@@ -1,6 +1,8 @@
 # Writers that publish through tempfile's persist cannot replace an open file on Windows
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started. Merged into `v0132/int` at `f2b702c50` and closed on the native Windows tests on the VM.
+Status: shipped in [v0.132.0](../../release/release-v0.132.0.md): on Windows chan's atomic writers (`fs_ops::atomic_write`, the workspace's writes and chan-server's `atomic_file`) publish through `std::fs::rename`, which replaces a file another process holds open with a handle that shares deletion and leaves that reader the old bytes, and they clear tempfile's temporary attribute on the published file (`v0132/persistwin` at `e58b295ee`, merged as `f2b702c50`). Read by the native Windows tests in CI's `make ci-windows` (runs 44147229285 and 44162191843) and by the workspace's native selection on the Windows VM (J179, 60 of 60). Not read: the VM job meant to show the base red (J91, its kit sealed and not run); the contract's wording on the POSIX-style rename's scope stays an open question for the owner.
+
+Record before the release: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started. Merged into `v0132/int` at `f2b702c50` and closed on the native Windows tests on the VM.
 
 Record: found in v0.131.0's review of the model download's Windows fix (`dev/v0131-team/reviews/review-modelroots-4a.md`, note 8). The model download's ref writer was moved to `std::fs::rename` in that row because `tempfile`'s `persist` failed with os error 5 while a reader held the old file open (Windows test VM, job J201a r2).
 

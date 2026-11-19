@@ -1,8 +1,10 @@
 # The TLS rows' Windows trust readings
 
-Status: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit for the self-update row sealed at r9 and not run; the model download's Windows trust reading waits for the owner's word on its model cache on the VM.
 
-Record: [the self-update's trust row](../done/the-clis-self-update-trusts-only-reqwests-bundled-roots.md) merged in v0.131.0 on its tests and its Linux guest reading; [the model download's trust row](../v0.132.0/the-model-download-trusts-only-bundled-roots.md) moved to v0.132.0 unmerged, with its Linux guest reading accepted. Their Windows test VM readings were one job (J187b): four release builds sharing one target (about 37000 s outer) and nine trust arms (about 29200 s outer), which did not fit the VM session left before the release. The kit is staged on the VM (`C:\v0131-tlswin-r5`, kit `tls-windows-r5`, manifest `aab84ef4`) and on the bus (`dev/v0131-team/evidence/Web131/`, the J187b request and its seals).
+Record before the move: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
+
+Record: [the self-update's trust row](../done/the-clis-self-update-trusts-only-reqwests-bundled-roots.md) merged in v0.131.0 on its tests and its Linux guest reading; [the model download's trust row](../done/the-model-download-trusts-only-bundled-roots.md) moved to v0.132.0 unmerged, with its Linux guest reading accepted. Their Windows test VM readings were one job (J187b): four release builds sharing one target (about 37000 s outer) and nine trust arms (about 29200 s outer), which did not fit the VM session left before the release. The kit is staged on the VM (`C:\v0131-tlswin-r5`, kit `tls-windows-r5`, manifest `aab84ef4`) and on the bus (`dev/v0131-team/evidence/Web131/`, the J187b request and its seals).
 
 ## Desired contract
 

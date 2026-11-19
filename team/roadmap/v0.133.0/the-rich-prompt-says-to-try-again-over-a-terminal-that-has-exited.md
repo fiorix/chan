@@ -1,6 +1,8 @@
 # The Rich Prompt says to try again over a terminal that has exited
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/exitedtry` at `277f73130`, its second fix round, with check 291's guest runs and one confirm reading owed.
+
+Record before the move: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
 
 Record: note 4 of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`) and item 2 of `owner-candidates-6.md`. Before v0.131.0 a refused submit showed nothing; v0.131.0 added the note, which says "try again" whatever the cause (browser check 290, `RichPrompt.disconnected.test.ts`). Cosmetic: the text stays in the composer.
 

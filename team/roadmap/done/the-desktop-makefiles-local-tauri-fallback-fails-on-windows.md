@@ -1,6 +1,8 @@
 # The desktop Makefile's local tauri fallback fails on Windows
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started.
+Status: shipped in [v0.132.0](../../release/release-v0.132.0.md): `desktop/Makefile` runs the pinned tauri-cli by its path once it is installed under `.build-tools/tauri-cli`, resolved as each recipe runs, and falls back to `cargo tauri` otherwise, so `make` in `desktop/` on Windows finds the tool it installed without a global one (`v0132/taurifallback` at `03a82d4a7`, merged as `392c44f05`). Read on the Windows VM (J6: the NSIS installer built twice with no global tauri-cli, the tree clean after) and on Linux (J7: the AppImage built twice). Not read on macOS.
+
+Record before the release: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started.
 
 Record: met by v0.131.0's Windows test VM package build (job J234, 2026-11-16T06:00Z): `make` installed tauri-cli 2.12.4 under the tree and then ended with `error: no such command: tauri`. The team's later runs pinned the tool directory in their own harness by a native PATH prepend; CI installs tauri-cli globally and never takes this path.
 

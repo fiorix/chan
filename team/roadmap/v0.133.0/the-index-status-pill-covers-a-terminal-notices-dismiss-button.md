@@ -1,6 +1,8 @@
 # The index status pill covers a terminal notice's Dismiss button
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/pillcover` at `123e03116`; check 211 read green interleaved with the base once the page starvation its own watcher caused was fixed (J127), and check 231 fixed; no reading of the range since.
+
+Record before the move: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started.
 
 Record: found by browser check 164 in the whole browser suite at v0.131.0's integration tip, and red there since v0.130.0 (`dev/v0131-team/reports/suite-131-164-diagnosis.md`). The check now waits for the cover to clear and fails naming any other cover; the app is unchanged.
 

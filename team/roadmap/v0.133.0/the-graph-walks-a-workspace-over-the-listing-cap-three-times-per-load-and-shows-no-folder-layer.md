@@ -1,6 +1,6 @@
 # The graph walks a workspace over the listing cap three times per load and shows no folder layer
 
-Status: accepted for v0.133.0 by the owner on 2026-11-19, as the second half of a split; the first half is [the v0.132.0 row](../v0.132.0/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md). Not started.
+Status: accepted for v0.133.0 by the owner on 2026-11-19, as the second half of a split; the first half is [the v0.132.0 row](../done/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md). Not started.
 
 Record: in a workspace over the 500,000-entry listing cap, every `/api/graph` load walks the whole tree three times (`workspace_disk_files`, `workspace_disk_dirs`, and `merge_unified_tree_layer`'s `list_tree_filtered_unified`, `crates/chan-server/src/routes/graph.rs`), each hitting the cap and thrown away, on every graph refresh; the shared graph then holds no folder nodes, no `contains` edges and no root, and folders carry no file counts. The graph tab still draws folders from its own fs-graph spine.
 

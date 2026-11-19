@@ -23,58 +23,27 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 [ghosttyng]: v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
-[modelroots]: v0.132.0/the-model-download-trusts-only-bundled-roots.md
 [streamlag]: v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [conpty]: v0.133.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
 [pillcover]: v0.133.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md
-[persistwin]: v0.132.0/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md
-[taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
 [winclaimread]: v0.133.0/the-windows-claims-two-account-and-compatibility-readings.md
 [tlswin]: v0.133.0/the-tls-rows-windows-trust-readings.md
 [termredproofs]: v0.133.0/the-terminal-regression-browser-checks-red-proofs.md
-[linkhealth]: v0.132.0/a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md
-[keyowner]: v0.132.0/the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md
-[freshmodes]: v0.132.0/a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md
 [exitedtry]: v0.133.0/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md
-[graphroot]: v0.132.0/the-graph-tab-cuts-off-root-files-below-the-bottom-edge-in-a-workspace-whose-root-holds-many-entries.md
 [unburywin]: v0.133.0/the-minimized-window-raise-is-unread-on-windows.md
 [appenv]: v0.133.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
-[fbpaste]: v0.132.0/the-file-browser-menus-paste-lands-in-the-selections-folder-not-the-right-clicked-folder.md
-[docktarget]: v0.132.0/the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes.md
 [detailsclear]: v0.133.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md
 [wikiplaces]: v0.133.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md
 [mousefamily]: v0.133.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
-[wakescale]: v0.132.0/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md
-[healthbadge]: v0.132.0/connection-health-shows-in-each-window-not-on-its-devservers-computers-badge.md
-[listingcap]: v0.132.0/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md
-[capghosts]: v0.132.0/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md
 [capwalks]: v0.133.0/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md
 [lockholes]: v0.133.0/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md
 [ctlresize]: v0.133.0/a-control-terminal-hidden-in-place-on-windows-stops-following-resizes.md
-
-### v0.132.0
-
-Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]). Later that day the model download's trust row ([modelroots]) moved here unmerged, when its native Windows rerun stopped on its test kit. The same day added six rows the round found or carried: three from its candidates, taken by survey (the index pill over a notice's Dismiss [pillcover], `tempfile` persist on Windows [persistwin], the desktop Makefile's Windows tauri fallback [taurifallback]); the Windows claim's installed readings [winclaimread] and the two TLS rows' Windows trust readings [tlswin], carried when those rows merged on their other readings; and the red proofs of the terminal regression browser checks [termredproofs], carried when those checks merged on their vitest proofs. He also added the connection health lane's branch, written and tested outside the round, to merge after a redesign of its indicator's placement and a rebase ([linkhealth]). By a survey the same day he took four more the round found at its third milestone, each older than v0.131.0, which ships as v0.130.0 behaved on all four: the Rich Prompt taking the keyboard from a survey, a dialog, an overlay or the launcher, with three focus residuals ([keyowner]), a fresh shell keeping a dead full-screen program's input modes ([freshmodes]), the Rich Prompt's "try again" over a terminal that has exited ([exitedtry]) and the Graph tab cutting off root files below its bottom edge, whose fix shape is his choice ([graphroot]). On 2026-11-17 the minimized-window row's Windows reading followed, carried when its test kit stopped twice on the release candidate before any cycle ([unburywin]). By a survey on 2026-11-17 he took five rows from the candidates v0.131.0 took with no row: the file browser menu's Paste ([fbpaste]), the launcher's file commands after a dock closes ([docktarget]), the Workspace details command's selection ([detailsclear]), wikilinks shown as typed in four places ([wikiplaces]) and the attach prelude's mouse modes ([mousefamily]); the same answer amended [keyowner] with a survey shown while its pane was unfocused. On 2026-11-17 the owner reported terminals drawn at half scale after a sleep on his Mac, and the round took it as a row ([wakescale]).
-
-| Item | State | Next |
-| --- | --- | --- |
-| [persist cannot replace an open file][persistwin] | merged | closed |
-| [the Makefile's tauri fallback on Windows][taurifallback] | merged | closed |
-| [the model download trusts bundled roots][modelroots] | merged | closed |
-| [a lossy link freezes a window][linkhealth] | merged | closed |
-| [health moves to the Computers badge][healthbadge] | merged | closed |
-| [listing cap locks windows; deep graph][listingcap] | merged | closed |
-| [cap: links drop out of the graph][capghosts] | merged | closed |
-| [the composer takes a survey's keys][keyowner] | merged | closed |
-| [a fresh shell keeps dead modes][freshmodes] | merged | closed |
-| [the graph cuts off root files][graphroot] | merged | closed |
-| [the menu's Paste lands in the selection][fbpaste] | merged | closed |
-| [file commands lose a closed dock's target][docktarget] | merged | closed |
-| [terminals at half scale after a sleep][wakescale] | merged | build |
+[surveytab]: v0.133.0/a-survey-over-an-unfocused-pane-takes-tab-and-its-keys.md
+[wakemac]: v0.133.0/the-half-scale-wake-fix-is-unread-on-macos.md
 
 ### v0.133.0
 
-Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well").
+Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved here, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -82,21 +51,55 @@ Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle (
 | [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 | [cap: three walks, no folder layer][capwalks] | not started | build |
 | [keys and viewers past the screen lock][lockholes] | not started | build |
-| [a fast stream loses output][streamlag] | partly built | build |
-| [AppImage children get its environment][appenv] | partly built | build |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
-| [ConPTY pulls history into the screen][conpty] | partly built | build |
-| [the index pill covers Dismiss][pillcover] | not started | build |
-| [the Windows claim's installed readings][winclaimread] | not started | build |
-| [the TLS rows' Windows readings][tlswin] | not started | measure |
-| [terminal browser checks' red proofs][termredproofs] | not started | measure |
-| [try again over an exited terminal][exitedtry] | not started | build |
-| [the minimized-window raise unread on Windows][unburywin] | not started | measure |
-| [Workspace details clears the wrong selection][detailsclear] | not started | build |
-| [four places show wikilinks as typed][wikiplaces] | not started | build |
+| [a fast stream loses output][streamlag] | partly built | review |
+| [AppImage children get its environment][appenv] | built | review |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | review |
+| [ConPTY pulls history into the screen][conpty] | partly built | measure |
+| [the index pill covers Dismiss][pillcover] | built | review |
+| [the Windows claim's installed readings][winclaimread] | kit ready | owner |
+| [the TLS rows' Windows readings][tlswin] | kit ready | measure |
+| [terminal browser checks' red proofs][termredproofs] | kit drafted | measure |
+| [try again over an exited terminal][exitedtry] | built | review |
+| [minimized raise unread on Windows][unburywin] | read in part | owner |
+| [Workspace details clears a selection][detailsclear] | built | review |
+| [four places show wikilinks as typed][wikiplaces] | partly built | review |
 | [a hidden control terminal stops resizing][ctlresize] | not started | build |
+| [an unfocused survey takes Tab and keys][surveytab] | not started | build |
+| [the wake fix unread on macOS][wakemac] | not started | measure |
 
 ## Completed
+
+### v0.132.0
+
+Shipped 2026-11-19; see [release-v0.132.0](../release/release-v0.132.0.md). A no-rc release by the owner's word ("move them and cut"): twenty-six `--no-ff` merges to `0ab2122d7`, twenty-five from twenty-three branches and one of `main` at the v0.131.0 publication record (`0fef0c8c7`, merged as `3b1f6c863`), into the integration branch `v0132/int` over the v0.131.0 release commit `91f2c91e0`, with the integrator's twenty-one roadmap and documents commits and two test and build fixes between them; then the roadmap housekeeping (merged as `b0bf23e9a`), `main` at `6bf78c6a5` (merged as `396b05326`) and the desktop test fix on `v0132/transfer-port` (`a413e0eba`, merged as `1aa93c730`), under twenty-seven rows. Seven Muse seats built until the owner paused the round on 2026-11-18; Opus builders under unanchored Fable readers built the rest. Thirteen shipped and are in [`done/`](done/), the wake fix with its macOS reading carried as a v0.133.0 row. Fourteen moved to v0.133.0: the FUSE-mode AppImage reading and the attach prelude's mouse modes on 2026-11-18, and twelve at the cut on 2026-11-19. Shipped without a row: the manual's connection health pages; the ghostty input handler's test net; the terminal suite's hygiene; the agy seats' Writes paragraph and Paste refactor; the download test server's blocking sockets; the desktop transfer test's port race; and the gateway lock's `ring` line.
+
+- [a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes](done/a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md) - A fresh shell after a dead full-screen program keeps some of its input modes.
+- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.133.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.133.0 at the cut on 2026-11-19, its client half not merged and its VM kit unsealed).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.133.0 at the cut on 2026-11-19, its server stage and client half built and not merged).
+- [a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired](done/a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md) - A window on a lossy link freezes with no sign until its socket is retired.
+- [a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page](done/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md) - A workspace over the listing cap locks its windows, and a deep graph freezes the page.
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 6's test net shipped; moved to v0.133.0 at the cut on 2026-11-19 with part 4's task 2 stage A built and not merged).
+- [connection-health-shows-in-each-window-not-on-its-devservers-computers-badge](done/connection-health-shows-in-each-window-not-on-its-devservers-computers-badge.md) - Connection health shows in each window, not on its devserver's Computers badge.
+- [copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed](v0.133.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md) - Copy as HTML, the link preview, survey bodies and the table widget show wikilinks as typed (moved to v0.133.0 at the cut on 2026-11-19, its first stage built and not merged).
+- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.133.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.133.0 at the cut on 2026-11-19, built and not merged).
+- [links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph](done/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md) - Links to files in a workspace over the listing cap drop out of the graph.
+- [terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos](done/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md) - Terminals come back at half scale in their old grid after a sleep on macOS (shipped; its macOS reading carried as a v0.133.0 row).
+- [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.133.0 by the owner on 2026-11-18, not started).
+- [the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last](v0.133.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md) - The attach prelude re-asserts every mouse mode a program set, where a terminal keeps only the last (moved to v0.133.0 by the owner on 2026-11-18, not started).
+- [the-desktop-makefiles-local-tauri-fallback-fails-on-windows](done/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md) - The desktop Makefile's local tauri fallback fails on Windows.
+- [the-file-browser-menus-paste-lands-in-the-selections-folder-not-the-right-clicked-folder](done/the-file-browser-menus-paste-lands-in-the-selections-folder-not-the-right-clicked-folder.md) - The file browser menu's Paste lands in the selection's folder, not the right-clicked folder.
+- [the-graph-tab-cuts-off-root-files-below-the-bottom-edge-in-a-workspace-whose-root-holds-many-entries](done/the-graph-tab-cuts-off-root-files-below-the-bottom-edge-in-a-workspace-whose-root-holds-many-entries.md) - The Graph tab cuts off root files below the bottom edge in a workspace whose root holds many entries.
+- [the-index-status-pill-covers-a-terminal-notices-dismiss-button](v0.133.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md) - The index status pill covers a terminal notice's Dismiss button (moved to v0.133.0 at the cut on 2026-11-19, built and not merged).
+- [the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes](done/the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes.md) - The launcher's file commands lose their target when the dock that held it closes.
+- [the-minimized-window-raise-is-unread-on-windows](v0.133.0/the-minimized-window-raise-is-unread-on-windows.md) - The minimized-window raise is unread on Windows (moved to v0.133.0 at the cut on 2026-11-19, read in part).
+- [the-model-download-trusts-only-bundled-roots](done/the-model-download-trusts-only-bundled-roots.md) - The model download trusts only bundled roots.
+- [the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited](v0.133.0/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md) - The Rich Prompt says to try again over a terminal that has exited (moved to v0.133.0 at the cut on 2026-11-19, built and not merged).
+- [the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher](done/the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md) - The Rich Prompt takes the keyboard from a survey, a dialog, an overlay or the launcher.
+- [the-terminal-regression-browser-checks-red-proofs](v0.133.0/the-terminal-regression-browser-checks-red-proofs.md) - The terminal regression browser checks' red proofs (moved to v0.133.0 at the cut on 2026-11-19, not run).
+- [the-tls-rows-windows-trust-readings](v0.133.0/the-tls-rows-windows-trust-readings.md) - The TLS rows' Windows trust readings (moved to v0.133.0 at the cut on 2026-11-19, not read).
+- [the-windows-claims-two-account-and-compatibility-readings](v0.133.0/the-windows-claims-two-account-and-compatibility-readings.md) - The Windows claim's two-account and compatibility readings (moved to v0.133.0 at the cut on 2026-11-19, not read).
+- [the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last](v0.133.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md) - The Workspace details command clears the selection of the file browser focused last, not the tab that shows the details (moved to v0.133.0 at the cut on 2026-11-19, built and not merged).
+- [writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows](done/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md) - Writers that publish through tempfile's persist cannot replace an open file on Windows.
 
 ### v0.131.0
 
@@ -133,7 +136,7 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 - [the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders](done/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md) - The file browser's New and Paste rows and the launcher's commands of those titles choose different folders.
 - [the-gateways-authorization-page-says-this-computer](done/the-gateways-authorization-page-says-this-computer.md) - The gateway's authorization page says "this computer".
 - [the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active](done/the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active.md) - The launcher's file commands act on the file browser focused last, not the tab just made active.
-- [the-model-download-trusts-only-bundled-roots](v0.132.0/the-model-download-trusts-only-bundled-roots.md) - The model download trusts only bundled roots (built and moved to v0.132.0 on 2026-11-16, unmerged).
+- [the-model-download-trusts-only-bundled-roots](done/the-model-download-trusts-only-bundled-roots.md) - The model download trusts only bundled roots (built and moved to v0.132.0 on 2026-11-16, unmerged; shipped in v0.132.0).
 - [the-team-dialogs-load-rewrites-a-hand-edited-config](done/the-team-dialogs-load-rewrites-a-hand-edited-config.md) - The team dialog's Load rewrites a hand-edited config.
 - [the-window-stalls-for-seconds-while-a-large-workspaces-graph-streams-in](done/the-window-stalls-for-seconds-while-a-large-workspaces-graph-streams-in.md) - The window stalls for seconds while a large workspace's graph streams in.
 - [the-windows-claim-is-a-name-another-account-can-hold](done/the-windows-claim-is-a-name-another-account-can-hold.md) - The Windows claim is a name another account can hold.

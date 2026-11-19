@@ -1,6 +1,8 @@
 # A fresh shell after a dead full-screen program keeps some of its input modes
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
+Status: shipped in [v0.132.0](../../release/release-v0.132.0.md): when a fresh shell replaces a tab's session the client resets all twelve modes the server tracks, from one list a drift test ties to `TRACKED_PRIVATE_MODES`, with the alternate-screen exit and the keyboard protocol reset, before the new shell's first output, and a fresh session id drops the cached snapshot of the dead one (`v0132/freshmodes` at `a23f304cc`, merged as `51152f887`, its closing `4a0042570` as `423c6529f`). Read by mounted tests on both engines, red at the base for the six missing modes, twelve drop mutations and an order mutation red, and the terminal suite at the fix tip in a guest (J23, J64). No end-to-end reading of a reattach to a lost session was made.
+
+Record before the release: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
 
 Record: note 3 of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`), entry T117 of the round's terminal regression list (`dev/v0131-team/terminal-regressions.md`), and item 1 of `owner-candidates-6.md`. The client's reset always left these modes out; v0.131.0's [reattach row](../done/a-reattach-replays-the-normal-screen-into-a-full-screen-program-and-drops-its-mouse-modes.md) grew the server's tracked set to twelve modes and left the reset as it was. Rare; nothing is lost.
 

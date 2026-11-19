@@ -1,6 +1,8 @@
 # A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); the session frame's PTY metadata shipped in v0.131.0; the client half is built on `v0133/conpty-client` at `19630872c` (pushed under that name; `v0131/conpty-client` is gone from origin) and not merged; in v0.132.0 its VM experiment kit reached revision 7, unsealed, after revision 6 was resealed in place following its reading, and no full job ran.
+
+Record before the move: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 
 Record: raised on 2026-11-12, while the terminal core was re-pinned to libghostty-vt 1.0.1, as an open question and unverified: "chan's ghostty terminals on Windows run over ConPTY but leave the core's `RESIZE_PULL_SCROLLBACK` option (in the ABI since 1.0.0) at its default of on, and the core's own comment says it should be off under ConPTY. It predates 1.0.1, but 1.0.1 now pulls scrollback on a combined resize too. To read on the Windows VM." (`dev/v0129/row-notes.md`, "Open questions raised by lanes"). The owner, for v0.130.0: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now".
 

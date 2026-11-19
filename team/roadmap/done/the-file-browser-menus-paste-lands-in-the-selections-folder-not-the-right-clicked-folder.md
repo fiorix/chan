@@ -1,6 +1,8 @@
 # The file browser menu's Paste lands in the selection's folder, not the right-clicked folder
 
-Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
+Status: shipped in [v0.132.0](../../release/release-v0.132.0.md): a row's right-click menu Paste lands in the clicked row's folder, the row itself for a directory and its parent for a file, in a tree and in a list, while the chord and the launcher's Paste keep the shared rule (`v0132/fbpaste` at `7ad836d76`, merged as `e3a300af7`, its closing `1bb203378` as `d1f312e25`). Read by check 232 in a guest's Chrome (J58) and by the desktop driver under WebKitGTK, green at the tip and faulting at the base (J81). A later driver commit, `a81d859ac`, is on the branch and not merged.
+
+Record before the release: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
 
 Record: item 4 of `dev/v0131-team/reports/owner-candidates-2.md`, from the independent review of the New and Paste work (`dev/v0131-team/reviews/review-newpaste-1.md`, note 1), which found it pre-existing and outside that row's contract. [The New and Paste row](../done/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md) made the menu row, the chord and the launcher's Paste share one folder rule; none of them reads the row the menu was opened on. Nothing is lost: the paste lands in a folder the user did not point at.
 

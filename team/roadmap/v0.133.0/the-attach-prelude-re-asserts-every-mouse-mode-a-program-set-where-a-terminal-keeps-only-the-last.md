@@ -25,7 +25,7 @@ Read at `b73773a93`, by reading; not run.
 
 - `update_private_modes`, `private_mode_prelude` and the persisted state in `crates/chan-library/src/terminal_sessions.rs` and `terminal_sessions/ring.rs`, with their tests; the ring header's flag bits stay as they are, since a register is a set with at most one member.
 - The ghostty widget's flag reading stays as it is; the difference it keeps after this change is recorded in `crates/chan-library/design.md`, and aligning it is the owner's call (the decision below).
-- Not here: the alternate-screen tracker, the replay, and the client's fresh-shell reset ([the fresh-shell row](a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md) compares its list with the server's set, which keeps its twelve members).
+- Not here: the alternate-screen tracker, the replay, and the client's fresh-shell reset ([the fresh-shell row](../done/a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md) compares its list with the server's set, which keeps its twelve members).
 
 ## Acceptance
 

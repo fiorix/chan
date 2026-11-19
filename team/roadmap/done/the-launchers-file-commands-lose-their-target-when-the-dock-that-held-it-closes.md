@@ -1,6 +1,8 @@
 # The launcher's file commands lose their target when the dock that held it closes
 
-Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
+Status: shipped in [v0.132.0](../../release/release-v0.132.0.md): when the dock that holds the file commands' target closes by its chord, the launcher's toggle or its menu row while it holds the keyboard, the focused pane's active tab takes the keyboard on a focus pulse and a Files tab there becomes the target; a close from another window hands nothing over (`v0132/docktarget` at `63d887afb`, merged into `v0132/keyboard` and with it onto the integration branch as `946ecd568`). Read by the docktarget driver under WebKitGTK from the dock's menu and from the command deck, its deck leg red without the hand-over (J190). Not read: check 234 in Chrome, which failed at its own setup at the tip and at the base (J186, J188).
+
+Record before the release: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
 
 Record: item 7 of `dev/v0131-team/reports/owner-candidates-1.md`, from the independent review of the launcher-target work (`dev/v0131-team/reviews/review-fbtarget-1.md`, note 3), which called it in-contract and worth the owner's eye. [The launcher-target row](../done/the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active.md) asked for no fallback to another surface, and its mounted suite pins today's behaviour. This row is a contract change, not a defect against that row. Nothing is lost: the commands say what to do.
 
