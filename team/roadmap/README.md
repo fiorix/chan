@@ -57,18 +57,18 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 
 | Item | State | Next |
 | --- | --- | --- |
-| [persist cannot replace an open file][persistwin] | merged | measure |
+| [persist cannot replace an open file][persistwin] | merged | closed |
 | [the Makefile's tauri fallback on Windows][taurifallback] | merged | closed |
-| [the model download trusts bundled roots][modelroots] | merged | measure |
-| [a lossy link freezes a window][linkhealth] | merged | build |
-| [health moves to the Computers badge][healthbadge] | not started | build |
-| [listing cap locks windows; deep graph][listingcap] | not started | build |
-| [cap: links drop out of the graph][capghosts] | not started | build |
-| [the composer takes a survey's keys][keyowner] | partly built | build |
+| [the model download trusts bundled roots][modelroots] | merged | closed |
+| [a lossy link freezes a window][linkhealth] | merged | closed |
+| [health moves to the Computers badge][healthbadge] | merged | closed |
+| [listing cap locks windows; deep graph][listingcap] | merged | closed |
+| [cap: links drop out of the graph][capghosts] | merged | closed |
+| [the composer takes a survey's keys][keyowner] | merged | closed |
 | [a fresh shell keeps dead modes][freshmodes] | merged | closed |
 | [the graph cuts off root files][graphroot] | merged | closed |
 | [the menu's Paste lands in the selection][fbpaste] | merged | closed |
-| [file commands lose a closed dock's target][docktarget] | not started | build |
+| [file commands lose a closed dock's target][docktarget] | merged | closed |
 | [terminals at half scale after a sleep][wakescale] | merged | build |
 
 ### v0.133.0

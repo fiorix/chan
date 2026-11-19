@@ -1,6 +1,6 @@
 # The model download trusts only bundled roots
 
-Status: accepted for v0.131.0 by the owner on 2026-11-13; built on `v0131/modelroots` and moved to v0.132.0 on 2026-11-16, unmerged.
+Status: accepted for v0.131.0 by the owner on 2026-11-13; built on `v0131/modelroots` and moved to v0.132.0 on 2026-11-16, unmerged. Merged into `v0132/int` at `48f1bc887` and closed on the readings taken: a real download from the Hub in a Linux guest, the TLS-inspecting proxy test and the native Windows tests on the VM. The macOS trust reading was not taken; it is a known gap.
 
 Record: named as a follow-up when the Rust TLS clients moved to the system's store in v0.128.0 ([the system CA row](../done/the-rust-tls-clients-ignore-the-systems-ca-store.md), "Built, 2026-11-11"; `crates/chan-tls/design.md`, "Clients outside it"). It was then drafted as a row for the next release on the owner's word: in the `chan-dev` repository under `releases/v0128/team/reports/row-draft-the-model-download-trusts-only-bundled-roots.md`, and in `team/release/release-v0.128.0.md`, "Rows drafted for the next release". v0.129.0's record lists it as still without a row. On 2026-11-13 the integrator asked where that later group goes, and the owner placed it in v0.131.0: "yes v0.131".
 
