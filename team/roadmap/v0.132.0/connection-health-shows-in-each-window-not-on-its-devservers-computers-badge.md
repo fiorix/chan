@@ -53,8 +53,8 @@ Docs and checks:
 7. On the desktop's Computers screen, each connected devserver's card shows that devserver's connection health. The faces are the indicator's, drawn with its bars mark:
    - healthy: the mark alone, named "Connection healthy";
    - slow: the larger of the latest reply time and the current wait once it reaches 1 s ("850 ms"), or the mark alone, named "Connection recovering", while the latest reply time is under 300 ms and no wait shows;
-   - stalled: the wait counting ("stalled 8 s");
-   - reconnecting: "reconnecting".
+   - stalled: the wait counting ("stalled 8 s"), named with the same count ("Connection stalled for 8 s");
+   - reconnecting: the time since the feed was lost counting ("reconnecting 20 s", in whole minutes from 120 s), named with the same count ("Connection lost, reconnecting for 20 s").
    Before the first reply the mark is dimmed and named "Connection status unknown".
 8. The thresholds are the window's. Slow: a reply has waited 1 s, or the latest took 1 s or more, or the last two took 400 ms or more; it ends when two in a row come back under 300 ms with none overdue. Stalled: a reply has waited 4 s or more with no frame of the devserver's, a set or a pong, in the last 4 s; a WebSocket Pong does not count, since a gateway's proxy can answer one. Reconnecting: from the loss of the devserver's open feed socket until a later one answers a ping.
 9. The card shows the detail the popover held: how long the state has lasted ("Slow for 12 s", "No response for 8 s", "Reconnecting for 20 s", "No reading yet"), a chart of the last 60 finished pings with the misses as gaps, the latest, median and worst reply times, and the last contact as a clock time to the second. Where on the card: decided 3.

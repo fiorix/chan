@@ -364,7 +364,8 @@ async function direct() {
     const age = /No response for (\d+) s/.exec(later?.detail?.text ?? "")?.[1];
     const detail = { first, second, detailAge: age ?? null, card: later };
     // A stall begins at a 4 s wait, so no count reads under 4.
-    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second) {
+    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second
+      && later?.face?.title === `Connection stalled for ${second} s`) {
       pass("silenced, the face reads stalled and counts in whole seconds", detail);
     } else {
       fault("the stalled face did not count its wait", detail);
@@ -379,7 +380,10 @@ async function direct() {
   relay.drop();
   relay.resume();
   const down = await readUntil("reconnecting", (card) => card.face?.state === "reconnecting", 20_000);
-  if (down?.ok && down.card.face.text === "reconnecting" && /Reconnecting for \d+ s/.test(down.card.detail?.text ?? "")) {
+  // The face counts from the drop, and its name carries the same count.
+  const downCount = /^reconnecting (\d+) s$/.exec(down?.card?.face?.text ?? "")?.[1];
+  if (down?.ok && downCount !== undefined && down.card.face.title === `Connection lost, reconnecting for ${downCount} s`
+    && /Reconnecting for \d+ s/.test(down.card.detail?.text ?? "")) {
     pass("dropped, the face reads reconnecting", down.card);
   } else {
     fault("the face did not read reconnecting with the feed dropped", down?.card ?? null);

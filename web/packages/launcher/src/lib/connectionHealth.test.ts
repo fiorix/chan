@@ -50,9 +50,9 @@ describe("face words", () => {
     expect(connectionFaceName(waiting, 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
-  test("a stalled face counts its wait in whole seconds", () => {
+  test("a stalled face counts its wait in whole seconds, in its words and its name", () => {
     expect(connectionFaceLabel(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("stalled 7 s");
-    expect(connectionFaceName(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("Connection stalled");
+    expect(connectionFaceName(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("Connection stalled for 7 s");
   });
 
   test("a wait from a moment ahead of this clock counts as none", () => {
@@ -60,10 +60,21 @@ describe("face words", () => {
     expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 500, wait_since: 11_000 }), 10_000)).toBe("500 ms");
   });
 
-  test("reconnecting reads its word whatever ping still waits", () => {
-    const down = health({ face: "reconnecting", wait_since: 0 });
-    expect(connectionFaceLabel(down, 40_000)).toBe("reconnecting");
-    expect(connectionFaceName(down, 40_000)).toBe("Connection lost, reconnecting");
+  test("reconnecting counts from the face's start whatever ping still waits", () => {
+    const down = health({ face: "reconnecting", since: 28_000, wait_since: 0 });
+    expect(connectionFaceLabel(down, 40_999)).toBe("reconnecting 12 s");
+    expect(connectionFaceName(down, 40_999)).toBe("Connection lost, reconnecting for 12 s");
+  });
+
+  test("reconnecting counts in whole minutes from 120 s", () => {
+    const down = health({ face: "reconnecting", since: 0 });
+    expect(connectionFaceLabel(down, 119_999)).toBe("reconnecting 119 s");
+    expect(connectionFaceLabel(down, 120_000)).toBe("reconnecting 2 min");
+    expect(connectionFaceName(down, 754_000)).toBe("Connection lost, reconnecting for 12 min");
+  });
+
+  test("a reconnecting face that starts ahead of this clock counts from zero", () => {
+    expect(connectionFaceLabel(health({ face: "reconnecting", since: 10_000 }), 9_000)).toBe("reconnecting 0 s");
   });
 
   test.each([

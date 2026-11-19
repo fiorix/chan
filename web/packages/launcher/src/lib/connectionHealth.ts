@@ -40,12 +40,13 @@ export function connectionWaitMs(health: ConnectionHealth, now: number): number 
 /// The words beside the mark, empty where the mark stands alone: healthy,
 /// unknown, and a slow face the desktop read as recovering, which holds until
 /// the next reading. Any other slow face reads the larger of its reply time
-/// and its wait.
+/// and its wait. Stalled counts the oldest unanswered ping's wait and
+/// reconnecting counts from the face's start, whatever ping still waits.
 export function connectionFaceLabel(health: ConnectionHealth, now: number): string {
   const wait = connectionWaitMs(health, now);
   switch (health.face) {
     case "reconnecting":
-      return "reconnecting";
+      return `reconnecting ${elapsed(health.since, now)}`;
     case "stalled":
       return `stalled ${Math.floor(wait / 1000)} s`;
     case "slow":
@@ -55,7 +56,9 @@ export function connectionFaceLabel(health: ConnectionHealth, now: number): stri
   }
 }
 
-/// The face's name, for its title and its accessible name.
+/// The face's name, for its title and its accessible name. It carries the
+/// count the words beside the mark show, since a control that holds the face
+/// and is labelled for its own action reads the name alone.
 export function connectionFaceName(health: ConnectionHealth, now: number): string {
   switch (health.face) {
     case "healthy":
@@ -70,9 +73,9 @@ export function connectionFaceName(health: ConnectionHealth, now: number): strin
         : "Connection slow, waiting for a reply";
     }
     case "stalled":
-      return "Connection stalled";
+      return `Connection stalled for ${Math.floor(connectionWaitMs(health, now) / 1000)} s`;
     case "reconnecting":
-      return "Connection lost, reconnecting";
+      return `Connection lost, reconnecting for ${elapsed(health.since, now)}`;
   }
 }
 

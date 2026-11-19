@@ -125,12 +125,16 @@ describe("the connection face on the Computers deck", () => {
     expect(detail("ds-a")!.textContent).toContain("No response for 4 s");
   });
 
-  it("counts reconnecting from its start while a ping still waits", () => {
+  it("counts reconnecting beside the name from its start while a ping still waits", () => {
     library.devservers = [computer("ds-a", "alpha", reading({ face: "reconnecting", since: NOW - 12_000, wait_since: NOW - 40_000 }))];
     mountDeck("ds-a");
-    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting");
-    expect(face("ds-a")!.title).toBe("Connection lost, reconnecting");
+    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting 12 s");
+    expect(face("ds-a")!.title).toBe("Connection lost, reconnecting for 12 s");
     expect(detail("ds-a")!.textContent).toContain("Reconnecting for 12 s");
+    vi.advanceTimersByTime(2_000);
+    flushSync();
+    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting 14 s");
+    expect(face("ds-a")!.querySelector('[role="img"]')!.getAttribute("aria-label")).toBe("Connection lost, reconnecting for 14 s");
   });
 
   it("shows the mark alone before the first reply and while recovering", () => {
@@ -191,10 +195,13 @@ describe("the connection face for a screen reader", () => {
     mountDeck("ds-a");
     const edit = slot("ds-a").querySelector<HTMLButtonElement>("button.ds-id.editable")!;
     expect(edit.getAttribute("aria-label")).toBe("Edit config for alpha");
-    expect(description(edit)).toBe("Connection stalled");
+    expect(description(edit)).toBe("Connection stalled for 5 s");
     library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", rtt_ms: 1_300 }))];
     flushSync();
     expect(description(edit)).toBe("Connection slow, 1.3 s");
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "reconnecting", since: NOW - 20_000 }))];
+    flushSync();
+    expect(description(edit)).toBe("Connection lost, reconnecting for 20 s");
   });
 
   it("gives the edit button no description while the row shows no face", () => {
