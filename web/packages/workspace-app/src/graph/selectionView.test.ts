@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { directoryNodeId } from "./canvasNodes";
 import { FS_GRAPH_DEPTH_MAX } from "./depth";
 import {
+  depthStep,
   depthWithinBudget,
   graphNodeIds,
   openBelow,
@@ -224,6 +225,25 @@ describe("the drawn-node budget", () => {
   test("one level opens whatever it draws, as a double-click does", () => {
     expect(depthWithinBudget(tree, root, "", 3, 1)).toBe(1);
     expect(depthWithinBudget(tree, root, "", 0, 1), "a closing depth is not raised").toBe(0);
+  });
+
+  test("a level is counted only once the folders above it are read", () => {
+    // a/ and b/ are read, a/x, a/y and a/z are not: the third level waits
+    // for them, at most two at a time.
+    const read = (path: string): boolean => !path.startsWith("a/");
+    expect(depthStep(tree, root, "", 3, 20, read, 2)).toEqual({ depth: 2, read: ["a/x", "a/y"], limited: false });
+    expect(depthStep(tree, root, "", 3, 20, () => true, 2)).toEqual({ depth: 3, read: [], limited: false });
+  });
+
+  test("a level already past the budget is not read first", () => {
+    // What is known of the third level, 12 notes on top of 8, already
+    // passes 19, so its unread folders are not asked for.
+    const read = (path: string): boolean => !path.startsWith("a/");
+    expect(depthStep(tree, root, "", 3, 19, read, 2)).toEqual({ depth: 2, read: [], limited: true });
+  });
+
+  test("an unread directory opens its first level and is read", () => {
+    expect(depthStep(tree, root, "a", 2, 20, (path) => path !== "a", 64)).toEqual({ depth: 1, read: ["a"], limited: false });
   });
 
   test("what shows outside the directory counts against the budget", () => {

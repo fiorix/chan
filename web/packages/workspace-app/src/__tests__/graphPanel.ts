@@ -93,6 +93,9 @@ export const graphServer = {
   languageDetail: null as unknown,
   graphStreamCalls: 0,
   fsGraphCalls: [] as Array<{ path: string; depth: number; cursor?: string }>,
+  /// When set, called with each fsGraph request as it arrives, before it is
+  /// answered.
+  onFsGraph: null as ((request: { path: string; depth: number; cursor?: string }) => void) | null,
 };
 
 export function resetGraphServer(): void {
@@ -105,6 +108,7 @@ export function resetGraphServer(): void {
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
   graphServer.fsGraphCalls = [];
+  graphServer.onFsGraph = null;
   canvas.props = null;
   canvas.all = [];
 }
@@ -217,6 +221,7 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
       })),
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
+        graphServer.onFsGraph?.({ path: o.path, depth: o.depth, cursor: o.cursor });
         if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
         const whole = fsResponse(o.path, o.depth);
         // Every answer carries the scope's ancestors, as the route's does.

@@ -46,9 +46,11 @@ const REFERENCE_KINDS: ReadonlySet<string> = new Set([
 export const SELECTION_HOPS_MAX = 6;
 
 /// The most files and folders a raised depth may draw. The layout runs on
-/// the page's main thread over every drawn node and starts over when a depth
-/// step brings many in, so this bounds what one step costs the page. It sits
-/// under 3,519 nodes, the largest graph whose frame cost has been measured.
+/// the page's main thread, one tick a frame over every drawn node, and
+/// starts over when a depth step brings many in, so this bounds what one
+/// step costs a frame. One d3-force tick with the canvas's forces, measured
+/// in V8 on a desktop CPU, costs about 12 ms over 3,000 nodes, inside a
+/// 16.7 ms frame, and about 160 ms over 20,000.
 export const GRAPH_DRAWN_NODE_BUDGET = 3000;
 
 /// Levels `path` sits below the directory `dir`: 0 for the directory
@@ -229,11 +231,64 @@ export function openBelow(
   return next;
 }
 
-/// The depth to open below the directory `dir` when `depth` is asked for:
-/// `depth` itself when the opened set `openBelow` gives draws at most
-/// `budget` files and folders, else the deepest level below it that does.
-/// Never less than one level, which a double-click opens whatever it draws;
-/// the budget bounds how far a depth reaches past it.
+/// One step of a raise of the directory `dir`'s depth toward `depth`.
+/// Opening a level draws the children of every folder one level above it,
+/// so a level is counted only once each of those folders has been read
+/// (`read`). The step opens the levels it can count that draw at most
+/// `budget` files and folders, and names the folders whose children must be
+/// read before the next level is counted: those one level above it, at most
+/// `batch`. `limited` says a level is past the budget, which stops the raise
+/// below it; what is known of a level is a floor on what it draws, so a
+/// level already past the budget is not read first. One level opens
+/// whatever it draws, as a double-click does.
+export type DepthStep = { depth: number; read: string[]; limited: boolean };
+
+export function depthStep(
+  nodes: readonly ViewNode[],
+  opened: Opened,
+  dir: string,
+  depth: number,
+  budget: number,
+  read: (dir: string) => boolean,
+  batch: number,
+): DepthStep {
+  if (depth <= 0) return { depth, read: [], limited: false };
+  // What lies outside `dir` draws the same at every depth: `openBelow`
+  // opens the directories above `dir` and leaves the rest as it was.
+  const outside = openBelow(nodes, opened, dir, 0);
+  const byLevel: number[] = [];
+  const foldersByLevel = new Map<number, string[]>();
+  let drawn = 0;
+  for (const n of nodes) {
+    if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
+    const level = levelsBelow(dir, n.path);
+    if (level < 0) {
+      if (ancestorsExpanded("", n.path, outside)) drawn += 1;
+      continue;
+    }
+    byLevel[level] = (byLevel[level] ?? 0) + 1;
+    if (isFolder(n)) {
+      const folders = foldersByLevel.get(level);
+      if (folders) folders.push(n.path);
+      else foldersByLevel.set(level, [n.path]);
+    }
+  }
+  drawn += byLevel[0] ?? 0;
+  for (let level = 1; level <= depth; level += 1) {
+    drawn += byLevel[level] ?? 0;
+    if (level > 1 && drawn > budget) return { depth: level - 1, read: [], limited: true };
+    const unread = (foldersByLevel.get(level - 1) ?? []).filter((path) => !read(path));
+    if (unread.length > 0) {
+      return { depth: Math.max(1, level - 1), read: unread.sort().slice(0, batch), limited: false };
+    }
+  }
+  return { depth, read: [], limited: false };
+}
+
+/// The depth to open below the directory `dir` when `depth` is asked for,
+/// counting the loaded nodes only: `depth` itself when the opened set
+/// `openBelow` gives draws at most `budget` files and folders, else the
+/// deepest level below it that does, never less than one.
 export function depthWithinBudget(
   nodes: readonly ViewNode[],
   opened: Opened,
@@ -241,27 +296,7 @@ export function depthWithinBudget(
   depth: number,
   budget: number,
 ): number {
-  if (depth <= 1) return depth;
-  // What lies outside `dir` draws the same at every depth: `openBelow`
-  // opens the directories above `dir` and leaves the rest as it was.
-  const outside = openBelow(nodes, opened, dir, 0);
-  const byLevel: number[] = [];
-  let drawn = 0;
-  for (const n of nodes) {
-    if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
-    const level = levelsBelow(dir, n.path);
-    if (level < 0) {
-      if (ancestorsExpanded("", n.path, outside)) drawn += 1;
-    } else {
-      byLevel[level] = (byLevel[level] ?? 0) + 1;
-    }
-  }
-  drawn += byLevel[0] ?? 0;
-  for (let level = 1; level <= depth; level += 1) {
-    drawn += byLevel[level] ?? 0;
-    if (drawn > budget) return Math.max(1, level - 1);
-  }
-  return depth;
+  return depthStep(nodes, opened, dir, depth, budget, () => true, 0).depth;
 }
 
 /// The opened set with the directory `dir` showing its children: the root,
