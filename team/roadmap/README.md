@@ -50,6 +50,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [capghosts]: v0.132.0/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md
 [capwalks]: v0.133.0/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md
 [lockholes]: v0.133.0/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md
+[ctlresize]: v0.133.0/a-control-terminal-hidden-in-place-on-windows-stops-following-resizes.md
 
 ### v0.132.0
 
@@ -93,6 +94,7 @@ Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle (
 | [the minimized-window raise unread on Windows][unburywin] | not started | measure |
 | [Workspace details clears the wrong selection][detailsclear] | not started | build |
 | [four places show wikilinks as typed][wikiplaces] | not started | build |
+| [a hidden control terminal stops resizing][ctlresize] | not started | build |
 
 ## Completed
 
