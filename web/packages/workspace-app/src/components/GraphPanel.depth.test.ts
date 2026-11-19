@@ -365,6 +365,52 @@ describe("the depth's bounds", () => {
     expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [limit]");
   });
 
+  test("a raise over a level the shared graph already counts past the budget reads none of it", async () => {
+    // As the server answers a gitignored folder: the shared graph's tree
+    // layer holds its 60 folders of 60 notes, the spine none of their
+    // levels, and the tab is restored on it with its deep/ folder open.
+    const dirs = ["ignored", "ignored/heavy", "ignored/heavy/deep"];
+    const files = ["ignored/heavy/deep/x.md"];
+    for (let f = 0; f < 60; f += 1) {
+      dirs.push(`ignored/heavy/u${f}`);
+      for (let n = 0; n < 60; n += 1) files.push(`ignored/heavy/u${f}/n${n}.md`);
+    }
+    const parent = (path: string): string => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+    const dirId = (path: string): string => (path === "" ? "" : `directory:${path}`);
+    graphServer.view = {
+      nodes: [g.dir(""), ...dirs.map((path) => g.dir(path)), ...files.map((path) => g.file(path))],
+      edges: [
+        ...dirs.map((path) => g.edge(dirId(parent(path)), dirId(path), "contains")),
+        ...files.map((path) => g.edge(dirId(parent(path)), path, "contains")),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...dirs.map((path) => fsg.dir(path)), ...files.map((path) => fsg.file(path))],
+      edges: [...dirs, ...files].map((path) => fsg.contains(parent(path), path)),
+    };
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({
+        pendingSelectId: "directory:ignored/heavy",
+        selectedNodeId: "directory:ignored/heavy",
+        expanded: { ignored: true, "ignored/heavy": true, "ignored/heavy/deep": true },
+      }),
+    );
+    let row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.max).toBe("2");
+    const start = graphServer.fsGraphCalls.length;
+
+    await slideTo(slider, 2);
+    await settle(30);
+    const reads = graphServer.fsGraphCalls.slice(start).filter((call) => call.path.startsWith("ignored/heavy/u"));
+    expect(reads, "no folder of a level already past the budget is read").toEqual([]);
+    expect(tab.expanded["ignored/heavy/u0"]).toBeUndefined();
+    row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row")!;
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [limit]");
+  });
+
   test("a raise reads a level's folders before the level below them", async () => {
     // Five folders whose children are unread hold three folders each, whose
     // notes are unread too; a chain gives the depth its third level.
