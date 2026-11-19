@@ -39,6 +39,8 @@ const checks = [
     { path: `/assets/home/tour/${clip}-wide.mp4`, status: 200 },
     { path: `/assets/home/tour/${clip}-narrow.mp4`, status: 200 },
   ]),
+  { path: "/assets/home/tour/workspace-new-run-wide.mp4", status: 200 },
+  { path: "/assets/home/tour/editor-run-wide.mp4", status: 200 },
   { path: "/", status: 200, before: ['id="tmux"', 'id="devserver"'] },
   { path: "/", status: 200, before: ['id="devserver"', 'id="gateway"'] },
   { path: "/devserver/", status: 200, includes: 'id="remote-tools"' },
