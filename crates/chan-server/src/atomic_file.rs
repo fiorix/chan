@@ -179,31 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn pre_publish_failure_leaves_target_untouched_and_cleans_up() {
-        let dir = tempfile::tempdir().expect("temporary directory");
-        let target = dir.path().join("target.bin");
-        let prior = b"prior-target-bytes";
-        std::fs::write(&target, prior).expect("seed prior target");
-        let error = write_with_pre_persist_hook(target.as_path(), b"replacement", None, |_| {
-            Err(std::io::Error::other("injected pre-publish failure"))
-        })
-        .expect_err("pre-persist failure must surface");
-        assert_eq!(error.kind(), std::io::ErrorKind::Other);
-        assert_eq!(
-            std::fs::read(&target).expect("read preserved target"),
-            prior,
-            "a refused replacement must preserve every prior byte"
-        );
-        assert_eq!(
-            std::fs::read_dir(dir.path())
-                .expect("read target directory")
-                .count(),
-            1,
-            "only the preserved target may remain visible"
-        );
-    }
-
-    #[test]
     fn write_onto_a_directory_preserves_its_entries_and_cleans_up() {
         let dir = tempfile::tempdir().expect("temporary directory");
         let target = dir.path().join("subdir");

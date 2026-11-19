@@ -51,3 +51,71 @@ test("Settings shows the model download refusal without losing the server's deta
     "/api/index/semantic/download",
   ]);
 });
+
+test("Settings says why the default stands in for a model the workspace named that chan dropped", async () => {
+  const note =
+    "BAAI/bge-m3 is no longer offered: its Hub repository publishes no model.safetensors. "
+    + "This workspace uses BAAI/bge-small-en-v1.5 until a model is chosen.";
+  const model = {
+    id: "BAAI/bge-small-en-v1.5", label: "BGE Small EN v1.5", dim: 384, size_label: "~130 MB",
+    note: "", default: true, downloaded: true, current: true,
+  };
+  const state = {
+    mode: "bm25", model_present: true, model_name: model.id, model_note: note,
+    model_path: "/models/bge-small", model_size_bytes: 1, semantic_enabled: false,
+  };
+  workspace.info = demoWorkspaceInfo({
+    metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+    files: [],
+  });
+  recordRequests((request) => {
+    if (request.path === "/api/build-info") return json({ version: "0", build: "test", features: { embeddings: true } });
+    if (request.path === "/api/index/semantic/state") return json(state);
+    if (request.path === "/api/index/semantic/models") return json({ current_model: model.id, models: [model] });
+    throw new Error(`Unexpected request: ${request.method} ${request.path}`);
+  });
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(SemanticControl, { target }));
+  await vi.waitFor(() => expect(target.querySelector("[role=note]")?.textContent).toBe(note));
+});
+
+test("Settings keeps the default that stands in for a dropped model and ends the note", async () => {
+  const note =
+    "BAAI/bge-m3 is no longer offered: its Hub repository publishes no model.safetensors. "
+    + "This workspace uses BAAI/bge-small-en-v1.5 until a model is chosen.";
+  const model = {
+    id: "BAAI/bge-small-en-v1.5", label: "BGE Small EN v1.5", dim: 384, size_label: "~130 MB",
+    note: "", default: true, downloaded: true, current: true,
+  };
+  let noted = true;
+  const state = () => ({
+    mode: "hybrid", model_present: true, model_name: model.id, model_note: noted ? note : null,
+    model_path: "/models/bge-small", model_size_bytes: 1, semantic_enabled: true,
+  });
+  workspace.info = demoWorkspaceInfo({
+    metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+    files: [],
+  });
+  const requests = recordRequests((request) => {
+    if (request.path === "/api/build-info") return json({ version: "0", build: "test", features: { embeddings: true } });
+    if (request.path === "/api/index/semantic/state") return json(state());
+    if (request.path === "/api/index/semantic/models") return json({ current_model: model.id, models: [model] });
+    if (request.path === "/api/index/semantic/model" && request.method === "PATCH") {
+      noted = false;
+      return json(state());
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.path}`);
+  });
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(SemanticControl, { target }));
+  await vi.waitFor(() => expect(target.querySelector("[role=note]")?.textContent).toBe(note));
+  const keep = [...target.querySelectorAll("button")].find(
+    (button) => button.textContent?.trim() === `Keep ${model.id}`,
+  );
+  expect(keep, "a Keep action under the note").toBeDefined();
+  keep!.click();
+  await vi.waitFor(() => expect(target.querySelector("[role=note]")).toBeNull());
+  expect(
+    requests.filter((request) => request.method === "PATCH").map((request) => [request.path, request.body]),
+  ).toEqual([["/api/index/semantic/model", { model: model.id }]]);
+});

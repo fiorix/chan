@@ -236,7 +236,8 @@ Source: `crates/chan-workspace/src/index/config.rs`.
 | Field | Type | Default | Reachability | Use |
 |-------|------|---------|--------------|-----|
 | `schema_version` | `u32` | current schema | internal | a mismatch wipes and rebuilds the index |
-| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model`, `PATCH /api/index/semantic/model`, Settings → This workspace | the embedding model new vectors are built with |
+| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model`, `PATCH /api/index/semantic/model`, Settings → This workspace | the embedding model new vectors are built with; a model chan does not offer loads as the default, its id kept in `replaced_model` |
+| `replaced_model` | `Option<String>` | unset | set on load when `model` names one chan does not offer; cleared when a model is chosen | the id the default replaced, for the note in Settings and `chan workspace index status` |
 | `chunking` | `Chunking` | `headings` | internal | how a Markdown file is split into indexable units: `headings`, `whole-doc` or `fixed` |
 | `vectors_model` | `Option<String>` | unset | internal stamp | the model that produced the vectors on disk; a mismatch with `model` wipes the vector store on open |
 | `vectors_dim` | `Option<u32>` | unset | internal stamp | the dimension of the vectors on disk, cross-checked before more are written |

@@ -1,12 +1,11 @@
 use std::fs::File;
 use std::io::Read;
 
-use super::tests::Server;
+use super::tests::{fixture, response, Server, COMMIT};
 use super::{publish_ref, repo_dir_name, Client, DownloadError};
 
 const OLD_COMMIT: &str = "0000000000000000000000000000000000000000";
 const NEW_COMMIT: &str = "1111111111111111111111111111111111111111";
-const ETAG: &str = "2222222222222222222222222222222222222222";
 
 #[test]
 fn reference_replacement_preserves_open_readers() {
@@ -86,32 +85,31 @@ fn published_reference_has_regular_file_attributes() {
 }
 
 #[test]
-fn blob_publication_failure_preserves_the_current_reference() {
+fn file_publication_failure_preserves_the_current_reference() {
     const BODY: &[u8] = b"fixture model";
     let cache = tempfile::tempdir().unwrap();
     let repo = cache.path().join(repo_dir_name("fixture/model"));
     publish_ref(&repo, OLD_COMMIT).unwrap();
-    let blob = repo.join("blobs").join(ETAG);
-    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
-    std::fs::write(&blob, BODY).unwrap();
-    let pointer = repo.join("snapshots").join(NEW_COMMIT).join("config.json");
-    // A directory at the file path rejects both symlink publication and the
-    // rename fallback used when Windows symlink privileges are unavailable.
-    std::fs::create_dir_all(&pointer).unwrap();
+    // A directory at the file's path refuses the rename into place.
+    let file = repo.join("snapshots").join(COMMIT).join("config.json");
+    std::fs::create_dir_all(&file).unwrap();
     let server = Server::start(|_| {
-        let mut response = format!(
-            "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/{}\r\nx-repo-commit: {NEW_COMMIT}\r\netag: \"{ETAG}\"\r\n\r\n",
-            BODY.len()
+        response(
+            "206 Partial Content",
+            &format!(
+                "Content-Range: bytes 0-{}/{}\r\n",
+                BODY.len() - 1,
+                BODY.len()
+            ),
+            BODY,
         )
-        .into_bytes();
-        response.extend_from_slice(&BODY[..1]);
-        response
     });
     let client = Client::with_config(
         cache.path(),
         &server.endpoint,
         chan_tls::client_config().unwrap(),
-    );
+    )
+    .pinned(fixture(BODY));
 
     let error = client
         .get_inner("fixture/model", "config.json")
@@ -121,8 +119,12 @@ fn blob_publication_failure_preserves_the_current_reference() {
     assert_eq!(
         std::fs::read_to_string(repo.join("refs/main")).unwrap(),
         OLD_COMMIT,
-        "a failed blob publication must not advance the current reference"
+        "a failed file publication must not advance the current reference"
     );
-    assert_eq!(std::fs::read(&blob).unwrap(), BODY);
+    assert_eq!(
+        std::fs::read(file.with_file_name("config.json.part")).unwrap(),
+        BODY,
+        "the verified bytes stay in the part for the next attempt"
+    );
     assert_eq!(server.requests.lock().unwrap().len(), 1);
 }

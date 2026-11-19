@@ -1,27 +1,43 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chan_tls::rustls;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+use super::tests::{fixture, in_child, is_child, COMMIT};
 use super::{Client, EmbedError};
 
-const CA: &[u8] = include_bytes!("testdata/ca.der");
-const LEAF: &[u8] = include_bytes!("testdata/localhost.der");
-const KEY: &[u8] = include_bytes!("testdata/localhost-key.pk8");
 const IO_LIMIT: Duration = Duration::from_secs(3);
 const SERVER_LIMIT: Duration = Duration::from_secs(15);
-const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const ETAG: &str = "abcdef0123456789abcdef0123456789abcdef01";
 const BODY: &[u8] = b"{\"tls_fixture\":true}\n";
+
+/// The CA the fixture servers chain to, and their leaf for `localhost` and
+/// `127.0.0.1` with its key: made once per test process, so a test that
+/// runs its server in a child makes the child's own.
+fn fixture_pki() -> &'static (
+    CertificateDer<'static>,
+    CertificateDer<'static>,
+    PrivateKeyDer<'static>,
+) {
+    static PKI: OnceLock<(
+        CertificateDer<'static>,
+        CertificateDer<'static>,
+        PrivateKeyDer<'static>,
+    )> = OnceLock::new();
+    PKI.get_or_init(|| {
+        let ca = chan_tls::testing::pki::ca("chan model download test CA");
+        let leaf = chan_tls::testing::pki::leaf(&ca);
+        (ca.cert.clone(), leaf.cert.clone(), leaf.key.clone_key())
+    })
+}
 
 fn trusted_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from(CA)).unwrap();
+    roots.add(fixture_pki().0.clone()).unwrap();
     rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -60,10 +76,7 @@ impl Server {
                 .with_safe_default_protocol_versions()
                 .unwrap()
                 .with_no_client_auth()
-                .with_single_cert(
-                    vec![CertificateDer::from(LEAF)],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY.to_vec())),
-                )
+                .with_single_cert(vec![fixture_pki().1.clone()], fixture_pki().2.clone_key())
                 .unwrap(),
             )
         });
@@ -130,6 +143,14 @@ fn serve(
     observed: &Mutex<Observation>,
     answer: &impl Fn(&str) -> Vec<u8>,
 ) -> io::Result<()> {
+    let request = read_head(stream)?;
+    observed.lock().unwrap().requests.push(request.clone());
+    stream.write_all(&answer(&request))?;
+    stream.flush()
+}
+
+/// A request's head, through the blank line that ends it.
+fn read_head(stream: &mut impl Read) -> io::Result<String> {
     let deadline = Instant::now() + IO_LIMIT;
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
@@ -142,11 +163,7 @@ fn serve(
         stream.read_exact(&mut byte)?;
         header.push(byte[0]);
     }
-    let request = String::from_utf8(header)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    observed.lock().unwrap().requests.push(request.clone());
-    stream.write_all(&answer(&request))?;
-    stream.flush()
+    String::from_utf8(header).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn range(request: &str) -> &str {
@@ -170,25 +187,28 @@ fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn model_response(request: &str) -> Vec<u8> {
-    let (last, body) = match range(request) {
-        "bytes=0-0" => (0, &BODY[..1]),
-        "bytes=0-" => (BODY.len() - 1, BODY),
-        _ => return response("400 Bad Request", "", b"unexpected fixture range"),
-    };
+    if range(request) != "bytes=0-" {
+        return response("400 Bad Request", "", b"unexpected fixture range");
+    }
     response(
         "206 Partial Content",
         &format!(
-            "Content-Range: bytes 0-{last}/{}\r\nx-repo-commit: {COMMIT}\r\netag: \"{ETAG}\"\r\n",
+            "Content-Range: bytes 0-{}/{}\r\n",
+            BODY.len() - 1,
             BODY.len()
         ),
-        body,
+        BODY,
     )
+}
+
+/// A client of `endpoint` on `config` with the fixture model pinned to `BODY`.
+fn client(cache: &std::path::Path, endpoint: &str, config: rustls::ClientConfig) -> Client {
+    Client::with_config(cache, endpoint, config).pinned(fixture(BODY))
 }
 
 fn payload_redirect_server(destination: &Server) -> Server {
     let location = format!("{}payload", destination.endpoint(true));
     Server::start(false, move |request| match range(request) {
-        "bytes=0-0" => model_response(request),
         "bytes=0-" => response("302 Found", &format!("Location: {location}\r\n"), b""),
         _ => response("400 Bad Request", "", b"unexpected pre-redirect range"),
     })
@@ -201,7 +221,7 @@ fn assert_certificate_error(error: &EmbedError, request_url: &str) {
     );
     let display = error.to_string();
     assert!(
-        display.starts_with(&format!("hf-hub: request error: {request_url}: ")),
+        display.starts_with(&format!("model download: request error: {request_url}: ")),
         "certificate error must retain the Hub transport context: {display}"
     );
     assert!(
@@ -212,89 +232,6 @@ fn assert_certificate_error(error: &EmbedError, request_url: &str) {
         display.to_ascii_lowercase().contains("certificate"),
         "certificate error must name its cause: {display}"
     );
-    println!("MODELROOTS_CERTIFICATE_DISPLAY={display}");
-    if let EmbedError::Certificate(transport) = error {
-        println!(
-            "MODELROOTS_CERTIFICATE_TRANSPORT_JSON={}",
-            serde_json::to_string(transport).unwrap()
-        );
-    }
-    println!(
-        "MODELROOTS_CERTIFICATE_JSON={}",
-        serde_json::json!({"error": display})
-    );
-}
-
-#[test]
-fn trusted_tls_configuration_downloads_metadata_and_payload() {
-    let cache = tempfile::tempdir().unwrap();
-    let server = Server::start(true, model_response);
-    let client = Client::with_config(cache.path(), &server.endpoint(true), trusted_config());
-    let result = client.get("fixture/model", "config.json");
-    let observed = server.finish();
-    assert!(
-        observed.errors.is_empty(),
-        "fixture errors: {:?}",
-        observed.errors
-    );
-    let path = result.expect("the explicitly trusted fixture CA must allow the transfer");
-    assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(observed.accepted, 2);
-    assert_eq!(
-        observed
-            .requests
-            .iter()
-            .map(|request| range(request))
-            .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
-    );
-}
-
-#[test]
-fn untrusted_metadata_certificate_preserves_the_transport_error() {
-    let cache = tempfile::tempdir().unwrap();
-    let marker = cache
-        .path()
-        .join(super::super::repo_dir_name(crate::DEFAULT_MODEL))
-        .join("cache-marker");
-    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-    std::fs::write(&marker, b"preserve certificate failure").unwrap();
-    let server = Server::start(true, model_response);
-    let client = Client::with_config(
-        cache.path(),
-        &server.endpoint(true),
-        chan_tls::client_config().unwrap(),
-    );
-    let result =
-        super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client);
-    let request_url = format!(
-        "{}{}/resolve/main/config.json",
-        server.endpoint(true),
-        crate::DEFAULT_MODEL
-    );
-    let observed = server.finish();
-    let error = result.expect_err("the fixture CA is absent from shared trust");
-    assert_certificate_error(&error, &request_url);
-    assert!(
-        marker.is_file(),
-        "certificate refusal must preserve the model cache"
-    );
-    assert_eq!(
-        std::fs::read(&marker).unwrap(),
-        b"preserve certificate failure"
-    );
-    assert_eq!(
-        observed.accepted, 1,
-        "the TLS endpoint must have been reached"
-    );
-    assert!(
-        observed.requests.is_empty(),
-        "untrusted TLS must carry no HTTP"
-    );
-    assert!(
-        !observed.errors.is_empty(),
-        "server must observe the TLS refusal"
-    );
 }
 
 #[test]
@@ -302,7 +239,7 @@ fn trusted_tls_configuration_downloads_the_redirected_payload() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let source = payload_redirect_server(&destination);
-    let client = Client::with_config(cache.path(), &source.endpoint(false), trusted_config());
+    let client = client(cache.path(), &source.endpoint(false), trusted_config());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
     let destination = destination.finish();
@@ -324,7 +261,7 @@ fn trusted_tls_configuration_downloads_the_redirected_payload() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination
@@ -341,14 +278,14 @@ fn untrusted_payload_certificate_preserves_the_transport_error() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let source = payload_redirect_server(&destination);
-    let client = Client::with_config(
+    let client = client(
         cache.path(),
         &source.endpoint(false),
         chan_tls::client_config().unwrap(),
     );
     let result = client.get("fixture/model", "config.json");
     let request_url = format!(
-        "{}fixture/model/resolve/main/config.json",
+        "{}fixture/model/resolve/{COMMIT}/config.json",
         source.endpoint(false)
     );
     let source = source.finish();
@@ -364,7 +301,7 @@ fn untrusted_payload_certificate_preserves_the_transport_error() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination.accepted, 1,
@@ -391,7 +328,7 @@ fn authorization(request: &str) -> Option<&str> {
 }
 
 #[test]
-fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
+fn same_host_relative_redirects_keep_bearer() {
     let cache = tempfile::tempdir().unwrap();
     let server = Server::start(true, |request| {
         if request.starts_with("GET /relative-config ") {
@@ -400,7 +337,7 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
             response("302 Found", "Location: /relative-config\r\n", b"")
         }
     });
-    let mut client = Client::with_config(cache.path(), &server.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &server.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let observed = server.finish();
@@ -411,14 +348,14 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
     );
     let path = result.expect("same-host relative redirects preserve the transfer");
     assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(observed.accepted, 4);
+    assert_eq!(observed.accepted, 2);
     assert_eq!(
         observed
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-0", "bytes=0-", "bytes=0-"]
+        ["bytes=0-", "bytes=0-"]
     );
     for request in &observed.requests {
         assert_eq!(
@@ -430,16 +367,14 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
 }
 
 #[test]
-fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
+fn cross_host_redirects_strip_bearer() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let location = format!("https://localhost:{}/payload", destination.addr.port());
     let source = Server::start(true, move |_| {
-        response("302 Found", &format!(
-            "Location: {location}\r\nx-repo-commit: {COMMIT}\r\nx-linked-etag: \"{ETAG}\"\r\netag: discarded-etag\r\n"
-        ), b"")
+        response("302 Found", &format!("Location: {location}\r\n"), b"")
     });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &source.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
@@ -456,15 +391,15 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
     );
     let path = result.expect("cross-host HTTPS redirects preserve the transfer");
     assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(source.accepted, 2);
-    assert_eq!(destination.accepted, 2);
+    assert_eq!(source.accepted, 1);
+    assert_eq!(destination.accepted, 1);
     assert_eq!(
         source
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination
@@ -472,7 +407,7 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     for request in &source.requests {
         assert_eq!(authorization(request), Some("Bearer fixture-bearer"));
@@ -484,56 +419,6 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
             "cross-host redirect must strip Authorization: {request}"
         );
     }
-    let repo = cache
-        .path()
-        .join(super::super::repo_dir_name("fixture/model"));
-    assert!(
-        repo.join("blobs")
-            .join(ETAG)
-            .with_extension("lock")
-            .is_file(),
-        "linked ETag owns the cache blob lock on every platform"
-    );
-    assert!(!repo.join("blobs/discarded-etag.lock").exists());
-}
-
-#[test]
-fn https_metadata_redirect_refuses_http_before_connecting() {
-    let cache = tempfile::tempdir().unwrap();
-    let destination = Server::start(false, model_response);
-    let location = format!("{}payload", destination.endpoint(false));
-    let source = Server::start(true, move |_| {
-        response(
-            "302 Found",
-            &format!(
-                "Location: {location}\r\nx-repo-commit: {COMMIT}\r\nx-linked-etag: \"{ETAG}\"\r\n"
-            ),
-            b"",
-        )
-    });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
-    client.token = Some("fixture-bearer".to_owned());
-    let result = client.get("fixture/model", "config.json");
-    let source = source.finish();
-    let destination = destination.finish();
-    assert_eq!(
-        destination.accepted, 0,
-        "an HTTPS metadata redirect must never connect to HTTP"
-    );
-    assert!(destination.requests.is_empty());
-    let error = result.expect_err("HTTPS metadata downgrade is refused");
-    assert!(
-        error.to_string().contains("https"),
-        "downgrade cause is visible: {error}"
-    );
-    assert_eq!(source.accepted, 1);
-    assert_eq!(source.requests.len(), 1);
-    assert_eq!(range(&source.requests[0]), "bytes=0-0");
-    assert_eq!(
-        authorization(&source.requests[0]),
-        Some("Bearer fixture-bearer")
-    );
-    assert!(source.errors.is_empty());
 }
 
 #[test]
@@ -541,14 +426,10 @@ fn https_payload_redirect_refuses_http_before_connecting() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(false, model_response);
     let location = format!("{}payload", destination.endpoint(false));
-    let source = Server::start(true, move |request| {
-        if range(request) == "bytes=0-0" {
-            model_response(request)
-        } else {
-            response("302 Found", &format!("Location: {location}\r\n"), b"")
-        }
+    let source = Server::start(true, move |_| {
+        response("302 Found", &format!("Location: {location}\r\n"), b"")
     });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &source.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
@@ -563,14 +444,14 @@ fn https_payload_redirect_refuses_http_before_connecting() {
         error.to_string().contains("https"),
         "downgrade cause is visible: {error}"
     );
-    assert_eq!(source.accepted, 2);
+    assert_eq!(source.accepted, 1);
     assert_eq!(
         source
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     for request in &source.requests {
         assert_eq!(authorization(request), Some("Bearer fixture-bearer"));
@@ -579,44 +460,38 @@ fn https_payload_redirect_refuses_http_before_connecting() {
 }
 
 #[test]
-fn http_proxy_environment_routes_metadata_and_payload() {
-    const CHILD: &str = "MODELROOTS_HTTP_PROXY_ENDPOINT";
-    if let Ok(endpoint) = std::env::var(CHILD) {
+fn http_proxy_environment_routes_the_download() {
+    const TEST: &str =
+        "index::embeddings::download::tls_tests::http_proxy_environment_routes_the_download";
+    const ORIGIN: &str = "CHAN_DOWNLOAD_TEST_ORIGIN";
+    if is_child(TEST) {
         let cache = tempfile::tempdir().unwrap();
-        let client = Client::with_config(cache.path(), &endpoint, trusted_config());
+        let mut client = client(
+            cache.path(),
+            &std::env::var(ORIGIN).unwrap(),
+            trusted_config(),
+        );
+        client.proxy_from_env = true;
         let path = client.get("fixture/model", "config.json").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), BODY);
-        println!("proxy-download-completed");
         return;
     }
     let origin = Server::start(false, model_response);
     let proxy = Server::start(false, model_response);
     let endpoint = origin.endpoint(false);
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args([
-        "--exact",
-        "index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload",
-        "--nocapture",
-        "--test-threads=1",
-    ]);
-    for name in super::super::PROXY_VARS {
-        command.env_remove(name);
-    }
-    let output = command
-        .env_remove("NO_PROXY")
-        .env_remove("no_proxy")
-        .env(CHILD, &endpoint)
-        .env("HTTP_PROXY", proxy.endpoint(false))
-        .output()
-        .unwrap();
+    in_child(
+        TEST,
+        &[(ORIGIN, &endpoint), ("HTTP_PROXY", &proxy.endpoint(false))],
+    );
     let proxy = proxy.finish();
     let origin = origin.finish();
     assert_eq!(
         proxy.requests.len(),
-        2,
-        "HTTP_PROXY must carry metadata and payload requests"
+        1,
+        "HTTP_PROXY must carry the download request"
     );
-    let absolute_request = format!("GET {endpoint}fixture/model/resolve/main/config.json HTTP/1.1");
+    let absolute_request =
+        format!("GET {endpoint}fixture/model/resolve/{COMMIT}/config.json HTTP/1.1");
     for request in &proxy.requests {
         assert_eq!(
             request.lines().next(),
@@ -629,42 +504,14 @@ fn http_proxy_environment_routes_metadata_and_payload() {
         "the client must not bypass HTTP_PROXY"
     );
     assert!(proxy.errors.is_empty());
-    assert!(
-        output.status.success(),
-        "isolated proxy download failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("proxy-download-completed"));
 }
 
 #[test]
 fn unusable_proxy_takes_precedence_over_certificate_error() {
-    const CHILD: &str = "MODELROOTS_PROXY_CLASSIFIER_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args([
-            "--exact",
-            "index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
-        for name in super::super::PROXY_VARS {
-            command.env_remove(name);
-        }
-        let output = command
-            .env(CHILD, "1")
-            .env("HTTPS_PROXY", "https://proxy.invalid:443")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated proxy classifier failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout)
-            .contains("proxy-certificate-precedence-observed"));
+    const TEST: &str =
+        "index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error";
+    if !is_child(TEST) {
+        in_child(TEST, &[("HTTPS_PROXY", "https://proxy.invalid:443")]);
         return;
     }
     let cache = tempfile::tempdir().unwrap();
@@ -706,5 +553,223 @@ fn unusable_proxy_takes_precedence_over_certificate_error() {
         if var == "HTTPS_PROXY" && value == "https://proxy.invalid:443"),
         "the unusable proxy takes precedence over certificate classification: {error:?}"
     );
-    println!("proxy-certificate-precedence-observed");
+}
+
+/// What a TLS-inspecting proxy saw: each tunnel asked for, the server name
+/// each handshake it completed named, each request inside one, and the
+/// handshakes the client refused.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct Inspected {
+    tunnels: Vec<String>,
+    server_names: Vec<String>,
+    requests: Vec<String>,
+    refused: Vec<String>,
+}
+
+/// A loopback HTTP proxy that accepts each CONNECT, then terminates the
+/// tunnel's TLS itself with `leaf`, as a TLS-inspecting proxy does, and
+/// answers each request with `answer`.
+#[cfg(target_os = "linux")]
+struct InspectingProxy {
+    addr: SocketAddr,
+    stopped: Arc<AtomicBool>,
+    inspected: Arc<Mutex<Inspected>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl InspectingProxy {
+    fn start(
+        leaf: chan_tls::testing::pki::Issued,
+        answer: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        let inspected = Arc::new(Mutex::new(Inspected::default()));
+        let seen = Arc::clone(&inspected);
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf.cert.clone()], leaf.key.clone_key())
+            .unwrap(),
+        );
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + SERVER_LIMIT;
+            while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("proxy accept failed: {error}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket.set_read_timeout(Some(IO_LIMIT)).unwrap();
+                socket.set_write_timeout(Some(IO_LIMIT)).unwrap();
+                let Ok(tunnel) = read_head(&mut socket) else {
+                    continue;
+                };
+                seen.lock()
+                    .unwrap()
+                    .tunnels
+                    .push(tunnel.lines().next().unwrap_or("").to_owned());
+                if socket
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .is_err()
+                {
+                    continue;
+                }
+                let connection = rustls::ServerConnection::new(Arc::clone(&config)).unwrap();
+                let mut stream = rustls::StreamOwned::new(connection, socket);
+                match read_head(&mut stream) {
+                    // ureq names the target in absolute form inside a tunnel;
+                    // a server takes either form.
+                    Ok(request) => {
+                        let request = request.replacen(" https://huggingface.co/", " /", 1);
+                        let mut seen = seen.lock().unwrap();
+                        seen.server_names
+                            .push(stream.conn.server_name().unwrap_or("").to_owned());
+                        seen.requests
+                            .push(request.lines().next().unwrap_or("").to_owned());
+                        drop(seen);
+                        let _ = stream.write_all(&answer(&request));
+                        let _ = stream.flush();
+                    }
+                    Err(error) => seen.lock().unwrap().refused.push(error.to_string()),
+                }
+            }
+        });
+        Self {
+            addr,
+            stopped,
+            inspected,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) -> Inspected {
+        self.stopped.store(true, Ordering::Release);
+        self.worker.take().unwrap().join().unwrap();
+        std::mem::take(&mut *self.inspected.lock().unwrap())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for InspectingProxy {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// The default model's config.json as the Hub serves it at the pinned
+/// commit.
+#[cfg(target_os = "linux")]
+const DEFAULT_CONFIG: &[u8] = include_bytes!("testdata/bge-small-en-v1.5-config.json");
+
+/// The production client behind a TLS-inspecting proxy: `HTTPS_PROXY` names
+/// a loopback proxy that presents its own leaf for huggingface.co. With the
+/// proxy's CA in the bundle `SSL_CERT_FILE` names, the system store chan's
+/// trust decision reads on Linux, the pinned file downloads; without it the
+/// download fails with the certificate error. No name is resolved and
+/// nothing leaves the machine.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_download_through_an_inspecting_proxy_trusts_the_system_store() {
+    const TEST: &str = "index::embeddings::download::tls_tests::a_download_through_an_inspecting_proxy_trusts_the_system_store";
+    const CACHE: &str = "CHAN_DOWNLOAD_TEST_CACHE";
+    const TRUSTED: &str = "CHAN_DOWNLOAD_TEST_TRUSTED";
+    if is_child(TEST) {
+        let cache = std::path::PathBuf::from(std::env::var(CACHE).unwrap());
+        let result = Client::new(&cache).get(crate::DEFAULT_MODEL, "config.json");
+        if std::env::var_os(TRUSTED).is_some() {
+            let path =
+                result.expect("the proxy's CA in the system store lets the download through");
+            assert_eq!(std::fs::read(path).unwrap(), DEFAULT_CONFIG);
+        } else {
+            let error = result.expect_err("a proxy CA outside the system store is refused");
+            assert!(
+                matches!(error, EmbedError::Certificate(_)),
+                "the refusal is the certificate error: {error:?}"
+            );
+        }
+        return;
+    }
+    let pinned = crate::index::config::embedding_model(crate::DEFAULT_MODEL).unwrap();
+    let file = pinned
+        .files
+        .iter()
+        .find(|file| file.name == "config.json")
+        .unwrap();
+    assert_eq!(
+        format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(DEFAULT_CONFIG)
+        ),
+        file.sha256,
+        "testdata/bge-small-en-v1.5-config.json must be the pinned file: refresh it from \
+         resolve/{}/config.json when the pin moves",
+        pinned.revision
+    );
+    let ca = chan_tls::testing::pki::ca("chan inspecting proxy test CA");
+    let leaf = chan_tls::testing::pki::leaf_for(&ca, "huggingface.co");
+    let home = tempfile::tempdir().unwrap();
+    let bundle = home.path().join("proxy-ca.pem");
+    std::fs::write(&bundle, ca.pem()).unwrap();
+    let path = format!(
+        "/{}/resolve/{}/config.json",
+        crate::DEFAULT_MODEL,
+        pinned.revision
+    );
+    let served = path.clone();
+    let proxy = InspectingProxy::start(leaf, move |request| {
+        if request.lines().next() == Some(format!("GET {served} HTTP/1.1").as_str())
+            && request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("host: huggingface.co"))
+        {
+            response("200 OK", "", DEFAULT_CONFIG)
+        } else {
+            response("404 Not Found", "", b"not a pinned file")
+        }
+    });
+    let proxy_url = format!("http://{}", proxy.addr);
+    let home_dir = home.path().to_str().unwrap();
+    for trusted in [true, false] {
+        let cache = home
+            .path()
+            .join(if trusted { "trusted" } else { "untrusted" });
+        let mut env = vec![
+            ("HOME", home_dir),
+            (CACHE, cache.to_str().unwrap()),
+            ("HTTPS_PROXY", proxy_url.as_str()),
+        ];
+        if trusted {
+            env.extend([("SSL_CERT_FILE", bundle.to_str().unwrap()), (TRUSTED, "1")]);
+        }
+        in_child(TEST, &env);
+    }
+    let inspected = proxy.finish();
+    assert_eq!(
+        inspected.tunnels, ["CONNECT huggingface.co:443 HTTP/1.1"; 2],
+        "both downloads tunnel to the Hub's name through the proxy"
+    );
+    assert_eq!(inspected.server_names, ["huggingface.co"]);
+    assert_eq!(
+        inspected.requests,
+        [format!("GET {path} HTTP/1.1")],
+        "only the download that trusts the proxy's CA sends its request"
+    );
+    assert_eq!(inspected.refused.len(), 1, "{:?}", inspected.refused);
 }

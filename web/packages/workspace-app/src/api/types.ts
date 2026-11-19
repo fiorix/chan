@@ -1216,6 +1216,9 @@ export type SemanticState = {
   mode: "bm25" | "hybrid";
   model_present: boolean;
   model_name: string;
+  /// Why `model_name` stands in for a model the workspace named that chan
+  /// does not offer; absent when nothing was replaced.
+  model_note?: string;
   model_path: string;
   model_size_bytes: number | null;
   semantic_enabled: boolean;

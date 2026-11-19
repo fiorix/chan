@@ -4,7 +4,7 @@
 
 ## What it is and where it sits
 
-Two crates bracket it. `chan-workspace`, its only real dependency, supplies the embedder and the `DEFAULT_MODEL` constant: fetch-models downloads through the same `Embedder::open` the runtime uses, so the staged bytes land in exactly the hf-hub cache layout the runtime later resolves, and the model id has one definition. `chan-server` consumes the artifact: its build script tracks the tarball, and its embed seeder bakes the bytes in with `include_bytes!` under the `embed-model` feature. fetch-models writes the file; chan-server decides whether to embed it.
+Two crates bracket it. `chan-workspace`, its only real dependency, supplies the embedder and the `DEFAULT_MODEL` constant: fetch-models downloads through the same `Embedder::open` the runtime uses, so the staged bytes land in exactly the cache layout the runtime later resolves, at each file's pinned commit and hash, and the model id has one definition. `chan-server` consumes the artifact: its build script tracks the tarball, and its embed seeder bakes the bytes in with `include_bytes!` under the `embed-model` feature. fetch-models writes the file; chan-server decides whether to embed it.
 
 The helper runs only when something names it: `make models` (which `make build-release` runs first) or `cargo run -p fetch-models`.
 
@@ -19,7 +19,7 @@ fetch-models resolves the tension with two independent off switches. The downloa
 ```mermaid
 flowchart TB
   Make["make models"] --> Fetch["fetch-models<br/>cargo run -p fetch-models"]
-  Fetch -->|"stage 1: Embedder::open(DEFAULT_MODEL, staging)"| Stage["target/fetch-models-cache/<br/>(hf-hub cache layout)"]
+  Fetch -->|"stage 1: Embedder::open(DEFAULT_MODEL, staging)"| Stage["target/fetch-models-cache/<br/>(model cache layout)"]
   Stage -->|"stage 2: tar + zstd, atomic rename"| Bundle["crates/chan-server/resources/models.tar.zst"]
   Bundle --> Build["chan-server build script<br/>stub-if-missing + rerun-if-changed"]
   Build --> Embed["include_bytes! seed<br/>cfg(feature = embed-model)"]
@@ -31,7 +31,7 @@ flowchart TB
 
 Stage one downloads through the runtime embedder into a stable staging directory under the repository's `target/`. chan-workspace's downloader populates it on a cold run and skips the network when it is populated; `cargo clean` wipes it and the next run downloads again. Reusing the embedder rather than a hand-rolled fetch is what guarantees the staged layout is the one the seeder validates.
 
-Stage two encodes the staging tree as a tar stream through a zstd encoder at a high compression level, the point past which more ratio costs far more encode time for a one-shot blob of this size. The walk drops cache lock and bookkeeping files and the `blobs/` subtree: tar follows the snapshot symlinks into the same bytes, so keeping both would double the archive. The output is written to a sibling temporary, both archive layers are finished, the file is synced and closed, and only then renamed into place; a failure removes the temporary, so an incomplete bundle can never pass for a finished one.
+Stage two encodes the staging tree as a tar stream through a zstd encoder at a high compression level, the point past which more ratio costs far more encode time for a one-shot blob of this size. The walk drops cache lock and bookkeeping files, partial downloads (`*.part`), a `refs/.tmp*` a crash left and any `blobs/` subtree: chan writes plain files under `snapshots/`, and a staging tree an earlier version wrote holds links there into `blobs/`, which tar follows, so keeping both would double the archive. The output is written to a sibling temporary, both archive layers are finished, the file is synced and closed, and only then renamed into place; a failure removes the temporary, so an incomplete bundle can never pass for a finished one.
 
 Between the stages sits an mtime gate: when the bundle exists, is non-empty and is newer than every file the encoder would include, the slow re-encode is skipped and the run is a no-op. The gate applies the encoder's own skip filter, so a freshly arrived lock file or blob does not force a rebuild. Forcing one is a matter of deleting the bundle.
 
