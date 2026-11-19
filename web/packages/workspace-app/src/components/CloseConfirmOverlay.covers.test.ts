@@ -17,6 +17,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
+import PromptModal from "./PromptModal.svelte";
 import SessionEndedOverlay from "./SessionEndedOverlay.svelte";
 import { recordingContext2d } from "../__tests__/canvas";
 import type { WsStatus } from "../api/client";
@@ -24,7 +25,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { COVER_ROOT_ATTR, coverOwnsButton, coverOwnsTextEntry, promptState, raisedCoverKeys, setCoverBlocking, ui, workspace } from "../state/store.svelte";
+import { COVER_ROOT_ATTR, coverOwnsButton, coverOwnsTextEntry, promptState, raisedCoverKeys, resolvePrompt, setCoverBlocking, uiPrompt, ui, workspace } from "../state/store.svelte";
 import { __resetWindowLifecycle, markWindowHidden } from "../state/windowLifecycle.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
@@ -336,4 +337,21 @@ test("typing reaches the screen lock's PIN field only while the lock paints on t
     setCoverBlocking("missing-token", false);
     missing.remove();
   }
+});
+
+test("the reconnect cover takes the keyboard off a dialog field it paints over, and the field has it back when the outage ends", async () => {
+  const dialogs = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PromptModal, { target: dialogs }) as Record<string, unknown>);
+  void uiPrompt("Name");
+  await settle();
+  const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
+  field.focus();
+  expect(document.activeElement, "the dialog's field").toBe(field);
+  const cover = await reconnectCover();
+  expect(cover.contains(document.activeElement), "the cover's card").toBe(true);
+  watchStatus("open");
+  await settle();
+  expect(raisedCoverKeys()).toEqual([]);
+  expect(document.activeElement, "the dialog's field once the outage ends").toBe(field);
+  resolvePrompt(null);
 });

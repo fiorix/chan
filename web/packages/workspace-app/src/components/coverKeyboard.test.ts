@@ -226,8 +226,8 @@ test("a dialog field left focused under the reconnect cover answers no Escape", 
   await settle();
   const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
   field.focus();
-  // The reconnect cover's root at its layer, over the dialogs' 26000; the
-  // cover leaves a dialog's focus where it was.
+  // The reconnect cover's root at its layer, over the dialogs' 26000, with
+  // the dialog's focus where it was, as when it opened under the cover.
   const cover = document.body.appendChild(document.createElement("div"));
   cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
   cover.style.position = "fixed";

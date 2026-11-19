@@ -225,8 +225,8 @@ describe("under a cover over the window", () => {
     void answer.then(() => (settled = true));
     const ok = button(target, "Delete");
     expect(document.activeElement).toBe(ok);
-    // The reconnect cover's root at its layer, over the dialogs' 26000: the
-    // cover leaves a dialog's focus where it was.
+    // The reconnect cover's root at its layer, over the dialogs' 26000, with
+    // the dialog's focus where it was, as when it opened under the cover.
     const cover = document.body.appendChild(document.createElement("div"));
     cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
     cover.style.position = "fixed";

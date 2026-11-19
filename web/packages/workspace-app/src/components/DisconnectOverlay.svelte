@@ -195,7 +195,8 @@
   /// keeps its own focus.
   $effect(() => {
     if (!visible) return;
-    const dialogOpen = modalDialogOpen();
+    // Read so a dialog closing over this cover runs this again.
+    modalDialogOpen();
     const active = document.activeElement as HTMLElement | null;
     // The card takes the keyboard only while this cover paints on top of
     // the covers (not under the screen lock, whatever holds the keyboard
@@ -210,9 +211,6 @@
       focusBeforeCover = deferredFocus.returnTo;
       deferredFocus = null;
     }
-    // ModalShell repairs focus into its top dialog. Leave that keyboard owner
-    // alone throughout the cover and after it clears.
-    if (dialogOpen && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
     queueMicrotask(() => {
       if (topCoverRoot() === overlayEl && !mayFocus(document.activeElement)) focusCard();

@@ -60,9 +60,9 @@
 
   function panelKeydown(event: KeyboardEvent): void {
     if (!registration?.isTop()) return;
-    // Under a cover painted over the dialog (the reconnect cover leaves a
-    // dialog's focus where it was), the dialog answers none of its keys:
-    // they go on to the window's guard, which cancels them.
+    // Under a cover painted over the dialog (a dialog opening under a cover
+    // takes focus as it mounts), the dialog answers none of its keys: they
+    // go on to the window's guard, which cancels them.
     if (appInputBlocked() && !mayFocus(panel ?? null)) return;
     focus.onKeydown(event);
     if (event.key === "Tab") event.stopPropagation();

@@ -640,9 +640,9 @@
 
   // Enter can answer the dialog, which closes it before the key would bubble
   // on, so Enter stops here: past the dialog, the window would read it as
-  // its own. Under a cover that holds the keyboard over the dialog (the
-  // reconnect cover leaves a dialog's focus where it was), Enter answers
-  // nothing and goes on to the window's guard, which cancels it.
+  // its own. Under a cover that holds the keyboard over the dialog (a dialog
+  // opening under a cover takes focus as it mounts), Enter answers nothing
+  // and goes on to the window's guard, which cancels it.
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
       if (appInputBlocked() && !mayFocus(e.target instanceof Element ? e.target : null)) return;

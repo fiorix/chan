@@ -640,7 +640,8 @@ describe("dismissal", () => {
 });
 
 /// The reconnect cover's root raised at its layer, over the dialogs' 26000;
-/// the answer lowers it. The cover leaves a dialog's focus where it was.
+/// the answer lowers it. The dialog's focus stays where it was, as when the
+/// dialog opened under the cover.
 function raiseReconnectCover(): () => void {
   const cover = document.body.appendChild(document.createElement("div"));
   cover.setAttribute(COVER_ROOT_ATTR, "reconnect");

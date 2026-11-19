@@ -26,7 +26,6 @@ import { WINDOW_TAB_BAR_MIN_HEIGHT, windowTabBar } from "../state/windowTabBar.s
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import OverlayShell from "./OverlayShell.svelte";
-import PromptModal from "./PromptModal.svelte";
 import { KEYBOARD_OWNER_ATTR, ownerTag } from "../state/keyboardOwner.svelte";
 
 type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
@@ -323,24 +322,6 @@ describe("the reconnect overlay", () => {
     await tick();
     await tick();
     expect(document.activeElement).toBe(card);
-  });
-
-  test("returns focus to the prompt field that owned it before the drop", async () => {
-    promptState.open = true;
-    promptState.title = "Prompt";
-    const target = document.body.appendChild(document.createElement("div"));
-    mounted.push(mount(PromptModal, { target }));
-    await tick();
-    const input = target.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
-    input.focus();
-    const blur = vi.spyOn(input, "blur");
-    await dropConnection();
-    expect(blur).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(input);
-    watchStatus("open");
-    await tick();
-    await tick();
-    expect(document.activeElement).toBe(input);
   });
 
   test("does not restore focus while the Computers launcher is shown", async () => {
@@ -680,6 +661,7 @@ describe("the reconnect overlay", () => {
     finishNew();
     await tick();
   });
+
   test("shows a spinner, what it is doing, and the attempt with the time elapsed", async () => {
     ui.wsAttempt = 3;
     const target = await dropConnection();
