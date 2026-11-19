@@ -366,6 +366,59 @@ describe("Library: devserver groups", () => {
     expect(target!.textContent).toContain("Not connected");
   });
 
+  // A connected devserver with no rows on the card, the desktop hiding them
+  // or not; with no flag given, its row carries no rows_hidden key, as a
+  // producer that sends no such key lists it.
+  async function quietDevserver(rows_hidden?: boolean): Promise<Element> {
+    await saveDevserver({ host: "quiet.example", port: 9100, label: "quiet" });
+    library.devservers = library.devservers.map((d): DevserverEntry => {
+      if (d.host !== "quiet.example") return d;
+      const { rows_hidden: _sent, ...row } = d;
+      return (rows_hidden === undefined ? { ...row, status: "connected" } : { ...row, status: "connected", rows_hidden }) as DevserverEntry;
+    });
+    mountList();
+    const quiet = [...target!.querySelectorAll("section.machine")].find((m) => m.textContent?.includes("quiet.example"));
+    expect(quiet).toBeTruthy();
+    return quiet!;
+  }
+  const hintOf = (machine: Element): string | undefined =>
+    machine.querySelector(".empty-hint")?.textContent?.replace(/\s+/g, " ").trim();
+  const emptyPrompt =
+    "No workspaces on this devserver yet. Add one with the buttons above, or run chan workspace serve /path/on/that/machine --on quiet in a terminal here.";
+
+  it("says a connected devserver's rows show again when the desktop hides them for an outage", async () => {
+    const quiet = await quietDevserver(true);
+    expect(hintOf(quiet)).toBe("Windows and workspaces show again when the connection recovers.");
+    expect(quiet.textContent).not.toContain("No workspaces on this devserver yet");
+    expect(quiet.textContent).not.toContain("chan workspace serve");
+  });
+
+  it("keeps the empty prompt for a connected devserver with no rows that the desktop does not hide", async () => {
+    const quiet = await quietDevserver(false);
+    expect(hintOf(quiet)).toBe(emptyPrompt);
+  });
+
+  it("keeps the empty prompt for a connected devserver whose row carries no rows_hidden key", async () => {
+    const quiet = await quietDevserver();
+    expect(hintOf(quiet)).toBe(emptyPrompt);
+  });
+
+  it("says the hidden rows show again under a control terminal the outage leaves on the card", () => {
+    const ds = library.devservers.find((d) => d.id === "ds-1")!;
+    library.devservers = library.devservers.map(
+      (d): DevserverEntry => (d.id === "ds-1" ? { ...d, rows_hidden: true } : d),
+    );
+    library.windows = library.windows.filter((w) => w.library_id !== ds.library_id || w.control);
+    library.workspaces = library.workspaces.filter((w) => w.devserver_id !== "ds-1");
+
+    mountList();
+
+    const prod = [...target!.querySelectorAll("section.machine")].find((m) => m.textContent?.includes("box.example.com:8787"));
+    expect(prod).toBeTruthy();
+    expect(prod!.textContent).toContain("Control terminal");
+    expect(hintOf(prod!)).toBe("Windows and workspaces show again when the connection recovers.");
+  });
+
   it("narrates a pending browser sign-in as a waiting row with a live re-click Connect", async () => {
     // A gateway connect that handed off to the browser: status stays
     // disconnected (waiting is a row state, not a connection state), but the

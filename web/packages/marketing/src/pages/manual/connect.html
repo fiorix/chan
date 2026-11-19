@@ -100,14 +100,14 @@
       </thead>
       <tbody>
         <tr><td>You press <strong>Disconnect</strong>, <kbd>o</kbd> on the card</td><td>The devserver's windows close here. Terminals, programs, workspaces and layouts keep running there.</td><td>Connect again: every shown window reopens where it was.</td></tr>
-        <tr><td>The tunnel drops while the script still runs</td><td>The windows show <code>reconnecting to the chan server</code> and keep trying (see <a href="/manual/navigation/#connection">connection health</a>). Once the drop has lasted 8 s, the cover adds <strong>Restart connection</strong> and <strong>Abandon</strong>.</td><td>Wait, or press <strong>Restart connection</strong> to run the script again, which closes and reopens the devserver's windows, or <strong>Abandon</strong> to disconnect.</td></tr>
+        <tr><td>The tunnel drops while the script still runs</td><td>The windows show <code>reconnecting to the chan server</code> and keep trying, with <strong>Show in Computers</strong> (see <a href="/manual/navigation/#connection">connection health</a>). Once the drop has lasted 8 s, the cover adds <strong>Restart connection</strong> and <strong>Abandon</strong>.</td><td>Wait, press <strong>Show in Computers</strong> to see the devserver's card, <strong>Restart connection</strong> to run the script again, which closes and reopens the devserver's windows, or <strong>Abandon</strong> to disconnect.</td></tr>
         <tr><td>The script exits with an error, as ssh does when the network goes</td><td>The windows close. The control terminal stays, with the script's last words and <code>process exited (255); press Ctrl+D to close this tab</code>, and its row flashes.</td><td>Read why, close the control terminal, and connect again.</td></tr>
       </tbody>
     </table>
   </div>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="connect-reconnecting" data-shot-kind="still">screenshot to capture<small>a devserver's terminal window greyed under the "reconnecting to the chan server" overlay, with its timer, Restart connection and Abandon</small></div>
-    <figcaption>A dropped tunnel: the window keeps trying, and after 8 s offers Restart connection and Abandon.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="connect-reconnecting" data-shot-kind="still">screenshot to capture<small>a devserver's terminal window greyed under the "reconnecting to the chan server" overlay, with its timer, Restart connection, Abandon and Show in Computers</small></div>
+    <figcaption>A dropped tunnel: the window keeps trying and offers Show in Computers, and after 8 s Restart connection and Abandon.</figcaption>
   </figure>
   <figure class="inline-shot">
     <div class="shot-placeholder-frame" data-shot="connect-script-exited" data-shot-kind="still">screenshot to capture<small>a Control Terminal window after ssh lost the connection: ssh's error, then "process exited (255); press Ctrl+D to close this tab"</small></div>

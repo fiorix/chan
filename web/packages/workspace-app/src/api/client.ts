@@ -1962,7 +1962,7 @@ export interface WatchSubscription {
 /// is per-socket). Returns a `WatchSubscription`: callable as the
 /// disposer, plus typed `subscribeDir` / `unsubscribeDir` helpers.
 /// `connectionProbe` is the probe the watcher reports its pings and pongs to, for a
-/// caller that reads the connection's health from it.
+/// caller that follows the connection through it.
 /// `options.remote` selects the shorter focused read deadline for a remote
 /// watcher; focused answered watchers ping fast on either kind of window.
 export function openWatchSocket(

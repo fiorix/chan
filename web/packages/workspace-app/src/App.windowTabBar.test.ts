@@ -19,7 +19,6 @@ import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/ap
 import { closePaneTree, openPaneTree } from "./state/paneTree.svelte";
 import { ui } from "./state/store.svelte";
 import { WINDOW_TAB_BAR_STORAGE_KEY, windowTabBar } from "./state/windowTabBar.svelte";
-import { connectionHealth, resetConnectionHealthForTests } from "./state/connectionHealth.svelte";
 
 stubAppEnvironment();
 
@@ -29,7 +28,6 @@ afterEach(async () => {
   await unmountApp();
   localStorage.removeItem(WINDOW_TAB_BAR_STORAGE_KEY);
   windowTabBar.on = false;
-  resetConnectionHealthForTests();
 });
 
 describe("the window tab bar in the app", () => {
@@ -57,17 +55,6 @@ describe("the window tab bar in the app", () => {
     ui.status = "working";
     await settle();
     expect(document.querySelector<HTMLElement>(".app-statusbar")?.style.top).toBe("48px");
-  });
-
-  test("an unhealthy window with title bar tabs draws exactly one connection indicator", async () => {
-    localStorage.setItem(WINDOW_TAB_BAR_STORAGE_KEY, "1");
-    const target = await mountApp();
-    connectionHealth.state = "slow";
-    connectionHealth.rttMs = 850;
-    await settle();
-    expect(target.querySelectorAll(".connection-indicator")).toHaveLength(1);
-    expect(target.querySelector(".window-tab-bar .connection-indicator")?.textContent).toContain("850 ms");
-    expect(target.querySelector(".app-statusbar .connection-section")).toBeNull();
   });
 
   test("the bar comes and goes in a running window and the strip follows it", async () => {

@@ -40,6 +40,8 @@ function rosterRow(over: Partial<DevserverEntry> = {}): DevserverEntry {
     gateway_url: "https://gw.chan.app",
     shared: false,
     native_trust_required: false,
+    rows_hidden: false,
+    connection_health: null,
     ...over,
   };
 }

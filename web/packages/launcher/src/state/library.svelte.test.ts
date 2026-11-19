@@ -23,7 +23,7 @@ import {
   updateGateway,
   windowLiveTerminalCount,
 } from "./library.svelte";
-import { ApiError, type GatewayEntry, type WindowSet, type WorkspaceEntry } from "../api/library";
+import { ApiError, type ConnectionHealth, type DevserverEntry, type GatewayEntry, type WindowSet, type WorkspaceEntry } from "../api/library";
 import { setDemoMode } from "./demo.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
@@ -711,5 +711,56 @@ describe("workspace polling", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(list).toHaveBeenCalledTimes(1);
     expect(library.workspaces[0]!.status).toBe("running");
+  });
+});
+
+describe("connection health polling", () => {
+  afterEach(() => {
+    stopWatching();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const reading: ConnectionHealth = { face: "healthy", since: 0, rtt_ms: 20, wait_since: null, last_contact: 0, samples: [] };
+
+  it("re-lists the devserver rows every 2 s while one has a reading and the screen is visible", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const row = (await backend.listDevservers())[0]!;
+    const list = vi.spyOn(backend, "listDevservers").mockResolvedValue([{ ...row, connection_health: reading }]);
+    vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    await loadLibrary();
+    list.mockClear();
+    const slow: ConnectionHealth = { ...reading, face: "slow", rtt_ms: 1_300 };
+    list.mockResolvedValue([{ ...row, connection_health: slow }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(library.devservers[0]!.connection_health).toEqual(slow);
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    list.mockResolvedValue([{ ...row, connection_health: null }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(library.devservers[0]!.connection_health).toBeNull();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-list rows from a producer that sends no reading key", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const { connection_health: _dropped, ...keyless } = (await backend.listDevservers())[0]!;
+    const list = vi.spyOn(backend, "listDevservers").mockResolvedValue([keyless as DevserverEntry]);
+    vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    await loadLibrary();
+    list.mockClear();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(list).not.toHaveBeenCalled();
   });
 });

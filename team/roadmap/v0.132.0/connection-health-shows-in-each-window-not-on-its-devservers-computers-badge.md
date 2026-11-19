@@ -1,6 +1,6 @@
 # Connection health shows in each window, not on its devserver's Computers badge
 
-Status: accepted for v0.132.0 by the owner on 2026-11-18, with its four choices decided the same day (`dev/v0132/decisions.md`, "Link health moves to the Computers window", 2026-11-18T13:15:22Z, "yes" to the lead's four points); not started. It takes the place of the review stage's step 5, the connection-health simplifications, and is built after the keyboard arbiter ([the keyboard owner row](the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md)).
+Status: accepted for v0.132.0 by the owner on 2026-11-18, with its four choices decided the same day (`dev/v0132/decisions.md`, "Link health moves to the Computers window", 2026-11-18T13:15:22Z, "yes" to the lead's four points); in build on `v0132/healthbadge`. It takes the place of the review stage's step 5, the connection-health simplifications, and is built after the keyboard arbiter ([the keyboard owner row](the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md)).
 
 Record: the owner's words: "i want all of the link health and network information to be present in the Computers window on the badge of each devserver rather than on the window where we have panes; however i do want that window to know when the remote devserver stopped responding when we usually present the screen with connection failed reconnect/abort - could link to the computers/badge from there too". The row moves the display half of [the lossy-link row](a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md) from the window to the desktop and keeps that row's cover. That row's open item on the indicator's placement goes with the indicator. The map of the window side's checks and tests is `dev/v0132-team/reviews/stage-review-B-1.md`, sections 3 to 5. Its proposals P4 and P5 fall away with the code they simplify; P1 to P3 may shape what stays and change no item below. The window code merged on `v0132/int` (`7ffdc5475`) and is in no release, so no released window shows an indicator. The UI keeps the word "connection", per the lossy-link row's ruling on names.
 
@@ -23,7 +23,7 @@ The Computers screen:
 - The launcher re-lists devservers, workspaces and gateways on every window-feed push (`web/packages/launcher/src/state/library.svelte.ts:117-136`). While visible it re-lists workspaces every 2 s, and gateways only while one has WireGuard state (`:215-225`).
 - The desktop builds each row's `status` (`desktop/src-tauri/src/config.rs:798` for configured rows, `:651` for gateway roster rows). A row reads `unreachable` once its feed watchdog has marked the devserver (`main.rs:634-674`, `set_unreachable` at `:802`).
 - The desktop holds one window feed socket per connected devserver, `GET /api/library/windows/watch` (`window_watcher_wiring.rs:1614-1700`), beside a colour feed. `keepalive_pump` (`:1490-1531`) sends a WebSocket Ping after 30 s with no inbound frame (`:1244`) and ends the round after two such intervals (`:1247`). Two rounds with no frame mark the devserver unreachable (`:1254`, `FeedRounds::settle` at `:1362-1392`). A round's end drops the tmux records (`:1027-1030`). Nothing is timed.
-- The devserver's feed handler ignores every client frame (`crates/chan-server/src/routes/library.rs:1459`). The tenant watcher answers `{"type":"ping"}` with `{"type":"pong"}` (`crates/chan-server/src/routes/ws.rs:468`, `:718`). A gateway's proxy forwards WebSocket Ping and Pong both ways (`gateway/crates/devserver-proxy/src/proxy.rs:1943-1944`, `:2157-2158`). As an axum server it also answers a Ping itself, since tungstenite replies on read [inferred, not run], so through a gateway the first Pong the desktop gets would be the proxy's.
+- The devserver's feed handler ends its wait on every client frame and sends its set again (`crates/chan-server/src/routes/library.rs:1459`, whose arm falls through to the next turn), so the desktop's 30 s WebSocket Ping draws a set. The tenant watcher answers `{"type":"ping"}` with `{"type":"pong"}` (`crates/chan-server/src/routes/ws.rs:468`, `:718`). A gateway's proxy forwards WebSocket Ping and Pong both ways (`gateway/crates/devserver-proxy/src/proxy.rs:1943-1944`, `:2157-2158`). As an axum server it also answers a Ping itself, since tungstenite replies on read [inferred, not run], so through a gateway the first Pong the desktop gets would be the proxy's.
 - The management protocol must match exactly (`main.rs:2557`; `DEVSERVER_API_PROTOCOL = 1` at `crates/chan-server/src/devserver_api.rs:32`). `DevserverInfo` takes fields with `#[serde(default)]` (`desktop/src-tauri/src/devserver.rs:237-257`).
 
 Raising the screen on a card:
@@ -56,7 +56,7 @@ Docs and checks:
    - stalled: the wait counting ("stalled 8 s");
    - reconnecting: "reconnecting".
    Before the first reply the mark is dimmed and named "Connection status unknown".
-8. The thresholds are the window's. Slow: a reply has waited 1 s, or the latest took 1 s or more, or the last two took 400 ms or more; it ends when two in a row come back under 300 ms with none overdue. Stalled: a reply has waited 4 s with no frame of any kind arriving meanwhile. Reconnecting: from the loss of the devserver's open feed socket until a later one answers a ping.
+8. The thresholds are the window's. Slow: a reply has waited 1 s, or the latest took 1 s or more, or the last two took 400 ms or more; it ends when two in a row come back under 300 ms with none overdue. Stalled: a reply has waited 4 s with no frame of the devserver's, a set or a pong, arriving meanwhile; a WebSocket Pong does not count, since a gateway's proxy can answer one. Reconnecting: from the loss of the devserver's open feed socket until a later one answers a ping.
 9. The card shows the detail the popover held: how long the state has lasted ("Slow for 12 s", "No response for 8 s", "Reconnecting for 20 s", "No reading yet"), a chart of the last 60 finished pings with the misses as gaps, the latest, median and worst reply times, and the last contact as a clock time to the second. Where on the card: decided 3.
 10. While the Computers screen is visible, a change of face shows within 2 s, and a count moves by whole seconds without skipping.
 11. The status glyph keeps its four states, colours and title, and the face sits beside it. A devserver marked lost (its feed down for two rounds) keeps the red glyph and reads reconnecting until its feed answers.
@@ -68,9 +68,9 @@ Docs and checks:
 14. The desktop measures each connected devserver once, over the window feed socket it holds to it, however many of that devserver's windows are open, none included. The reading reaches the Computers screen in the serving library's devserver rows; the launcher dials nothing.
 15. It pings every 3 s while a window of the desktop has the focus and every 20 s otherwise, and once more when the desktop gains the focus and when a Computers screen shows. The chart then holds the last three minutes of use, and a card opened after a freeze shows the freeze.
 16. The reply it times is the devserver's own and crosses every leg between them: an ssh forward, a gateway and its tunnel, WireGuard. With decided 1 it is a `{"type":"ping"}` text frame on the feed, which the devserver answers with `{"type":"pong"}`.
-17. A sleep of the local machine never reads as a slow reply or a stall: a ping in flight across a sleep is not timed, and neither is a reply that took longer than 45 s.
-18. Measuring never retires or redials the feed. The feed keeps its 30 s keepalive, its two-interval rule and its two-round lost mark, and the measurement adds no reason for the feed's tmux windows to close.
-19. The desktop does not ping a devserver whose release does not answer the feed's ping, which it learns from that devserver's info at connect. Its card shows the status glyph and no face.
+17. A sleep of the local machine never reads as a slow reply or a stall: a ping in flight across a sleep is not timed. A sleep is a step of the wall clock against the monotonic one of more than 2 s, or a gap of more than 6 s in the reports the desktop makes every 2 s while a ping waits on a connection whose devserver has answered. A reply that took longer than 45 s is not timed either, while a wait past 45 s keeps counting. On a monotonic clock that counts a sleep (Windows), a sleep under 45 s across a connection's first ping, before any reply, shows no step and no report gap, so that one reply is timed: one slow sample that two fast replies clear.
+18. Measuring never retires or redials the feed. The feed keeps its 30 s keepalive, its two-interval rule and its two-round lost mark, and the measurement adds no reason for the feed's tmux windows to close. A pong does not count as the feed's activity for the keepalive's idle clock, so the 30 s WebSocket Ping still goes out when no set has arrived for 30 s, and the set it draws keeps a window's transfer state (which has no change notice) as fresh as it is today.
+19. The desktop learns whether a devserver answers the feed's ping from a pong: it sends one ping when the feed opens and no other until a pong arrives on that connection, and a pong at any time turns the reading on. The feed's opening set is not a reply, and a set that arrives before any pong decides nothing (a current devserver sends its opening set, and a change's set, before it reads the ping). An older devserver re-sends its set for that one ping and never answers it, so it costs one set per connection and its card shows the status glyph and no face. While its feed is down it reads reconnecting, as any devserver does, and on a later socket its set ends that with no face. While the first ping waits, the face reads "Connection status unknown". The devserver's info is not the carrier, since a gateway's proxy answers 404 under `/api/devserver/*` (`gateway/crates/devserver-proxy/src/proxy.rs:322-326`, `:913-915`).
 
 ### Cases
 
@@ -93,11 +93,11 @@ Docs and checks:
 
 ## Boundaries
 
-- The devserver: `crates/chan-server/src/routes/library.rs` answers a ping on the window feed, and the info route gains one additive field saying so, with their tests. No other route, frame or protocol number changes (decided 1).
+- The devserver: `crates/chan-server/src/routes/library.rs` answers a ping on the window feed, with its tests. No other route, frame or protocol number changes (decided 1).
 - The registry wire: `DevserverEntry` in `crates/chan-library/src/devserver_registry.rs` gains the reading (face, its start, latest reply time, the wait's start, last contact, up to 60 samples). It is always serialized, `null` without a reading, and `#[serde(default)]` for older producers, with its byte tests. The mirror is in `web/packages/launcher/src/api/library.ts`, plus the demo backend.
 - The desktop:
-  - The feed pump in `window_watcher_wiring.rs` sends the ping on the cadence and hands a pong to the reading, never to the frame decoder.
-  - The reading, its classification and its tests live in a module of their own; `DevserverFeed` in `main.rs` holds one reading per devserver; `config.rs` fills both row builders; `devserver.rs` reads the info field.
+  - The feed pump in `window_watcher_wiring.rs` sends the ping on the cadence and hands a pong to the reading before it decodes a window frame, so a pong is neither logged as an unreadable frame nor taken for a set, nor counted as activity for the keepalive.
+  - The reading, its classification and its tests live in a module of their own; `DevserverFeed` in `main.rs` holds one reading per devserver; `config.rs` fills both row builders.
   - A command shows the Computers screen over the calling window on its devserver's card, sending the card after the show as `show_for_attention` does. Its grant goes in `permissions/app.toml`, `capabilities/workspace.json`, the gateway grant list in `runtime_capability.rs` (with the ACL parity tests in `serve.rs`) and `native_vocabulary`.
   - `desktop/design.md`.
 - The launcher: the face and detail on the devserver card in `Library.svelte`; the chart math moved from the workspace app; the 2 s refresh of devserver rows while one has a reading (`state/library.svelte.ts`); the card event in `App.svelte`; `launcher/design.md`.
@@ -116,14 +116,14 @@ Docs and checks:
 ## Acceptance
 
 1. Before the build, a reading through the gateway fixture (`scripts/e2e/gateway-zone.sh`) of what answers a WebSocket Ping from the desktop's feed: the proxy, the devserver or both. It grounds the line marked inferred above.
-2. The devserver: a test that the library window feed answers `{"type":"ping"}` with `{"type":"pong"}` and sends its window sets unchanged, and that the info route carries its field. Red at the base.
+2. The devserver: a test that the library window feed answers `{"type":"ping"}` with `{"type":"pong"}` and sends its window sets unchanged, and that any other client frame is still answered as before. Red at the base.
 3. The desktop's reading, as Rust tests with an injected clock, each seen red against a deliberate break:
    - every face and threshold of items 7 and 8;
    - the 60-sample cap with misses;
    - reconnecting until a later socket's first reply;
    - a reply over 45 s and a ping across a sleep left untimed;
    - the 3 s and 20 s cadence and the focus ping;
-   - no ping to a devserver that does not answer;
+   - one ping per connection to a devserver that does not answer, and a change's set before the pong still turns the reading on;
    - a pong reaching the reading and not the frame decoder.
    The feed's keepalive and `FeedRounds` tests stay unchanged and green. The wire: `DevserverEntry` byte tests with a reading, with `null` and with the key absent.
 4. The badge on the desktop, in the desktop guest on WebKitGTK, through the desktop observations harness. Chan-desktop is connected to a direct devserver whose flows pass through a relay that can delay and silence each one (295's relay, shared through `scripts/e2e/browser-smoke/lib/`).
@@ -149,6 +149,8 @@ Docs and checks:
 The owner took the four recommendations on 2026-11-18 ("ok i take your recommendations, let's do it"; `dev/v0132/decisions.md`, "The health badge row's four choices"):
 
 1. The devserver answers `{"type":"ping"}` with `{"type":"pong"}` on its window feed and says so in its info; the desktop sends that ping on the feed it already holds, and a devserver of an older release gives no reading.
+
+Amended by the lead on 2026-11-18, reported to the owner the same day: the info does not carry the capability, because a gateway's proxy answers 404 under `/api/devserver/*`; the desktop learns it from a pong (contract 19). The devserver's answer and the reply crossing every leg are as he chose.
 2. The window keeps its early redial of a silent watcher socket and the wake probe's deadline (contract 4); a terminal's early redial of a stalled socket goes, so an untouched stalled terminal waits for its own 45 s deadline.
 3. The face sits beside the devserver's name on the card's identity row, and the detail under its address on the card in front, shown while connected; captures of this and of a face-only card with a popover go to the owner before the badge lands.
 4. The Computers page a browser opens at a server's `/` is not in this row: a browser tab gets the cover alone.

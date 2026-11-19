@@ -56,17 +56,17 @@ test("the store opens its watcher on the window's connection probe and reports e
   watcher.status?.("connecting", 0);
   watcher.status?.("open", 0);
   expect(ui.ws).toBe("open");
-  expect(connectionHealth.state).toBe("unknown");
+  expect(connectionHealth.outage).toBeNull();
 
   const contact = Date.now() - 15_000;
   watcher.status?.("reconnecting", 1, { reason: "deadline", lastFrameAt: contact });
   expect(ui.ws).toBe("reconnecting");
   expect(ui.wsAttempt).toBe(1);
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   expect(connectionHealth.outage?.coverAt).toBe(contact + 45_000);
 
   watcher.status?.("open", 0);
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
 });
 
 test("a remote desktop window passes its remote flag to the watcher", () => {

@@ -118,6 +118,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "set_terminal_background_opacity",
     "set_titlebar_tabs",
     "set_titlebar_tabs_preference",
+    "show_computers_for_window",
     "terminal_background_opacity",
     "titlebar_chrome",
     "titlebar_menu_popup",
@@ -298,6 +299,13 @@ mod tests {
         "stub-primary-write"
     }
 
+    /// Stub for the disconnect overlay's Show in Computers, granted to
+    /// `lib-*` windows through both window sets.
+    #[tauri::command]
+    fn show_computers_for_window() -> &'static str {
+        "stub-computers"
+    }
+
     /// Stub for `read_dropped_paths` - the one command a loopback
     /// workspace window holds that `lib-*` windows never get, on any
     /// origin. Registered so the out-of-set denial pin cannot pass
@@ -323,7 +331,8 @@ mod tests {
                 create_library_window,
                 focus_library_window,
                 read_primary_selection,
-                write_primary_selection
+                write_primary_selection,
+                show_computers_for_window
             ])
             .build(crate::app_context())
             .expect("mock app builds from the real context")
@@ -529,6 +538,36 @@ mod tests {
             );
             assert!(invoke_from(&gateway, SIBLING_PAGE, cmd).is_err());
         }
+    }
+
+    /// The reconnecting cover's Show in Computers reaches the desktop from a
+    /// gateway-served devserver window through the minted grant, at the label
+    /// and page the watcher builds, and from a loopback devserver window
+    /// through the workspace capability; another tenant's page stays out.
+    #[test]
+    fn show_in_computers_reaches_every_devserver_window() {
+        let app = mock_desktop_app();
+        let watched = lib_window(&app, WATCHED_LABEL, WATCHED_PAGE);
+        assert!(
+            invoke_from(&watched, WATCHED_PAGE, "show_computers_for_window").is_err(),
+            "a gateway origin is denied before its grant is minted"
+        );
+        app.add_capability(production_json())
+            .expect("add_capability returned Ok");
+        assert_eq!(
+            invoke_from(&watched, WATCHED_PAGE, "show_computers_for_window"),
+            Ok("stub-computers".into())
+        );
+        assert!(invoke_from(&watched, SIBLING_PAGE, "show_computers_for_window").is_err());
+        let loopback = lib_window(&app, "lib-0a1b::w-2", "http://127.0.0.1:4090/");
+        assert_eq!(
+            invoke_from(
+                &loopback,
+                "http://127.0.0.1:4090/",
+                "show_computers_for_window"
+            ),
+            Ok("stub-computers".into())
+        );
     }
 
     /// The shapes production presents, which no other pin here uses: every

@@ -62,7 +62,7 @@ describe("the demo socket's heartbeat", () => {
     vi.advanceTimersByTime(0);
     expect(connection.answered).toBe(true);
     expect(connection.rttMs).toBe(0);
-    expect(connection.oldestPingAt).toBeNull();
+    expect(connection.hasPendingPing).toBe(false);
     watch.close();
   });
 });

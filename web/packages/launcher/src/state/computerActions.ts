@@ -244,6 +244,32 @@ export function showComputerCard(key: string): void {
   showCard("computers", key, { focus: true });
 }
 
+/** The key of the Computers deck's first card, All windows. */
+export const ALL_WINDOWS_CARD = "all-windows";
+
+/** What the desktop's card event carries (`show_card_js` in
+ * launcher_panel.rs): the devserver whose card goes in front, or null for the
+ * screen's first card. */
+export interface DevserverCardRequest {
+  devserverId: string | null;
+}
+
+/** Bring the card of the devserver `id` to the front of the Computers screen
+ * with the keyboard on it, or the screen's first card when the registry holds
+ * no row for it or `id` is null. Before the library's first reading an absent
+ * row is not yet a gone one: the devserver's key goes in front, which the deck
+ * holds while the registry loads, and the answer is `false` so the caller
+ * asks again once `library.loaded` is set. */
+export function showDevserverCard(id: string | null): boolean {
+  if (id !== null && !library.loaded) {
+    showComputerCard(id);
+    return false;
+  }
+  const listed = id !== null && library.devservers.some((devserver) => devserver.id === id);
+  showComputerCard(listed ? id : ALL_WINDOWS_CARD);
+  return true;
+}
+
 /** Copy a gateway's WireGuard public key, the key its badge shows the first
  * characters of. */
 export async function copyGatewayPublicKey(gateway: GatewayEntry): Promise<void> {

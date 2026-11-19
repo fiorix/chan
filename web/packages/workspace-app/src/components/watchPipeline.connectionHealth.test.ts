@@ -68,7 +68,7 @@ test("a real watcher status bridge carries a deadline and a close to the window 
   first.pong();
   await tick();
   expect(ui.ws).toBe("open");
-  expect(connectionHealth.state).toBe("ok");
+  expect(connectionHealth.outage).toBeNull();
   const contact = Date.now();
 
   vi.advanceTimersByTime(15_000);
@@ -81,7 +81,7 @@ test("a real watcher status bridge carries a deadline and a close to the window 
   const redial = FakeSocket.instances.at(-1)!;
   redial.open();
   await tick();
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   for (let i = 0; i < 2; i += 1) {
     vi.advanceTimersByTime(10_000);
     redial.onmessage?.({ data: "{" });

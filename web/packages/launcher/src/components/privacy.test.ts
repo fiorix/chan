@@ -15,6 +15,7 @@ const computer: DevserverEntry = {
   label: "private-machine", script: "ssh private-host -L 8787:localhost:8787", has_token: true,
   library_id: null, status: "disconnected", pending_signin: false, auto_hide_control: false,
   os: "linux", pretty_name: null, gateway_id: null, gateway_url: "", shared: false, native_trust_required: false,
+  rows_hidden: false, connection_health: null,
 };
 const gateway: GatewayEntry = {
   id: "private-gateway", url: "https://private-gateway.example", label: "private-gateway-name", enabled: true,

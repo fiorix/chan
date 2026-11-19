@@ -10,7 +10,8 @@
   // and reads as a live reconnecting state: a spinner + status. The auto-reconnect loop
   // runs underneath, so doing nothing heals on its own once the
   // channel returns. A devserver-backed desktop window also offers a
-  // Restart connection and Abandon actions for a stuck remote connection.
+  // Restart connection and Abandon actions for a stuck remote connection,
+  // and Show in Computers, which shows the devserver's card.
 
   import { COVER_ROOT_ATTR, modalDialogOpen, setCoverBlocking, topCoverRoot, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
@@ -18,7 +19,9 @@
     isTauriDesktop,
     abandonDevserverForWindow,
     reconnectDevserverForWindow,
+    showComputersForWindow,
   } from "../api/desktop";
+  import { hostVocabulary } from "../api/nativeVocabulary";
   import { errorText } from "../api/errors";
   import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
   import { bumpTabFocusPulse } from "../state/tabs.svelte";
@@ -34,10 +37,12 @@
   const canRecover = isTauriDesktop() && windowLibraryId() !== "local";
   let reconnectBtn: HTMLButtonElement | null = $state(null);
   let abandonBtn: HTMLButtonElement | null = $state(null);
-  let pendingAction = $state<"reconnect" | "abandon" | null>(null);
+  let computersBtn: HTMLButtonElement | null = $state(null);
+  type CoverAction = "reconnect" | "abandon" | "computers";
+  let pendingAction = $state<CoverAction | null>(null);
   let recoveryError = $state<string | null>(null);
   // Only a button the user activated may regain focus after its IPC settles.
-  let focusAfterAction: "reconnect" | "abandon" | null = null;
+  let focusAfterAction: CoverAction | null = null;
   // A late IPC completion cannot return focus during a later outage.
   let recoveryEpoch = 0;
   type FocusReturn = { element: HTMLElement; surface: boolean };
@@ -47,8 +52,26 @@
   let deferredFocus: { returnTo: FocusReturn; epoch: number } | null = null;
   const restartNoteId = $props.id();
 
+  // Show in Computers disrupts nothing, so it needs no wait. The page comes
+  // from a devserver whose release can differ from the installed desktop's,
+  // so it is offered only where the desktop advertises the command, and never
+  // on a control terminal, which is no devserver's window.
+  let computersAdvertised = $state(false);
+  const offerComputers = $derived(canRecover && computersAdvertised && !ui.terminalControl);
+
+  async function readComputersAdvertised(): Promise<void> {
+    if (!canRecover || computersAdvertised) return;
+    if ((await hostVocabulary())?.has("show_computers_for_window")) computersAdvertised = true;
+  }
+
+  function actionButton(action: CoverAction | null): HTMLButtonElement | null {
+    if (action === "reconnect") return reconnectBtn;
+    if (action === "abandon") return abandonBtn;
+    return action === "computers" ? computersBtn : null;
+  }
+
   async function runRecovery(
-    action: "reconnect" | "abandon",
+    action: CoverAction,
     fn: () => Promise<void>,
   ): Promise<void> {
     if (pendingAction !== null) return;
@@ -65,7 +88,7 @@
       // Disabling the active button can drop native focus onto the body.
       if (visible && !outageResolved && recoveryEpoch === actionEpoch) {
         focusAfterAction = action;
-        focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
+        focusCard(actionButton(action));
       }
     }
   }
@@ -82,6 +105,13 @@
   // leaving the overlay in the same state.
   function abandon(): void {
     void runRecovery("abandon", abandonDevserverForWindow);
+  }
+
+  // Show in Computers: ask the desktop for the Computers screen over this
+  // window on its devserver's card. The screen takes the keyboard; hiding it
+  // gives the window back with the cover up while the outage lasts.
+  function showComputers(): void {
+    void runRecovery("computers", showComputersForWindow);
   }
 
   /// Show the overlay only AFTER the watcher channel has been open
@@ -176,6 +206,16 @@
     return () => clearTimeout(actions);
   });
 
+  // The desktop's vocabulary is asked at mount, so Show in Computers is there
+  // when a cover first shows, and again as a cover shows while the desktop
+  // has not said: a failed query is not cached (nativeVocabulary.ts).
+  onMount(() => {
+    void readComputersAdvertised();
+  });
+  $effect(() => {
+    if (visible) void readComputersAdvertised();
+  });
+
   /// Park focus when the overlay appears. The backdrop's
   /// pointer-events stop *clicks* from reaching the editor, but
   /// keystrokes still flow to whatever was focused before the
@@ -248,10 +288,7 @@
 
   function focusCard(preferred: HTMLElement | null = null): void {
     if (launcherShownOverWindow()) return;
-    const action = focusAfterAction === "reconnect"
-      ? reconnectBtn
-      : focusAfterAction === "abandon" ? abandonBtn : null;
-    (preferred ?? action ?? overlayEl)?.focus();
+    (preferred ?? actionButton(focusAfterAction) ?? overlayEl)?.focus();
   }
 
   function trapTab(e: KeyboardEvent): void {
@@ -323,13 +360,16 @@
       {#if recoveryError}
         <div class="error" role="alert"><PrivateField field="reconnect:error" label="reconnection error">{recoveryError}</PrivateField></div>
       {/if}
-      {#if canRecover && actionsReady}
-        <div class="actions">
+      <!-- The card is centred, so a row that appears moves the rows below it.
+           With Show in Computers there, Restart connection and Abandon hold
+           their place, hidden and inert, from the moment the cover shows. -->
+      {#if canRecover && (actionsReady || offerComputers)}
+        <div class="actions" class:reserved={!actionsReady} inert={!actionsReady}>
           <button
             class="reconnect"
             bind:this={reconnectBtn}
             aria-describedby={restartNoteId}
-            disabled={pendingAction !== null}
+            disabled={pendingAction !== null || !actionsReady}
             onclick={reconnect}
           >
             {pendingAction === "reconnect" ? "Restarting..." : "Restart connection"}
@@ -337,13 +377,25 @@
           <button
             class="abandon"
             bind:this={abandonBtn}
-            disabled={pendingAction !== null}
+            disabled={pendingAction !== null || !actionsReady}
             onclick={abandon}
           >
             {pendingAction === "abandon" ? "Abandoning..." : "Abandon"}
           </button>
         </div>
-        <div class="action-note" id={restartNoteId}>Restart closes and reopens the windows served by this connection.</div>
+        <div class="action-note" class:reserved={!actionsReady} inert={!actionsReady} id={restartNoteId}>Restart closes and reopens the windows served by this connection.</div>
+      {/if}
+      {#if offerComputers}
+        <div class="actions">
+          <button
+            class="computers"
+            bind:this={computersBtn}
+            disabled={pendingAction !== null}
+            onclick={showComputers}
+          >
+            {pendingAction === "computers" ? "Showing..." : "Show in Computers"}
+          </button>
+        </div>
       {/if}
     </div>
   </div>
@@ -423,6 +475,10 @@
     gap: 10px;
     justify-content: center;
   }
+  /* A held place: laid out as when shown, so nothing below it moves. */
+  .reserved {
+    visibility: hidden;
+  }
   .action-note {
     color: var(--text-secondary);
     font-size: 12px;
@@ -453,6 +509,20 @@
   .abandon:hover {
     border-color: var(--danger);
     color: var(--danger);
+  }
+  /* Show in Computers disrupts nothing: a quiet secondary action. */
+  .computers {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .computers:hover {
+    border-color: var(--link);
+    color: var(--link);
   }
   .actions button:disabled {
     cursor: wait;

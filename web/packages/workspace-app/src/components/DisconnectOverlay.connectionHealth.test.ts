@@ -6,7 +6,6 @@ import type { WatchDrop } from "../api/transport";
 import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { raisedCoverKeys, ui } from "../state/store.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
-import ConnectionIndicator from "./ConnectionIndicator.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -72,7 +71,7 @@ test.each([
   const lastFrameAt = Date.now();
   await advance(contactAge);
   await drop({ reason: "deadline", lastFrameAt });
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   expect(cover(target)).toBeNull();
   expect(ui.disconnectBlocking).toBe(false);
   expect(raisedCoverKeys()).not.toContain("reconnect");
@@ -142,23 +141,6 @@ test("an old-contact wake retirement still restarts the grace on a status flip",
   expect(cover(target)).not.toBeNull();
 });
 
-test("the reconnecting indicator stays pressable until the cover appears", async () => {
-  const target = await open();
-  const lastFrameAt = Date.now();
-  const indicatorTarget = document.body.appendChild(document.createElement("div"));
-  mounted.push(mount(ConnectionIndicator, { target: indicatorTarget, props: { placement: "status" } }) as Record<string, unknown>);
-  await advance(15_000);
-  await drop({ reason: "deadline", lastFrameAt });
-  const button = indicatorTarget.querySelector<HTMLButtonElement>(".connection-indicator")!;
-  button.click();
-  await tick();
-  expect(document.body.querySelector(".connection-popover")).not.toBeNull();
-  expect(cover(target)).toBeNull();
-  await advance(30_000);
-  expect(cover(target)).not.toBeNull();
-  expect(document.body.querySelector(".connection-popover")).toBeNull();
-});
-
 test("a late cover opens with recovery actions ready and does not block keys before then", async () => {
   (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke: async () => null };
   history.replaceState(null, "", "/?lib=dev-1");
@@ -195,13 +177,13 @@ test("a pong before the late cover deadline cancels the cover", async () => {
   ui.ws = "open";
   watchConnectionProbe.pingSent();
   await tick();
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   await advance(100);
   watchConnectionProbe.frameReceived();
   watchConnectionProbe.pongReceived();
   await tick();
   await advance(30_000);
-  expect(connectionHealth.state).toBe("ok");
+  expect(connectionHealth.outage).toBeNull();
   expect(cover(target)).toBeNull();
 });
 
@@ -219,7 +201,7 @@ test("a flap holds one cover and one action delay until a later socket's pong", 
   ui.ws = "open";
   watchConnectionProbe.pingSent();
   await tick();
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   expect(cover(target)).not.toBeNull();
   await advance(7_400);
   expect(target.querySelector(".actions button")).not.toBeNull();

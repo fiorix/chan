@@ -61,7 +61,7 @@ describe("DisconnectOverlay follows a watcher outage", () => {
     setConnectionWatchStatus("open");
     ui.ws = "open";
     await tick();
-    expect(connectionHealth.state).toBe("down");
+    expect(connectionHealth.outage).not.toBeNull();
     expect(target.querySelector(".overlay")).not.toBeNull();
     watchConnectionProbe.pingSent();
     watchConnectionProbe.frameReceived();

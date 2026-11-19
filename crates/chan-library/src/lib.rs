@@ -41,7 +41,10 @@ pub use config::{
     TERMINAL_FONT_SIZE_MIN, TERMINAL_PROFILE_MAX, TERMINAL_SCROLLBACK_MB_MAX,
     TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
 };
-pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus};
+pub use devserver_registry::{
+    ConnectionFace, ConnectionHealth, ConnectionSample, DevserverEntry, DevserverInput,
+    DevserverRegistry, DevserverStatus, CONNECTION_SAMPLE_CAP,
+};
 pub use error::Error;
 pub use gateway_registry::{
     GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, WireguardIngressStatus,

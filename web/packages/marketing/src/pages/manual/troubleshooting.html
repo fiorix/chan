@@ -20,6 +20,7 @@
         <tr><td>The devserver's windows close, and its control terminal ends with <code>process exited (N); press Ctrl+D to close this tab</code></td><td>The connect script failed, as ssh does when the network goes.</td><td><a href="#devserver">Devserver</a></td></tr>
         <tr><td>Connect is dimmed: <strong>Close the control terminal to reconnect</strong></td><td>The dead control terminal of the last connection is still open.</td><td><a href="#devserver">Devserver</a></td></tr>
         <tr><td>A devserver's icon turns red: <strong>Connection lost</strong></td><td>Its window feed went silent, as after the computer sleeps, or its script exited.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td>A devserver's card reads <code>stalled</code> or <code>reconnecting</code>, or <strong>Windows and workspaces show again when the connection recovers.</strong></td><td>The devserver stopped answering, as when the network or its tunnel stalls.</td><td><a href="/manual/computers/#connection">Connection health</a></td></tr>
         <tr><td><code>devserver HOST:PORT did not come up in time</code></td><td>Nothing answered at the Address for about 30 seconds.</td><td><a href="#devserver">Devserver</a></td></tr>
         <tr><td><code>devserver speaks management protocol N but this desktop speaks M; update whichever is older</code></td><td>Chan Desktop and the devserver speak different management protocols.</td><td><a href="#devserver">Devserver</a></td></tr>
         <tr><td>After <code>chan devserver rotate-token</code>, the Computers screen in a browser, or a devserver added with a token in its Address, no longer connects</td><td>The devserver dropped the old token at once.</td><td><a href="#devserver">Devserver</a></td></tr>
@@ -85,7 +86,7 @@
 <section class="manual-block" id="devserver">
   <h2><a class="heading-anchor" href="#devserver">Devserver connections</a></h2>
   <ul>
-    <li><strong>Reconnecting</strong>: wait, or, once the drop has lasted 8 s, press <strong>Restart connection</strong> to run the script again, or <strong>Abandon</strong> (see <a href="/manual/navigation/#connection">connection health</a>).</li>
+    <li><strong>Reconnecting</strong>: wait, press <strong>Show in Computers</strong> to see how the devserver's connection is doing, or, once the drop has lasted 8 s, press <strong>Restart connection</strong> to run the script again, or <strong>Abandon</strong> (see <a href="/manual/navigation/#connection">connection health</a>).</li>
     <li><strong>Process exited</strong>: read why in the control terminal, close it with <kbd>Ctrl+D</kbd>, and connect again.</li>
     <li><strong>Connection lost</strong>: press <kbd>o</kbd> on the card to disconnect, then again to connect.</li>
     <li><strong>Did not come up in time</strong>: check that the Address matches the local end of the script's tunnel, as in the <a href="/manual/connect/#recipes">recipes</a>.</li>

@@ -45,6 +45,8 @@
   import AddCard from "./AddCard.svelte";
   import DevserverForm from "./DevserverForm.svelte";
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
+  import ConnectionFace from "./ConnectionFace.svelte";
+  import ConnectionDetail from "./ConnectionDetail.svelte";
   import {
     library,
     revokeDevserverNativeTrust,
@@ -53,6 +55,7 @@
     clearError,
   } from "../state/library.svelte";
   import {
+    ALL_WINDOWS_CARD,
     connectComputer,
     canOpenWorkspaceWindow,
     detachTmux,
@@ -193,6 +196,41 @@
   }
 
   const connected = (ds: DevserverEntry): boolean => ds.status === "connected";
+  // The desktop lists none of this devserver's windows or workspaces while
+  // its workspace poll finds it not answering, so a card with no rows then
+  // is not an empty devserver.
+  const rowsHidden = (ds: DevserverEntry): boolean => ds.rows_hidden === true;
+  // The connection health the desktop reads for a devserver it holds a
+  // connection to; null without one, and for a row from a producer that
+  // sends no key.
+  const health = (ds: DevserverEntry) => ds.connection_health ?? null;
+  const connectionField = (ds: DevserverEntry): string => `devserver:${ds.id}:connection`;
+  // The face's image, by id: the edit button around a configured devserver's
+  // identity is labelled for its action, which replaces what it holds for a
+  // screen reader, so it names the face as its description.
+  const faceIdBase = $props.id();
+  const faceId = (ds: DevserverEntry): string => `${faceIdBase}-face-${ds.id}`;
+  // The faces count waits and ages against this clock. A quarter-second tick
+  // while any reading shows moves every count by whole seconds without
+  // skipping one, and each fresh list of rows restarts it, so a reading
+  // counts from the moment it arrives: a stall the desktop read at 4 s never
+  // shows a count from a tick before it. The clock stops while the page is
+  // hidden, where no count shows, and reads the time again when it shows.
+  let now = $state(Date.now());
+  const readingShown = $derived(library.devservers.some((ds) => health(ds) !== null));
+  let pageShown = $state(typeof document === "undefined" || document.visibilityState === "visible");
+  $effect(() => {
+    const read = (): void => { pageShown = document.visibilityState === "visible"; };
+    document.addEventListener("visibilitychange", read);
+    return () => document.removeEventListener("visibilitychange", read);
+  });
+  $effect(() => {
+    if (!readingShown || !pageShown) return;
+    void library.devservers;
+    now = Date.now();
+    const timer = setInterval(() => { now = Date.now(); }, 250);
+    return () => clearInterval(timer);
+  });
   // The devserver's connection dropped out from under it: the control script
   // exited, or a connected transport stopped answering. The identity row's
   // machine icon turns RED (the same icon is green while connected)
@@ -249,7 +287,7 @@
     | { key: string; label: string; kind: "orphans" }
     | { key: string; label: string; kind: "add" };
   const deckCards = $derived.by((): DeckCard[] => {
-    const cards: DeckCard[] = [{ key: "all-windows", label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
+    const cards: DeckCard[] = [{ key: ALL_WINDOWS_CARD, label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
       key: machineKey(node),
       label: privateText(machineName(node), node.kind === "local" ? "This machine" : "Computer"),
       kind: "machine" as const,
@@ -515,6 +553,8 @@
           <code>chan open /path/to/project</code> in a terminal.
         </p>
       {/if}
+    {:else if node.devserver !== null && rowsHidden(node.devserver)}
+      <p class="empty-hint">Windows and workspaces show again when the connection recovers.</p>
     {:else if machineIsEmpty(node) && node.devserver !== null && connected(node.devserver) && !readOnly}
       <p class="empty-hint">
         No workspaces on this devserver yet. Add one with the buttons above, or run
@@ -546,6 +586,7 @@
     </span>
     <PrivateField field={`devserver:${ds.id}:name`} label="computer name"><span class="row-name">{devserverName(ds)}</span></PrivateField>
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
+    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} field={connectionField(ds)} id={faceId(ds)} />{/if}
   </span>
   <span class="ds-addr-row">
     <span class="ds-glyph"></span>
@@ -571,7 +612,7 @@
   </span>
 {/snippet}
 
-{#snippet machineCard(node: MachineNode)}
+{#snippet machineCard(node: MachineNode, active: boolean)}
   <section class="card machine">
     {#if node.kind === "local"}
       <div class="card-header machine-header" data-deck-row tabindex="-1">
@@ -698,6 +739,7 @@
             type="button"
             title="Edit config"
             aria-label={`Edit config for ${privateText(devserverName(ds), "computer")}`}
+            aria-describedby={health(ds) ? faceId(ds) : undefined}
             onclick={() => openEditDevserver(ds)}>
             {@render dsIdentity(ds, true)}
           </button>
@@ -785,6 +827,10 @@
           {/if}
         </div>
       </div>
+      {#if active && health(ds)}
+        <!-- The card in front carries its connection detail under the address. -->
+        <div class="ds-health"><ConnectionDetail health={health(ds)!} {now} field={connectionField(ds)} /></div>
+      {/if}
       {#if hasContent(node)}
         {@render machineContent(node)}
       {:else if ds.pending_signin}
@@ -822,11 +868,11 @@
      card, like the deck itself, exists only where that bridge does. -->
 {#if hasDesktopBridge}
   <Carousel deck="computers" items={deckCards} label="Computers">
-    {#snippet card(item: DeckCard)}
+    {#snippet card(item: DeckCard, active: boolean)}
       {#if item.kind === "windows"}
         <AllWindows {tree} />
       {:else if item.kind === "machine"}
-        {@render machineCard(item.node)}
+        {@render machineCard(item.node, active)}
       {:else if item.kind === "orphans"}
         {@render orphanCard()}
       {:else}
@@ -844,7 +890,7 @@
   </Carousel>
 {:else}
   {#each tree.machines as node (machineKey(node))}
-    {@render machineCard(node)}
+    {@render machineCard(node, false)}
   {/each}
   {#if tree.orphans.length}
     {@render orphanCard()}
@@ -893,6 +939,9 @@
     color: var(--text);
   }
 
+  /* The connection detail under the devserver's address, its text in line
+     with the name's. */
+  .ds-health { padding: 0.1rem 0.6rem 0.6rem 1.75rem; }
   /* The devserver identity block (name row over address row). On the mutable
      surface it is a button: the whole block opens the edit-config form, lifting
      a hover tint; the read-only surface renders it as a static div. */

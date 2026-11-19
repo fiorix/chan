@@ -6,7 +6,10 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
 import TerminalConnectionNoticeHarness from "../__tests__/TerminalConnectionNoticeHarness.svelte";
 import { APP_STATUS_PILL_SELECTOR } from "./terminalNoticePlacement";
+import AppStatusBar from "./AppStatusBar.svelte";
+import { ui } from "../state/store.svelte";
 
+const SENTENCE = "Reconnected. Input typed while disconnected may not have been sent.";
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
@@ -14,64 +17,46 @@ afterEach(() => {
 });
 
 function show(
-  stalled: boolean,
-  waitMs: number,
-  notice = false,
-  options: Partial<{ lost: boolean; findOpen: boolean; inspectorOpen: boolean; inspectorWidth: number }> = {},
+  notice: boolean,
+  options: Partial<{ findOpen: boolean; inspectorOpen: boolean; inspectorWidth: number }> = {},
   parent: HTMLElement = document.body,
 ): HTMLElement {
   const target = document.createElement("div");
   target.className = "terminal-main";
   parent.append(target);
-  mounted.push(mount(TerminalConnectionNotice, { target, props: { stalled, lost: false, notice, waitMs, findOpen: false, inspectorOpen: false, inspectorWidth: 0, ...options } }));
+  mounted.push(mount(TerminalConnectionNotice, { target, props: { notice, findOpen: false, inspectorOpen: false, inspectorWidth: 0, ...options } }));
   flushSync();
   return target;
 }
 
 describe("terminal connection pill", () => {
-  test("appears only while stalled and shows the counted ping wait", () => {
-    expect(show(false, 8_000).querySelector("[data-terminal-connection-pill]")).toBeNull();
-    expect(show(true, 8_900).querySelector("[data-terminal-connection-pill]")?.textContent).toContain("No response for 8 s. Waiting for the connection.");
+  test("appears only while a note is owed and says what may not have been sent", () => {
+    expect(show(false).querySelector("[data-terminal-connection-pill]")).toBeNull();
+    expect(show(true).querySelector("[data-terminal-connection-pill]")?.textContent?.trim()).toBe(SENTENCE);
   });
 
-  test("takes no pointer or focus and announces a fixed message once", () => {
-    const target = show(true, 9_000);
+  test("takes no pointer or focus and announces its sentence once", () => {
+    const target = show(true);
     const pill = target.querySelector<HTMLElement>("[data-terminal-connection-pill]")!;
     expect(pill.style.pointerEvents).toBe("none");
     expect(pill.tabIndex).toBe(-1);
     expect(pill.querySelector("button, a, input, textarea, [tabindex]")).toBeNull();
     expect(pill.getAttribute("aria-hidden")).toBe("true");
     expect(target.querySelectorAll('[role="status"]')).toHaveLength(1);
-    expect(target.querySelector('[role="status"]')?.textContent).toBe("Terminal connection stalled. Waiting for the connection.");
-    expect(pill.textContent).toBe("No response for 9 s. Waiting for the connection.");
-  });
-
-  test("shows the lost-input sentence through the same fixed live region", () => {
-    const target = show(false, 0, true);
-    const sentence = "Reconnected. Input typed while disconnected may not have been sent.";
-    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
-    expect(target.querySelector('[role="status"]')?.textContent).toBe(sentence);
-  });
-
-  test("shows a fixed connection-lost sentence instead of a stall count", () => {
-    const target = show(true, 50_000, false, { lost: true });
-    const sentence = "Connection lost. Typing is not being sent until it reconnects.";
-    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
-    expect(target.querySelector('[role="status"]')?.textContent).toBe(sentence);
-    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).not.toContain("No response for");
+    expect(target.querySelector('[role="status"]')?.textContent).toBe(SENTENCE);
   });
 
   test("find and inspector props keep the pill below and left of their boxes", () => {
-    const plain = show(true, 8_000).querySelector<HTMLElement>('[data-terminal-connection-pill]')!;
+    const plain = show(true).querySelector<HTMLElement>('[data-terminal-connection-pill]')!;
     expect(plain.style.top).toBe("5px");
     expect(plain.style.right).toBe("5px");
-    const moved = show(true, 8_000, false, { findOpen: true, inspectorOpen: true, inspectorWidth: 280 }).querySelector<HTMLElement>('[data-terminal-connection-pill]')!;
+    const moved = show(true, { findOpen: true, inspectorOpen: true, inspectorWidth: 280 }).querySelector<HTMLElement>('[data-terminal-connection-pill]')!;
     expect(moved.style.top).toBe("50px");
     expect(moved.style.right).toBe("309px");
     expect(moved.style.maxWidth).toContain("314px");
   });
 
-  test("keeps one live region mounted while its text appears and the visible count changes", () => {
+  test("keeps one live region mounted while its text appears and goes", () => {
     const target = document.body.appendChild(document.createElement("div"));
     const component = mount(TerminalConnectionNoticeHarness, { target });
     mounted.push(component);
@@ -79,15 +64,10 @@ describe("terminal connection pill", () => {
     const region = target.querySelector<HTMLElement>('[role="status"]')!;
     expect(region).not.toBeNull();
     expect(region!.textContent).toBe("");
-    component.show(8_000);
+    component.show();
     flushSync();
     expect(target.querySelector('[role="status"]')).toBe(region);
-    expect(region.textContent).toBe("Terminal connection stalled. Waiting for the connection.");
-    component.count(9_000);
-    flushSync();
-    expect(target.querySelector('[role="status"]')).toBe(region);
-    expect(region.textContent).toBe("Terminal connection stalled. Waiting for the connection.");
-    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 9 s.");
+    expect(region.textContent).toBe(SENTENCE);
     component.hide();
     flushSync();
     expect(target.querySelector('[role="status"]')).toBe(region);
@@ -103,7 +83,6 @@ describe("terminal connection pill", () => {
     expect(source).not.toMatch(/\.terminal-connection-pill\s*\{[^}]*\binset:/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bbackground:\s*var\(--bg-card\);/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bborder:\s*1px solid var\(--border\);/);
-    expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bfont-variant-numeric:\s*tabular-nums;/);
     expect(source).not.toMatch(/\b(?:animation|transition):/);
   });
 
@@ -172,18 +151,27 @@ describe("terminal connection pill clears the app status pill", () => {
     });
     status = document.createElement("div");
     status.setAttribute("data-app-status-pill", "");
-    status.textContent = "stalled 9 s";
+    status.textContent = "indexing 1 file";
     document.body.append(status);
   }
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    ui.status = null;
+  });
+
+  test("the app's status pill carries the selector the pill finds it by", () => {
+    ui.status = "saved";
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(AppStatusBar, { target }));
+    flushSync();
+    expect(target.querySelector(APP_STATUS_PILL_SELECTOR)?.classList.contains("app-statusbar")).toBe(true);
   });
 
   test("drops below an overlapping app status pill and returns when it goes", async () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("50px");
     status.remove();
     await mutations();
@@ -194,7 +182,7 @@ describe("terminal connection pill clears the app status pill", () => {
     setup();
     statusLeft = 1595;
     statusWidth = 0;
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("5px");
     statusLeft = 1447;
     statusWidth = 140;
@@ -208,7 +196,7 @@ describe("terminal connection pill clears the app status pill", () => {
   test("follows a newly mounted status pill", async () => {
     setup();
     status.remove();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("5px");
     document.body.append(status);
     await mutations();
@@ -217,7 +205,7 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("follows a status pill moving without changing size", async () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("50px");
     statusTop = 90;
     status.style.top = "90px";
@@ -230,7 +218,7 @@ describe("terminal connection pill clears the app status pill", () => {
     statusLeft = 1280;
     statusWidth = 120;
     noticeWidth = 100;
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("5px");
     noticeWidth = 307;
     const observer = observers.find((item) => item.target.includes(pill(target)));
@@ -243,7 +231,7 @@ describe("terminal connection pill clears the app status pill", () => {
   test("follows a pane moving without changing size", async () => {
     setup();
     const ancestor = document.body.appendChild(document.createElement("div"));
-    const target = show(true, 5_000, false, {}, ancestor);
+    const target = show(true, {}, ancestor);
     expect(pill(target).style.top).toBe("50px");
     expect(frames).toHaveLength(0);
     paneLeft = 800;
@@ -254,7 +242,7 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("follows a terminal main style change without changing size", async () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("50px");
     paneLeft = 800;
     target.style.left = "800px";
@@ -264,7 +252,7 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("ignores style mutations inside the terminal main", async () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(frames).toHaveLength(0);
     pill(target).style.color = "red";
     await Promise.resolve();
@@ -273,9 +261,9 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("does not measure for a text-only status change of unchanged size", async () => {
     setup();
-    show(true, 5_000);
+    show(true);
     const before = reads.mock.calls.length;
-    status.firstChild!.textContent = "stalled 10 s";
+    status.firstChild!.textContent = "indexing 2 files";
     await Promise.resolve();
     expect(frames).toHaveLength(0);
     expect(reads).toHaveBeenCalledTimes(before);
@@ -290,7 +278,7 @@ describe("terminal connection pill clears the app status pill", () => {
     const component = mount(TerminalConnectionNoticeHarness, { target });
     mounted.push(component);
     flushSync();
-    component.show(5_000);
+    component.show();
     component.inspect(true);
     flushSync();
     const observerCount = observers.length;
@@ -301,8 +289,6 @@ describe("terminal connection pill clears the app status pill", () => {
     flushSync();
     expect(pill(target).style.right).toBe("349px");
     expect(reads.mock.calls.length).toBeGreaterThan(before);
-    component.lose(true);
-    flushSync();
     expect(observers).toHaveLength(observerCount);
     expect(mutationObserve.mock.calls.filter(([node]) => node === document.body)).toHaveLength(bodyObserveCount);
     expect(addListener.mock.calls.filter(([type]) => type === "resize")).toHaveLength(resizeListenerCount);
@@ -316,7 +302,7 @@ describe("terminal connection pill clears the app status pill", () => {
     const component = mount(TerminalConnectionNoticeHarness, { target });
     mounted.push(component);
     flushSync();
-    component.show(5_000);
+    component.show();
     flushSync();
     expect(pill(target).style.top).toBe("5px");
     component.find(true);
@@ -329,7 +315,7 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("rechecks the boxes after a window resize moves the pane", () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("50px");
     paneLeft = 800;
     window.dispatchEvent(new Event("resize"));
@@ -341,7 +327,7 @@ describe("terminal connection pill clears the app status pill", () => {
     setup();
     const mutationObserve = vi.spyOn(MutationObserver.prototype, "observe");
     const addListener = vi.spyOn(window, "addEventListener");
-    const target = show(false, 0);
+    const target = show(false);
     expect(pill(target)).toBeNull();
     expect(observers).toHaveLength(0);
     expect(mutationObserve.mock.calls.filter(([node]) => node === document.body)).toHaveLength(0);
@@ -357,7 +343,7 @@ describe("terminal connection pill clears the app status pill", () => {
     const component = mount(TerminalConnectionNoticeHarness, { target });
     mounted.push(component);
     flushSync();
-    component.show(5_000);
+    component.show();
     flushSync();
     component.hide();
     flushSync();
@@ -373,7 +359,7 @@ describe("terminal connection pill clears the app status pill", () => {
 
   test("stops observing and responding to resize after unmount", async () => {
     setup();
-    const target = show(true, 5_000);
+    const target = show(true);
     expect(pill(target).style.top).toBe("50px");
     unmount(mounted.pop()!);
     expect(observers.every((observer) => observer.target.length === 0)).toBe(true);
