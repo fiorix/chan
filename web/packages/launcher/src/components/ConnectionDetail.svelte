@@ -1,8 +1,8 @@
 <script lang="ts">
   // A connected devserver's connection detail on its card in front: how long
-  // the face has held, the last 60 finished pings with the misses as gaps,
-  // the latest, median and worst reply times, and the last contact to the
-  // second. In privacy mode it is concealed behind the devserver's one
+  // the face has held, the last 60 finished pings with a red mark at each
+  // miss, the latest, median and worst reply times, and the last contact to
+  // the second. In privacy mode it is concealed behind the devserver's one
   // connection reveal, the one beside its face.
   import { isConcealed } from "@chan/web-shared/privacy";
   import type { ConnectionHealth } from "../api/library";
