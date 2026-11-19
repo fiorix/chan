@@ -3512,7 +3512,11 @@ impl Workspace {
         let limit = listing_limit_test_hooks::rebuild_listing_limit(self);
         #[cfg(not(any(test, feature = "test-hooks")))]
         let limit = fs_ops::LIST_TREE_LIMIT;
-        let entries = fs_ops::list_indexable_files(self.root(), policy, limit, cancel)?;
+        let mut entries = fs_ops::list_indexable_files(self.root(), policy, limit, cancel)?;
+        // In path order: a pass cut short has then staged every file up to
+        // its cursor, the greatest staged path, which the resume skip below
+        // relies on. A directory read hands its entries in no such order.
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
         // Only Markdown files become graph documents. Plain text gets stat
         // rows for reconcile, replaced atomically with the staged graph.
         let total: u64 = entries
@@ -3580,7 +3584,7 @@ impl Workspace {
                 }
                 continue;
             }
-            // Resume skip: the walk is sorted, so a strictly-
+            // Resume skip: the listing is in path order, so a
             // less-or-equal comparison against the cursor matches
             // every file already staged in a prior session.
             if let Some(c) = cursor.as_deref() {
@@ -8789,6 +8793,53 @@ mod tests {
             .staging_cursor()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_rebuild_cut_short_resumes_with_every_file_whatever_the_read_order() {
+        // The pass is cancelled after it staged two notes, then run again.
+        // The notes are created out of order, so a directory read that
+        // hands them in creation order, or in reverse, or by hash, puts a
+        // late name first; the resumed pass must still stage every note.
+        struct CancelAtSecond(Arc<AtomicBool>);
+        impl crate::progress::ProgressCallback for CancelAtSecond {
+            fn on_progress(&self, event: crate::progress::ProgressEvent) {
+                if event.stage == crate::progress::ProgressStage::GraphRebuild && event.current >= 1
+                {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let (_cfg, workspace_dir, workspace) = fixture();
+        workspace.stop_open_recovery();
+        let names = ["m", "c", "x", "a", "q", "f", "z", "k"];
+        for name in names {
+            std::fs::write(
+                workspace_dir.path().join(format!("{name}.md")),
+                format!("# {name}\n"),
+            )
+            .unwrap();
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cut = workspace.reindex_with(Some(&cancel), &CancelAtSecond(cancel.clone()));
+        assert!(matches!(cut, Err(ChanError::Cancelled)), "{cut:?}");
+        assert!(
+            workspace
+                .graph()
+                .unwrap()
+                .staging_cursor()
+                .unwrap()
+                .is_some(),
+            "the cut pass left its staged notes"
+        );
+
+        workspace.reindex(None).unwrap();
+
+        let mut files = workspace.graph().unwrap().files().unwrap();
+        files.sort();
+        let mut expected: Vec<String> = names.iter().map(|name| format!("{name}.md")).collect();
+        expected.sort();
+        assert_eq!(files, expected);
     }
 
     #[test]
