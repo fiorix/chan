@@ -215,13 +215,17 @@ async function cardToFront() {
   await sleep(600); // the deck's turn
 }
 
+/// The detail leaves the state and its count to the face: it opens on the
+/// chart, whose text is nothing, so its words start at the figures.
+const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
+
 async function healthyLeg(host) {
   const healthy = await readUntil("healthy",
-    (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && card.detail, 30_000);
+    (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && detailOpensOnFigures(card), 30_000);
   if (healthy?.ok) {
-    pass("the card in front shows a healthy face beside the name and the detail under the address", healthy.card);
+    pass("the card in front shows a healthy face beside the name and under the address a detail that opens on its chart", healthy.card);
   } else {
-    fault("no healthy face beside the name with the detail under the address", healthy?.card ?? null);
+    fault("no healthy face beside the name with a detail under the address that opens on its chart", healthy?.card ?? null);
   }
   await shot(host, "healthy");
   const local = await readCard("local");
@@ -361,11 +365,10 @@ async function direct() {
     await sleep(2_100);
     const later = await readCard("stalled count");
     const second = count(later);
-    const age = /No response for (\d+) s/.exec(later?.detail?.text ?? "")?.[1];
-    const detail = { first, second, detailAge: age ?? null, card: later };
+    const detail = { first, second, card: later };
     // A stall begins at a 4 s wait, so no count reads under 4.
-    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second
-      && later?.face?.title === `Connection stalled for ${second} s`) {
+    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4
+      && later?.face?.title === `Connection stalled for ${second} s` && detailOpensOnFigures(later)) {
       pass("silenced, the face reads stalled and counts in whole seconds", detail);
     } else {
       fault("the stalled face did not count its wait", detail);
@@ -383,7 +386,7 @@ async function direct() {
   // The face counts from the drop, and its name carries the same count.
   const downCount = /^reconnecting (\d+) s$/.exec(down?.card?.face?.text ?? "")?.[1];
   if (down?.ok && downCount !== undefined && down.card.face.title === `Connection lost, reconnecting for ${downCount} s`
-    && /Reconnecting for \d+ s/.test(down.card.detail?.text ?? "")) {
+    && detailOpensOnFigures(down.card)) {
     pass("dropped, the face reads reconnecting", down.card);
   } else {
     fault("the face did not read reconnecting with the feed dropped", down?.card ?? null);

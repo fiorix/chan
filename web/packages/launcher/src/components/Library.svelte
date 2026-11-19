@@ -829,7 +829,7 @@
       </div>
       {#if active && health(ds)}
         <!-- The card in front carries its connection detail under the address. -->
-        <div class="ds-health"><ConnectionDetail health={health(ds)!} {now} field={connectionField(ds)} /></div>
+        <div class="ds-health"><ConnectionDetail health={health(ds)!} field={connectionField(ds)} /></div>
       {/if}
       {#if hasContent(node)}
         {@render machineContent(node)}

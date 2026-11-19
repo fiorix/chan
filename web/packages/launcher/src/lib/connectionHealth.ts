@@ -134,15 +134,3 @@ export function connectionContactTime(at: number | null): string {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
   });
 }
-
-/// How long the face has held, in words: stalled counts the oldest
-/// unanswered ping's wait, slow and reconnecting count from the face's start.
-export function connectionStateAge(health: ConnectionHealth, now: number): string {
-  switch (health.face) {
-    case "healthy": return "Connected";
-    case "unknown": return "No reading yet";
-    case "slow": return `Slow for ${elapsed(health.since, now)}`;
-    case "stalled": return `No response for ${Math.floor(connectionWaitMs(health, now) / 1000)} s`;
-    case "reconnecting": return `Reconnecting for ${elapsed(health.since, now)}`;
-  }
-}

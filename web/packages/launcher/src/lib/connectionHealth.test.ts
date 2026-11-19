@@ -7,7 +7,6 @@ import {
   connectionFaceName,
   connectionFigures,
   connectionSparkline,
-  connectionStateAge,
 } from "./connectionHealth";
 
 /// The reading the desktop serves for a connection slow from two 450 ms
@@ -149,7 +148,7 @@ describe("chart", () => {
   });
 });
 
-describe("contact clock and state age", () => {
+describe("contact clock", () => {
   test("last contact is a locale clock time with seconds or a dash", () => {
     expect(connectionContactTime(null)).toBe("-");
     const format = vi.spyOn(Date.prototype, "toLocaleTimeString").mockReturnValue("17:42:07");
@@ -160,34 +159,5 @@ describe("contact clock and state age", () => {
     } finally {
       format.mockRestore();
     }
-  });
-
-  test("clamps a face that starts ahead of this clock to zero", () => {
-    expect(connectionStateAge(health({ face: "slow", since: 10_000 }), 9_000)).toBe("Slow for 0 s");
-  });
-
-  test("uses whole minutes for long state ages", () => {
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 754_000)).toBe("Reconnecting for 12 min");
-  });
-
-  test("changes state age from seconds to minutes at 120 s", () => {
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 119_999)).toBe("Reconnecting for 119 s");
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 120_000)).toBe("Reconnecting for 2 min");
-  });
-
-  test.each([
-    ["healthy", "Connected"],
-    ["unknown", "No reading yet"],
-    ["slow", "Slow for 12 s"],
-    ["stalled", "No response for 12 s"],
-    ["reconnecting", "Reconnecting for 12 s"],
-  ] as const)("words the %s face", (face, expected) => {
-    expect(connectionStateAge(health({ face, since: 0, wait_since: 0 }), 12_900)).toBe(expected);
-  });
-
-  test("stalled counts the ping's wait, while slow and reconnecting count from the face's start", () => {
-    expect(connectionStateAge(health({ face: "stalled", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("No response for 8 s");
-    expect(connectionStateAge(health({ face: "slow", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("Slow for 4 s");
-    expect(connectionStateAge(health({ face: "reconnecting", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("Reconnecting for 4 s");
   });
 });

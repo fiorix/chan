@@ -1,8 +1,9 @@
 <script lang="ts">
-  // A connected devserver's connection detail on its card in front: how long
-  // the face has held, the last 60 finished pings with a red mark at each
-  // miss, the latest, median and worst reply times, and the last contact to
-  // the second. In privacy mode it is concealed behind the devserver's one
+  // A connected devserver's connection detail on its card in front: the last
+  // 60 finished pings with a red mark at each miss, the latest, median and
+  // worst reply times, and the last contact to the second. The face beside
+  // the name says the state, counting where it counts, so the detail does
+  // not repeat it. In privacy mode it is concealed behind the devserver's one
   // connection reveal, the one beside its face.
   import { isConcealed } from "@chan/web-shared/privacy";
   import type { ConnectionHealth } from "../api/library";
@@ -16,11 +17,10 @@
     connectionContactTime,
     connectionFigures,
     connectionSparkline,
-    connectionStateAge,
     formatConnectionMs,
   } from "../lib/connectionHealth";
 
-  let { health, now, field }: { health: ConnectionHealth; now: number; field: string } = $props();
+  let { health, field }: { health: ConnectionHealth; field: string } = $props();
 
   const concealed = $derived(isConcealed(field));
   const figures = $derived(connectionFigures(health.samples));
@@ -32,7 +32,6 @@
   {#if concealed}
     <span class="redacted" aria-label="connection details hidden">Hidden</span>
   {:else}
-    <div class="state-age">{connectionStateAge(health, now)}</div>
     <svg class="sparkline" viewBox={`0 0 ${CONNECTION_SPARKLINE_WIDTH} ${CONNECTION_SPARKLINE_HEIGHT}`} role="img" aria-label="Recent reply times and missed pings">
       <path class="baseline" d={`M ${CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE} L ${CONNECTION_SPARKLINE_WIDTH - CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE}`} />
       {#each sparkline.paths as path}<path class="reading" d={path} />{/each}
@@ -56,7 +55,6 @@
     font-size: 12px;
     font-variant-numeric: tabular-nums;
   }
-  .state-age { color: var(--text); font-weight: 600; }
   .sparkline { display: block; width: 100%; height: auto; margin: 6px 0; }
   .baseline { fill: none; stroke: var(--border); stroke-width: 1; }
   .reading { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
