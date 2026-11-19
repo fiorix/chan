@@ -6,6 +6,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
 import TerminalConnectionNoticeHarness from "../__tests__/TerminalConnectionNoticeHarness.svelte";
 import { APP_STATUS_PILL_SELECTOR } from "./terminalNoticePlacement";
+import AppStatusBar from "./AppStatusBar.svelte";
+import { ui } from "../state/store.svelte";
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
@@ -179,6 +181,15 @@ describe("terminal connection pill clears the app status pill", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    ui.status = null;
+  });
+
+  test("the app's status pill carries the selector the pill finds it by", () => {
+    ui.status = "saved";
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(AppStatusBar, { target }));
+    flushSync();
+    expect(target.querySelector(APP_STATUS_PILL_SELECTOR)?.classList.contains("app-statusbar")).toBe(true);
   });
 
   test("drops below an overlapping app status pill and returns when it goes", async () => {

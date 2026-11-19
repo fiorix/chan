@@ -54,8 +54,6 @@ import { fileTab, resetLayout } from "./__tests__/tabs";
 import { __testResetSessionDiscarded, __testSetBootstrapHydrated, clearRemoteApplyEmptyWindow, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
 import { hasAnyTab, openTerminalInActivePane } from "./state/tabs.svelte";
 import { windowCaps } from "./state/windowCaps";
-import { connectionHealth, resetConnectionHealthForTests } from "./state/connectionHealth.svelte";
-import { windowTabBar } from "./state/windowTabBar.svelte";
 
 stubAppEnvironment();
 
@@ -75,8 +73,6 @@ afterEach(async () => {
   clearRemoteApplyEmptyWindow();
   searchPanel.open = false;
   ui.terminalArmed = false;
-  resetConnectionHealthForTests();
-  windowTabBar.on = false;
   vi.restoreAllMocks();
 });
 
@@ -121,16 +117,6 @@ describe("a window with no workspace", () => {
 
     await unmountApp();
     expect(themeWatch.closed).toBe(1);
-  });
-
-  test("shows an unhealthy connection in the status bar of a standalone terminal window", async () => {
-    windowTabBar.on = false;
-    await mountApp();
-    connectionHealth.state = "slow";
-    connectionHealth.rttMs = 850;
-    await settle();
-    expect(document.querySelector(".window-tab-bar")).toBeNull();
-    expect(document.querySelector(".app-statusbar .connection-section .connection-indicator")?.textContent).toContain("850 ms");
   });
 
   test("arms close-when-empty on its first tab, not at boot", async () => {

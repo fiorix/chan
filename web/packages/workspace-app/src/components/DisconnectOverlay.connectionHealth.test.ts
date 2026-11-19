@@ -6,7 +6,6 @@ import type { WatchDrop } from "../api/transport";
 import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { raisedCoverKeys, ui } from "../state/store.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
-import ConnectionIndicator from "./ConnectionIndicator.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -140,23 +139,6 @@ test("an old-contact wake retirement still restarts the grace on a status flip",
   expect(cover(target)).toBeNull();
   await advance(1);
   expect(cover(target)).not.toBeNull();
-});
-
-test("the reconnecting indicator stays pressable until the cover appears", async () => {
-  const target = await open();
-  const lastFrameAt = Date.now();
-  const indicatorTarget = document.body.appendChild(document.createElement("div"));
-  mounted.push(mount(ConnectionIndicator, { target: indicatorTarget, props: { placement: "status" } }) as Record<string, unknown>);
-  await advance(15_000);
-  await drop({ reason: "deadline", lastFrameAt });
-  const button = indicatorTarget.querySelector<HTMLButtonElement>(".connection-indicator")!;
-  button.click();
-  await tick();
-  expect(document.body.querySelector(".connection-popover")).not.toBeNull();
-  expect(cover(target)).toBeNull();
-  await advance(30_000);
-  expect(cover(target)).not.toBeNull();
-  expect(document.body.querySelector(".connection-popover")).toBeNull();
 });
 
 test("a late cover opens with recovery actions ready and does not block keys before then", async () => {

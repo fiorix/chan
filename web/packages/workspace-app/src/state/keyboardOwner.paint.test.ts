@@ -26,7 +26,6 @@ const sources = import.meta.glob(
     "../components/AppStatusBar.svelte",
     "../components/PaneTreeOverlay.svelte",
     "../components/HamburgerMenu.svelte",
-    "../components/ConnectionIndicator.svelte",
     "../../../web-shared/src/components/CommandDeck.svelte",
   ],
   { query: "?raw", import: "default", eager: true },
@@ -64,7 +63,6 @@ const chrome = {
   "the status bar": layer("AppStatusBar.svelte", ".app-statusbar"),
   "the pane tree": layer("PaneTreeOverlay.svelte", ".pane-tree-layer"),
   "the menus": layer("HamburgerMenu.svelte", ".hamburger-menu"),
-  "the connection popover": layer("ConnectionIndicator.svelte", ".connection-popover"),
 };
 
 afterEach(() => {
@@ -100,7 +98,7 @@ describe("the keyboard's owners paint in the order they hold it", () => {
     expect(survey, "over the menus").toBeGreaterThan(chrome["the menus"]);
   });
 
-  test("the command deck that holds the keyboard paints over the status bar, the pane tree, the menus and the connection popover", () => {
+  test("the command deck that holds the keyboard paints over the status bar, the pane tree and the menus", () => {
     overlayStack.ids = ["launcher"];
     for (const [surface, under] of Object.entries(chrome)) {
       expect(commandDeckLayer(), `over ${surface}`).toBeGreaterThan(under);
