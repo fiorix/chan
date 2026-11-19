@@ -5305,19 +5305,19 @@ mod tests {
             heard.iter().map(Duration::as_secs_f64).collect()
         }
 
-        /// A devserver that never answers the feed's ping gets one per
-        /// connection: none on the cadence, none for a nudge, however long
-        /// the socket stays up. Its set for that ping shows no face, and on
-        /// a later socket that set ends the reconnecting the loss of the
-        /// first one began.
+        /// A devserver that never answers the feed's ping gets one per feed
+        /// socket: none on the cadence, none for a nudge, however long the
+        /// socket stays up. Its set for that ping shows no face, and on a
+        /// later socket that set ends the reconnecting the loss of the first
+        /// one began.
         #[tokio::test(start_paused = true)]
-        async fn a_devserver_that_does_not_answer_gets_one_ping_per_connection() {
+        async fn a_devserver_that_does_not_answer_gets_one_ping_per_socket() {
             let start = Instant::now();
             let pacer = ProbePacer::default();
             pacer.window_focus("w", true);
             let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
             let clock = PausedClock::new();
-            for connection in 1..=2 {
+            for socket in 1..=2 {
                 let (client, server) = ws_pair().await;
                 let heard = Arc::new(Mutex::new(Heard::default()));
                 let devserver = tokio::spawn(serve_feed(
@@ -5334,7 +5334,7 @@ mod tests {
                 assert_eq!(
                     clock.reads() - reads,
                     heard.lock().unwrap().ws_pings.len() - ws_pings,
-                    "connection {connection} reported more than the sets the keepalive drew: \
+                    "socket {socket} reported more than the sets the keepalive drew: \
                      the time, for a ping its devserver never answers"
                 );
                 pacer.ping_now();
@@ -5342,16 +5342,16 @@ mod tests {
                 assert_eq!(
                     heard.lock().unwrap().pings.len(),
                     1,
-                    "connection {connection} pinged a devserver that never answered more than once"
+                    "socket {socket} pinged a devserver that never answered more than once"
                 );
                 assert!(
                     heard.lock().unwrap().ws_pings.len() >= 3,
-                    "fixture: the keepalive did not run on connection {connection}"
+                    "fixture: the keepalive did not run on socket {socket}"
                 );
                 assert_eq!(
                     face(&snapshot, &clock),
                     None,
-                    "connection {connection} showed a face for a devserver that never answered"
+                    "socket {socket} showed a face for a devserver that never answered"
                 );
                 devserver.abort();
                 assert!(
@@ -5361,7 +5361,7 @@ mod tests {
                 assert_eq!(
                     face(&snapshot, &clock),
                     Some(chan_server::ConnectionFace::Reconnecting),
-                    "the loss of connection {connection}'s socket"
+                    "the loss of socket {socket}"
                 );
             }
         }
