@@ -9,7 +9,7 @@
     setTeamWorkPendingConfig,
     teamWorkPendingConfig,
   } from "../state/tabs.svelte";
-  import { appInputBlocked, refreshTree, scheduleSessionSave } from "../state/store.svelte";
+  import { refreshTree, scheduleSessionSave } from "../state/store.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
   import {
     assignMemberToCell,
@@ -349,10 +349,12 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && !busy) {
-      // A cover painted over the dialog (the screen lock, the reconnect or
-      // session-ended cover) holds the keyboard: Escape there is not the
-      // dialog's, whose Cancel closes the lead terminal.
-      if (appInputBlocked() && !mayFocus(dialogEl ?? null)) return;
+      // Escape is the dialog's only while it holds the keyboard: under a
+      // cover painted over it (the screen lock, the reconnect or
+      // session-ended cover) or an owner shown over it (the close prompt, a
+      // window-wide survey), it is not, and the dialog's Cancel would close
+      // the lead terminal.
+      if (!mayFocus(dialogEl ?? null)) return;
       // The modal owns Escape before any terminal or compose-box handler;
       // stopPropagation keeps its dismissal out of the underlying surface.
       e.preventDefault();

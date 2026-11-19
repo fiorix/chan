@@ -36,7 +36,7 @@ import { focusOrigin, settle } from "../__tests__/dialog";
 import { recordingContext2d } from "../__tests__/canvas";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { demoWorkspaceInfo } from "../demo/data";
-import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
+import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
 import { bumpTabFocusPulse, layout, type LeafNode } from "../state/tabs.svelte";
 import { COVER_ROOT_ATTR, promptState, resolvePrompt, setCoverBlocking, uiPrompt, workspace } from "../state/store.svelte";
@@ -285,4 +285,29 @@ test("Escape on the screen lock leaves a menu open under it and moves no focus t
   expect(backdrop.contains(document.activeElement), "the lock keeps the keyboard").toBe(true);
   expect(document.activeElement).not.toBe(trigger);
   expect(document.querySelector(".hamburger-menu"), "the menu under the lock stays as it was").not.toBeNull();
+});
+
+test("Escape on the close prompt over the Team dialog cancels the prompt, not the dialog and its lead terminal", async () => {
+  resetLayout([terminalTab({ id: "lead-tab", terminalSessionId: "lead-session" })]);
+  focusOrigin();
+  const request = { leadTabId: "lead-tab", leadPaneId: "pane-test" };
+  openTeamDialog(request);
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(TeamDialog, { target, props: { request } }));
+  await settle();
+  // The close prompt at its layer, over the dialogs.
+  const promptLayer = document.body.appendChild(document.createElement("div"));
+  promptLayer.style.position = "fixed";
+  promptLayer.style.zIndex = "30002";
+  mounted.push(mount(CloseConfirmOverlay, { target: promptLayer }));
+  void uiCloseConfirm();
+  await settle();
+  const cancel = promptLayer.querySelector<HTMLButtonElement>("button.cancel")!;
+  expect(document.activeElement, "the prompt's Cancel").toBe(cancel);
+  cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await settle();
+  expect(teamDialogState.request, "the Team dialog stays open").not.toBeNull();
+  expect(closeConfirmState.open, "Escape cancels the prompt").toBe(false);
+  const tabs = Object.values(layout.nodes).flatMap((node) => (node.kind === "leaf" ? (node as LeafNode).tabs : []));
+  expect(tabs.map((tab) => tab.id), "the lead terminal stays").toContain("lead-tab");
 });
