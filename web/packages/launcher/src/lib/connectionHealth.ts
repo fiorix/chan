@@ -12,14 +12,29 @@ import type { ConnectionHealth } from "../api/library";
 /// It scales the drawing and decides no face, so the row does not carry it.
 export const CONNECTION_CHART_FLOOR_MS = 400;
 
-/// The chart and its marks use one view box so the component and path math agree.
+/// The chart and its marks use one view box so the component and path math
+/// agree: CONNECTION_SPARKLINE_HEIGHT units tall and, until the detail it
+/// fills has been measured, CONNECTION_SPARKLINE_WIDTH units wide.
 export const CONNECTION_SPARKLINE_WIDTH = 180;
 export const CONNECTION_SPARKLINE_HEIGHT = 48;
+/// The chart's height on the card, in CSS pixels. It draws at one scale in
+/// both directions, so a wider card spreads its points further apart and
+/// leaves its height and the weight of its strokes as they are.
+export const CONNECTION_CHART_HEIGHT_PX = 69;
 export const CONNECTION_SPARKLINE_EDGE = 3;
 const CONNECTION_SPARKLINE_PAD = 4;
 export const CONNECTION_SPARKLINE_BASELINE = CONNECTION_SPARKLINE_HEIGHT - CONNECTION_SPARKLINE_PAD;
 export const CONNECTION_SPARKLINE_MISS_TOP = CONNECTION_SPARKLINE_BASELINE - 4;
 export const CONNECTION_SPARKLINE_MISS_BOTTOM = CONNECTION_SPARKLINE_BASELINE + 2;
+
+/// The chart's width in view-box units for a detail `boxWidth` CSS pixels
+/// wide, at the chart's one scale, so its points span the detail's width;
+/// CONNECTION_SPARKLINE_WIDTH before the detail has been measured.
+export function connectionSparklineWidth(boxWidth: number): number {
+  return boxWidth > 0
+    ? boxWidth * CONNECTION_SPARKLINE_HEIGHT / CONNECTION_CHART_HEIGHT_PX
+    : CONNECTION_SPARKLINE_WIDTH;
+}
 
 /// Latest is the last answered ping; median and worst use the answered set.
 export type ConnectionFigures = { latest: number | null; median: number | null; worst: number | null };
@@ -40,12 +55,13 @@ export function connectionWaitMs(health: ConnectionHealth, now: number): number 
 /// The words beside the mark, empty where the mark stands alone: healthy,
 /// unknown, and a slow face the desktop read as recovering, which holds until
 /// the next reading. Any other slow face reads the larger of its reply time
-/// and its wait.
+/// and its wait. Stalled counts the oldest unanswered ping's wait and
+/// reconnecting counts from the face's start, whatever ping still waits.
 export function connectionFaceLabel(health: ConnectionHealth, now: number): string {
   const wait = connectionWaitMs(health, now);
   switch (health.face) {
     case "reconnecting":
-      return "reconnecting";
+      return `reconnecting ${elapsed(health.since, now)}`;
     case "stalled":
       return `stalled ${Math.floor(wait / 1000)} s`;
     case "slow":
@@ -55,7 +71,10 @@ export function connectionFaceLabel(health: ConnectionHealth, now: number): stri
   }
 }
 
-/// The face's name, for its title and its accessible name.
+/// The face's name, for its title and its accessible name. A stalled or
+/// reconnecting face's name carries the count its words show, since a
+/// control that holds the face and is labelled for its own action reads the
+/// name alone.
 export function connectionFaceName(health: ConnectionHealth, now: number): string {
   switch (health.face) {
     case "healthy":
@@ -70,9 +89,9 @@ export function connectionFaceName(health: ConnectionHealth, now: number): strin
         : "Connection slow, waiting for a reply";
     }
     case "stalled":
-      return "Connection stalled";
+      return `Connection stalled for ${Math.floor(connectionWaitMs(health, now) / 1000)} s`;
     case "reconnecting":
-      return "Connection lost, reconnecting";
+      return `Connection lost, reconnecting for ${elapsed(health.since, now)}`;
   }
 }
 
@@ -130,16 +149,4 @@ export function connectionContactTime(at: number | null): string {
   return at === null ? "-" : new Date(at).toLocaleTimeString(undefined, {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
   });
-}
-
-/// How long the face has held, in words: stalled counts the oldest
-/// unanswered ping's wait, slow and reconnecting count from the face's start.
-export function connectionStateAge(health: ConnectionHealth, now: number): string {
-  switch (health.face) {
-    case "healthy": return "Connected";
-    case "unknown": return "No reading yet";
-    case "slow": return `Slow for ${elapsed(health.since, now)}`;
-    case "stalled": return `No response for ${Math.floor(connectionWaitMs(health, now) / 1000)} s`;
-    case "reconnecting": return `Reconnecting for ${elapsed(health.since, now)}`;
-  }
 }

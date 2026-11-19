@@ -99,6 +99,12 @@ const READ = () => `(() => {
   const local = document.querySelector('.slot[data-key="local"]');
   const face = slot?.querySelector('.ds-name-row .connection-face');
   const detail = slot?.querySelector('.ds-health .connection-detail');
+  const chart = detail?.querySelector('svg.sparkline');
+  const edges = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { left: Math.round(r.left), right: Math.round(r.right) };
+  };
   return {
     key: slot?.getAttribute('data-key') ?? null,
     front: slot?.getAttribute('aria-current') === 'true',
@@ -107,6 +113,9 @@ const READ = () => `(() => {
       text: detail.innerText.replace(/\\s+/g, ' ').trim(),
       misses: detail.querySelectorAll('.miss').length,
       runs: detail.querySelectorAll('.reading').length,
+      chart: chart ? { ...edges(chart), height: getComputedStyle(chart).height } : null,
+      name: edges(slot.querySelector('.ds-name-row .row-name')),
+      actions: edges(slot.querySelector('.machine-actions')),
     } : null,
     faces: slot ? slot.querySelectorAll('.connection-face').length : -1,
     localMarks: local ? local.querySelectorAll('.connection-face, .connection-detail').length : -1,
@@ -215,13 +224,27 @@ async function cardToFront() {
   await sleep(600); // the deck's turn
 }
 
+/// The detail leaves the state and its count to the face: it opens on the
+/// chart, whose text is nothing, so its words start at the figures.
+const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
+
+/// The chart spans the card: from the name's left edge to the right edge of
+/// the header's actions, at its fixed height.
+const chartSpansCard = (card) => {
+  const { chart, name, actions } = card?.detail ?? {};
+  return Boolean(chart && name && actions) && chart.height === "69px"
+    && Math.abs(chart.left - name.left) <= 2 && Math.abs(chart.right - actions.right) <= 2;
+};
+
 async function healthyLeg(host) {
   const healthy = await readUntil("healthy",
-    (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && card.detail, 30_000);
+    (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && detailOpensOnFigures(card), 30_000);
   if (healthy?.ok) {
-    pass("the card in front shows a healthy face beside the name and the detail under the address", healthy.card);
+    pass("the card in front shows a healthy face beside the name and under the address a detail that opens on its chart", healthy.card);
+    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card from the name to the actions, 69 px high", healthy.card.detail);
+    else fault("the detail's chart does not span the card from the name to the actions at 69 px", healthy.card.detail);
   } else {
-    fault("no healthy face beside the name with the detail under the address", healthy?.card ?? null);
+    fault("no healthy face beside the name with a detail under the address that opens on its chart", healthy?.card ?? null);
   }
   await shot(host, "healthy");
   const local = await readCard("local");
@@ -237,8 +260,9 @@ const slowReply = (card, max) => {
   return card.face?.state === "slow" && seconds >= 1.2 && seconds <= max;
 };
 
-/// The detail's last contact as it reads, the clock time that ends it.
-const lastContact = (card) => /Last contact (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
+/// The last contact as the figures line reads it: the clock time after
+/// Since, the line's last figure and the detail's last words.
+const lastContact = (card) => /Since (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
 
 // Every client frame of every flow, read past its request head; a flow
 // from the desktop's own client carries no Origin header.
@@ -361,10 +385,10 @@ async function direct() {
     await sleep(2_100);
     const later = await readCard("stalled count");
     const second = count(later);
-    const age = /No response for (\d+) s/.exec(later?.detail?.text ?? "")?.[1];
-    const detail = { first, second, detailAge: age ?? null, card: later };
+    const detail = { first, second, card: later };
     // A stall begins at a 4 s wait, so no count reads under 4.
-    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second) {
+    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4
+      && later?.face?.title === `Connection stalled for ${second} s` && detailOpensOnFigures(later)) {
       pass("silenced, the face reads stalled and counts in whole seconds", detail);
     } else {
       fault("the stalled face did not count its wait", detail);
@@ -379,7 +403,10 @@ async function direct() {
   relay.drop();
   relay.resume();
   const down = await readUntil("reconnecting", (card) => card.face?.state === "reconnecting", 20_000);
-  if (down?.ok && down.card.face.text === "reconnecting" && /Reconnecting for \d+ s/.test(down.card.detail?.text ?? "")) {
+  // The face counts from the drop, and its name carries the same count.
+  const downCount = /^reconnecting (\d+) s$/.exec(down?.card?.face?.text ?? "")?.[1];
+  if (down?.ok && downCount !== undefined && down.card.face.title === `Connection lost, reconnecting for ${downCount} s`
+    && detailOpensOnFigures(down.card)) {
     pass("dropped, the face reads reconnecting", down.card);
   } else {
     fault("the face did not read reconnecting with the feed dropped", down?.card ?? null);

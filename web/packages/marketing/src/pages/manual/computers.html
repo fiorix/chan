@@ -106,7 +106,7 @@
 <section class="manual-block" id="connection">
   <h2><a class="heading-anchor" href="#connection">Connection health</a></h2>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="computers-connection-health" data-shot-kind="still">screenshot to capture<small>a devserver's card in front over a slow connection: 850 ms beside its name in the warning colour, and under its address Slow for 12 s, the chart, Latest, Median and Worst, and Last contact</small></div>
+    <div class="shot-placeholder-frame" data-shot="computers-connection-health" data-shot-kind="still">screenshot to capture<small>a devserver's card in front over a slow connection: 850 ms beside its name in the warning colour, and under its address the chart across the card, and Latest, Median, Worst and Since on one line</small></div>
     <figcaption>A slow devserver: its reply time beside its name, and the detail on the card in front.</figcaption>
   </figure>
   <p>Chan Desktop checks the connection to each devserver it is connected to, and marks how it is doing beside the devserver's name on its card.</p>
@@ -119,11 +119,11 @@
         <tr><td>Bars alone</td><td>Replies come back in time. They show faded before the first reply.</td></tr>
         <tr><td>A time, such as <code>850 ms</code> or <code>2.4 s</code></td><td>Slow: a reply has waited 1 s, the last one took 1 s or more, or the last two took 400 ms or more. It shows the longer of the last reply and a wait of 1 s or more. Two replies in a row under 300 ms make it healthy again; while they recover it shows the bars alone, still in the warning colour.</td></tr>
         <tr><td><code>stalled 8 s</code></td><td>Stalled: a reply has waited 4 s or more with nothing arriving from the devserver in the last 4 s.</td></tr>
-        <tr><td><code>reconnecting</code></td><td>The connection dropped, or stayed silent until Chan Desktop dropped it, 60 to 90 s into the silence. It reads this until a new one answers.</td></tr>
+        <tr><td><code>reconnecting 20 s</code></td><td>The connection dropped, or stayed silent until Chan Desktop dropped it, 60 to 90 s into the silence. It counts from the drop, in minutes from 2 minutes on, until a new one answers.</td></tr>
       </tbody>
     </table>
   </div>
-  <p>The card in front adds the detail under the devserver's address: how long the state has lasted, such as <strong>Slow for 12 s</strong> or <strong>No response for 8 s</strong>, a chart of the last 60 checks with a red mark for each missed one, the latest, median and worst reply times, and the time of the last contact.</p>
+  <p>The card in front adds the detail under the devserver's address: a chart across the card of the last 60 checks with a red mark for each missed one, and under it, on one line, the latest, median and worst reply times and, as <strong>Since</strong>, the time of the last contact. On a narrow card the line wraps, Since first. The mark beside the name says how the connection is doing, with its count where it has one.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
@@ -131,7 +131,7 @@
       <li>Chan Desktop checks each devserver once, however many of its windows are open: every 3 s while a Chan Desktop window has the focus, every 20 s otherwise, and once more when Chan Desktop gains the focus and when the Computers screen shows.</li>
       <li>The check crosses everything between the two machines, such as an ssh tunnel or a gateway and its tunnel, so a devserver reached through a gateway shows the same marks.</li>
       <li>A sleep of the local machine does not read as slow or stalled: a check in flight across a sleep is not timed, and neither is a reply that took longer than 45 s. On Windows, a sleep under 45 s across a connection's very first check can show once as a slow reply, which the next two replies clear.</li>
-      <li>No mark shows on This machine's card, on a devserver that is connecting or disconnected, or in a browser. A devserver that runs a chan too old to answer the check shows none either, except <code>reconnecting</code> while its connection is down.</li>
+      <li>No mark shows on This machine's card, on a devserver that is connecting or disconnected, or in a browser. A devserver that runs a chan too old to answer the check shows none either, except the reconnecting count while its connection is down.</li>
       <li>The mark and a window's cover watch different connections. A window can be covered while its devserver reads healthy, as when the window's own connection or its workspace is gone, and a devserver can read stalled while a window still gets data.</li>
       <li>In privacy mode the mark keeps its colour, and its words and the detail hide behind one eye button per devserver.</li>
     </ul>

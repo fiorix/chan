@@ -10,6 +10,7 @@ import Library from "./Library.svelte";
 import { library } from "../state/library.svelte";
 import { resetDeck, showCard } from "../state/deck.svelte";
 import type { ConnectionHealth, DevserverEntry } from "../api/library";
+import { connectionContactTime } from "../lib/connectionHealth";
 
 vi.mock("../api/backend", async () => ({ backend: (await import("../api/mock")).mockApi }));
 
@@ -47,8 +48,20 @@ function mountDeck(front: string): void {
 const slot = (key: string) => document.querySelector<HTMLElement>(`.slot[data-key="${key}"]`)!;
 const face = (key: string) => slot(key).querySelector<HTMLElement>(".ds-name-row .connection-face");
 const detail = (key: string) => slot(key).querySelector<HTMLElement>(".ds-health .connection-detail");
+const detailText = (key: string) => detail(key)!.textContent!.replace(/\s+/g, " ").trim();
+
+// jsdom has no ResizeObserver, which the detail measures its width through.
+// Each observed element keeps its callback here, so a test can report a
+// resize.
+const observed = new Map<Element, () => void>();
 
 beforeEach(() => {
+  observed.clear();
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private readonly report: () => void) {}
+    observe(el: Element) { observed.set(el, this.report); }
+    disconnect() {}
+  });
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   vi.setSystemTime(NOW);
   resetDeck();
@@ -64,6 +77,7 @@ afterEach(async () => {
   library.devservers = [];
   await setPrivacy({ enabled: false });
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("the connection face on the Computers deck", () => {
@@ -74,12 +88,55 @@ describe("the connection face on the Computers deck", () => {
     expect(face("ds-a")!.dataset.face).toBe("slow");
     expect(face("ds-a")!.textContent!.trim()).toBe("1.3 s");
     expect(face("ds-a")!.title).toBe("Connection slow, 1.3 s");
-    const text = detail("ds-a")!.textContent!.replace(/\s+/g, " ");
-    expect(text).toContain("Slow for 27 s");
-    expect(text).toContain("Latest 1.3 s Median 660 ms Worst 1.3 s");
-    expect(text).toContain("Last contact");
+    expect(detailText("ds-a")).toBe(`Latest 1.3 s Median 660 ms Worst 1.3 s Since ${connectionContactTime(NOW - 1_000)}`);
     const header = slot("ds-a").querySelector(".machine-header")!;
     expect(header.compareDocumentPosition(detail("ds-a")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    ["healthy", reading()],
+    ["unknown", reading({ face: "unknown", rtt_ms: null, last_contact: null, samples: [] })],
+    ["slow", reading({ face: "slow", since: NOW - 27_000, rtt_ms: 1_300 })],
+    ["stalled", reading({ face: "stalled", since: NOW - 1_000, wait_since: NOW - 5_000 })],
+    ["reconnecting", reading({ face: "reconnecting", since: NOW - 12_000 })],
+  ])("leaves the %s face's state and count to the face: the detail opens on its chart", (_face, health) => {
+    library.devservers = [computer("ds-a", "alpha", health)];
+    mountDeck("ds-a");
+    expect(detail("ds-a")!.firstElementChild!.matches("svg.sparkline")).toBe(true);
+    expect(detailText("ds-a")).toMatch(/^Latest /);
+  });
+
+  it("puts the last contact on the figures line, after Latest, Median and Worst, as Since", () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ last_contact: NOW - 4_000 }))];
+    mountDeck("ds-a");
+    const figures = [...detail("ds-a")!.querySelectorAll(".figures > span")].map((el) => el.textContent!.replace(/\s+/g, " ").trim());
+    expect(figures).toEqual(["Latest 24 ms", "Median 22 ms", "Worst 24 ms", `Since ${connectionContactTime(NOW - 4_000)}`]);
+    expect(detail("ds-a")!.lastElementChild!.matches(".figures"), "a line follows the figures").toBe(true);
+  });
+
+  it("draws its chart across the detail's width at a fixed height, and again when the card resizes", () => {
+    let width = 552;
+    const clientWidth = vi.spyOn(Element.prototype, "clientWidth", "get")
+      .mockImplementation(function (this: Element) { return this.classList.contains("connection-detail") ? width : 0; });
+    try {
+      library.devservers = [computer("ds-a", "alpha", reading({ samples: [20, null, 24] }))];
+      mountDeck("ds-a");
+      const chart = detail("ds-a")!.querySelector<SVGSVGElement>("svg.sparkline")!;
+      expect(chart.getAttribute("viewBox")).toBe("0 0 384 48");
+      expect(chart.style.height).toBe("69px");
+      expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 381 44");
+      expect([...chart.querySelectorAll(".reading")].map((path) => path.getAttribute("d"))).toEqual(["M 3 42 L 3 42", "M 381 42 L 381 42"]);
+      expect(chart.querySelector(".miss")!.getAttribute("d")).toBe("M 192 40 L 192 46");
+      expect(observed.has(detail("ds-a")!), "nothing observes the detail's size").toBe(true);
+      width = 276;
+      observed.get(detail("ds-a")!)!();
+      flushSync();
+      expect(chart.getAttribute("viewBox")).toBe("0 0 192 48");
+      expect(chart.style.height).toBe("69px");
+      expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 189 44");
+    } finally {
+      clientWidth.mockRestore();
+    }
   });
 
   it("shows a card not in front its face without the detail, and the local machine's card neither", () => {
@@ -105,11 +162,9 @@ describe("the connection face on the Computers deck", () => {
     library.devservers = [computer("ds-a", "alpha", reading({ face: "stalled", since: NOW - 1_000, wait_since: NOW - 5_000 }))];
     mountDeck("ds-a");
     expect(face("ds-a")!.textContent!.trim()).toBe("stalled 5 s");
-    expect(detail("ds-a")!.textContent).toContain("No response for 5 s");
     vi.advanceTimersByTime(2_000);
     flushSync();
     expect(face("ds-a")!.textContent!.trim()).toBe("stalled 7 s");
-    expect(detail("ds-a")!.textContent).toContain("No response for 7 s");
   });
 
   it("counts a fresh reading from the moment it arrives, not from the clock's last tick", () => {
@@ -122,15 +177,17 @@ describe("the connection face on the Computers deck", () => {
     library.devservers = [computer("ds-a", "alpha", reading({ face: "stalled", since: NOW + 900, wait_since: NOW + 900 - 4_000 }))];
     flushSync();
     expect(face("ds-a")!.textContent!.trim()).toBe("stalled 4 s");
-    expect(detail("ds-a")!.textContent).toContain("No response for 4 s");
   });
 
-  it("counts reconnecting from its start while a ping still waits", () => {
+  it("counts reconnecting beside the name from its start while a ping still waits", () => {
     library.devservers = [computer("ds-a", "alpha", reading({ face: "reconnecting", since: NOW - 12_000, wait_since: NOW - 40_000 }))];
     mountDeck("ds-a");
-    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting");
-    expect(face("ds-a")!.title).toBe("Connection lost, reconnecting");
-    expect(detail("ds-a")!.textContent).toContain("Reconnecting for 12 s");
+    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting 12 s");
+    expect(face("ds-a")!.title).toBe("Connection lost, reconnecting for 12 s");
+    vi.advanceTimersByTime(2_000);
+    flushSync();
+    expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting 14 s");
+    expect(face("ds-a")!.querySelector('[role="img"]')!.getAttribute("aria-label")).toBe("Connection lost, reconnecting for 14 s");
   });
 
   it("shows the mark alone before the first reply and while recovering", () => {
@@ -141,9 +198,7 @@ describe("the connection face on the Computers deck", () => {
     mountDeck("ds-a");
     expect(face("ds-a")!.textContent!.trim()).toBe("");
     expect(face("ds-a")!.title).toBe("Connection status unknown");
-    const text = detail("ds-a")!.textContent!.replace(/\s+/g, " ");
-    expect(text).toContain("No reading yet");
-    expect(text).toContain("Latest - Median - Worst - Last contact -");
+    expect(detailText("ds-a")).toBe("Latest - Median - Worst - Since -");
     expect(face("ds-b")!.textContent!.trim()).toBe("");
     expect(face("ds-b")!.title).toBe("Connection recovering");
   });
@@ -155,13 +210,13 @@ describe("the connection face on the Computers deck", () => {
     expect(face("ds-a")!.dataset.face).toBe("slow");
     expect(face("ds-a")!.title).toBe("Connection details");
     expect(slot("ds-a").textContent).not.toContain("1.3 s");
-    expect(slot("ds-a").textContent).not.toContain("Slow for");
+    expect(slot("ds-a").textContent).not.toContain("Median");
     const reveals = slot("ds-a").querySelectorAll<HTMLButtonElement>('[aria-label="Reveal connection details"]');
     expect(reveals).toHaveLength(1);
     reveals[0]!.click();
     flushSync();
     expect(face("ds-a")!.textContent).toContain("1.3 s");
-    expect(detail("ds-a")!.textContent).toContain("Slow for 27 s");
+    expect(detailText("ds-a")).toContain("Median 22 ms");
   });
 
   it("keeps the privacy reveal out of the face's image, whose children a screen reader skips", async () => {
@@ -191,10 +246,13 @@ describe("the connection face for a screen reader", () => {
     mountDeck("ds-a");
     const edit = slot("ds-a").querySelector<HTMLButtonElement>("button.ds-id.editable")!;
     expect(edit.getAttribute("aria-label")).toBe("Edit config for alpha");
-    expect(description(edit)).toBe("Connection stalled");
+    expect(description(edit)).toBe("Connection stalled for 5 s");
     library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", rtt_ms: 1_300 }))];
     flushSync();
     expect(description(edit)).toBe("Connection slow, 1.3 s");
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "reconnecting", since: NOW - 20_000 }))];
+    flushSync();
+    expect(description(edit)).toBe("Connection lost, reconnecting for 20 s");
   });
 
   it("gives the edit button no description while the row shows no face", () => {

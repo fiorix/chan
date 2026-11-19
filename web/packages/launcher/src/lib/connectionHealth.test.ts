@@ -7,7 +7,7 @@ import {
   connectionFaceName,
   connectionFigures,
   connectionSparkline,
-  connectionStateAge,
+  connectionSparklineWidth,
 } from "./connectionHealth";
 
 /// The reading the desktop serves for a connection slow from two 450 ms
@@ -50,9 +50,9 @@ describe("face words", () => {
     expect(connectionFaceName(waiting, 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
-  test("a stalled face counts its wait in whole seconds", () => {
+  test("a stalled face counts its wait in whole seconds, in its words and its name", () => {
     expect(connectionFaceLabel(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("stalled 7 s");
-    expect(connectionFaceName(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("Connection stalled");
+    expect(connectionFaceName(health({ face: "stalled", wait_since: 2_000 }), 9_999)).toBe("Connection stalled for 7 s");
   });
 
   test("a wait from a moment ahead of this clock counts as none", () => {
@@ -60,10 +60,21 @@ describe("face words", () => {
     expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 500, wait_since: 11_000 }), 10_000)).toBe("500 ms");
   });
 
-  test("reconnecting reads its word whatever ping still waits", () => {
-    const down = health({ face: "reconnecting", wait_since: 0 });
-    expect(connectionFaceLabel(down, 40_000)).toBe("reconnecting");
-    expect(connectionFaceName(down, 40_000)).toBe("Connection lost, reconnecting");
+  test("reconnecting counts from the face's start whatever ping still waits", () => {
+    const down = health({ face: "reconnecting", since: 28_000, wait_since: 0 });
+    expect(connectionFaceLabel(down, 40_999)).toBe("reconnecting 12 s");
+    expect(connectionFaceName(down, 40_999)).toBe("Connection lost, reconnecting for 12 s");
+  });
+
+  test("reconnecting counts in whole minutes from 120 s", () => {
+    const down = health({ face: "reconnecting", since: 0 });
+    expect(connectionFaceLabel(down, 119_999)).toBe("reconnecting 119 s");
+    expect(connectionFaceLabel(down, 120_000)).toBe("reconnecting 2 min");
+    expect(connectionFaceName(down, 754_000)).toBe("Connection lost, reconnecting for 12 min");
+  });
+
+  test("a reconnecting face that starts ahead of this clock counts from zero", () => {
+    expect(connectionFaceLabel(health({ face: "reconnecting", since: 10_000 }), 9_000)).toBe("reconnecting 0 s");
   });
 
   test.each([
@@ -138,7 +149,23 @@ describe("chart", () => {
   });
 });
 
-describe("contact clock and state age", () => {
+describe("chart width", () => {
+  test("spans the detail at the chart's one scale, 48 units to 69 px", () => {
+    expect(connectionSparklineWidth(552)).toBe(384);
+    expect(connectionSparklineWidth(276)).toBe(192);
+  });
+
+  test("keeps the default width until the detail has been measured", () => {
+    expect(connectionSparklineWidth(0)).toBe(180);
+  });
+
+  test("spreads the points across the width it is given", () => {
+    expect(connectionSparkline([20, null, 24], connectionSparklineWidth(552)))
+      .toEqual({ paths: ["M 3 42 L 3 42", "M 381 42 L 381 42"], misses: [192] });
+  });
+});
+
+describe("contact clock", () => {
   test("last contact is a locale clock time with seconds or a dash", () => {
     expect(connectionContactTime(null)).toBe("-");
     const format = vi.spyOn(Date.prototype, "toLocaleTimeString").mockReturnValue("17:42:07");
@@ -149,34 +176,5 @@ describe("contact clock and state age", () => {
     } finally {
       format.mockRestore();
     }
-  });
-
-  test("clamps a face that starts ahead of this clock to zero", () => {
-    expect(connectionStateAge(health({ face: "slow", since: 10_000 }), 9_000)).toBe("Slow for 0 s");
-  });
-
-  test("uses whole minutes for long state ages", () => {
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 754_000)).toBe("Reconnecting for 12 min");
-  });
-
-  test("changes state age from seconds to minutes at 120 s", () => {
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 119_999)).toBe("Reconnecting for 119 s");
-    expect(connectionStateAge(health({ face: "reconnecting", since: 0 }), 120_000)).toBe("Reconnecting for 2 min");
-  });
-
-  test.each([
-    ["healthy", "Connected"],
-    ["unknown", "No reading yet"],
-    ["slow", "Slow for 12 s"],
-    ["stalled", "No response for 12 s"],
-    ["reconnecting", "Reconnecting for 12 s"],
-  ] as const)("words the %s face", (face, expected) => {
-    expect(connectionStateAge(health({ face, since: 0, wait_since: 0 }), 12_900)).toBe(expected);
-  });
-
-  test("stalled counts the ping's wait, while slow and reconnecting count from the face's start", () => {
-    expect(connectionStateAge(health({ face: "stalled", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("No response for 8 s");
-    expect(connectionStateAge(health({ face: "slow", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("Slow for 4 s");
-    expect(connectionStateAge(health({ face: "reconnecting", since: 16_000, wait_since: 11_100 }), 20_000)).toBe("Reconnecting for 4 s");
   });
 });
