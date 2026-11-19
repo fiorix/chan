@@ -511,11 +511,20 @@ impl ProbePace {
     }
 }
 
+/// What holds the keyboard in a window of the desktop: the window's own
+/// webview, or the Computers screen, a webview of its own over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum FocusHolder {
+    Window,
+    Screen,
+}
+
 /// The desktop's [`ProbePace`], shared by every feed's pump.
 pub(crate) struct ProbePacer {
-    /// The labels of the desktop's windows that have the focus. A move of
-    /// the focus between two windows can report the loss first.
-    focused: Mutex<HashSet<String>>,
+    /// What has the focus in the desktop's windows, by window label. A move
+    /// of the focus between two windows, or between a window's webview and
+    /// its Computers screen, can report the loss first.
+    focused: Mutex<HashSet<(String, FocusHolder)>>,
     pace: watch::Sender<ProbePace>,
 }
 
@@ -537,14 +546,31 @@ impl ProbePacer {
     /// (`focused` false). When the desktop gains the focus, every feed
     /// pings once, in the same update of the pace.
     pub(crate) fn window_focus(&self, label: &str, focused: bool) {
+        self.holder_focus(label, FocusHolder::Window, focused);
+    }
+
+    /// The Computers screen over window `host` gained or lost the keyboard,
+    /// or was hidden or dropped (`focused` false). The window has the focus
+    /// while either its own webview or its screen holds it. Only Windows
+    /// reports a screen's focus: there tauri-runtime-wry synthesizes a
+    /// window's focus from its own webview's WebView2 controller, so the
+    /// screen taking the keyboard reads as the window losing the focus, and
+    /// no gain follows while the screen holds it. Elsewhere a window's focus
+    /// is the native window's, which the screen's webview leaves alone.
+    pub(crate) fn screen_focus(&self, host: &str, focused: bool) {
+        self.holder_focus(host, FocusHolder::Screen, focused);
+    }
+
+    fn holder_focus(&self, label: &str, holder: FocusHolder, focused: bool) {
         let now_focused = {
-            let mut windows = self.focused.lock().unwrap_or_else(|e| e.into_inner());
+            let mut holders = self.focused.lock().unwrap_or_else(|e| e.into_inner());
+            let key = (label.to_string(), holder);
             if focused {
-                windows.insert(label.to_string());
+                holders.insert(key);
             } else {
-                windows.remove(label);
+                holders.remove(&key);
             }
-            !windows.is_empty()
+            !holders.is_empty()
         };
         self.pace
             .send_if_modified(|pace| pace.take_focus(now_focused));
@@ -1252,5 +1278,52 @@ mod tests {
         assert_eq!(pace.borrow().nudges, 2);
         pacer.ping_now();
         assert_eq!(pace.borrow().nudges, 3);
+    }
+
+    /// The reports Windows makes while a window's Computers screen holds the
+    /// keyboard: the window's own webview loses the focus to the screen, and
+    /// the screen's webview reports its gain and its loss.
+    #[test]
+    fn a_window_whose_computers_screen_holds_the_keyboard_keeps_the_focus() {
+        let focused = |nudges| ProbePace {
+            focused: true,
+            nudges,
+        };
+        let pacer = ProbePacer::default();
+        let pace = pacer.subscribe();
+        pacer.window_focus("w", true);
+        assert_eq!(*pace.borrow(), focused(1));
+        // The screen shows and takes the keyboard, its gain reported first.
+        pacer.screen_focus("w", true);
+        pacer.window_focus("w", false);
+        assert_eq!(
+            *pace.borrow(),
+            focused(1),
+            "the screen taking the keyboard read as the window losing it"
+        );
+        // The user goes to another application.
+        pacer.screen_focus("w", false);
+        assert!(!pace.borrow().focused, "a screen's loss kept the focus");
+        // The user comes back: the window's webview gains the focus, and the
+        // screen takes the keyboard back from it.
+        pacer.window_focus("w", true);
+        pacer.screen_focus("w", true);
+        pacer.window_focus("w", false);
+        assert_eq!(*pace.borrow(), focused(2));
+        // The screen hides and hands the keyboard to the window's webview.
+        pacer.screen_focus("w", false);
+        pacer.window_focus("w", true);
+        assert!(pace.borrow().focused);
+        // The window's loss, reported before its screen's gain.
+        pacer.window_focus("w", false);
+        pacer.screen_focus("w", true);
+        assert!(pace.borrow().focused);
+        // Another window's focus is no screen's: the screen of "w" keeps
+        // the desktop focused after "v" loses it.
+        pacer.window_focus("v", true);
+        pacer.window_focus("v", false);
+        assert!(pace.borrow().focused);
+        pacer.screen_focus("w", false);
+        assert!(!pace.borrow().focused);
     }
 }

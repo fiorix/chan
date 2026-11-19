@@ -121,6 +121,11 @@ url = { workspace = true }
 #   decorated window would have (AdjustWindowRectExForDpi, looked up at run
 #   time), so a hide and restore keeps its size (titlebar_tabs.rs).
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }
+# The focus handlers the in-window launcher attaches to its WebView2
+# controller (src/launcher_panel.rs), so the devserver feeds' pacer sees a
+# window as focused while its launcher holds the keyboard. The version is the
+# one wry and tauri-runtime-wry link, so Cargo builds one webview2-com.
+webview2-com = "0.39"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 # The message a launch shows when it exits beside a desktop that does not

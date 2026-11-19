@@ -843,6 +843,12 @@ impl DevserverFeed {
         self.pacer.window_focus(label, focused);
     }
 
+    /// The Computers screen over window `host` gained or lost the keyboard,
+    /// or was hidden or dropped.
+    fn screen_focus(&self, host: &str, focused: bool) {
+        self.pacer.screen_focus(host, focused);
+    }
+
     /// Ask every devserver that answers its feed's ping for one now, so the
     /// Computers screen shows each card's face fresh as it shows.
     fn ping_now(&self) {

@@ -361,6 +361,11 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
                 ZOOM_LEVELS.with(|levels| levels.borrow_mut().remove(&host));
             }
         });
+        // A launcher dropped with the keyboard reports no loss of it.
+        app_for_main
+            .state::<Arc<AppState>>()
+            .devserver_feed
+            .screen_focus(&host, false);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         GTK_LAYERS.with(|layers| {
             layers.borrow_mut().remove(&host);
@@ -746,6 +751,10 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
             }
         }
     });
+    // A hidden launcher holds no keyboard, whatever its webview reports.
+    app.state::<Arc<AppState>>()
+        .devserver_feed
+        .screen_focus(host, false);
     let Some(host_window) = host_window else {
         return;
     };
@@ -755,8 +764,6 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
         let _ = host_window.remove_menu();
         crate::rebuild_window_menu(app);
     }
-    #[cfg(target_os = "macos")]
-    let _ = app;
 }
 
 /// Hide the launcher overlay and return keyboard focus to the host.
@@ -1099,6 +1106,8 @@ fn build_panel(
         // Built hidden, so parked until its first show fits it.
         #[cfg(target_os = "macos")]
         park(host, &webview);
+        #[cfg(windows)]
+        report_focus(app, &label, &webview);
         webview
     };
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1161,6 +1170,46 @@ fn build_panel(
         });
     }
     Ok(true)
+}
+
+/// Report the focus of `host`'s launcher to the devserver feeds' pacer, which
+/// paces them faster while a window of the desktop has the focus. On Windows
+/// tauri-runtime-wry reads a window's focus from its own webview's WebView2
+/// controller alone, so the launcher taking the keyboard reads as the window
+/// losing the focus, and no gain follows while the launcher holds it: the
+/// launcher's controller reports for itself. A hidden or dropped launcher
+/// holds no focus (`hide_now`, `close_for_host`). Main thread.
+#[cfg(windows)]
+fn report_focus(app: &AppHandle, host: &str, webview: &wry::WebView) {
+    use webview2_com::FocusChangedEventHandler;
+    use wry::WebViewExtWindows;
+
+    let controller = webview.controller();
+    for gained in [true, false] {
+        let app = app.clone();
+        let host_for_event = host.to_string();
+        let handler = FocusChangedEventHandler::create(Box::new(move |_, _| {
+            app.state::<Arc<AppState>>()
+                .devserver_feed
+                .screen_focus(&host_for_event, gained);
+            Ok(())
+        }));
+        // The controller holds the handler until it closes with the
+        // launcher, so the token that would remove it early is not kept.
+        let mut token: i64 = 0;
+        // SAFETY: a COM call on the launcher's live controller, on the main
+        // thread that created it, with a handler it keeps a reference to.
+        let attached = unsafe {
+            if gained {
+                controller.add_GotFocus(&handler, &mut token)
+            } else {
+                controller.add_LostFocus(&handler, &mut token)
+            }
+        };
+        if let Err(e) = attached {
+            tracing::warn!(host, gained, error = %e, "watching the launcher's focus failed");
+        }
+    }
 }
 
 fn open_externally(app: &AppHandle, target: &str) {
@@ -1515,6 +1564,44 @@ mod tests {
             unshown < ping,
             "a show that did not happen asked for a ping"
         );
+    }
+
+    #[test]
+    fn a_launcher_reports_its_own_focus_on_windows_and_none_once_hidden() {
+        // On Windows a window's focus is read from its own webview's WebView2
+        // controller, so a launcher holding the keyboard reads as a window
+        // without the focus unless the launcher's controller reports for
+        // itself. A hidden or dropped launcher holds no focus, whatever its
+        // controller reported last.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let body = |head: &str| {
+            let (_, rest) = SOURCE.split_once(head).expect("the function exists");
+            rest.split_once("\n}\n")
+                .expect("it ends at a column-0 brace")
+                .0
+        };
+        let build = body("\nfn build_panel(");
+        assert!(build.contains("#[cfg(windows)]\n        report_focus(app, &label, &webview);"));
+        let report = body("\nfn report_focus(");
+        assert!(report.contains("controller.add_GotFocus(&handler, &mut token)"));
+        assert!(report.contains("controller.add_LostFocus(&handler, &mut token)"));
+        assert!(report.contains(".screen_focus(&host_for_event, gained)"));
+        let hide = body("\nfn hide_now(");
+        let hidden = hide
+            .find("webview.set_visible(false)")
+            .expect("the hide hides the launcher");
+        let cleared = hide
+            .find(".screen_focus(host, false)")
+            .expect("a hidden launcher holds no focus");
+        assert!(hidden < cleared);
+        let close = body("\npub(crate) fn close_for_host<");
+        let dropped = close
+            .find("launchers.remove(&host)")
+            .expect("the close drops the launcher");
+        let cleared = close
+            .find(".screen_focus(&host, false)")
+            .expect("a dropped launcher holds no focus");
+        assert!(dropped < cleared);
     }
 
     #[test]
