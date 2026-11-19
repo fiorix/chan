@@ -115,6 +115,13 @@
     {/if}
     {#if semantic.state?.model_note}
       <p class="hint" role="note">{semantic.state.model_note}</p>
+      <button
+        class="action"
+        disabled={semantic.modelBusy || semantic.downloading || semantic.enabling}
+        onclick={() => void setSemanticModel(semantic.state!.model_name)}
+      >
+        Keep {semantic.state.model_name}
+      </button>
     {/if}
   </div>
 </SettingField>
@@ -137,6 +144,24 @@
   }
   .v .ok {
     color: var(--accent);
+  }
+  .action {
+    padding: 5px 10px;
+    border: 1px solid var(--btn-border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    align-self: flex-start;
+  }
+  .action:hover:not(:disabled) {
+    border-color: var(--btn-hover);
+  }
+  .action:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
   .muted {
     color: var(--text-secondary);

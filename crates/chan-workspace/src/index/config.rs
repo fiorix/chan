@@ -229,10 +229,10 @@ impl IndexConfig {
         Some(
             match RETIRED_MODELS.iter().find(|(id, _)| *id == replaced) {
                 Some((_, why)) => format!(
-                    "{replaced} is no longer offered: {why}. This workspace uses {model} until another model is chosen."
+                    "{replaced} is no longer offered: {why}. This workspace uses {model} until a model is chosen."
                 ),
                 None => format!(
-                    "{replaced} is not a model chan offers. This workspace uses {model} until another model is chosen."
+                    "{replaced} is not a model chan offers. This workspace uses {model} until a model is chosen."
                 ),
             },
         )
@@ -461,8 +461,8 @@ mod tests {
             loaded.model_note().unwrap(),
             format!(
                 "BAAI/bge-m3 is no longer offered: its Hub repository publishes no \
-                 model.safetensors. This workspace uses {DEFAULT_MODEL} until another \
-                 model is chosen."
+                 model.safetensors. This workspace uses {DEFAULT_MODEL} until a model \
+                 is chosen."
             )
         );
         // The note survives a save until a model is chosen.
