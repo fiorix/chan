@@ -1,6 +1,6 @@
 # The minimized-window raise is unread on Windows
 
-Status: carried from v0.131.0 on 2026-11-17 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
+Status: carried from v0.131.0 on 2026-11-17 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
 
 Record: [the minimized-window row](../done/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md) shipped in v0.131.0 on its tests and its readings in a Linux desktop guest (acceptances 1 and 2). Its acceptance 3 on the Windows test VM did not run: the reading on the release candidate stopped twice in its test kit before any `cs window open` cycle (`dev/v0131-team/evidence/Ops131/winvm131/10b-unbury/`, `10c-unbury/`).
 

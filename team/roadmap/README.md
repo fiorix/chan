@@ -21,28 +21,28 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-[ghosttyng]: v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[ghosttyng]: v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [modelroots]: v0.132.0/the-model-download-trusts-only-bundled-roots.md
-[streamlag]: v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
-[conpty]: v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
-[pillcover]: v0.132.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md
+[streamlag]: v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
+[conpty]: v0.133.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
+[pillcover]: v0.133.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md
 [persistwin]: v0.132.0/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md
 [taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
-[winclaimread]: v0.132.0/the-windows-claims-two-account-and-compatibility-readings.md
-[tlswin]: v0.132.0/the-tls-rows-windows-trust-readings.md
-[termredproofs]: v0.132.0/the-terminal-regression-browser-checks-red-proofs.md
+[winclaimread]: v0.133.0/the-windows-claims-two-account-and-compatibility-readings.md
+[tlswin]: v0.133.0/the-tls-rows-windows-trust-readings.md
+[termredproofs]: v0.133.0/the-terminal-regression-browser-checks-red-proofs.md
 [linkhealth]: v0.132.0/a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md
 [keyowner]: v0.132.0/the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md
 [freshmodes]: v0.132.0/a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md
-[exitedtry]: v0.132.0/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md
+[exitedtry]: v0.133.0/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md
 [graphroot]: v0.132.0/the-graph-tab-cuts-off-root-files-below-the-bottom-edge-in-a-workspace-whose-root-holds-many-entries.md
-[unburywin]: v0.132.0/the-minimized-window-raise-is-unread-on-windows.md
-[appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
+[unburywin]: v0.133.0/the-minimized-window-raise-is-unread-on-windows.md
+[appenv]: v0.133.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [fbpaste]: v0.132.0/the-file-browser-menus-paste-lands-in-the-selections-folder-not-the-right-clicked-folder.md
 [docktarget]: v0.132.0/the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes.md
-[detailsclear]: v0.132.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md
-[wikiplaces]: v0.132.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md
+[detailsclear]: v0.133.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md
+[wikiplaces]: v0.133.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md
 [mousefamily]: v0.133.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
 [wakescale]: v0.132.0/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md
 [healthbadge]: v0.132.0/connection-health-shows-in-each-window-not-on-its-devservers-computers-badge.md
@@ -57,30 +57,18 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 
 | Item | State | Next |
 | --- | --- | --- |
-| [a fast stream loses output][streamlag] | partly built | build |
-| [AppImage children get its environment][appenv] | partly built | build |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
-| [ConPTY pulls history into the screen][conpty] | partly built | build |
-| [the index pill covers Dismiss][pillcover] | not started | build |
 | [persist cannot replace an open file][persistwin] | merged | measure |
 | [the Makefile's tauri fallback on Windows][taurifallback] | merged | closed |
-| [the Windows claim's installed readings][winclaimread] | not started | build |
 | [the model download trusts bundled roots][modelroots] | merged | measure |
-| [the TLS rows' Windows readings][tlswin] | not started | measure |
-| [terminal browser checks' red proofs][termredproofs] | not started | measure |
 | [a lossy link freezes a window][linkhealth] | merged | build |
 | [health moves to the Computers badge][healthbadge] | not started | build |
 | [listing cap locks windows; deep graph][listingcap] | not started | build |
 | [cap: links drop out of the graph][capghosts] | not started | build |
 | [the composer takes a survey's keys][keyowner] | partly built | build |
 | [a fresh shell keeps dead modes][freshmodes] | merged | closed |
-| [try again over an exited terminal][exitedtry] | not started | build |
 | [the graph cuts off root files][graphroot] | merged | closed |
-| [the minimized-window raise unread on Windows][unburywin] | not started | measure |
 | [the menu's Paste lands in the selection][fbpaste] | merged | closed |
 | [file commands lose a closed dock's target][docktarget] | not started | build |
-| [Workspace details clears the wrong selection][detailsclear] | not started | build |
-| [four places show wikilinks as typed][wikiplaces] | not started | build |
 | [terminals at half scale after a sleep][wakescale] | merged | build |
 
 ### v0.133.0
@@ -93,6 +81,18 @@ Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle (
 | [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 | [cap: three walks, no folder layer][capwalks] | not started | build |
 | [keys and viewers past the screen lock][lockholes] | not started | build |
+| [a fast stream loses output][streamlag] | partly built | build |
+| [AppImage children get its environment][appenv] | partly built | build |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
+| [ConPTY pulls history into the screen][conpty] | partly built | build |
+| [the index pill covers Dismiss][pillcover] | not started | build |
+| [the Windows claim's installed readings][winclaimread] | not started | build |
+| [the TLS rows' Windows readings][tlswin] | not started | measure |
+| [terminal browser checks' red proofs][termredproofs] | not started | measure |
+| [try again over an exited terminal][exitedtry] | not started | build |
+| [the minimized-window raise unread on Windows][unburywin] | not started | measure |
+| [Workspace details clears the wrong selection][detailsclear] | not started | build |
+| [four places show wikilinks as typed][wikiplaces] | not started | build |
 
 ## Completed
 
@@ -104,7 +104,7 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 - [a-devserver-close-test-holds-a-tenth-of-the-production-release-budget-and-fails-a-loaded-gate](done/a-devserver-close-test-holds-a-tenth-of-the-production-release-budget-and-fails-a-loaded-gate.md) - A devserver close test holds a tenth of the production release budget and fails a loaded gate.
 - [a-diagrams-clicks-land-off-to-the-side-of-the-pointer](done/a-diagrams-clicks-land-off-to-the-side-of-the-pointer.md) - A diagram's clicks land off to the side of the pointer.
 - [a-gateway-page-may-delete-a-saved-layout](done/a-gateway-page-may-delete-a-saved-layout.md) - A gateway page may delete a saved layout.
-- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (the session frame's PTY metadata shipped; its client half moved to v0.132.0 on 2026-11-16).
+- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.133.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (the session frame's PTY metadata shipped; its client half moved to v0.132.0 on 2026-11-16).
 - [a-graph-tab-keeps-a-directorys-old-files-after-another-directory-takes-its-name](done/a-graph-tab-keeps-a-directorys-old-files-after-another-directory-takes-its-name.md) - A graph tab keeps a directory's old files after another directory takes its name.
 - [a-heading-the-editors-parse-reaches-late-has-no-fold-chevron-until-an-edit](done/a-heading-the-editors-parse-reaches-late-has-no-fold-chevron-until-an-edit.md) - A heading the editor's parse reaches late has no fold chevron until an edit.
 - [a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back](done/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md) - A minimized window stays minimized when cs window open, a window list's Focus or About brings it back.
@@ -112,18 +112,18 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 - [a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved](done/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md) - A reloaded window can come back focused on another pane than it saved.
 - [a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing](done/a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing.md) - A second launch from a terminal gets no focus where the window manager prevents focus stealing.
 - [a-stale-workspace-read-reverts-a-preference-the-user-just-set](done/a-stale-workspace-read-reverts-a-preference-the-user-just-set.md) - A stale workspace read reverts a preference the user just set.
-- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.132.0 at the cut on 2026-11-15, its server stage built and not merged).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.132.0 at the cut on 2026-11-15, its server stage built and not merged).
 - [a-terminals-survey-takes-the-keyboard-from-another-pane](done/a-terminals-survey-takes-the-keyboard-from-another-pane.md) - A terminal's survey takes the keyboard from another pane.
 - [a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos](done/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md) - A warm chan-term launch opens its window without Chan coming forward on macOS.
 - [a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved](done/a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved.md) - A window that edits a shortcut erases the shortcuts another window saved.
 - [an-accessibility-press-on-a-tab-also-closes-it](done/an-accessibility-press-on-a-tab-also-closes-it.md) - An accessibility press on a tab also closes it.
 - [an-exported-pdf-holds-each-page-as-one-image-with-no-text-to-select-or-search](done/an-exported-pdf-holds-each-page-as-one-image-with-no-text-to-select-or-search.md) - An exported PDF holds each page as one image, with no text to select or search (withdrawn by the owner on 2026-11-14; its gap page fix shipped).
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 3 and part 4's first task shipped; carried to v0.132.0 for part 4's tasks 2 to 6 and parts 5 and 6).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 3 and part 4's first task shipped; carried to v0.132.0 for part 4's tasks 2 to 6 and parts 5 and 6).
 - [cs-terminal-team-load-script-overwrites-a-hand-edited-team-config](done/cs-terminal-team-load-script-overwrites-a-hand-edited-team-config.md) - cs terminal team load --script overwrites a hand-edited team config.
 - [cs-window-new-prints-an-id-the-window-verbs-refuse](done/cs-window-new-prints-an-id-the-window-verbs-refuse.md) - cs window new prints an id the window verbs refuse.
 - [cs-window-new-returns-before-the-window-can-take-commands](done/cs-window-new-returns-before-the-window-can-take-commands.md) - cs window new returns before the window can take commands.
 - [directory-downloads-and-copies-carry-chans-write-temporaries](done/directory-downloads-and-copies-carry-chans-write-temporaries.md) - Directory downloads and copies carry chan's write temporaries.
-- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.132.0 at the cut on 2026-11-15, built in part and not merged).
+- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.133.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.132.0 at the cut on 2026-11-15, built in part and not merged).
 - [one-timed-out-directory-read-fails-a-graph-tabs-first-load](done/one-timed-out-directory-read-fails-a-graph-tabs-first-load.md) - One timed-out directory read fails a graph tab's first load.
 - [slides-and-pdf-export-show-wikilinks-as-raw-text](done/slides-and-pdf-export-show-wikilinks-as-raw-text.md) - Slides and PDF export show wikilinks as raw text.
 - [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.132.0 at the cut on 2026-11-15 with the environment row, not started).
@@ -143,14 +143,14 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 Shipped 2026-11-14; see [release-v0.130.0](../release/release-v0.130.0.md). A no-rc release by the owner's word ("the ones pending we move to v0.131 and once the ones inflight complete we move to ga/tag"): sixteen `--no-ff` merges, fourteen from twelve branches and two of `main`, into the integration branch `v0130/int` over `main` at `8f427abce` (the v0.129.0 tag and the systemd-report row), with the integrator's thirteen documents commits between them, under fourteen rows; nine shipped and are in [`done/`](done/), and the five not started moved to v0.131.0 on 2026-11-14. The manual, rewritten as short pages with the product changes the owner ordered in that lane, and two fixes from its follow-ups shipped without a row.
 
 - [a-ghostty-terminal-leaves-a-pure-black-background-unpainted](done/a-ghostty-terminal-leaves-a-pure-black-background-unpainted.md) - A ghostty terminal leaves a pure black background unpainted.
-- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.131.0 on 2026-11-14, not started).
+- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.133.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.131.0 on 2026-11-14, not started).
 - [a-ghostty-terminal-opening-in-a-background-pane-takes-the-keyboard-for-a-moment](done/a-ghostty-terminal-opening-in-a-background-pane-takes-the-keyboard-for-a-moment.md) - A ghostty terminal opening in a background pane takes the keyboard for a moment.
 - [a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges](done/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md) - A pane keeps its margin and rounded corners on the window's own edges.
 - [a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early](done/a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early.md) - A pasted or delivered text holding `ESC[201~` ends its bracketed paste early.
 - [a-standalone-terminal-window-loads-no-saved-shortcut-overrides](done/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md) - A standalone terminal window loads no saved shortcut overrides.
-- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.131.0 on 2026-11-14, not started).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.131.0 on 2026-11-14, not started).
 - [every-underline-style-in-a-ghostty-terminal-draws-one-straight-line](done/every-underline-style-in-a-ghostty-terminal-draws-one-straight-line.md) - Every underline style in a ghostty terminal draws one straight line.
-- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.131.0 on 2026-11-14, not started).
+- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.133.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.131.0 on 2026-11-14, not started).
 - [moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal](done/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) - Moving pane focus to a file browser leaves the keyboard in the terminal.
 - [selected-text-in-a-ghostty-terminal-loses-its-colour-to-a-fixed-dark-grey](done/selected-text-in-a-ghostty-terminal-loses-its-colour-to-a-fixed-dark-grey.md) - Selected text in a ghostty terminal loses its colour to a fixed dark grey.
 - [systemd-report-cannot-read-the-devservers-metrics](done/systemd-report-cannot-read-the-devservers-metrics.md) - systemd-report cannot read the devserver's metrics.
@@ -161,7 +161,7 @@ Shipped 2026-11-14; see [release-v0.130.0](../release/release-v0.130.0.md). A no
 
 Shipped 2026-11-13; see [release-v0.129.0](../release/release-v0.129.0.md). A no-rc release by the owner's word ("let's go"): twenty-eight `--no-ff` merges from seventeen branches into the integration branch `v0129/int` over `main` at `8ded1bda9` (the v0.128.0 tag), with a merge of `main` for the v0.128.0 record (`8b7a54f18`), documents commits and one fix between them, under five rows; four shipped and are in [`done/`](done/), the raise row with its hidden-app case fixed the day the owner's Mac walk found it. The fifth, the ghostty-web fork, shipped its part 2, re-seating the core, and moves to v0.130.0 for parts 3 to 6. Two of the owner's requests shipped without a row, a remote window's title led by an up arrow and the tmux titles, and so did the Arch snapshot downgrade the v0.128.0 record promised as this release's first merge, which came in near its end.
 
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 2, re-seating the core, shipped; carried to v0.130.0 for parts 3 to 6).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 2, re-seating the core, shipped; carried to v0.130.0 for parts 3 to 6).
 - [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app.
 - [the-command-launcher-is-one-flat-list-behind-dead-keys](done/the-command-launcher-is-one-flat-list-behind-dead-keys.md) - The command launcher is one flat list behind dead keys, and an action has up to five names across the deck, the menus and Settings.
 - [the-default-terminal-is-chan-desktop-under-flags-of-its-own](done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md) - The default terminal is chan-desktop under flags of its own.
@@ -186,7 +186,7 @@ Shipped 2026-11-12; see [release-v0.128.0](../release/release-v0.128.0.md). A no
 - [a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn](done/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md) - A used token's cut is lost when the client hangs up between the commit and the spawn.
 - [basic-flows-break-with-no-end-to-end-check-to-catch-them](done/basic-flows-break-with-no-end-to-end-check-to-catch-them.md) - Basic flows break with no end-to-end check to catch them.
 - [chan-cannot-be-opened-as-a-file-browser-or-markdown-editor](done/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md) - chan cannot be opened as a file browser or Markdown editor.
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
 - [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app (carried to v0.129.0, not started).
 - [copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken](done/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md) - Copying a wrapped command from a ghostty terminal pastes it broken.
 - [ghostty-sends-a-pasted-line-break-as-lf](done/ghostty-sends-a-pasted-line-break-as-lf.md) - ghostty sends a pasted line break as LF where xterm.js sends CR.

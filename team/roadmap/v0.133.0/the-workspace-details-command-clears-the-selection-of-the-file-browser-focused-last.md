@@ -1,6 +1,6 @@
 # The Workspace details command clears the selection of the file browser focused last, not the tab that shows the details
 
-Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
+Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
 
 Record: item 9 of `dev/v0131-team/reports/owner-candidates-1.md`, found while the launcher-target row was built (`dev/v0131-team/followups/followup-Web131-Lead131-6.md`, "Outside this row", and `dev/v0131-team/reviews/review-fbtarget-1.md`, note 8) and left out of that row as a workspace command, not one of its selection commands; the candidate was not verified by a run. [The launcher-target row](../done/the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active.md) kept the view commands and this one out of its boundary. Nothing is lost but a selection.
 
