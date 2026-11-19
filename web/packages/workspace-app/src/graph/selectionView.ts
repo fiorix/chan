@@ -331,7 +331,9 @@ export function fitsBudget(drawn: ReadonlySet<string>, budget: number): boolean 
 /// do. Only the open folders at or below a folder in `grown`, where the
 /// drawn tree grew, close, deepest first and a level at a time, so a change
 /// closes what it grew and leaves the rest of the tree as it was; the
-/// subfolders of a folder that grew close before the folder itself.
+/// subfolders of a folder that grew close before the folder itself. Should
+/// those not be enough, which `grown` naming every folder the tree grew in
+/// rules out, every folder closes.
 export function closeToBudget(
   nodes: readonly ViewNode[],
   opened: Opened,

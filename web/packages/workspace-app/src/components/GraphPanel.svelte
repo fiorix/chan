@@ -901,12 +901,13 @@
   // The drawn-node budget, held in one place before anything is drawn:
   // whatever changed the drawn nodes or the opened set (a raise, a
   // double-click's read, a patch, a whole fetch, a shared graph taken, a
-  // restored tab), a tree past the budget closes back the folders the
-  // change grew, deepest first. What is left is drawn as the budget last
-  // held it, so its own write fits and it runs once more and stops. When
-  // the selected directory is what closes, the status line says why: the
-  // tap before a double-click selects its folder, and a tab opened on a
-  // directory selects it.
+  // restored tab), a tree past the budget closes back the open folders at
+  // or below those the change grew, deepest first. What is left fits: at
+  // worst it is a part of what was drawn when the budget last held, so its
+  // own write fits and it runs once more and stops. When the selected
+  // directory closes and could not open again within the budget, the
+  // status line says why: the tap before a double-click selects its
+  // folder, and a tab opened on a directory selects it.
   $effect.pre(() => {
     const opened = expandedDirs;
     const drawn = drawnTreePaths(nodes, opened);
@@ -919,7 +920,14 @@
     const closed = closeToBudget(nodes, opened, GRAPH_DRAWN_NODE_BUDGET, grown);
     if (closed === null) return;
     untrack(() => {
-      if (depthDir && opened[depthDir] && !closed[depthDir]) depthNote = opensPastBudget(depthDir);
+      if (
+        depthDir &&
+        opened[depthDir] &&
+        !closed[depthDir] &&
+        !fitsBudget(drawnTreePaths(nodes, { ...closed, [depthDir]: true }), GRAPH_DRAWN_NODE_BUDGET)
+      ) {
+        depthNote = opensPastBudget(depthDir);
+      }
       graphState.expanded = closed;
     });
   });

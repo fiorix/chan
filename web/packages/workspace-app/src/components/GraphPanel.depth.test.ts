@@ -562,6 +562,28 @@ describe("the drawn-node budget holds", () => {
     expect(note(), "no note names a folder for a cause it did not have").toBeNull();
   });
 
+  test("a close names the selected folder only when it would not fit alone", async () => {
+    // u0 and u1 hold 10 notes each and are open; u0 is selected. One burst
+    // adds a note to u0 and 3,000 to u1, and both close at their level.
+    serveUnreadFolders(2, 10);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    for (const folder of ["u1", "u0"]) {
+      canvas.props!.onSelect(`directory:${folder}`);
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle(10);
+    }
+    const arriving = ["u0/one.md", ...Array.from({ length: 3000 }, (_, n) => `u1/more${n}.md`)];
+    graphServer.fs.nodes.push(...arriving.map((path) => fsg.file(path)));
+    graphServer.fs.edges.push(...arriving.map((path) => fsg.contains(path.split("/")[0], path)));
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    expect(tab.expanded.u0, "u0 closed with its level").toBeUndefined();
+    expect(note(), "u0 alone fits, so no note says otherwise").toBeNull();
+  });
+
   test("a graph opened on a folder past the budget says why it stays closed", async () => {
     serveUnreadFolders(1, 3500);
     for (let n = 0; n < 3500; n += 1) {
