@@ -306,19 +306,18 @@ impl Client {
         let progress = self
             .progress
             .then(|| progress_bar(file.size, start, file.name));
-        let mut fresh = start == 0;
         loop {
             let (actual, from_zero) =
                 self.transfer(url, file, &mut part, start, progress.as_ref())?;
             if actual == file.sha256 {
                 break;
             }
-            // A whole-file answer to a resume was a fresh attempt already.
-            fresh |= from_zero;
             // Bytes of the right length that hash wrong cannot be resumed.
             part.set_len(0)?;
             part.rewind()?;
-            if fresh {
+            // An attempt from zero fails, a whole-file answer to a resume
+            // included.
+            if from_zero {
                 return Err(DownloadError::Digest {
                     file: file.name,
                     expected: file.sha256,
@@ -327,7 +326,6 @@ impl Client {
             }
             // The kept prefix may be what was wrong: fetch the whole file
             // once more before failing.
-            fresh = true;
             start = 0;
             if let Some(progress) = &progress {
                 progress.set_position(0);
