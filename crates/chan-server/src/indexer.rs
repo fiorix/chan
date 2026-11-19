@@ -1726,11 +1726,12 @@ impl ProgressCallback for StatusUpdater {
                     p.started
                 };
                 // Before the first embed flush this is the foreground
-                // BM25/graph pass, which legitimately gates preflight ->
-                // Building. After it, BM25 is searchable and embeddings are
-                // a background refinement, so we must NOT revert to Building
-                // (that would re-lock preflight on every interleaved
-                // IndexFile tick).
+                // BM25/graph pass, and the status reads Building with its
+                // counter. After it, BM25 is searchable and embeddings are a
+                // background refinement on the idle status's embedding chip,
+                // so an interleaved IndexFile tick must NOT put the status
+                // back to Building, which would turn the chip back to
+                // indexing on every tick.
                 if !started {
                     let file = event.label.clone().unwrap_or_default();
                     if let Ok(mut s) = self.status.lock() {
