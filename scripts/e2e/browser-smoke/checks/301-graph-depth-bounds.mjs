@@ -7,27 +7,33 @@
 //             window's shared graph holds the whole of it: depth 2 draws
 //             about 2,815 nodes, depth 3 about 25,200;
 //   chain/    fourteen nested folders with a note at the bottom;
-//   ignored/  listed in the root .gitignore, so the index and the shared
-//             graph hold none of it and the tab reads it from disk:
-//             heavy/ has 60 folders of 60 notes (a second level would draw
-//             about 3,660 nodes), many/ has 100 folders of 20 notes (about
-//             2,110, more folders than one read takes), and each has a
-//             deep/ folder with a note that gives its depth a second level.
+//   ignored/  listed in the root .gitignore, which keeps it out of the
+//             index; the shared graph holds its notes all the same, since
+//             its tree layer lists the tree from disk, while the tab's
+//             spine holds a folder's level only once it reads it: heavy/
+//             has 60 folders of 60 notes (a second level would draw about
+//             3,660 nodes), many/ has 100 folders of 20 notes (about 2,110,
+//             more folders than one read takes), and each has a deep/
+//             folder with a note that gives its depth a second level.
 //
 // Once the index is idle, each leg opens a page whose graph tab has one
 // directory selected and its first level open (and the deep/ folder, for
 // the two ignored legs), opens the tab menu and drags its Depth slider from
 // its start to its end with the pointer, as a person does, then waits for
-// the graph to settle. Every leg's readings are recorded before anything is
-// asserted, so a failing leg leaves the others read.
+// the graph to settle: QUIET_MS with no fs-graph request in flight and no
+// change in the drawn count. Every leg's readings are recorded before
+// anything is asserted, so a failing leg leaves the others read. Every leg
+// first checks its own drag: the slider reads its end when the pointer is
+// released, or the leg fails as a drag, not as the graph.
 //
 //   wide:  while the pointer is down the drawn count does not change; the
-//          release stops at "2 [limit]", draws at most the budget, and the
-//          address's opened tree holds wide/a0 but not wide/a0/b0; a frame
-//          probe's largest gap from the press until the graph settles is
-//          within GAP_BOUND_MS, over a step that brings in about 2,800 nodes.
-//   heavy: the release reads the 60 folders' children before it opens a
-//          level, finds the second level past the budget, and stays at
+//          release stops at "2 [limit]", draws the second level's 2,800
+//          folders and at most the budget, and the address's opened tree
+//          holds wide/a0 but not wide/a0/b0; a frame probe's largest gap
+//          from the press until the graph settles is within GAP_BOUND_MS,
+//          over that step.
+//   heavy: the graph already counts the second level past the budget, so
+//          the release reads none of the 60 folders and stays at
 //          "1 [limit]" with at most the budget drawn.
 //   many:  the release reads all 100 folders, past the 64 one read takes,
 //          and opens the second level with no further step: the 2,000
@@ -45,12 +51,23 @@
 // second, the host cannot judge the bound, and the check skips once every
 // other reading has passed.
 //
+// QUIET_MS: a raise reads its folders one request after another and
+// draws a level once its last read lands, a frame or two later; 1,500 ms
+// with neither a request nor a change in the drawn count is a raise that
+// has ended, on a guest under the suite's load too.
+//
+// The pages ask for reduced motion. The tab menu otherwise pops in (from
+// scale 0.92 over 260 ms) and grows by 1.5% under the pointer, so a box
+// read while the menu opens puts the press beside the slider, where the
+// drag moves nothing, or the release short of the slider's end.
+//
 // What each leg catches: wide, a depth applied at every value of a drag,
 // and a release that opens past the budget or shows no "[limit]"; heavy, a
-// level opened before its folders' notes are counted; many, a raise that
-// stops after the first batch of folder reads; chain, a directory's depth
-// past the server's walk. The result records the wide leg's largest frame
-// gap and each leg's folder reads whether the check passes or not.
+// raise that reads a level the graph already counts past the budget; many,
+// a raise that stops after the first batch of folder reads; chain, a
+// directory's depth past the server's walk. The result records the wide
+// leg's largest frame gap and each leg's folder reads whether the check
+// passes or not.
 
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,6 +77,7 @@ import { launchServer, teardownServer } from "../lib/server.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
 const GAP_BOUND_MS = 250;
+const QUIET_MS = 1500;
 /// The baseline's frame rate under which the host is too loaded to judge.
 const MIN_BASELINE_FPS = 30;
 /// The workspace app's GRAPH_DRAWN_NODE_BUDGET.
@@ -124,6 +142,24 @@ async function settledGraph(page, timeoutMs = 120_000) {
     if (now && last && now.drawn === last.drawn && now.total === last.total) return now;
     last = now;
     await sleep(250);
+  }
+  return null;
+}
+
+/// The active graph's drawn and total node counts once, for QUIET_MS,
+/// `traffic` (the leg's fs-graph requests) has had none in flight and none
+/// started or answered, and the counts have not changed; null when that
+/// does not happen within the timeout.
+async function settledAfterRelease(page, traffic, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  let changedAt = Date.now();
+  while (Date.now() < deadline) {
+    const now = await drawnCounts(page).catch(() => null);
+    if (!now || !last || now.drawn !== last.drawn || now.total !== last.total) changedAt = Date.now();
+    last = now;
+    if (now && traffic.inFlight === 0 && Date.now() - Math.max(changedAt, traffic.lastAt) >= QUIET_MS) return now;
+    await sleep(100);
   }
   return null;
 }
@@ -210,9 +246,11 @@ function takeProbe(page) {
 /// Press on the slider's start, move the pointer to its end in steps, read
 /// the drawn count at each step, and release. The pointer stays on the
 /// track, from its first pixel to its last, so the press and the release
-/// both land on the slider.
+/// both land on the slider. Answers the drawn counts and the slider's value
+/// as the pointer is released.
 async function dragToEnd(page) {
-  const box = await page.$eval(".tab-menu-bubble .depth-row input[type='range']", (el) => {
+  const slider = ".tab-menu-bubble .depth-row input[type='range']";
+  const box = await page.$eval(slider, (el) => {
     const r = el.getBoundingClientRect();
     return { x: r.left, y: r.top + r.height / 2, width: r.width };
   });
@@ -225,8 +263,9 @@ async function dragToEnd(page) {
     await sleep(40);
     drawnWhileDown.push((await drawnCounts(page).catch(() => null))?.drawn ?? null);
   }
+  const released = await page.$eval(slider, (el) => el.value).catch(() => null);
   await page.mouse.up();
-  return drawnWhileDown;
+  return { drawnWhileDown, released };
 }
 
 function graphUrl(origin, token, windowId, dir, opened) {
@@ -255,6 +294,7 @@ export default {
         const page = await ctx.browser.newPage();
         pages.push(page);
         await page.setViewport({ width: 1280, height: 800 });
+        await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
         const windowId = `smoke-301-${dir.replaceAll("/", "-")}-${Date.now().toString(36)}`;
         await page.goto(graphUrl(url.origin, token, windowId, dir, opened), { waitUntil: "domcontentloaded", timeout: 60_000 });
         await page.waitForSelector(".graph-tab.active canvas", { timeout: 60_000 });
@@ -276,15 +316,31 @@ export default {
             reading.baseline = await takeProbe(page);
           }
           const reads = [];
-          page.on("request", (request) => {
+          const traffic = { inFlight: 0, lastAt: Date.now() };
+          const fsGraphPath = (request) => {
             const target = new URL(request.url());
-            if (target.pathname.endsWith("/api/fs-graph")) reads.push(target.searchParams.get("path") ?? "");
+            return target.pathname.endsWith("/api/fs-graph") ? (target.searchParams.get("path") ?? "") : null;
+          };
+          page.on("request", (request) => {
+            const path = fsGraphPath(request);
+            if (path === null) return;
+            reads.push(path);
+            traffic.inFlight += 1;
+            traffic.lastAt = Date.now();
           });
+          const answered = (request) => {
+            if (fsGraphPath(request) === null) return;
+            traffic.inFlight = Math.max(0, traffic.inFlight - 1);
+            traffic.lastAt = Date.now();
+          };
+          page.on("requestfinished", answered);
+          page.on("requestfailed", answered);
           if (probe) await startProbe(page);
           try {
-            reading.drawnWhileDown = await dragToEnd(page);
-            reading.after = await settledGraph(page);
-            await sleep(1000);
+            const drag = await dragToEnd(page);
+            reading.drawnWhileDown = drag.drawnWhileDown;
+            reading.released = drag.released;
+            reading.after = await settledAfterRelease(page, traffic);
           } finally {
             if (probe) reading.dragged = await takeProbe(page).catch((error) => ({ error: error.message }));
           }
@@ -307,21 +363,30 @@ export default {
       const expect = (ok, what) => {
         if (!ok) failures.push(what);
       };
-      for (const [name, reading] of Object.entries(record)) expect(!reading.error, `${name}: ${reading.error}`);
+      for (const [name, reading] of Object.entries(record)) {
+        expect(!reading.error, `${name}: ${reading.error}`);
+        expect(
+          reading.released === reading.slider?.max,
+          `${name}: the drag released the slider at ${reading.released}, not at its end ${reading.slider?.max}`,
+        );
+      }
       const { wide, heavy, many, chain } = record;
       expect(
         wide.before && wide.drawnWhileDown?.every((drawn) => drawn === wide.before.drawn),
         "wide: the drawn graph changed while the pointer was down",
       );
       expect(wide.depth === "2 [limit]", `wide: the release reads "${wide.depth}", not "2 [limit]"`);
-      expect(wide.after && wide.after.drawn <= DRAWN_NODE_BUDGET, `wide: ${wide.after?.drawn} nodes drawn`);
+      expect(
+        wide.after && wide.after.drawn >= WIDE.top * WIDE.middle && wide.after.drawn <= DRAWN_NODE_BUDGET,
+        `wide: ${wide.after?.drawn} nodes drawn, not the second level's ${WIDE.top * WIDE.middle} folders within the budget`,
+      );
       expect(
         wide.address?.includes("wide/a0") && !wide.address?.includes("wide/a0/b0"),
         "wide: the opened tree is not wide/a0 open and wide/a0/b0 closed",
       );
       expect(heavy.depth === "1 [limit]", `heavy: the release reads "${heavy.depth}", not "1 [limit]"`);
       expect(heavy.after && heavy.after.drawn <= DRAWN_NODE_BUDGET, `heavy: ${heavy.after?.drawn} nodes drawn`);
-      expect(heavy.folderReads === HEAVY.folders, `heavy: ${heavy.folderReads} folders read, not its ${HEAVY.folders}`);
+      expect(heavy.folderReads === 0, `heavy: ${heavy.folderReads} folders read of a level already past the budget`);
       expect(!heavy.address?.includes("ignored/heavy/u0"), "heavy: the level past the budget opened");
       expect(many.address?.includes(`ignored/many/u${MANY.folders - 1}`), "many: the folders past the first read did not open");
       expect(
