@@ -1,4 +1,4 @@
-// Connection probe: times one socket's pongs and reads the connection's health from them.
+// Connection probe: times one socket's pongs.
 //
 // The server answers each `{"type":"ping"}` with a `{"type":"pong"}` that
 // carries no id, in the order the pings reached it. A queue of send times
@@ -9,29 +9,6 @@
 // its owner reports what the socket did and reads the result. The
 // clock is injectable so a test can drive it without real time passing.
 
-/// What the probe's pongs say about its connection. `unknown` until this socket has
-/// received a pong, or any socket this probe has served with memory enabled.
-export type ConnectionProbeState = "unknown" | "ok" | "slow" | "stalled";
-
-/// A ping unanswered this long makes the connection `slow`. Well above a healthy
-/// round trip through a gateway, so jitter does not trip it, and short enough
-/// to show while the user still wonders why the window stopped answering.
-export const CONNECTION_SLOW_WAIT_MS = 1_000;
-/// Round trips at or over this make the connection `slow` once CONNECTION_RTT_RUN in a
-/// row reach it: the delay at which an echoed keystroke visibly lags.
-export const CONNECTION_SLOW_RTT_MS = 400;
-/// Round trips must come back under this, CONNECTION_RTT_RUN in a row, for the connection
-/// to leave `slow`. Lower than the entry threshold so a connection that hovers
-/// around it does not change state on every pong.
-export const CONNECTION_OK_RTT_MS = 300;
-/// How many round trips in a row a threshold takes, so that one outlier
-/// neither enters nor leaves `slow`.
-export const CONNECTION_RTT_RUN = 2;
-/// A ping unanswered this long, with no frame of any kind arriving meanwhile,
-/// makes the connection `stalled`: it carries nothing. Long enough for TCP to
-/// retransmit through a short burst of loss, and well short of the read
-/// deadlines, so the state shows before the socket is retired.
-export const CONNECTION_STALLED_MS = 4_000;
 /// The longest round trip worth timing: the sockets' ordinary read deadline,
 /// `WS_READ_DEADLINE_MS` in `transport.ts`, repeated here because this module
 /// imports nothing. A socket silent that long is retired, so a pong later
@@ -45,71 +22,12 @@ export const CONNECTION_MAX_RTT_MS = 45_000;
 /// deadline, so a socket retired on silence never reaches it.
 export const CONNECTION_PENDING_CAP = 32;
 
-/// One finished ping.
-export interface ConnectionSample {
-  /// When the ping left, on the probe's clock.
-  at: number;
-  /// How long its pong took, or `null` for a ping the socket never answered.
-  rttMs: number | null;
-}
-
-/// What `classifyConnection` reads. Times are on the probe's clock.
-export interface ConnectionReading {
-  /// This socket has received a pong, or an earlier one when this probe keeps
-  /// answer memory across resets.
-  hasAnswered: boolean;
-  /// Its latest round trips, oldest first.
-  rtts: readonly number[];
-  /// When the oldest unanswered ping left, or `null` with none waiting.
-  oldestPingAt: number | null;
-  /// When the last frame of any kind arrived, or `null` with none yet.
-  lastFrameAt: number | null;
-}
-
-/// The connection's state at `now`, given the state it was in. Pure: the previous
-/// state is the only memory, and it matters only for leaving `slow`, which
-/// takes CONNECTION_RTT_RUN round trips under CONNECTION_OK_RTT_MS where entering takes
-/// as many at CONNECTION_SLOW_RTT_MS or over, or one at CONNECTION_SLOW_WAIT_MS or over.
-export function classifyConnection(
-  prev: ConnectionProbeState,
-  reading: ConnectionReading,
-  now: number,
-): ConnectionProbeState {
-  if (!reading.hasAnswered) return "unknown";
-  const pingAt = reading.oldestPingAt;
-  if (pingAt !== null) {
-    // The silence counts from the ping: a frame older than the ping says
-    // nothing about a connection that was not being asked. A frame newer than the
-    // ping proves the connection still carries data, however late the pong.
-    const quietSince = Math.max(pingAt, reading.lastFrameAt ?? pingAt);
-    if (now - quietSince >= CONNECTION_STALLED_MS) return "stalled";
-    if (now - pingAt >= CONNECTION_SLOW_WAIT_MS) return "slow";
-  }
-  // A round trip that long had its ping overdue, whether or not anything
-  // read the state while it waited: a socket's first ping waits in `unknown`
-  // unless this probe keeps answer memory from an earlier socket.
-  const latest = reading.rtts.at(-1);
-  if (latest !== undefined && latest >= CONNECTION_SLOW_WAIT_MS) return "slow";
-  const run = reading.rtts.slice(-CONNECTION_RTT_RUN);
-  const full = run.length === CONNECTION_RTT_RUN;
-  if (prev === "slow" || prev === "stalled") {
-    return full && run.every((ms) => ms < CONNECTION_OK_RTT_MS) ? "ok" : "slow";
-  }
-  return full && run.every((ms) => ms >= CONNECTION_SLOW_RTT_MS) ? "slow" : "ok";
-}
-
 export interface ConnectionProbeOptions {
-  /// Keep whether any socket this probe has served answered a ping across reset().
-  rememberAnsweredAcrossSockets?: boolean;
   /// Clock, in milliseconds. Defaults to `Date.now`.
   now?: () => number;
-  /// Called once per finished ping that was timed: an answered one with its
-  /// round-trip time, and each eligible one still waiting when the socket is
-  /// retired as a miss.
-  onSample?: (sample: ConnectionSample) => void;
-  /// Called after every report that changed the probe, so an owner can read
-  /// it again.
-  onChange?: () => void;
+  /// Called after each pong that answers a ping, the only report that can
+  /// make `answered` true.
+  onAnswer?: () => void;
 }
 
 export interface ConnectionProbe {
@@ -128,17 +46,14 @@ export interface ConnectionProbe {
   frameReceived(): void;
   /// The clock jumped while pings were in flight, as across a machine sleep.
   /// They keep their place in the queue, so later pongs still pair up, but
-  /// their own pongs give no round-trip time and they count as neither timed
-  /// waits nor misses.
+  /// their own pongs give no round-trip time.
   forgetTimings(): void;
-  /// The socket opened or was retired. Timed waiting pings become misses if
-  /// this socket answered, or if answer memory was enabled and an earlier
-  /// socket answered. The probe then clears this socket's timings.
+  /// The socket opened or was retired. The probe clears this socket's
+  /// timings and whether it answered; `everAnswered` stays.
   reset(): void;
   /// Whether this socket has answered a ping.
   readonly answered: boolean;
-  /// Whether any socket this probe has served has answered a ping, including
-  /// earlier sockets only when rememberAnsweredAcrossSockets is enabled.
+  /// Whether any socket this probe has served has answered a ping.
   readonly everAnswered: boolean;
   /// Whether this socket has an unanswered ping, timed or counted.
   readonly hasPendingPing: boolean;
@@ -146,13 +61,6 @@ export interface ConnectionProbe {
   readonly rttMs: number | null;
   /// When this socket's last frame arrived, or `null` before the first.
   readonly lastFrameAt: number | null;
-  /// When the oldest unanswered ping that is still timed left, or `null` with
-  /// none waiting.
-  readonly oldestPingAt: number | null;
-  /// The connection's state now, carried forward from the state at the last call.
-  /// Time alone can change it while a ping waits, so an owner that wants the
-  /// change without a socket event calls again on a timer.
-  classify(): ConnectionProbeState;
 }
 
 export function createConnectionProbe(options: ConnectionProbeOptions = {}): ConnectionProbe {
@@ -166,11 +74,8 @@ export function createConnectionProbe(options: ConnectionProbeOptions = {}): Con
   let behind = 0;
   let answered = false;
   let everAnswered = false;
-  let rtts: number[] = [];
+  let rttMs: number | null = null;
   let lastFrameAt: number | null = null;
-  let state: ConnectionProbeState = "unknown";
-
-  const oldestPingAt = (): number | null => timed[0] ?? null;
 
   return {
     pingSent() {
@@ -185,7 +90,6 @@ export function createConnectionProbe(options: ConnectionProbeOptions = {}): Con
       // it the pong of an older ping.
       if (behind > 0 || timed.length >= CONNECTION_PENDING_CAP) behind += 1;
       else timed.push(now());
-      options.onChange?.();
     },
     pongReceived() {
       let at: number | null = null;
@@ -197,39 +101,27 @@ export function createConnectionProbe(options: ConnectionProbeOptions = {}): Con
       everAnswered = true;
       if (at !== null) {
         const took = Math.max(0, now() - at);
-        if (took <= CONNECTION_MAX_RTT_MS) {
-          rtts.push(took);
-          if (rtts.length > CONNECTION_RTT_RUN) rtts.shift();
-          options.onSample?.({ at, rttMs: took });
-        }
+        if (took <= CONNECTION_MAX_RTT_MS) rttMs = took;
       }
-      options.onChange?.();
+      options.onAnswer?.();
       return at;
     },
     frameReceived() {
       lastFrameAt = now();
-      options.onChange?.();
     },
     forgetTimings() {
       if (timed.length === 0) return;
       ahead += timed.length + behind;
       timed = [];
       behind = 0;
-      options.onChange?.();
     },
     reset() {
-      if (everAnswered) {
-        for (const at of timed) options.onSample?.({ at, rttMs: null });
-      }
       ahead = 0;
       timed = [];
       behind = 0;
       answered = false;
-      if (!options.rememberAnsweredAcrossSockets) everAnswered = false;
-      rtts = [];
+      rttMs = null;
       lastFrameAt = null;
-      state = "unknown";
-      options.onChange?.();
     },
     get answered() {
       return answered;
@@ -241,21 +133,10 @@ export function createConnectionProbe(options: ConnectionProbeOptions = {}): Con
       return ahead > 0 || timed.length > 0 || behind > 0;
     },
     get rttMs() {
-      return rtts.at(-1) ?? null;
+      return rttMs;
     },
     get lastFrameAt() {
       return lastFrameAt;
-    },
-    get oldestPingAt() {
-      return oldestPingAt();
-    },
-    classify() {
-      state = classifyConnection(
-        state,
-        { hasAnswered: everAnswered, rtts, oldestPingAt: oldestPingAt(), lastFrameAt },
-        now(),
-      );
-      return state;
     },
   };
 }

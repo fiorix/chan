@@ -71,7 +71,7 @@ test.each([
   const lastFrameAt = Date.now();
   await advance(contactAge);
   await drop({ reason: "deadline", lastFrameAt });
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   expect(cover(target)).toBeNull();
   expect(ui.disconnectBlocking).toBe(false);
   expect(raisedCoverKeys()).not.toContain("reconnect");
@@ -177,13 +177,13 @@ test("a pong before the late cover deadline cancels the cover", async () => {
   ui.ws = "open";
   watchConnectionProbe.pingSent();
   await tick();
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   await advance(100);
   watchConnectionProbe.frameReceived();
   watchConnectionProbe.pongReceived();
   await tick();
   await advance(30_000);
-  expect(connectionHealth.state).toBe("ok");
+  expect(connectionHealth.outage).toBeNull();
   expect(cover(target)).toBeNull();
 });
 
@@ -201,7 +201,7 @@ test("a flap holds one cover and one action delay until a later socket's pong", 
   ui.ws = "open";
   watchConnectionProbe.pingSent();
   await tick();
-  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage).not.toBeNull();
   expect(cover(target)).not.toBeNull();
   await advance(7_400);
   expect(target.querySelector(".actions button")).not.toBeNull();

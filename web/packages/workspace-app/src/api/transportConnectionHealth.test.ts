@@ -9,7 +9,7 @@
 // test sets.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createConnectionProbe, CONNECTION_MAX_RTT_MS, type ConnectionProbe, type ConnectionSample } from "./connectionProbe";
+import { createConnectionProbe, CONNECTION_MAX_RTT_MS, type ConnectionProbe } from "./connectionProbe";
 import {
   openWatch,
   setSocketFactory,
@@ -304,7 +304,6 @@ describe("watcher cadence", () => {
     answerOpenPing(s);
     vi.advanceTimersByTime(3_000);
     connection.forgetTimings();
-    expect(connection.oldestPingAt).toBeNull();
     expect(connection.hasPendingPing).toBe(true);
     page({ focused: false });
     page({ focused: true });
@@ -531,15 +530,9 @@ describe("wake probe deadline", () => {
 });
 
 describe("watcher connection probe", () => {
-  function sampled(): { connection: ConnectionProbe; samples: ConnectionSample[] } {
-    const samples: ConnectionSample[] = [];
-    return { connection: createConnectionProbe({ onSample: (x) => samples.push(x) }), samples };
-  }
-
   test("times open, heartbeat, focus and probe pings alike", () => {
-    const { connection, samples } = sampled();
+    const connection = createConnectionProbe();
     const { s, handle } = watch(true, connection);
-    const t0 = Date.now();
     vi.advanceTimersByTime(40); // the open's ping
     s.pong();
     expect(connection.answered).toBe(true);
@@ -547,22 +540,19 @@ describe("watcher connection probe", () => {
     vi.advanceTimersByTime(19_960); // the heartbeat's ping
     vi.advanceTimersByTime(55);
     s.pong();
+    expect(connection.rttMs).toBe(55);
     page({ focused: true }); // the focus ping
     vi.advanceTimersByTime(70);
     s.pong();
+    expect(connection.rttMs).toBe(70);
     handle.probe(); // the probe's ping
     vi.advanceTimersByTime(25);
     s.pong();
-    expect(samples).toEqual([
-      { at: t0, rttMs: 40 },
-      { at: t0 + 20_000, rttMs: 55 },
-      { at: t0 + 20_055, rttMs: 70 },
-      { at: t0 + 20_125, rttMs: 25 },
-    ]);
+    expect(connection.rttMs).toBe(25);
   });
 
   test("reports every inbound frame as contact", () => {
-    const { connection } = sampled();
+    const connection = createConnectionProbe();
     const { s } = watch(true, connection);
     const t0 = Date.now();
     expect(connection.lastFrameAt).toBeNull();
@@ -574,32 +564,27 @@ describe("watcher connection probe", () => {
     expect(connection.lastFrameAt).toBe(t0 + 5_250);
   });
 
-  test("a retired socket's waiting pings are misses", () => {
-    const { connection, samples } = sampled();
+  test("a retired socket's waiting pings leave with it", () => {
+    const connection = createConnectionProbe();
     const { s } = watch(true, connection);
-    const t0 = Date.now();
     answerOpenPing(s);
     // Silent from here: the heartbeat pings twice before the deadline.
     vi.advanceTimersByTime(45_000);
     expect(s.readyState).toBe(FakeSocket.CLOSED);
-    expect(samples).toEqual([
-      { at: t0, rttMs: 40 },
-      { at: t0 + 20_000, rttMs: null },
-      { at: t0 + 40_000, rttMs: null },
-    ]);
     expect(connection.answered).toBe(false);
+    expect(connection.hasPendingPing).toBe(false);
+    expect(connection.rttMs).toBeNull();
   });
 
   test("a pong delivered inside the send still finds its ping", () => {
-    const { connection, samples } = sampled();
+    const connection = createConnectionProbe();
     handles.push(openWatch(() => {}, undefined, undefined, undefined, undefined, connection));
     const s = FakeSocket.instances[0];
     s.answersInPlace = true;
-    const t0 = Date.now();
     s.open();
-    expect(samples).toEqual([{ at: t0, rttMs: 0 }]);
+    expect(connection.rttMs).toBe(0);
     expect(connection.answered).toBe(true);
-    expect(connection.oldestPingAt).toBeNull();
+    expect(connection.hasPendingPing).toBe(false);
   });
 
   test("a ping in flight across a sleep is not timed", () => {
@@ -610,20 +595,16 @@ describe("watcher connection probe", () => {
       onWake = cb;
       return () => {};
     });
-    const { connection, samples } = sampled();
+    const connection = createConnectionProbe();
     const { s } = watch(true, connection);
-    const t0 = Date.now();
     answerOpenPing(s);
     vi.advanceTimersByTime(19_960); // the heartbeat's ping leaves
     vi.advanceTimersByTime(2_000); // and is still unanswered at the wake
     onWake();
     vi.advanceTimersByTime(30);
     s.pong(); // the sleeping ping's pong
+    expect(connection.rttMs).toBe(40);
     s.pong(); // the wake probe's
-    expect(samples).toEqual([
-      { at: t0, rttMs: 40 },
-      { at: t0 + 22_000, rttMs: 30 },
-    ]);
     expect(connection.rttMs).toBe(30);
   });
 
@@ -632,7 +613,7 @@ describe("watcher connection probe", () => {
   });
 
   test("a pong that lands after a clock jump the wake detector has not seen yet is not timed", () => {
-    const { connection, samples } = sampled();
+    const connection = createConnectionProbe();
     const { s, handle } = watch(true, connection);
     const t0 = Date.now();
     answerOpenPing(s);
@@ -641,18 +622,14 @@ describe("watcher connection probe", () => {
     // detector's included.
     vi.setSystemTime(t0 + 20_000 + 3_600_000);
     s.pong();
-    expect(samples).toEqual([{ at: t0, rttMs: 40 }]);
     expect(connection.rttMs).toBe(40);
     expect(connection.answered).toBe(true);
-    expect(connection.oldestPingAt).toBeNull();
+    expect(connection.hasPendingPing).toBe(false);
 
     // The pairing held: the next pong is the next ping's own.
     handle.probe();
     vi.advanceTimersByTime(25);
     s.pong();
-    expect(samples).toEqual([
-      { at: t0, rttMs: 40 },
-      { at: t0 + 20_000 + 3_600_000, rttMs: 25 },
-    ]);
+    expect(connection.rttMs).toBe(25);
   });
 });

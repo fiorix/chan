@@ -614,8 +614,9 @@ function probeDeadlineMs(rttMs: number | null): number {
 /// `close()`, so its queued `onclose` cannot schedule a redial.
 ///
 /// Every ping and pong is reported to `connectionProbe`, which times them. A caller that
-/// shows the connection's health passes its own probe and reads it; the watcher
-/// reads the same probe to pick its cadence and its probe deadline.
+/// follows the connection, as the window's outage does, passes its own probe and
+/// reads it; the watcher reads the same probe to pick its cadence and its probe
+/// deadline.
 /// Every focused window takes fast pings after its first pong; only a remote
 /// window takes the fast read deadline.
 export function openWatch(
@@ -624,7 +625,7 @@ export function openWatch(
   onOpen: () => void = () => {},
   windowId?: string,
   holder?: string,
-  connectionProbe: ConnectionProbe = createConnectionProbe({ rememberAnsweredAcrossSockets: true }),
+  connectionProbe: ConnectionProbe = createConnectionProbe(),
   options: WatchOptions = {},
 ): WatchSocket {
   let closed = false;
@@ -662,8 +663,7 @@ export function openWatch(
     deadlineDueAt = null;
     probePending = false;
     fast = false;
-    // The retired socket's unanswered pings are its misses, and the next
-    // socket starts with no timings.
+    // The next socket starts with no timings.
     connectionProbe.reset();
   };
 
