@@ -978,11 +978,26 @@ fn action_failure_is_final(error: &chan_workspace::ChanError) -> bool {
 fn action_error_message(error: &chan_workspace::ChanError) -> String {
     match error {
         chan_workspace::ChanError::ListingTooLarge { limit, .. } => format!(
-            "the search index has more than {limit} files to read; add the directories it \
-             should skip under Settings > This workspace > Excluded directories"
+            "the search index has more than {} files to read; add the directories it \
+             should skip under Settings > This workspace > Excluded directories",
+            grouped(*limit)
         ),
         other => other.to_string(),
     }
+}
+
+/// `n` with a comma between each group of three digits, as the chip reads
+/// it: 500,000.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 fn drain_required_generation(
@@ -3878,6 +3893,18 @@ mod tests {
             message.contains("Settings > This workspace > Excluded directories"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn the_listing_cap_reads_with_its_digits_grouped() {
+        let message = action_error_message(&chan_workspace::ChanError::ListingTooLarge {
+            observed: 500_000,
+            limit: 500_000,
+        });
+        assert!(message.contains("more than 500,000 files"), "{message}");
+        assert_eq!(grouped(2), "2");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(12_345_678), "12,345,678");
     }
 
     /// Wait until recovery is ready with `generation` complete.
