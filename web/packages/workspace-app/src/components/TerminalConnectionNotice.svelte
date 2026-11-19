@@ -2,33 +2,24 @@
   import { APP_STATUS_PILL_SELECTOR, terminalNoticeTop } from "./terminalNoticePlacement";
 
   let {
-    stalled,
-    lost,
     notice,
-    waitMs,
     findOpen,
     inspectorOpen,
     inspectorWidth,
   }: {
-    stalled: boolean;
-    lost: boolean;
     notice: boolean;
-    waitMs: number;
     findOpen: boolean;
     inspectorOpen: boolean;
     inspectorWidth: number;
   } = $props();
-  const seconds = $derived(Math.floor(waitMs / 1000));
-  const mode = $derived(lost ? "lost" : stalled ? "stalled" : notice ? "notice" : "none");
-  const lostSentence = "Connection lost. Typing is not being sent until it reconnects.";
+  const sentence = "Reconnected. Input typed while disconnected may not have been sent.";
   const defaultTop = $derived(findOpen ? 50 : 5);
-  const shown = $derived(mode !== "none");
   let placedTop = $state<number | null>(null);
   let pill = $state<HTMLDivElement | null>(null);
   let requestMeasure: () => void = () => {};
 
   $effect(() => {
-    if (!shown || !pill) {
+    if (!notice || !pill) {
       placedTop = null;
       return;
     }
@@ -39,15 +30,15 @@
     let sizes: ResizeObserver | null = null;
 
     function measure(): void {
-      const notice = currentPill.getBoundingClientRect();
+      const box = currentPill.getBoundingClientRect();
       const currentTop = Number.parseFloat(currentPill.style.top) || 0;
       const top = defaultTop;
       const offset = top - currentTop;
       const defaultBox = {
-        left: notice.left,
-        right: notice.right,
-        top: notice.top + offset,
-        bottom: notice.bottom + offset,
+        left: box.left,
+        right: box.right,
+        top: box.top + offset,
+        bottom: box.bottom + offset,
       };
       const status = document.querySelector<HTMLElement>(APP_STATUS_PILL_SELECTOR);
       if (status !== observedStatus) {
@@ -98,7 +89,7 @@
   });
 
   $effect(() => {
-    if (!shown || !pill) return;
+    if (!notice || !pill) return;
     void defaultTop;
     void inspectorOpen;
     void inspectorWidth;
@@ -106,8 +97,8 @@
   });
 </script>
 
-<span class="sr-only" role="status">{mode === "lost" ? lostSentence : mode === "stalled" ? "Terminal connection stalled. Waiting for the connection." : mode === "notice" ? "Reconnected. Input typed while disconnected may not have been sent." : ""}</span>
-{#if mode !== "none"}
+<span class="sr-only" role="status">{notice ? sentence : ""}</span>
+{#if notice}
   <!-- The inspector box extends 12px past its width; 17px more leaves a 5px gap beside the pill. -->
   <div
     bind:this={pill}
@@ -119,7 +110,7 @@
     style:right={inspectorOpen ? `${inspectorWidth + 29}px` : "5px"}
     style:max-width={inspectorOpen ? `min(70%, 36rem, calc(100% - ${inspectorWidth + 34}px))` : "min(70%, 36rem)"}
   >
-    {#if mode === "lost"}{lostSentence}{:else if mode === "stalled"}No response for {seconds} s. Waiting for the connection.{:else}Reconnected. Input typed while disconnected may not have been sent.{/if}
+    {sentence}
   </div>
 {/if}
 
@@ -140,7 +131,6 @@
     background: var(--bg-card);
     color: var(--text);
     font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-variant-numeric: tabular-nums;
   }
   .sr-only {
     position: absolute;

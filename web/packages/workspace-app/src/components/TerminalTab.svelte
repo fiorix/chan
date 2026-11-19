@@ -243,7 +243,6 @@
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
   import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
-  import { connectionHealth } from "../state/connectionHealth.svelte";
 
   let {
     tab,
@@ -411,16 +410,10 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
-  const terminalConnection = createTerminalConnectionHealth(() => sendPing(), undefined, {
-    canRedial: () => status !== "exited",
-    lastContactAt: () => connectionHealth.lastContactAt,
-    run: redialStalledTerminal,
-  });
+  const terminalConnection = createTerminalConnectionHealth(() => sendPing());
   $effect(() => {
-    const state = connectionHealth.state;
-    const waitStartedAt = state === "stalled" ? Date.now() - connectionHealth.waitMs : null;
     const blocked = ui.disconnectBlocking || !active;
-    untrack(() => terminalConnection.windowChanged(state, blocked, waitStartedAt));
+    untrack(() => terminalConnection.setNoticeBlocked(blocked));
   });
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
@@ -682,9 +675,7 @@
   $effect(() => {
     const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
       const sent = sendInput(data, binary);
-      const mouseReport = terminalMouseReport(data);
-      if (sent && mouseReport) terminalConnection.inputWritten();
-      if (!mouseReport) {
+      if (!terminalMouseReport(data)) {
         if (sent) terminalConnection.inputSent();
         else if (status !== "exited") terminalConnection.inputRefused();
       }
@@ -1104,22 +1095,12 @@
   // reconnect via the existing resume path (sessionId/since/generation), which
   // replays only the missed bytes -- no scrollback loss. A socket that is not
   // OPEN is already reconnecting (or intentionally closed); leave it alone.
-  // Stalled-terminal redial has its own guard and also uses the resume path.
   function recyclePtySocketAfterWake(): void {
     // The control terminal is a single-shot local runner owned by the desktop
     // exit watcher; a wake redial would mint a fresh session whose tenant
     // default re-runs the devserver connect script.
     if (ui.terminalControl) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      void connect();
-    }
-  }
-
-  function redialStalledTerminal(): void {
-    // The read deadline may have called close() without receiving onclose;
-    // with no user input in flight, replacing that CLOSING socket is safe.
-    if (ws && (ws.readyState === WebSocket.OPEN || (terminalConnection.state.retiring && ws.readyState === WebSocket.CLOSING))) {
-      terminalConnection.disconnected();
       void connect();
     }
   }
@@ -1634,7 +1615,6 @@
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(() => {
       deadlineTimer = null;
-      terminalConnection.retiring();
       try {
         ws?.close();
       } catch {
@@ -1779,7 +1759,6 @@
       // Any inbound frame proves the socket is live -- refresh the deadline
       // first, before decoding.
       armDeadline();
-      terminalConnection.frameArrived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
         if (resetBeforeReplay && bytes.length > 0) {
@@ -2060,7 +2039,6 @@
     };
     ws.onclose = () => {
       clearLiveness();
-      if (status !== "exited" && !ui.terminalControl) terminalConnection.disconnected();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
       // delivery -- fail it (bubble unlocks, keeps text, labels honestly;
@@ -2129,10 +2107,9 @@
     const seed = ` ${pendingPromptSeed}\x01`;
     clearTerminalSeedInput(tab);
     setTimeout(() => {
-      // Mark the seed as written input if it went out, so a stall holds
-      // the redial with it in flight. It sets no lost-input notice and,
-      // sent directly, reaches no broadcast group.
-      if (sendInput(seed)) terminalConnection.inputWritten();
+      // Sent directly, the seed arms no input ping, owes no note and
+      // reaches no broadcast group.
+      sendInput(seed);
       focusTerminal();
       scheduleTerminalSessionSave();
     }, 150);
@@ -2441,9 +2418,7 @@
 
   function sendUserInput(data: string, binary = false, probeInput = true): void {
     const sent = sendInput(data, binary);
-    const mouseReport = terminalMouseReport(data);
-    if (sent && (!probeInput || mouseReport)) terminalConnection.inputWritten();
-    if (probeInput && !mouseReport) {
+    if (probeInput && !terminalMouseReport(data)) {
       if (sent) terminalConnection.inputSent();
       else if (status !== "exited") terminalConnection.inputRefused();
     }
@@ -3640,10 +3615,7 @@
       bind:this={host}
     ></div>
     <TerminalConnectionNotice
-      stalled={terminalConnection.state.stalled && status === "connected" && active && !ui.disconnectBlocking}
-      lost={terminalConnection.state.lost && status !== "exited" && active && !ui.disconnectBlocking}
       notice={terminalConnection.state.notice && status === "connected" && active && !ui.disconnectBlocking}
-      waitMs={terminalConnection.state.waitMs}
       {findOpen}
       inspectorOpen={!!tab.inspectorOpen}
       inspectorWidth={tab.inspectorWidth ?? 280}
