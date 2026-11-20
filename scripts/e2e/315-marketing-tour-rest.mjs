@@ -17,10 +17,16 @@ const viewports = {
   phone: { width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 1 },
 };
 let failed = 0;
+let unmet = 0;
 
-function result(name, expected, actual, pass) {
-  console.log(JSON.stringify({ name, expected, actual, pass }));
-  if (!pass) failed++;
+// A leg whose own setup did not hold (no point found, the page did not settle, the mouse did
+// not wake the part it hovers) says so, and is counted apart from a failed product assertion.
+class Precondition extends Error {}
+
+function result(name, expected, actual, outcome) {
+  console.log(JSON.stringify({ name, outcome, expected, actual, pass: outcome === "pass" }));
+  if (outcome === "fail") failed++;
+  if (outcome === "precondition") unmet++;
 }
 
 function unavailable(message) {
@@ -135,6 +141,13 @@ function inPage(op, arg) {
     case "stageTop":
       window.scrollTo({ top: Math.max(0, stage.getBoundingClientRect().top + scrollY), behavior: "instant" });
       return scrollY;
+    case "stageFoot": {
+      // The callout sits at the stage's foot, which can start below the viewport while the stage
+      // waits under the page header to pin.
+      const over = Math.ceil(stage.getBoundingClientRect().bottom - innerHeight);
+      if (over > 0) window.scrollBy({ top: over, behavior: "instant" });
+      return { over, scrollY, stageBottom: stage.getBoundingClientRect().bottom, innerHeight };
+    }
     default:
       throw new Error(`unknown op ${op}`);
   }
@@ -153,7 +166,7 @@ async function settle(page) {
     same = motion === last ? same + 1 : 0;
     last = motion;
   }
-  if (same < 3) throw new Error(`tour did not settle: ${last}`);
+  if (same < 3) throw new Precondition(`tour did not settle: ${last}`);
 }
 
 // Opens a page with a reachable part; when none is in view at the top, scrolls the stage up.
@@ -171,7 +184,7 @@ async function open(browser, origin, route, viewport) {
       await settle(page);
       part = await page.evaluate(inPage, "part", null);
     }
-    if (!part) throw new Error(`${route}: no part the pointer can reach`);
+    if (!part) throw new Precondition(`${route}: no part the pointer can reach`);
     return { page, part };
   } catch (error) {
     await page.close();
@@ -182,9 +195,10 @@ async function open(browser, origin, route, viewport) {
 async function check(name, body) {
   try {
     const { expected, actual, pass } = await body();
-    result(name, expected, actual, pass);
+    result(name, expected, actual, pass ? "pass" : "fail");
   } catch (error) {
-    result(name, "check completes", String(error?.stack ?? error), false);
+    if (error instanceof Precondition) result(name, "the leg's setup holds", error.message, "precondition");
+    else result(name, "check completes", String(error?.stack ?? error), "fail");
   }
 }
 
@@ -198,7 +212,7 @@ async function hover(page, part, away) {
   await page.mouse.move(part.x, part.y);
   await frames(page);
   const now = await state(page);
-  if (!lit(now, part)) throw new Error(`precondition: the mouse did not wake ${part.title}: ${JSON.stringify(now)}`);
+  if (!lit(now, part)) throw new Precondition(`the mouse did not wake ${part.title}: ${JSON.stringify(now)}`);
   return now;
 }
 
@@ -211,12 +225,17 @@ async function press(page, point) {
 
 async function desktopLegs(browser, origin, route) {
   const label = `desktop ${route}`;
-  const { page, part } = await open(browser, origin, route, viewports.desktop);
+  let page = null;
+  let part = null;
   try {
     let stageSpot = null;
     let outside = null;
-    let target = part;
+    let target = null;
+    const opened = () => {
+      if (!page) throw new Precondition("the page did not open with a part the pointer can reach");
+    };
     await check(`${label} a: the mouse over a part lights it and the callout names it`, async () => {
+      ({ page, part } = await open(browser, origin, route, viewports.desktop));
       await page.mouse.move(part.x, part.y);
       await frames(page);
       const now = await state(page);
@@ -227,36 +246,22 @@ async function desktopLegs(browser, origin, route) {
       return { expected: `only part ${part.index} (${part.title}) is-awake; callout shown titled ${part.title}`, actual: { part, now }, pass: lit(now, part) };
     });
     await check(`${label} b: a press on empty stage rests the part and hides the callout`, async () => {
-      if (!stageSpot) throw new Error("no empty point on the stage");
+      opened();
+      if (!stageSpot) throw new Precondition("no empty point on the stage");
       const before = await hover(page, target, stageSpot);
       await press(page, stageSpot);
       const now = await state(page);
       return { expected: "no is-awake, callout hidden, same beat", actual: { stageSpot, before: before.beat, now }, pass: rested(now) && now.beat === before.beat };
     });
     await check(`${label} c: a press outside the tour rests the part and hides the callout`, async () => {
-      if (!outside) throw new Error("no point outside the tour in view");
+      opened();
+      if (!outside) throw new Precondition("no point outside the tour in view");
       const before = await hover(page, target, outside);
       await press(page, outside);
       const now = await state(page);
       return { expected: "no is-awake, callout hidden, same beat", actual: { outside, before: before.beat, now }, pass: rested(now) && now.beat === before.beat };
     });
-    await check(`${label} f: a press inside the callout keeps the part awake and its link follows to the part's page`, async () => {
-      if (!stageSpot) throw new Error("no empty point on the stage");
-      const before = await hover(page, target, stageSpot);
-      const spots = await page.evaluate(inPage, "callout");
-      if (!spots?.title || !spots?.link) throw new Error(`callout text or link not reachable: ${JSON.stringify(spots)}`);
-      await press(page, spots.title);
-      const afterText = await state(page);
-      await page.mouse.move(spots.link.x, spots.link.y);
-      await page.mouse.down();
-      const linkDown = await state(page);
-      const [response] = await Promise.all([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }), page.mouse.up()]);
-      const reached = { url: page.url(), status: response?.status() ?? null };
-      const actual = { spots, afterText, linkDown, reached };
-      const pass = lit(afterText, part) && lit(linkDown, part) && afterText.beat === before.beat && linkDown.calloutHref === part.href && reached.url === part.href && reached.status === 200;
-      return { expected: `part stays awake through a press on the callout text and on its link; the link reaches ${part.href} with 200`, actual, pass };
-    });
-  } finally { await page.close(); }
+  } finally { await page?.close(); }
 
   await check(`${label} e: a click on the part already awake follows its link`, async () => {
     const { page, part } = await open(browser, origin, route, viewports.desktop);
@@ -264,26 +269,59 @@ async function desktopLegs(browser, origin, route) {
       await page.mouse.move(part.x, part.y);
       await frames(page);
       const awake = await state(page);
-      if (!lit(awake, part)) throw new Error(`precondition: the mouse did not wake ${part.title}: ${JSON.stringify(awake)}`);
+      if (!lit(awake, part)) throw new Precondition(`the mouse did not wake ${part.title}: ${JSON.stringify(awake)}`);
       // The callout now shows and may lie over the hovered point; press where the part is still hit.
       const spot = await page.evaluate(inPage, "part", part.index);
-      if (!spot) throw new Error("the awake part is no longer reachable");
+      if (!spot) throw new Precondition("the awake part is no longer reachable");
       await page.mouse.move(spot.x, spot.y);
       const [response] = await Promise.all([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }), page.mouse.down().then(() => page.mouse.up())]);
       const actual = { part, spot, url: page.url(), status: response?.status() ?? null };
       return { expected: `navigates to ${part.href} with 200`, actual, pass: actual.url === part.href && actual.status === 200 };
     } finally { await page.close(); }
   });
+
+  await check(`${label} f: a press inside the callout keeps the part awake and its link follows to the part's page`, async () => {
+    const { page, part } = await open(browser, origin, route, viewports.desktop);
+    try {
+      // Bring the stage's foot, where the callout shows, into view before anything wakes, and
+      // hold the tour to the beat it opened on.
+      const opening = await state(page);
+      const foot = await page.evaluate(inPage, "stageFoot");
+      await settle(page);
+      const beat = (await state(page)).beat;
+      if (beat !== opening.beat) throw new Precondition(`scrolling the stage's foot into view moved the tour from ${opening.beat} to ${beat}: ${JSON.stringify(foot)}`);
+      const spot = await page.evaluate(inPage, "part", part.index);
+      if (!spot) throw new Precondition(`${part.title} is not reachable once the stage's foot is in view: ${JSON.stringify(foot)}`);
+      await page.mouse.move(spot.x, spot.y);
+      await frames(page);
+      const woke = await state(page);
+      if (!lit(woke, part)) throw new Precondition(`the mouse did not wake ${part.title}: ${JSON.stringify(woke)}`);
+      const spots = await page.evaluate(inPage, "callout");
+      if (!spots?.title || !spots?.link) throw new Precondition(`callout text or link not reachable: ${JSON.stringify({ spots, foot })}`);
+      await press(page, spots.title);
+      const afterText = await state(page);
+      await page.mouse.move(spots.link.x, spots.link.y);
+      await page.mouse.down();
+      const linkDown = await state(page);
+      const [response] = await Promise.all([page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }), page.mouse.up()]);
+      const reached = { url: page.url(), status: response?.status() ?? null };
+      const actual = { foot, spot, spots, afterText, linkDown, reached };
+      const pass = lit(afterText, part) && lit(linkDown, part) && afterText.beat === beat && linkDown.beat === beat && linkDown.calloutHref === part.href && reached.url === part.href && reached.status === 200;
+      return { expected: `${part.title} stays awake on ${beat} through a press on the callout text and on its link; the link reaches ${part.href} with 200`, actual, pass };
+    } finally { await page.close(); }
+  });
 }
 
 async function touchLegs(browser, origin, route) {
   const label = `phone ${route}`;
-  const { page, part } = await open(browser, origin, route, viewports.phone);
+  let page = null;
+  let part = null;
   try {
     let navigations = 0;
-    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
     let elsewhere = null;
     await check(`${label} d: a tap on a part wakes it without following its link`, async () => {
+      ({ page, part } = await open(browser, origin, route, viewports.phone));
+      page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
       const before = await state(page);
       await page.touchscreen.tap(part.x, part.y);
       await pause(600);
@@ -294,16 +332,17 @@ async function touchLegs(browser, origin, route) {
       return { expected: `only part ${part.index} (${part.title}) is-awake, callout titled ${part.title}, no navigation`, actual, pass: lit(now, part) && navigations === 0 && now.url === before.url };
     });
     await check(`${label} d: a tap elsewhere rests the part and hides the callout`, async () => {
-      if (!elsewhere) throw new Error("no point that is no part or control in view");
+      if (!page) throw new Precondition("the page did not open with a part the pointer can reach");
+      if (!elsewhere) throw new Precondition("no point that is no part or control in view");
       const before = await state(page);
-      if (!lit(before, part)) throw new Error(`precondition: ${part.title} is not awake: ${JSON.stringify(before)}`);
+      if (!lit(before, part)) throw new Precondition(`${part.title} is not awake: ${JSON.stringify(before)}`);
       await page.touchscreen.tap(elsewhere.x, elsewhere.y);
       await pause(300);
       await frames(page);
       const now = await state(page);
       return { expected: "no is-awake, callout hidden, same beat, no navigation", actual: { elsewhere, now, navigations }, pass: rested(now) && now.beat === before.beat && navigations === 0 };
     });
-  } finally { await page.close(); }
+  } finally { await page?.close(); }
 }
 
 async function main() {
@@ -339,8 +378,9 @@ async function main() {
     await browser?.close();
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
-  console.log(JSON.stringify({ verdict: failed ? "failed" : "passed", failures: failed }));
-  process.exitCode = failed ? 1 : 0;
+  // An unmet precondition is not a pass: the leg did not run.
+  console.log(JSON.stringify({ verdict: failed ? "failed" : unmet ? "incomplete" : "passed", failures: failed, preconditions: unmet }));
+  process.exitCode = failed || unmet ? 1 : 0;
 }
 
 main().catch((error) => {
