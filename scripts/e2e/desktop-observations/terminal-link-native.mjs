@@ -119,23 +119,32 @@ let page;
 
 // Where X input lands on the page: the offset between a screen point and the
 // client point the page's mousemove reports for it, read at two points that
-// must agree.
+// must agree. Each reading moves the pointer to a point 7 px off first, so
+// the move onto the point is a real move, and the record is cleared only
+// after that first move has landed: a reading taken from the first move
+// would be 7 px off, which is how two readings once disagreed by exactly
+// (7, 7). The reading waits for a trusted move and settles before it is
+// taken, as keyboard-focus-native.mjs reads it.
 async function calibrate() {
   const geometry = Object.fromEntries((await exec("xdotool", ["getwindowgeometry", "--shell", values.xid])).stdout.trim().split("\n").map((line) => line.split("=")));
   const [wx, wy, ww, wh] = ["X", "Y", "WIDTH", "HEIGHT"].map((key) => Number(geometry[key]));
   await page.evaluate(() => {
     window.__linkMove = null;
-    addEventListener("mousemove", (event) => { window.__linkMove = { x: event.clientX, y: event.clientY }; }, true);
+    addEventListener("mousemove", (event) => {
+      window.__linkMove = { x: event.clientX, y: event.clientY, trusted: event.isTrusted };
+    }, true);
   });
   const seen = [];
   for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.35]]) {
     const sx = Math.round(wx + ww * fx);
     const sy = Math.round(wy + wh * fy);
-    await page.evaluate(() => { window.__linkMove = null; });
     await exec("xdotool", ["windowactivate", "--sync", values.xid, "mousemove", String(sx - 7), String(sy - 7)]);
     await delay(120);
+    await page.evaluate(() => { window.__linkMove = null; });
     await exec("xdotool", ["mousemove", String(sx), String(sy)]);
-    const move = await until("the page to see the pointer", () => page.evaluate(() => window.__linkMove), Boolean, 3000, SetupError);
+    await until("the page to see the pointer", () => page.evaluate(() => window.__linkMove), (move) => move?.trusted === true, 3000, SetupError);
+    await delay(120);
+    const move = await page.evaluate(() => window.__linkMove);
     seen.push({ dx: sx - move.x, dy: sy - move.y });
   }
   if (seen.some((p) => p.dx !== seen[0].dx || p.dy !== seen[0].dy)) {
@@ -172,20 +181,47 @@ async function setBackend(backend) {
   page = await openPage();
 }
 
+/// The page selector of the named terminal's surface, from the server's own
+/// list of where that terminal shows (its pane and tab), or null while it is
+/// not listed. Keyed on the terminal, not on whichever tab is active, so a
+/// terminal another backend's run left behind cannot stand in for it.
+async function surfaceOf(name, backend) {
+  const listed = JSON.parse(await cs("terminal", "list", "--json"));
+  const row = Object.values(listed.groups ?? {}).flat().find((entry) => entry.name === name);
+  if (!row?.pane || !row.tab) return null;
+  return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${SURFACE[backend]}`;
+}
+
 async function runBackend(backend) {
   const record = { ok: false };
   verdict.backends[backend] = record;
+  const name = `LinkNative${backend}`;
+  try {
+    await driveBackend(backend, name, record);
+  } finally {
+    // Closed whatever the outcome, so the next backend's run meets no
+    // terminal of this one.
+    await cs("terminal", "close", "--tab-name", name).catch(() => {});
+  }
+}
+
+async function driveBackend(backend, name, record) {
   await setBackend(backend);
   const offset = await calibrate();
-  const name = `LinkNative${backend}`;
+  record.offset = offset;
   const size = join(values.workspace, `size-${backend}`);
   rmSync(size, { force: true });
   await cs("terminal", "new", "--window", windowId, "--tab-name", name);
-  const surface = `.terminal-tab.active ${SURFACE[backend]}`;
-  await until(`the ${backend} terminal`, () => page.evaluate((sel) => {
-    const box = document.querySelector(sel)?.getBoundingClientRect();
-    return box && box.width > 0 && box.height > 0;
-  }, surface), (v) => v === true, 60_000, SetupError);
+  let surface = null;
+  await until(`the ${backend} terminal ${name}`, async () => {
+    surface = await surfaceOf(name, backend);
+    if (!surface) return { listed: false };
+    return page.evaluate((sel) => {
+      const box = document.querySelector(sel)?.getBoundingClientRect();
+      return { listed: true, shown: Boolean(box && box.width > 0 && box.height > 0) };
+    }, surface);
+  }, (v) => v?.shown === true, 60_000, SetupError);
+  record.surface = surface;
   const format = String.raw`\033[H\033[2Jhttp%s\nN316_%s\n`;
   await cs("terminal", "write", "--tab-name", name, `stty size > '${size}' && printf '${format}' '${URL_TAIL}' READY\n`);
   await until("the printed URL", () => cs("terminal", "scrollback", "--tab-name", name), (text) => typeof text === "string" && text.includes("N316_READY"), 30_000, SetupError);
@@ -228,7 +264,6 @@ async function runBackend(backend) {
   }
   record.opened = readFileSync(opened, "utf8").slice(before.length).trim();
   record.ok = true;
-  await cs("terminal", "close", "--tab-name", name).catch(() => {});
 }
 
 let status = 0;

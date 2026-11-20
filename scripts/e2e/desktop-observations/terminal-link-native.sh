@@ -9,6 +9,10 @@
 # every backend, 1 a fault was observed (terminal-link.json names each), 2
 # the environment or the driver's setup could not run (no menu was asked
 # for), 3 inconclusive.
+#
+# The result names the tree by OBS_SHA, which lib.sh reads from git. A tree
+# synced without .git can name its commit by setting OBS_SHA; lib.sh keeps
+# it and adds -status-unknown, since it cannot read that tree's status.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
