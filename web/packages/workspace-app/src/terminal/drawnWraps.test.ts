@@ -239,6 +239,22 @@ describe("in a Muse session, rows that are not a cut line keep their breaks", ()
     expect(term.getSelection()).toBe(`${FULL}\n\nafter`);
   });
 
+  test("a row that ends one column short of the edge keeps its break, by every read", async () => {
+    const short = "y".repeat(COLS - 1);
+    const { term, core, history, select } = await museTerminal(`${short}\r\nnext line`, true);
+    select([0, 0], [COLS - 1, 1]);
+    expect(term.getSelection()).toBe(`${short}\nnext line`);
+    expect(ghosttyCopyScrollback(term, true)).toBe(`${short}\nnext line`);
+    expect(lineAcrossWraps(core, history, true)).toEqual({
+      start: { col: 0, absoluteRow: history },
+      end: { col: COLS - 2, absoluteRow: history },
+    });
+    expect(lineAcrossWraps(core, history + 1, true)).toEqual({
+      start: { col: 0, absoluteRow: history + 1 },
+      end: { col: "next line".length - 1, absoluteRow: history + 1 },
+    });
+  });
+
   test("a real two-line output stays two lines", async () => {
     const { term, select, writes, click } = await museTerminal("first line of output\r\nsecond line", true);
     select([0, 0], [COLS - 1, 1]);
