@@ -15,7 +15,11 @@ set -euo pipefail
 # with --trust-workspace, which saves nothing (without it Muse parks on a
 # trust prompt), and sets the effort with `-c reasoning_effort="low"`, which
 # applies to the run alone: --reasoning-effort would save the effort as the
-# user's global default under ~/.config/muse. --no-session-log,
+# user's global default under ~/.config/muse. Muse reads a -c value as JSON
+# and refuses an unquoted string, and the launch passes through the team
+# config's TOML literal string, kept verbatim, and then the server's
+# `$SHELL -lc`, which removes bare double quotes; so each quote is written
+# `\"` and the shell hands Muse `reasoning_effort="low"`. --no-session-log,
 # --disable-write and --approval-mode never keep the run from writing files
 # or waiting on an approval. Its ready pattern is the `Muse Code` banner,
 # because the prompt's placeholder text appears only later.
@@ -197,7 +201,7 @@ case "$agent" in
     ready_pattern='Type your message'
     ;;
   muse)
-    launch='muse --trust-workspace --no-session-log --disable-write --approval-mode never -c reasoning_effort="low"'
+    launch='muse --trust-workspace --no-session-log --disable-write --approval-mode never -c reasoning_effort=\"low\"'
     ready_pattern='Muse Code'
     ;;
   opencode)
