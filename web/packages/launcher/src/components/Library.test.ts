@@ -1180,6 +1180,23 @@ describe("Library: tmux connection cards", () => {
     }
   });
 
+  it("keeps a devserver run's buried control terminal on the devserver's card while it is disconnected", async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    const prodLibrary = library.devservers.find((d) => d.label === "prod")!.library_id!;
+    const onProd = entry({ connection: "tm-prod", library_id: prodLibrary, session: { id: "$4", name: "ops" } });
+    setMockTmuxConnections([onProd], [{ ...row("tm-prod", "tm-prod-control", true, 0), library_id: prodLibrary }]);
+    library.devservers = library.devservers.map(
+      (d): DevserverEntry => (d.id === "ds-1" ? { ...d, status: "disconnected" } : d),
+    );
+    // The devserver's own connect control terminal is gone, so the tmux
+    // connection's is the one control terminal its card holds.
+    library.windows = library.windows.filter((w) => !(w.control && !w.tmux && w.library_id === prodLibrary));
+    mountList();
+    const holders = [...target!.querySelectorAll<HTMLElement>("section.machine")].filter((m) => buriedRows(m).length > 0);
+    expect(holders).toEqual([devserverCard("prod")]);
+    expect(buriedRows(holders[0]!)[0]!.textContent).toContain("tmux -CC on prod (ops)");
+  });
+
   it("masks the machine card's control terminal row in privacy mode and keeps its detach", async () => {
     const { setPrivacy } = await import("@chan/web-shared/privacy");
     const { setMockTmuxConnections } = await import("../api/mock");
