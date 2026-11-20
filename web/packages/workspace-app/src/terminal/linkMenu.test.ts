@@ -154,8 +154,10 @@ describe("xtermLinkHandlers", () => {
     expect(seen.map((s) => s.target)).toEqual(["https://example.com/a"]);
   });
 
-  test("the addon's handler without a hover of the same URL reports nothing", () => {
+  test("the addon's handler reports only the URL its last hover named, whose range it carries", () => {
     const { seen, hooks } = xterm();
+    hooks.webLink.handler(click(), "https://example.com/a");
+    hooks.webLink.options.hover(click(), "https://example.com/a", { start: { x: 3, y: 5 }, end: { x: 21, y: 5 } });
     hooks.webLink.handler(click(), "https://example.com/other");
     expect(seen).toEqual([]);
   });
