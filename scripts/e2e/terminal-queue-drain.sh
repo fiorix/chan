@@ -7,6 +7,18 @@ set -euo pipefail
 # codex and claude both park on a first-run trust prompt in an unfamiliar
 # directory and never print their ready pattern, so a probe over a fresh
 # random path fails every run on the ready-pattern timeout instead.
+#
+# The muse arm assumes Muse Code 1.4.24 or later on PATH, signed in to a model
+# that can follow the batch instruction: the load-bearing sentinels are built
+# by the model, so Muse's echo provider, which repeats each accepted turn,
+# cannot satisfy them. Its launch trusts the probe's directory for the run
+# with --trust-workspace, which saves nothing (without it Muse parks on a
+# trust prompt), and sets the effort with `-c reasoning_effort="low"`, which
+# applies to the run alone: --reasoning-effort would save the effort as the
+# user's global default under ~/.config/muse. --no-session-log,
+# --disable-write and --approval-mode never keep the run from writing files
+# or waiting on an approval. Its ready pattern is the `Muse Code` banner,
+# because the prompt's placeholder text appears only later.
 # Each probe agent is spawned directly through a one-member team config so
 # the target session is born with the server-derived agent identity that
 # `--submit` requires. The hidden team materialization is owned by this run
@@ -99,7 +111,7 @@ default_gap_ms=50
 
 usage() {
   cat >&2 <<'EOF'
-usage: terminal-queue-drain.sh [--agent codex|claude|gemini|opencode] [--case gap|batch|boundaries|late|cap|all]
+usage: terminal-queue-drain.sh [--agent codex|claude|gemini|muse|opencode] [--case gap|batch|boundaries|late|cap|all]
                                [--size-kib N] [--runs N] [--timeout-secs N]
                                [--gap MS] [--max-batch-bytes N]
 
@@ -183,6 +195,10 @@ case "$agent" in
   gemini)
     launch='gemini --approval-mode plan'
     ready_pattern='Type your message'
+    ;;
+  muse)
+    launch='muse --trust-workspace --no-session-log --disable-write --approval-mode never -c reasoning_effort="low"'
+    ready_pattern='Muse Code'
     ;;
   opencode)
     launch='opencode --agent plan --model opencode/deepseek-v4-flash-free --mini --no-replay'
