@@ -107,6 +107,18 @@ export function judgePrivacy(card) {
   return { setup: true, lines };
 }
 
+/// The face driver's reading of the detail's layout: the chart spans the
+/// card at the header's inset, from the left edge of the header's content to
+/// the right edge of its actions, at its fixed height, and the figures' words
+/// start under the name. The figures line's box takes in its own padding,
+/// so where its words start is its first figure's left edge.
+export function chartSpansCard(card) {
+  const { chart, firstFigure, name, header, actions } = card?.detail ?? {};
+  return Boolean(chart && firstFigure && name && header && actions) && chart.height === "69px"
+    && Math.abs(chart.left - header.left) <= 2 && Math.abs(chart.right - actions.right) <= 2
+    && Math.abs(firstFigure.left - name.left) <= 2;
+}
+
 /// The inset verdict from the boxes the page read: the chart's drawn extent
 /// (the baseline's ends) inside the card.
 export function judgeInset(boxes) {

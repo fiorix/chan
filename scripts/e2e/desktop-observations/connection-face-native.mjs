@@ -27,6 +27,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { clientFrameReader, startRelay } from "../browser-smoke/lib/flow-relay.mjs";
+import { chartSpansCard } from "./connection-chart-verdict.mjs";
 
 const run = promisify(execFile);
 const [inspector, work, chan, fixturePath] = process.argv.slice(2);
@@ -115,6 +116,9 @@ const READ = () => `(() => {
       runs: detail.querySelectorAll('.reading').length,
       chart: chart ? { ...edges(chart), height: getComputedStyle(chart).height } : null,
       figures: edges(detail.querySelector('.figures')),
+      // Where the figures' words start: the first figure, inside the line's
+      // own padding, which the line's box takes in.
+      firstFigure: edges(detail.querySelector('.figures > span')),
       missedTitle: detail.querySelector('.figures > span:last-child')?.getAttribute('title') ?? null,
       name: edges(slot.querySelector('.ds-name-row .row-name')),
       header: (() => {
@@ -235,16 +239,6 @@ async function cardToFront() {
 /// The detail leaves the state and its count to the face: it opens on the
 /// chart, whose text is nothing, so its words start at the figures.
 const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
-
-/// The chart spans the card at the header's inset: from the left edge of
-/// the header's content to the right edge of its actions, at its fixed
-/// height; the figures under it start under the name.
-const chartSpansCard = (card) => {
-  const { chart, figures, name, header, actions } = card?.detail ?? {};
-  return Boolean(chart && figures && name && header && actions) && chart.height === "69px"
-    && Math.abs(chart.left - header.left) <= 2 && Math.abs(chart.right - actions.right) <= 2
-    && Math.abs(figures.left - name.left) <= 2;
-};
 
 async function healthyLeg(host) {
   const healthy = await readUntil("healthy",

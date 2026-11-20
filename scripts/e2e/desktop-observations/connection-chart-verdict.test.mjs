@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { judgeFigures, judgeInset, judgeMotion, judgePrivacy } from "./connection-chart-verdict.mjs";
+import { chartSpansCard, judgeFigures, judgeInset, judgeMotion, judgePrivacy } from "./connection-chart-verdict.mjs";
 
 // Offline verdict test for connection-chart-native.mjs: made traces of a
 // line that steps at each arrival, as the chart did, of one that scrolls,
@@ -77,6 +77,22 @@ test("privacy mode must leave the chart, the figures and the face's name shown",
   assert.deepEqual(judgePrivacy(hidden).lines.filter((l) => !l.pass).map((l) => l.name),
     ["the chart draws its reading", "the figures line reads", "the face's title names the face", "no reveal stands for the connection"]);
   assert.equal(judgePrivacy({ points: 12, privacy: { ...shown.privacy, nameHidden: false } }).setup, false);
+});
+
+// The face driver's layout reading, with the boxes the tip read in the
+// desktop guest: the figures line's box starts at the header's inset, its
+// padding putting the first figure under the name.
+test("the figures' words start at the first figure, not at the line's box", () => {
+  const detail = {
+    chart: { left: 332, right: 868, height: "69px" },
+    figures: { left: 332, right: 868 },
+    name: { left: 357 },
+    header: { left: 332 },
+    actions: { right: 868 },
+  };
+  assert.equal(chartSpansCard({ detail: { ...detail, firstFigure: { left: 357, right: 420 } } }), true);
+  assert.equal(chartSpansCard({ detail: { ...detail, firstFigure: { left: 332, right: 395 } } }), false);
+  assert.equal(chartSpansCard({ detail }), false, "no first figure read");
 });
 
 test("the insets compare the baseline's ends with the card's edges", () => {
