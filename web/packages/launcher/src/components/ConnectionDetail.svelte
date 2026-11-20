@@ -133,7 +133,9 @@
   .reading { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .miss { fill: none; stroke: var(--danger); stroke-width: 2; stroke-linecap: round; }
   /* One line of figures; a card too narrow for the four wraps it between
-     figures, never inside one, so Missed goes first to the next line. */
-  .figures { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; white-space: nowrap; }
+     figures, never inside one, so Missed goes first to the next line. It
+     starts --figures-indent in from the chart's left edge, which the page
+     around the detail sets to line the figures up with what it holds. */
+  .figures { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; padding-left: var(--figures-indent, 0); white-space: nowrap; }
   .figures strong { color: var(--text); font-weight: 600; }
 </style>

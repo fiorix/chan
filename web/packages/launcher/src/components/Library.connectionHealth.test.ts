@@ -1,8 +1,7 @@
 // A connected devserver's connection face on the Computers deck: the face
 // beside its name on every card, the detail under its address on the card
 // in front, and nothing on the local machine's card or a row with no
-// reading. That privacy mode leaves both shown is read by the desktop
-// driver connection-chart-native.sh.
+// reading; privacy mode leaves both shown, with no reveal for them.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
@@ -191,6 +190,16 @@ describe("the connection face on the Computers deck", () => {
     flushSync();
     expect(face("ds-a")!.textContent!.trim()).toBe("reconnecting 14 s");
     expect(face("ds-a")!.querySelector('[role="img"]')!.getAttribute("aria-label")).toBe("Connection lost, reconnecting for 14 s");
+  });
+
+  it("leaves the face's words and the detail shown in privacy mode, with no reveal for them", async () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", since: NOW - 27_000, rtt_ms: 1_300 }))];
+    await setPrivacy({ enabled: true });
+    mountDeck("ds-a");
+    expect(slot("ds-a").querySelector('[aria-label="computer name hidden"]'), "privacy mode is on").not.toBeNull();
+    expect(face("ds-a")!.textContent).toContain("1.3 s");
+    expect(detailText("ds-a")).toMatch(/^Latest /);
+    expect(slot("ds-a").querySelectorAll('[aria-label="Reveal connection details"]')).toHaveLength(0);
   });
 
   it("shows the mark alone before the first reply and while recovering", () => {
