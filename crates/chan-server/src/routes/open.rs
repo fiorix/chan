@@ -13,6 +13,11 @@
 //! the submitting window. The HTTP reply carries the queued acknowledgment,
 //! plus `window` for a routed open, or a refusal (400 `{error}`).
 //!
+//! `must_exist` is the terminal link menu's mode: a path that does not exist
+//! answers 404 `{error}` before anything is routed or created, so a link opens
+//! what is there or nothing. `cs open` and the launcher's Open leave it off
+//! and keep creating a missing file.
+//!
 //! Mounted on the OPEN workspace-tenant api block (tunnel-reachable)
 //! DELIBERATELY: a tunnel caller gains no new capability class here. Every
 //! tunnel caller is the owner or a grantee, both can already create and edit
@@ -39,16 +44,19 @@ use crate::state::AppState;
 
 /// Body of `POST /api/open` (Contract C). `window_id` is the submitting
 /// window (`sessionWindowId()` in the SPA). `target` is a workspace-relative
-/// or absolute path, or a serialized `chan://graph?...` link.
+/// or absolute path, or a serialized `chan://graph?...` link. `must_exist`
+/// refuses a missing path instead of creating it; absent, it is false.
 #[derive(Deserialize)]
 pub struct OpenRequest {
     pub window_id: String,
     pub target: String,
+    #[serde(default)]
+    pub must_exist: bool,
 }
 
 /// `POST /api/open` - queue an open locally or route it through the host.
-/// A 200 carries `message`, plus `window` when routed. A refusal answers 400;
-/// a failed blocking task answers 500.
+/// A 200 carries `message`, plus `window` when routed. A refusal answers 400,
+/// a missing path under `must_exist` 404; a failed blocking task answers 500.
 pub async fn api_open(
     State(state): State<Arc<AppState>>,
     Json(req): Json<OpenRequest>,
@@ -90,6 +98,21 @@ pub async fn api_open(
     } else {
         workspace.root().join(requested)
     };
+    if req.must_exist {
+        // Checked before the route so neither opener, the workspace's or the
+        // routed standalone window's, reaches its create-on-missing arm.
+        let probe = requested.clone();
+        match run_blocking("open", move || std::fs::metadata(probe)).await {
+            Err(failed) => return failed.into_response(),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    format!("not found: {}", requested.display()),
+                );
+            }
+            Ok(_) => {}
+        }
+    }
     match crate::control_socket::route_open_if_outside_workspace(
         &state.unserve,
         workspace.root(),
@@ -189,7 +212,29 @@ mod tests {
         window_id: &str,
         target: &str,
     ) -> (StatusCode, serde_json::Value) {
-        let body = serde_json::json!({ "window_id": window_id, "target": target });
+        post_open_body(
+            router,
+            serde_json::json!({ "window_id": window_id, "target": target }),
+        )
+        .await
+    }
+
+    /// The terminal link menu's open: the target must exist.
+    async fn post_open_existing(
+        router: axum::Router,
+        target: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        post_open_body(
+            router,
+            serde_json::json!({ "window_id": "w-1", "target": target, "must_exist": true }),
+        )
+        .await
+    }
+
+    async fn post_open_body(
+        router: axum::Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let resp = router
             .oneshot(
                 Request::builder()
@@ -319,6 +364,51 @@ mod tests {
         );
         assert!(!root.path().join("missing.png").exists());
         assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[tokio::test]
+    async fn must_exist_refuses_a_missing_workspace_path_without_creating_it() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let (status, body) = post_open_existing(router.clone(), "fresh.md").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(
+            body["error"],
+            format!(
+                "not found: {}",
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("fresh.md")
+                    .display()
+            )
+        );
+        assert!(!root.path().join("fresh.md").exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+
+        std::fs::write(root.path().join("notes.md"), "hello\n").unwrap();
+        let (status, body) = post_open_existing(router, "notes.md").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let frame = next_frame(&mut rx);
+        assert_eq!(frame["command"], "open_file");
+        assert_eq!(frame["path"], "notes.md");
+    }
+
+    #[tokio::test]
+    async fn must_exist_refuses_a_missing_outside_path_before_routing() {
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
+        let outside = TempDir::new().unwrap();
+        let path = outside.path().join("gone.md");
+        let (status, body) = post_open_existing(router.clone(), path.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], format!("not found: {}", path.display()));
+        assert!(!path.exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+
+        // An outside path that exists goes on to the escape route as before.
+        std::fs::write(&path, "x\n").unwrap();
+        let (status, body) = post_open_existing(router, path.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], guidance(&path));
     }
 
     #[tokio::test]
@@ -502,6 +592,18 @@ mod tests {
                 (absolute.clone(), "w-1".into()),
             ]
         );
+        // A missing outside path under must_exist never reaches the host,
+        // whose standalone window would create it.
+        let missing = fixture.path().join("missing.md");
+        let (status, body) =
+            post_open_existing(artifacts.app.clone(), missing.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(fake.open_requests().len(), 2, "the host was not asked");
+        assert!(
+            window_commands(&mut events).is_empty(),
+            "a refusal queues no window command"
+        );
+        assert!(!missing.exists());
         fake.refuse_opens();
         let (status, body) = post_open(artifacts.app.clone(), absolute.to_str().unwrap()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
