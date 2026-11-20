@@ -490,8 +490,8 @@ export async function runTeamBootstrap(
   // The lead is a normal terminal. Auto-deliver its
   // identity prompt through the write queue - the same prompt-frame path every
   // terminal uses - with the lead's agent so the server appends the right
-  // submit chord (claude CSI; agy/codex/kimi/opencode bracketed paste + CR; gemini
-  // and muse CR in a later write). The freshly-spawned
+  // submit chord (claude CSI; agy/codex/kimi/muse/opencode bracketed paste + CR;
+  // gemini CR in a later write). The freshly-spawned
   // lead's WS may not be open yet, so retry until
   // the send goes out (the server then enqueues + drains when the agent is
   // idle). This is what makes the lead read bootstrap.md + drive the workers.

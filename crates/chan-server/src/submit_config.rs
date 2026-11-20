@@ -21,7 +21,7 @@
 //! [kimi]
 //! template = '\e[200~{}\e[201~\r'
 //! [muse]
-//! template = '{}\r'
+//! template = '\e[200~{}\e[201~\r'
 //! [opencode]
 //! template = '\e[200~{}\e[201~\r'
 //! ```
@@ -144,13 +144,13 @@ template = "\\e[200~{}\\e[201~\\r"
         let file: SubmitOverridesFile = toml::from_str(
             r#"
 [muse]
-template = "{}\\r"
+template = "\\e[200~{}\\e[201~\\r"
 "#,
         )
         .expect("valid submit config");
         assert_eq!(
             file.into_map().get("muse").map(String::as_str),
-            Some("{}\\r")
+            Some("\\e[200~{}\\e[201~\\r")
         );
     }
 }
