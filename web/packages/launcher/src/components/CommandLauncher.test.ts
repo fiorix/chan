@@ -1749,6 +1749,41 @@ describe("tmux windows", () => {
     await query("vim");
     expect(item("Terminal Window 2 [vim]").subtitle).toBe("tmux -CC on alpha (main)");
   });
+
+  it("lists a connection's control terminal once, under the machine whose card lists it", async () => {
+    const connection: TmuxConnectionEntry = {
+      connection: "tm-1",
+      library_id: "lib-a",
+      origin: { program: "tmux", command: "tmux -CC", local: true },
+      version: "3.5",
+      session: { id: "$main", name: "main" },
+      windows: [],
+      window_cap: 8,
+      errors: [],
+      control_window: "tm-1-control",
+    };
+    const row = (id: string, control: boolean, ordinal: number): WindowRecord => ({
+      ...terminalRecord,
+      window_id: id,
+      library_id: "lib-a",
+      title: control ? "Control terminal" : `Terminal Window ${ordinal}`,
+      ordinal,
+      label: undefined,
+      control,
+      hidden: control,
+      tmux: { connection: "tm-1", control },
+    });
+    library.devservers = [alpha];
+    library.tmuxConnections = [connection];
+    library.windows = [row("tm-1-control", true, 0), row("tm-1-w1", false, 3)];
+    open();
+    await filterBy("windows");
+    expect(outline()).toEqual([
+      "alpha: Control terminal",
+      "tmux -CC on alpha (main): Terminal Window 3",
+      "New: New terminal",
+    ]);
+  });
 });
 
 describe("browser Show readiness", () => {

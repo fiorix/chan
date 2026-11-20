@@ -299,7 +299,15 @@
     }
 
     function machineModel(node: MachineNode): ComputersMachine {
-      const loose = [...node.control, ...node.terminals, ...node.looseWindows];
+      // A tmux connection's control terminal is listed where the cards list
+      // it: under the machine whose terminal ran it, and under the
+      // connection only while no machine card holds it.
+      const loose = [
+        ...node.control,
+        ...node.tmuxControls.map((row) => row.window),
+        ...node.terminals,
+        ...node.looseWindows,
+      ];
       if (node.kind === "tmux") {
         const connection = node.connection!;
         const key = `tmux:${connection}`;

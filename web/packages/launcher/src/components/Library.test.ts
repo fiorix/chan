@@ -1074,17 +1074,13 @@ describe("Library: tmux connection cards", () => {
     expect(remoteCard.textContent).toContain("session work");
     expect(remoteCard.textContent).toContain("tmux 3.5a");
     expect(localCard.querySelector(".machine-icon.live")).not.toBeNull();
-    // The control terminal is pinned first; the rows are the connection's,
-    // and a tmux window past the cap closes the list.
+    // The rows are the connection's windows, and a tmux window past the cap
+    // closes the list; the control terminal is This machine's row alone.
     expect(localCard.querySelector(".section-label")?.textContent).toBe("Windows");
-    expect(rowNames(localCard)).toEqual(["Control terminal", "Terminal Window 1"]);
-    expect(rowNames(remoteCard)).toEqual(["Control terminal", "Terminal Window 1", "logs"]);
-    // The control terminal stays buried while the connection runs: its row
-    // offers no action, while the connection's window keeps its buttons.
+    expect(rowNames(localCard)).toEqual(["Terminal Window 1"]);
+    expect(rowNames(remoteCard)).toEqual(["Terminal Window 1", "logs"]);
+    // The connection's window keeps its buttons.
     const localRows = [...localCard.querySelectorAll<HTMLElement>(".row")];
-    const controlRow = localRows.find((r) => r.textContent?.includes("Control terminal"))!;
-    expect(controlRow.querySelector("button")).toBeNull();
-    expect(controlRow.textContent).toContain("buried");
     const windowRow = localRows.find((r) => r.textContent?.includes("Terminal Window 1"))!;
     expect(windowRow.querySelector("button")).not.toBeNull();
     // This machine lists the control terminals its terminals ran, the local
@@ -1096,8 +1092,8 @@ describe("Library: tmux connection cards", () => {
     // The badge counts the rows the card shows, the unopened window included.
     const badge = (c: HTMLElement) =>
       c.querySelector(".machine-actions .count-badge")?.getAttribute("title");
-    expect(badge(localCard)).toBe("2 windows");
-    expect(badge(remoteCard)).toBe("3 windows");
+    expect(badge(localCard)).toBe("1 window");
+    expect(badge(remoteCard)).toBe("2 windows");
   });
 
   /** The buried control terminal rows a machine card lists for its tmux runs. */
@@ -1147,12 +1143,11 @@ describe("Library: tmux connection cards", () => {
         ["tm-geekom", { request: "detach" }],
       ]);
       expect(library.error).toBeNull();
-      // The connection's card keeps its detach on the title and its control
-      // row as before: buried, with no action.
+      // The connection's card keeps its detach on the title and lists no
+      // control terminal.
       const own = card(LOCAL_TITLE);
       expect(own.querySelector(`.machine-header button[aria-label="Detach ${LOCAL_TITLE}"]`)).not.toBeNull();
-      const ownControl = buriedRows(own)[0]!;
-      expect(ownControl.querySelector("button")).toBeNull();
+      expect(buriedRows(own)).toEqual([]);
     } finally {
       request.mockRestore();
     }
