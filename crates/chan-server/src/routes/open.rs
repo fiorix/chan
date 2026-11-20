@@ -13,6 +13,14 @@
 //! the submitting window. The HTTP reply carries the queued acknowledgment,
 //! plus `window` for a routed open, or a refusal (400 `{error}`).
 //!
+//! `must_exist` is the terminal link menu's mode: a path that does not exist
+//! answers 404 `{error}` before anything is routed, both openers are told to
+//! create nothing (a path they cannot stat is refused with their reason), so
+//! a link opens what is there or nothing, and a target starting `~/` (or `~` alone) names
+//! the home of the user the server runs as, which the link's shell would
+//! have expanded. `cs open` and the launcher's Open leave it off and keep
+//! creating a missing file.
+//!
 //! Mounted on the OPEN workspace-tenant api block (tunnel-reachable)
 //! DELIBERATELY: a tunnel caller gains no new capability class here. Every
 //! tunnel caller is the owner or a grantee, both can already create and edit
@@ -39,16 +47,20 @@ use crate::state::AppState;
 
 /// Body of `POST /api/open` (Contract C). `window_id` is the submitting
 /// window (`sessionWindowId()` in the SPA). `target` is a workspace-relative
-/// or absolute path, or a serialized `chan://graph?...` link.
+/// or absolute path, or a serialized `chan://graph?...` link. `must_exist`
+/// refuses a missing path instead of creating it and expands a leading `~/`
+/// against the server's home; absent, it is false.
 #[derive(Deserialize)]
 pub struct OpenRequest {
     pub window_id: String,
     pub target: String,
+    #[serde(default)]
+    pub must_exist: bool,
 }
 
 /// `POST /api/open` - queue an open locally or route it through the host.
-/// A 200 carries `message`, plus `window` when routed. A refusal answers 400;
-/// a failed blocking task answers 500.
+/// A 200 carries `message`, plus `window` when routed. A refusal answers 400,
+/// a missing path under `must_exist` 404; a failed blocking task answers 500.
 pub async fn api_open(
     State(state): State<Arc<AppState>>,
     Json(req): Json<OpenRequest>,
@@ -83,18 +95,67 @@ pub async fn api_open(
         Err(e) => return crate::error::err_state(&e),
     };
     // Relative targets resolve against the workspace root (the launcher has
-    // no cwd, unlike `cs open`); absolute ones pass verbatim.
-    let requested = PathBuf::from(&target);
+    // no cwd, unlike `cs open`); absolute ones pass verbatim. A link's `~/`
+    // is the home of the user the server runs as, as its shell would read it.
+    let requested = match home_relative(&target).filter(|_| req.must_exist) {
+        Some(rest) => match dirs::home_dir() {
+            Some(home) => home.join(rest),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "the server has no home directory to expand ~ against".into(),
+                );
+            }
+        },
+        None => PathBuf::from(&target),
+    };
     let requested = if requested.is_absolute() {
         requested
     } else {
         workspace.root().join(requested)
     };
+    // Under must_exist neither opener, the workspace's or the routed
+    // standalone window's, creates anything: each refuses, with its own
+    // reason, a path it cannot lstat (one that is missing, escapes its root,
+    // or was removed after the check below). The check itself refuses a
+    // special file.
+    let missing = if req.must_exist {
+        chan_library::MissingPath::Refuse
+    } else {
+        chan_library::MissingPath::Create
+    };
+    if req.must_exist {
+        // A path that does not exist answers 404 before anything is routed,
+        // and one that is neither a file nor a directory (a FIFO, a device,
+        // a socket, reached directly or through a symlink) is refused: a link
+        // opens a file or a folder.
+        let probe = requested.clone();
+        match run_blocking("open", move || std::fs::metadata(probe)).await {
+            Err(failed) => return failed.into_response(),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return err(
+                    StatusCode::NOT_FOUND,
+                    format!("not found: {}", requested.display()),
+                );
+            }
+            Ok(Ok(meta)) if !meta.is_file() && !meta.is_dir() => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "cannot open {}: not a regular file or directory",
+                        requested.display()
+                    ),
+                );
+            }
+            Ok(_) => {}
+        }
+    }
     match crate::control_socket::route_open_if_outside_workspace(
         &state.unserve,
         workspace.root(),
         &requested,
         &window_id,
+        missing,
         &state.session_registry,
         &state.events_tx,
     )
@@ -127,6 +188,7 @@ pub async fn api_open(
             &window_id,
             &requested,
             None,
+            missing,
             &session_registry,
             &events_tx,
         )
@@ -136,6 +198,17 @@ pub async fn api_open(
         Ok(Ok(message)) => ok_message(message),
         Ok(Err(error)) => err(StatusCode::BAD_REQUEST, error),
         Err(failed) => failed.into_response(),
+    }
+}
+
+/// The part of `target` under the home directory when it starts with `~/` or
+/// is `~` alone; None otherwise. `~user` names another user's home, which
+/// the server does not look up, so it stays a relative name.
+fn home_relative(target: &str) -> Option<&str> {
+    if target == "~" {
+        Some("")
+    } else {
+        target.strip_prefix("~/")
     }
 }
 
@@ -189,7 +262,29 @@ mod tests {
         window_id: &str,
         target: &str,
     ) -> (StatusCode, serde_json::Value) {
-        let body = serde_json::json!({ "window_id": window_id, "target": target });
+        post_open_body(
+            router,
+            serde_json::json!({ "window_id": window_id, "target": target }),
+        )
+        .await
+    }
+
+    /// The terminal link menu's open: the target must exist.
+    async fn post_open_existing(
+        router: axum::Router,
+        target: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        post_open_body(
+            router,
+            serde_json::json!({ "window_id": "w-1", "target": target, "must_exist": true }),
+        )
+        .await
+    }
+
+    async fn post_open_body(
+        router: axum::Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let resp = router
             .oneshot(
                 Request::builder()
@@ -319,6 +414,134 @@ mod tests {
         );
         assert!(!root.path().join("missing.png").exists());
         assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[tokio::test]
+    async fn must_exist_refuses_a_missing_workspace_path_without_creating_it() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let (status, body) = post_open_existing(router.clone(), "fresh.md").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(
+            body["error"],
+            format!(
+                "not found: {}",
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("fresh.md")
+                    .display()
+            )
+        );
+        assert!(!root.path().join("fresh.md").exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+
+        std::fs::write(root.path().join("notes.md"), "hello\n").unwrap();
+        let (status, body) = post_open_existing(router, "notes.md").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let frame = next_frame(&mut rx);
+        assert_eq!(frame["command"], "open_file");
+        assert_eq!(frame["path"], "notes.md");
+    }
+
+    #[tokio::test]
+    async fn must_exist_refuses_a_missing_outside_path_before_routing() {
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
+        let outside = TempDir::new().unwrap();
+        let path = outside.path().join("gone.md");
+        let (status, body) = post_open_existing(router.clone(), path.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], format!("not found: {}", path.display()));
+        assert!(!path.exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+
+        // An outside path that exists goes on to the escape route as before.
+        std::fs::write(&path, "x\n").unwrap();
+        let (status, body) = post_open_existing(router, path.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], guidance(&path));
+    }
+
+    #[tokio::test]
+    async fn must_exist_reads_a_tilde_as_the_server_home() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let name = format!("chan-open-test-missing-{}.md", std::process::id());
+        let (status, body) = post_open_existing(router, &format!("~/{name}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let home = dirs::home_dir().expect("a home directory");
+        assert_eq!(
+            body["error"],
+            format!("not found: {}", home.join(&name).display())
+        );
+        assert!(!root.path().join("~").exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[tokio::test]
+    async fn a_tilde_without_must_exist_stays_a_workspace_name() {
+        // A folder named `~` in the workspace holds a folder the home does
+        // not: `~/<folder>/notes.md` read as a workspace name is created
+        // there, as cs open creates a missing file. Read as the home, its
+        // folder does not exist, so the path resolves nowhere and the open
+        // is refused before any write: no mutation of the expansion can
+        // create a file under the real home.
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let folder = format!("chan-open-test-tilde-{}", std::process::id());
+        let home = dirs::home_dir().expect("a home directory");
+        assert!(!home.join(&folder).exists());
+        std::fs::create_dir_all(root.path().join("~").join(&folder)).unwrap();
+        let (status, body) = post_open(router, &format!("~/{folder}/notes.md")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(next_frame(&mut rx)["path"], format!("~/{folder}/notes.md"));
+        assert!(root
+            .path()
+            .join("~")
+            .join(&folder)
+            .join("notes.md")
+            .is_file());
+        assert!(!home.join(&folder).exists(), "nothing under the home");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn must_exist_refuses_a_special_file() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let fifo = root.path().join("pipe.md");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed");
+        let (status, body) = post_open_existing(router, "pipe.md").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.ends_with("pipe.md: not a regular file or directory")),
+            "{body}"
+        );
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn must_exist_answers_a_dangling_symlink_as_not_found() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let link = root.path().join("gone.md");
+        std::os::unix::fs::symlink(root.path().join("target.md"), &link).expect("symlink");
+        let (status, body) = post_open_existing(router, "gone.md").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(!root.path().join("target.md").exists(), "nothing created");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[test]
+    fn home_relative_takes_a_leading_tilde_alone() {
+        assert_eq!(home_relative("~/notes/a.md"), Some("notes/a.md"));
+        assert_eq!(home_relative("~"), Some(""));
+        assert_eq!(home_relative("~other/a.md"), None);
+        assert_eq!(home_relative("./~/a.md"), None);
+        assert_eq!(home_relative("/home/me/a.md"), None);
     }
 
     #[tokio::test]
@@ -500,6 +723,34 @@ mod tests {
             vec![
                 (root.join("../outside.md"), "w-1".into()),
                 (absolute.clone(), "w-1".into()),
+            ]
+        );
+        // A missing outside path under must_exist never reaches the host,
+        // whose standalone window would create it.
+        let missing = fixture.path().join("missing.md");
+        let (status, body) =
+            post_open_existing(artifacts.app.clone(), missing.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(fake.open_requests().len(), 2, "the host was not asked");
+        assert!(
+            window_commands(&mut events).is_empty(),
+            "a refusal queues no window command"
+        );
+        assert!(!missing.exists());
+        // An outside path that exists routes under must_exist with the
+        // resolving tenant told to create nothing.
+        let present = fixture.path().join("present.md");
+        std::fs::write(&present, "x\n").unwrap();
+        let (status, body) =
+            post_open_existing(artifacts.app.clone(), present.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let _ = window_commands(&mut events);
+        assert_eq!(
+            fake.open_missing(),
+            vec![
+                chan_library::MissingPath::Create,
+                chan_library::MissingPath::Create,
+                chan_library::MissingPath::Refuse,
             ]
         );
         fake.refuse_opens();

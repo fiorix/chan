@@ -68,9 +68,9 @@ pub use prefix::{
 pub use root_locks::{KeyedLockGuard, KeyedLocks};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
-    terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles,
-    StandaloneOpenFrame, TenantArtifacts, TenantBuilder, TenantTaskOwner, TerminalTenantOptions,
-    UnserveMode, UnserveScope, WorkspaceCellHandle,
+    terminal_tenant_root, BrowserWindowTarget, HostControl, MissingPath, OpenOutsideAck,
+    StandaloneFiles, StandaloneOpenFrame, TenantArtifacts, TenantBuilder, TenantTaskOwner,
+    TerminalTenantOptions, UnserveMode, UnserveScope, WorkspaceCellHandle,
 };
 pub use terminal_sessions::shell_profiles::{ProfileSource, ShellKind, ShellProfile};
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.

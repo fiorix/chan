@@ -178,6 +178,9 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     }
 
     attachCustomWheelEventHandler() {}
+    onLinkActivate() {
+      return { dispose() {} };
+    }
     hasMouseTracking() {
       return false;
     }

@@ -20,10 +20,10 @@ export const xterm = {
   fit: { calls: 0, failure: null as Error | null, size: null as { cols: number; rows: number } | null },
   /// Every WebglAddon made, with the context-loss handler it was given.
   webgl: [] as Array<{ loadedInto: FakeTerminal | null; onContextLoss: (() => void) | null; disposed: boolean }>,
+  /// The handler and options each WebLinksAddon was given.
+  webLinks: [] as Array<{ handler: (event: MouseEvent, uri: string) => void; options: any }>,
   /// When set, constructing a WebglAddon throws, as it does without WebGL.
   webglThrows: false,
-  /// The link handler each WebLinksAddon was given.
-  linkHandlers: [] as Array<(event: MouseEvent, uri: string) => void>,
   /// When set, each terminal opens a textarea in its host and focus() and
   /// blur() move DOM focus to and from it, as xterm's own textarea does.
   textareaFocus: false,
@@ -157,6 +157,8 @@ export class FakeTerminal {
   hasSelection(): boolean {
     return this.selection.length > 0;
   }
+  /// The mouse tracking a program asked for; none until a test sets it.
+  modes = { mouseTrackingMode: "none" as "none" | "x10" | "vt200" | "drag" | "any" };
   focus(): void {
     this.focusCount += 1;
     this.textarea?.focus();
@@ -221,11 +223,18 @@ export function serializeAddonModule() {
   };
 }
 
+// A buffer with no rows at the bottom of an empty history, on the prototype
+// so a suite that reads a buffer of its own redefines it there.
+Object.defineProperty(FakeTerminal.prototype, "buffer", {
+  configurable: true,
+  get: () => ({ active: { viewportY: 0, getLine: () => undefined } }),
+});
+
 export function webLinksAddonModule() {
   return {
     WebLinksAddon: class {
-      constructor(handler: (event: MouseEvent, uri: string) => void) {
-        xterm.linkHandlers.push(handler);
+      constructor(handler: (event: MouseEvent, uri: string) => void, options: unknown) {
+        xterm.webLinks.push({ handler, options });
       }
     },
   };

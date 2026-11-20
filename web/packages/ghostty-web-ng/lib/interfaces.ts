@@ -58,6 +58,26 @@ export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 /** A parsed write or a completed grid resize, delivered before painting. */
 export type TerminalChange = { kind: 'write' | 'resize' };
 
+/** Which provider found a link: an OSC 8 hyperlink or a URL in the text. */
+export type TerminalLinkKind = 'osc8' | 'url';
+
+/**
+ * A click on a link the terminal underlines. `target` is the real target,
+ * the OSC 8 URI exactly as the program wrote it or the matched URL, which can
+ * differ from the text on the screen and is not to be trusted. `range` is the
+ * link's cells, absolute rows (0 is the oldest history row), both ends
+ * included. `event` is the click.
+ */
+export interface TerminalLinkActivation {
+  readonly target: string;
+  readonly kind: TerminalLinkKind;
+  readonly range: {
+    readonly start: { readonly x: number; readonly y: number };
+    readonly end: { readonly x: number; readonly y: number };
+  };
+  readonly event: MouseEvent;
+}
+
 export interface TerminalViewport {
   /** Rows back from the bottom; fractions accumulate between pixel-wheel events. */
   readonly offset: number;

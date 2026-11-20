@@ -191,10 +191,14 @@ export class InputHandler {
   private mousedownListener: ((e: MouseEvent) => void) | null = null;
   private mouseupListener: ((e: MouseEvent) => void) | null = null;
   private mousemoveListener: ((e: MouseEvent) => void) | null = null;
+  private documentMouseupListener: ((e: MouseEvent) => void) | null = null;
   private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
+  // Buttons pressed with Shift held while tracking: the gesture is the
+  // terminal's (a selection, a link click), so none of it is reported.
+  private mouseButtonsBypassed = 0;
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -303,6 +307,11 @@ export class InputHandler {
 
     this.mousemoveListener = this.handleMouseMove.bind(this);
     this.container.addEventListener('mousemove', this.mousemoveListener);
+
+    // A Shift drag the selection manager carries past the terminal's edge
+    // ends with a release only the document sees; it still ends the bypass.
+    this.documentMouseupListener = this.handleDocumentMouseUp.bind(this);
+    globalThis.document?.addEventListener('mouseup', this.documentMouseupListener);
 
     this.wheelListener = this.handleWheel.bind(this);
     this.container.addEventListener('wheel', this.wheelListener, { passive: false });
@@ -815,7 +824,17 @@ export class InputHandler {
    */
   private handleMouseDown(event: MouseEvent): void {
     if (this.isDisposed) return;
+    // A press starts a fresh gesture, whatever became of the last one's
+    // release.
+    this.mouseButtonsBypassed &= ~(1 << event.button);
     if (!this.mouseConfig?.hasMouseTracking()) return;
+
+    // Shift bypasses mouse reporting, as in xterm.js and native terminals:
+    // the press, its drag and its release stay with the terminal.
+    if (event.shiftKey) {
+      this.mouseButtonsBypassed |= 1 << event.button;
+      return;
+    }
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -842,6 +861,14 @@ export class InputHandler {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
+    // A release ends the gesture its press began: a bypassed press is not
+    // reported, a reported one is, Shift or not, so the program never holds
+    // a button down.
+    if (this.mouseButtonsBypassed & (1 << event.button)) {
+      this.mouseButtonsBypassed &= ~(1 << event.button);
+      return;
+    }
+
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
@@ -851,6 +878,16 @@ export class InputHandler {
     this.mouseButtonsPressed &= ~(1 << button);
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
+  }
+
+  /**
+   * A release anywhere in the document ends a bypassed press: the terminal's
+   * own mouseup listener has already reported or withheld it when the
+   * release was over the terminal, and a release past its edge reaches only
+   * the document.
+   */
+  private handleDocumentMouseUp(event: MouseEvent): void {
+    this.mouseButtonsBypassed &= ~(1 << event.button);
   }
 
   /**
@@ -866,6 +903,9 @@ export class InputHandler {
     const hasAnyMotion = this.getModeCallback?.(1003) ?? false;
 
     if (!hasButtonMotion && !hasAnyMotion) return;
+
+    // Motion with Shift held, or during a bypassed press, is not reported.
+    if (event.shiftKey || this.mouseButtonsBypassed !== 0) return;
 
     // In button motion mode, only report if a button is pressed
     if (hasButtonMotion && !hasAnyMotion && this.mouseButtonsPressed === 0) return;
@@ -890,6 +930,7 @@ export class InputHandler {
   private handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    if (event.shiftKey) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -1084,6 +1125,11 @@ export class InputHandler {
     if (this.mousemoveListener) {
       this.container.removeEventListener('mousemove', this.mousemoveListener);
       this.mousemoveListener = null;
+    }
+
+    if (this.documentMouseupListener) {
+      globalThis.document?.removeEventListener('mouseup', this.documentMouseupListener);
+      this.documentMouseupListener = null;
     }
 
     if (this.wheelListener) {

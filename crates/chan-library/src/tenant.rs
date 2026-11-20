@@ -74,14 +74,32 @@ pub trait StandaloneFiles: Send + Sync {
     /// Resolve `requested` against this tenant's capability root and produce
     /// the frame that opens it in `window_id`, plus the path to name in the
     /// acknowledgement. `Err` when the path cannot be expressed there (outside
-    /// the root, unresolvable, non-UTF-8) -- the caller refuses rather than
-    /// opening something other than what was named.
-    fn open_frame(&self, window_id: &str, requested: &Path) -> Result<StandaloneOpenFrame, String>;
+    /// the root, unresolvable, non-UTF-8), or when it names nothing that can
+    /// be opened and `missing` refuses to create it -- the caller refuses
+    /// rather than opening something other than what was named.
+    fn open_frame(
+        &self,
+        window_id: &str,
+        requested: &Path,
+        missing: MissingPath,
+    ) -> Result<StandaloneOpenFrame, String>;
 
     /// The serialized `/ws` frame that opens a terminal tab in `window_id`
     /// starting in `cwd`, an absolute directory resolved against this tenant's
     /// capability root. `Err` when `cwd` is not a real directory there.
     fn term_new_frame(&self, window_id: &str, cwd: &Path) -> Result<String, String>;
+}
+
+/// What an open does with a path its filesystem surface cannot lstat: one
+/// that is missing, escapes the surface's root, or went away between a
+/// caller's check and the open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingPath {
+    /// Create it empty and open it, as `cs open` does.
+    Create,
+    /// Refuse it with the surface's own reason and create nothing, for a
+    /// caller that opens only what is there.
+    Refuse,
 }
 
 /// What [`StandaloneFiles::open_frame`] hands back: the wire frame to deliver
@@ -158,10 +176,14 @@ pub trait HostControl: Send + Sync {
     /// `Err` when this host serves no filesystem surface, when the path cannot
     /// be expressed there, or when no window could be minted. Async because
     /// raising the target window goes through the desktop bridge.
+    ///
+    /// `missing` says what the resolving tenant does with a path that does
+    /// not exist there.
     async fn open_outside_workspace(
         &self,
         requested: &Path,
         caller_window_id: &str,
+        missing: MissingPath,
     ) -> Result<OpenOutsideAck, Error>;
 }
 

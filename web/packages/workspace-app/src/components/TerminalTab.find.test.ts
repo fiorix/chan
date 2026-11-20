@@ -285,6 +285,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.resizeListeners.add(listener);
       return { dispose: () => this.resizeListeners.delete(listener) };
     }
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return false;
     }

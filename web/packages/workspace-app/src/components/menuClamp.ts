@@ -16,6 +16,10 @@ export interface ClampOpts {
   /// Cursor / desired-top-left position in viewport coords.
   x: number;
   y: number;
+  /// Where the menu's bottom edge goes when it flips up; `y` when absent. A
+  /// menu opened below a band (a terminal link's row) flips to above it,
+  /// never over it.
+  flipY?: number;
   /// Inset from the viewport edges so the menu never butts up flush.
   margin?: number;
 }
@@ -27,7 +31,7 @@ export interface ClampOpts {
 export function clampToViewport(
   width: number,
   height: number,
-  { x, y, margin = 8 }: ClampOpts,
+  { x, y, flipY = y, margin = 8 }: ClampOpts,
 ): { left: number; top: number } {
   const vw = window.innerWidth;
   const vh = window.visualViewport?.height ?? window.innerHeight;
@@ -44,7 +48,7 @@ export function clampToViewport(
   }
   if (top + height > vh - margin) {
     // Flip up: anchor bottom edge near the cursor.
-    top = Math.max(margin, y - height);
+    top = Math.max(margin, flipY - height);
   }
   if (top + height > vh - margin) {
     top = Math.max(margin, vh - margin - height);

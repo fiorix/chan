@@ -1113,13 +1113,14 @@ describe('InputHandler', () => {
       };
     }
 
-    function mouseEvent(type: string, button: number) {
+    function mouseEvent(type: string, button: number, shiftKey = false) {
       return {
         type,
         clientX: 5,
         clientY: 5,
         button,
-        shiftKey: false,
+        deltaY: -100,
+        shiftKey,
         metaKey: false,
         ctrlKey: false,
         preventDefault: vi.fn(),
@@ -1167,6 +1168,71 @@ describe('InputHandler', () => {
 
       // The non-SGR release is button 3; without the mapping the release repeats the press bytes. The handler calls this normal-tracking form X10, though ctlseqs' mode 9 reports no release.
       expect(dataReceived).toEqual(['\x1b[M !!', '\x1b[M#!!']);
+    });
+
+    test('Shift keeps a gesture from the program while it tracks the mouse', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (mode) => mode === 1003,
+        undefined,
+        undefined,
+        mouseConfig(true)
+      );
+
+      // A Shift press, its drag (Shift let go of mid-drag included) and its
+      // release are the terminal's, and so is a Shift wheel or motion.
+      container.dispatchEvent(mouseEvent('mousedown', 0, true));
+      container.dispatchEvent(mouseEvent('mousemove', 0, true));
+      container.dispatchEvent(mouseEvent('mousemove', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+      container.dispatchEvent(mouseEvent('wheel', 0, true));
+      container.dispatchEvent(mouseEvent('mousemove', 0, true));
+      expect(dataReceived).toEqual([]);
+
+      // A press without Shift is the program's to its release, Shift or not.
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0, true));
+      expect(dataReceived).toEqual(['\x1b[<0;1;1M', '\x1b[<4;1;1m']);
+    });
+
+    function trackingHandler(mode: number) {
+      return new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (asked) => asked === mode,
+        undefined,
+        undefined,
+        mouseConfig(true)
+      );
+    }
+
+    test('a press after a Shift press whose release never came is the program\'s whole gesture', () => {
+      trackingHandler(1002);
+      container.dispatchEvent(mouseEvent('mousedown', 0, true));
+      // Its release lands nowhere the handler listens: a lost release.
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mousemove', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+      expect(dataReceived).toEqual(['\x1b[<0;1;1M', '\x1b[<32;1;1M', '\x1b[<0;1;1m']);
+    });
+
+    test('a Shift drag released past the terminal\'s edge ends the bypass', () => {
+      const handler = trackingHandler(1003);
+      container.dispatchEvent(mouseEvent('mousedown', 0, true));
+      document.dispatchEvent(new MouseEvent('mouseup', { button: 0 }));
+      // Motion with no button held is reported again under any-motion tracking.
+      container.dispatchEvent(mouseEvent('mousemove', 0));
+      handler.dispose();
+      expect(dataReceived).toEqual(['\x1b[<32;1;1M']);
     });
   });
 

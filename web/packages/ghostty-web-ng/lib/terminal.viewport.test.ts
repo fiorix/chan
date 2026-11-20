@@ -223,12 +223,7 @@ describe('content changes', () => {
     term.write('\r\x1b[2Khttps://after.example');
     expect(observed).toHaveLength(1);
     const link = await observed[0];
-    expect(link, 'the replacement URL remains a link').toBeDefined();
-    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
-    link!.activate(new MouseEvent('click', { ctrlKey: true }));
-    expect(open, 'the listener sees the URL currently on the screen').toHaveBeenCalledExactlyOnceWith(
-      'https://after.example', '_blank', 'noopener,noreferrer',
-    );
+    expect(link?.target, 'the listener sees the URL currently on the screen').toBe('https://after.example');
   });
 
   test('change listeners see the final anchored offset before any write paint', async () => {
