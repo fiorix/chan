@@ -1656,18 +1656,17 @@ turn instead of one turn each and the agent can reconcile them
 before acting. agy, claude, codex, kimi, muse and opencode take
 such a batch; gemini takes one message per turn. A write with no
 --submit, a gemini target, a Rich Prompt turn and a runtime submit
-override each end that run and are delivered on their own. The command prints the message's
-position among the target's pending messages and returns at
-once; it never waits for the agent's reply.
+override each end that run and are delivered on their own. The
+command prints the message's position among the target's pending
+messages and returns at once; it never waits for the agent's reply.
 
 The queue holds 100 entries per target, where a gemini message
 costs two entries and every other message, muse's included, costs
-one. The queue is
-dropped when the session is recycled (restarted). "Idle" is
-detected from the quiescence of visible output (a repaint that
-is escape sequences alone does not count), so a target sitting
-at its prompt with a PAUSED, half-typed buffer reads as idle;
-that rare case is not detected.
+one. The queue is dropped when the session is recycled
+(restarted). "Idle" is detected from the quiescence of visible
+output (a repaint that is escape sequences alone does not count),
+so a target sitting at its prompt with a PAUSED, half-typed buffer
+reads as idle; that rare case is not detected.
 
 --submit submits the bytes into each target hands-free. A non-empty
 body is delivered as its trailing newlines trimmed, then exactly
