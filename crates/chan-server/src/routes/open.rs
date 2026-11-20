@@ -115,9 +115,10 @@ pub async fn api_open(
         workspace.root().join(requested)
     };
     // Under must_exist neither opener, the workspace's or the routed
-    // standalone window's, creates anything: they refuse what they cannot
-    // stat (a symlink, a special file, a path removed after the check below)
-    // with their own reason.
+    // standalone window's, creates anything: each refuses, with its own
+    // reason, a path it cannot lstat (one that is missing, escapes its root,
+    // or was removed after the check below). The check itself refuses a
+    // special file.
     let missing = if req.must_exist {
         chan_library::MissingPath::Refuse
     } else {
@@ -477,21 +478,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_tilde_without_must_exist_stays_a_workspace_name() {
+        // A folder named `~` in the workspace holds a folder the home does
+        // not: `~/<folder>/notes.md` read as a workspace name is created
+        // there, as cs open creates a missing file. Read as the home, its
+        // folder does not exist, so the path resolves nowhere and the open
+        // is refused before any write: no mutation of the expansion can
+        // create a file under the real home.
         let (_cfg, root, mut rx, router, _guard) = test_router();
-        let name = format!("chan-open-test-tilde-{}.md", std::process::id());
+        let folder = format!("chan-open-test-tilde-{}", std::process::id());
         let home = dirs::home_dir().expect("a home directory");
-        let (status, body) = post_open(router, &format!("~/{name}")).await;
-        assert!(!home.join(&name).exists(), "nothing under the home");
-        assert!(
-            !body
-                .to_string()
-                .contains(&home.join(&name).display().to_string()),
-            "{body}"
-        );
-        if status == StatusCode::OK {
-            assert_eq!(next_frame(&mut rx)["path"], format!("~/{name}"));
-            assert!(root.path().join("~").join(&name).is_file());
-        }
+        assert!(!home.join(&folder).exists());
+        std::fs::create_dir_all(root.path().join("~").join(&folder)).unwrap();
+        let (status, body) = post_open(router, &format!("~/{folder}/notes.md")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(next_frame(&mut rx)["path"], format!("~/{folder}/notes.md"));
+        assert!(root
+            .path()
+            .join("~")
+            .join(&folder)
+            .join("notes.md")
+            .is_file());
+        assert!(!home.join(&folder).exists(), "nothing under the home");
     }
 
     #[cfg(unix)]

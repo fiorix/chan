@@ -90,15 +90,15 @@ pub trait StandaloneFiles: Send + Sync {
     fn term_new_frame(&self, window_id: &str, cwd: &Path) -> Result<String, String>;
 }
 
-/// What an open does with a path its filesystem surface cannot stat: one
-/// that does not exist, or one the surface refuses to read (a symlink, a
-/// special file).
+/// What an open does with a path its filesystem surface cannot lstat: one
+/// that is missing, escapes the surface's root, or went away between a
+/// caller's check and the open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MissingPath {
-    /// Create it empty and open it, as `cs open` and the launcher's Open do.
+    /// Create it empty and open it, as `cs open` does.
     Create,
-    /// Refuse it with the surface's own reason and create nothing: the
-    /// terminal link menu opens what is there or nothing.
+    /// Refuse it with the surface's own reason and create nothing, for a
+    /// caller that opens only what is there.
     Refuse,
 }
 
