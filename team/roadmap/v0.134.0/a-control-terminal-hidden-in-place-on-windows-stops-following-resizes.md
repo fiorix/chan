@@ -1,6 +1,6 @@
 # A control terminal hidden in place on Windows stops following resizes
 
-Status: accepted for v0.133.0 by the owner on 2026-11-19; not started.
+Status: accepted for v0.133.0 by the owner on 2026-11-19; not started. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record: on Windows, when the Computers screen hides a connected control terminal in place, `close_for_host` (`desktop/src-tauri/src/launcher_panel.rs`) drops the screen's webview from that window and the window lives on: Show brings back the same native window (hwnd 590776). After that hide and show, the window's page no longer follows the window's size and no longer takes the keyboard when the window is activated, and its connection feed falls to the unfocused cadence, one ping every 20 s instead of every 3 s. Read on 2026-11-19 on the local Windows 11 VM at `b3a03cd24`, with a second devserver registered directly with a script, its screen built by a real chord show and hide, and each read made by resizing the window with `SetWindowPos` (no activation), making it the last window used, clicking away and coming back with Alt+Tab (`dev/v0132-team/followups/followup-Ops132-Lead132-54.md`, "The reader's resize leg (f)"; evidence under `dev/v0132-team/evidence/Ops132/J211c/run/`). The readings, in CSS px at a device pixel ratio of 1:
 

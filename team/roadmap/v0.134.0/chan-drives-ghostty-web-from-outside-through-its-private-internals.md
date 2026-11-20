@@ -1,6 +1,6 @@
 # chan drives ghostty-web from outside, through its private internals
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); in v0.132.0, part 6's test net stage 1 shipped; part 4 task 2's stage A is built on `v0132/ghosttyng-p4t2` at `8263902ee`, its third fix round unread, with part 4's tasks 2b, 3 and 4 stacked on it (`v0132/ghosttyng-p4t2b` `6e9e8dc84`, `-p4t3` `eedeeed79`, `-p4t4` `27853ca0d`), none merged.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); in v0.132.0, part 6's test net stage 1 shipped; part 4 task 2's stage A is built on `v0132/ghosttyng-p4t2` at `8263902ee`, its third fix round unread, with part 4's tasks 2b, 3 and 4 stacked on it (`v0132/ghosttyng-p4t2b` `6e9e8dc84`, `-p4t3` `eedeeed79`, `-p4t4` `27853ca0d`), none merged. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: part 2, re-seating the core, shipped in [v0.129.0](../../release/release-v0.129.0.md), with the vendored core at libghostty-vt 1.0.1. The owner moved the remaining parts to v0.131.0 on 2026-11-13. Part 3 (the inventory, the input-handler test port and the pruning) is built, reviewed and merged; at the integrated tip `692273d5e` the full gate and the terminal browser suite (19 checks on both backends) are green. Parts 4 to 6 remain.
 

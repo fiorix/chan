@@ -1,6 +1,6 @@
 # The minimized-window raise is unread on Windows
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); read in part on the Windows VM: with another chan window in front, `cs window open` restored and raised the minimized window (jobs J124 and J126); with another application in front, 20 of 20 (J134), each cycle also putting that application into menu mode (`SC_KEYMENU`); whether the row closes on the raise is the owner's call.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); read in part on the Windows VM: with another chan window in front, `cs window open` restored and raised the minimized window (jobs J124 and J126); with another application in front, 20 of 20 (J134), each cycle also putting that application into menu mode (`SC_KEYMENU`); whether the row closes on the raise is the owner's call. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: carried from v0.131.0 on 2026-11-17 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 

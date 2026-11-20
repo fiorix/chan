@@ -1,6 +1,6 @@
 # A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); the session frame's PTY metadata shipped in v0.131.0; the client half is built on `v0133/conpty-client` at `19630872c` (pushed under that name; `v0131/conpty-client` is gone from origin) and not merged; in v0.132.0 its VM experiment kit reached revision 7, unsealed, after revision 6 was resealed in place following its reading, and no full job ran.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); the session frame's PTY metadata shipped in v0.131.0; the client half is built on `v0133/conpty-client` at `19630872c` (pushed under that name; `v0131/conpty-client` is gone from origin) and not merged; in v0.132.0 its VM experiment kit reached revision 7, unsealed, after revision 6 was resealed in place following its reading, and no full job ran. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 

@@ -1,6 +1,6 @@
 # A survey over an unfocused pane takes Tab and its keys
 
-Status: split from the keyboard-owner row's amendment by the lead on 2026-11-19 and carried to v0.133.0 under the owner's "move them and cut"; the owner accepted the amendment itself on 2026-11-17. Not started.
+Status: split from the keyboard-owner row's amendment by the lead on 2026-11-19 and carried to v0.133.0 under the owner's "move them and cut"; the owner accepted the amendment itself on 2026-11-17. Not started. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record: the amendment of 2026-11-17 to [the keyboard-owner row](../done/the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md), accepted by the owner by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"), with option (a) below as the draft recommended; he may revisit it before the build. Item 5 of `dev/v0131-team/reports/owner-candidates-2.md` in the development tree, from `dev/v0131-team/reviews/review-surveykeys-3.md`, note 1, found pre-existing while [the survey row](../done/a-terminals-survey-takes-the-keyboard-from-another-pane.md) was reviewed. The keyboard-owner row shipped in v0.132.0 without it, and at that release's cut the owner moved what was not done to v0.133.0. The same owner rule as the keyboard-owner arbiter, from the other side: a survey card that does not own the keyboard can still receive it.
 

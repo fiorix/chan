@@ -1,6 +1,6 @@
 # The Workspace details command clears the selection of the file browser focused last, not the tab that shows the details
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/detailsclear` at `945c0720c`, with its guest legs and one confirm reading owed.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/detailsclear` at `945c0720c`, with its guest legs and one confirm reading owed. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
 

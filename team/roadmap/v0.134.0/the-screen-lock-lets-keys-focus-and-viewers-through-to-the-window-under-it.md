@@ -1,6 +1,6 @@
 # The screen lock lets keys, focus and viewers through to the window under it
 
-Status: accepted for v0.133.0 by the owner on 2026-11-19 ("screen-lock: make an item for next version"). Not started.
+Status: accepted for v0.133.0 by the owner on 2026-11-19 ("screen-lock: make an item for next version"). Not started. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record: the v0.132.0 review of the keyboard-owner arbiter closed the screen lock's holes in the code it rewrote (covers, dialogs, the close prompt, the Team dialog, menus) and named these, all older than that work and left for this row (`dev/v0132-team/reviews/stage-fix-kbd-arbiter-c-4.md` and `-c-5.md` in the development tree, read at `v0132/keyboard` `c809d3e40`, now merged). The arbiter is `web/packages/workspace-app/src/state/keyboardOwner.svelte.ts`; full-window covers hold the keyboard over the page and rank among themselves by paint; the screen lock paints at 39000.
 

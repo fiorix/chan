@@ -1,6 +1,6 @@
 # The Windows claim's two-account and compatibility readings
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit sealed at r4 and not run: its pre-read (job J39p) found both VM test accounts holding earlier installs, which the readings would delete, and the job waits for the owner's word on those two folders.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit sealed at r4 and not run: its pre-read (job J39p) found both VM test accounts holding earlier installs, which the readings would delete, and the job waits for the owner's word on those two folders. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 

@@ -1,6 +1,6 @@
 # Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/appenv` at `d8d941627`, its third reading accepting (`dev/v0132-team/reviews/review-appenv-3.md` in the development tree) and `ci.yml` 44159454985 green at that tip; its guest readings (jobs J27 to J29) never ran.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/appenv` at `d8d941627`, its third reading accepting (`dev/v0132-team/reviews/review-appenv-3.md` in the development tree) and `ci.yml` 44159454985 green at that tip; its guest readings (jobs J27 to J29) never ran. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; moved by him to v0.132.0 on 2026-11-15 when he cut v0.131.0 at its third milestone; built in part, not merged.
 

@@ -1,6 +1,6 @@
 # The TLS rows' Windows trust readings
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit for the self-update row sealed at r9 and not run; the model download's Windows trust reading waits for the owner's word on its model cache on the VM.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit for the self-update row sealed at r9 and not run; the model download's Windows trust reading waits for the owner's word on its model cache on the VM. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 

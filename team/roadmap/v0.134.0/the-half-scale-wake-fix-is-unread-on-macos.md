@@ -1,6 +1,6 @@
 # The half-scale wake fix is unread on macOS
 
-Status: carried for v0.133.0 by the lead on 2026-11-19 under the owner's "move them and cut"; not started.
+Status: carried for v0.133.0 by the lead on 2026-11-19 under the owner's "move them and cut"; not started. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record: [the half-scale wake row](../done/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md) shipped in v0.132.0 on check 296 in a guest's Chrome at a device scale of 2 and on its unit and mounted tests. Its readings on the owner's Mac, where the fault was seen, and in Chan Desktop under WebKitGTK at a device scale of 2 were not made: the WebKitGTK driver's job (J121 in `dev/v0132-team/ops/queue.md` in the development tree) was held at the round's pause on 2026-11-18 and not rerun.
 

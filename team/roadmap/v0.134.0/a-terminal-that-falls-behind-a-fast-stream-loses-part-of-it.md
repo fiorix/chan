@@ -1,6 +1,6 @@
 # A terminal that falls behind a fast stream loses part of it
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built in part in v0.132.0 and not merged: the server stage on `v0132/streamlag` at `f0451bd87`, after five fix rounds in which each `ci-macos` run found a fixture defect, and the client half on `v0132/streamlag-client` at `5d2a9c251`; neither has been read since the fifth round.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built in part in v0.132.0 and not merged: the server stage on `v0132/streamlag` at `f0451bd87`, after five fix rounds in which each `ci-macos` run found a fixture defect, and the client half on `v0132/streamlag-client` at `5d2a9c251`; neither has been read since the fifth round. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
 
 Record before the move: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; moved by him to v0.132.0 on 2026-11-15 when he cut v0.131.0 at its third milestone; built in part (the server stage), not merged.
 
