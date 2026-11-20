@@ -114,7 +114,14 @@ const READ = () => `(() => {
       misses: detail.querySelectorAll('.miss').length,
       runs: detail.querySelectorAll('.reading').length,
       chart: chart ? { ...edges(chart), height: getComputedStyle(chart).height } : null,
+      figures: edges(detail.querySelector('.figures')),
       name: edges(slot.querySelector('.ds-name-row .row-name')),
+      header: (() => {
+        const header = slot.querySelector('.machine-header');
+        if (!header) return null;
+        const r = header.getBoundingClientRect();
+        return { left: Math.round(r.left + parseFloat(getComputedStyle(header).paddingLeft)) };
+      })(),
       actions: edges(slot.querySelector('.machine-actions')),
     } : null,
     faces: slot ? slot.querySelectorAll('.connection-face').length : -1,
@@ -228,12 +235,14 @@ async function cardToFront() {
 /// chart, whose text is nothing, so its words start at the figures.
 const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
 
-/// The chart spans the card: from the name's left edge to the right edge of
-/// the header's actions, at its fixed height.
+/// The chart spans the card at the header's inset: from the left edge of
+/// the header's content to the right edge of its actions, at its fixed
+/// height; the figures under it start under the name.
 const chartSpansCard = (card) => {
-  const { chart, name, actions } = card?.detail ?? {};
-  return Boolean(chart && name && actions) && chart.height === "69px"
-    && Math.abs(chart.left - name.left) <= 2 && Math.abs(chart.right - actions.right) <= 2;
+  const { chart, figures, name, header, actions } = card?.detail ?? {};
+  return Boolean(chart && figures && name && header && actions) && chart.height === "69px"
+    && Math.abs(chart.left - header.left) <= 2 && Math.abs(chart.right - actions.right) <= 2
+    && Math.abs(figures.left - name.left) <= 2;
 };
 
 async function healthyLeg(host) {
@@ -241,8 +250,8 @@ async function healthyLeg(host) {
     (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && detailOpensOnFigures(card), 30_000);
   if (healthy?.ok) {
     pass("the card in front shows a healthy face beside the name and under the address a detail that opens on its chart", healthy.card);
-    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card from the name to the actions, 69 px high", healthy.card.detail);
-    else fault("the detail's chart does not span the card from the name to the actions at 69 px", healthy.card.detail);
+    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card at the header's inset to the actions, 69 px high, its figures under the name", healthy.card.detail);
+    else fault("the detail's chart does not span the card at the header's inset to the actions at 69 px with its figures under the name", healthy.card.detail);
   } else {
     fault("no healthy face beside the name with a detail under the address that opens on its chart", healthy?.card ?? null);
   }

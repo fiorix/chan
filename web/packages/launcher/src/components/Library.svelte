@@ -939,9 +939,12 @@
     color: var(--text);
   }
 
-  /* The connection detail under the devserver's address, from the name's
-     left edge to the header actions' right edge. */
-  .ds-health { padding: 0.1rem 0.2rem 0.6rem 1.75rem; }
+  /* The connection detail under the devserver's address, inset as the
+     header is (0.2rem), so its chart sits as far from the card's left edge
+     as from its right. Its figures keep the name's indent: the glyph
+     column (1.15rem) and the name row's gap (0.4rem). */
+  .ds-health { padding: 0.1rem 0.2rem 0.6rem; }
+  .ds-health :global(.figures) { padding-left: 1.55rem; }
   /* The devserver identity block (name row over address row). On the mutable
      surface it is a button: the whole block opens the edit-config form, lifting
      a hover tint; the read-only surface renders it as a static div. */
