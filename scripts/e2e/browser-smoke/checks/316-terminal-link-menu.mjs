@@ -13,14 +13,15 @@
 // reported; nothing reads the page's terminal objects. `window.open` is
 // stubbed in the page and records what the browser would have opened.
 //
-// Every click on a link first moves the pointer to another row and then onto
-// the link, as a hand does: xterm.js reads a row's links anew only when the
+// Every click on a link but resting-click's first moves the pointer to
+// another row and then onto the link, as a hand does: xterm.js reads a row's links anew only when the
 // pointer enters the row (Linkifier `_handleHover`), so a link printed into
 // the row under a pointer resting there is found only once it leaves the row.
 //
 // Legs, each on both backends unless noted:
 //   url-menu        a click on the URL opens the menu with "Open in
-//                   browser" and the URL, and the menu takes the keyboard
+//                   browser", the URL and its host on a line of its own,
+//                   and the menu takes the keyboard
 //                   onto that entry; pressing it reaches the opener.
 //   rel-editor      (ghostty) a click on NOTES-REL shows the relative
 //                   target and "Open in editor"; pressing it opens an editor
@@ -38,6 +39,8 @@
 //                   underlines no `~/` OSC 8 target, as with NOTES-REL.
 //   escape-typing   Escape closes the menu, and typing reaches the PTY.
 //   output-closes   output that clears the screen closes an open menu.
+//   resting-click   (ghostty) a URL printed into the row under a resting
+//                   pointer opens the menu with no move off the row.
 //   ctrl-click      Ctrl with a click opens the URL with no menu.
 //   double-click    a double click on the URL leaves no menu and opens
 //                   nothing.
@@ -63,6 +66,7 @@ const BODY = "LINK316 NOTES BODY";
 const URL_ARG = "s://example.com/link316?q=1";
 const URL_316 = `http${URL_ARG}`;
 const TRACK_URL = "https://example.com/track316";
+const REST_URL = "https://example.com/rest316";
 const FOREIGN = "file://elsewhere.invalid/etc/hosts";
 const MENU = '.terminal-tab-menu-bubble[aria-label="terminal link menu"]';
 const SENTINEL = "SMOKE316_CLIPBOARD_SENTINEL";
@@ -144,7 +148,9 @@ export default {
           disabled: button.disabled,
         }));
         return {
-          target: menu.querySelector("[data-terminal-link-target]")?.textContent ?? null,
+          // The whole target; the menu may show a long one cut in the middle.
+          target: menu.querySelector("[data-terminal-link-target]")?.getAttribute("data-terminal-link-target") ?? null,
+          host: menu.querySelector("[data-terminal-link-host]")?.textContent ?? null,
           reason: menu.querySelector("[data-terminal-link-reason]")?.textContent ?? null,
           rows,
           focused: menu.contains(document.activeElement),
@@ -271,14 +277,14 @@ export default {
         await clickRow(ROW.url);
         const menu = await waitMenu("url click with the keyboard on its entry", (m) => m.focused);
         const open = menu.rows.find((r) => r.action === "open-browser");
-        if (menu.target !== URL_316 || !open || open.disabled || !menu.rows.some((r) => r.action === "copy-link")) {
+        if (menu.target !== URL_316 || menu.host !== "example.com" || !open || open.disabled || !menu.rows.some((r) => r.action === "copy-link")) {
           throw new Error(`menu shows ${JSON.stringify(menu)}`);
         }
         await press("open-browser");
         await page.waitForSelector(MENU, { hidden: true, timeout: 5_000 });
         const now = await opened();
         if (now.length !== before + 1 || now.at(-1) !== URL_316) throw new Error(`the opener got ${JSON.stringify(now.slice(before))}`);
-        return { target: menu.target, focused: menu.focused, opened: now.at(-1) };
+        return { target: menu.target, host: menu.host, focused: menu.focused, opened: now.at(-1) };
       });
 
       await leg(at("foreign"), async () => {
@@ -403,6 +409,24 @@ export default {
           throw new Error("the menu stayed up over a cleared screen");
         });
       });
+
+      if (backend === "ghostty") {
+        // ghostty looks a link up at the click, so one printed into the row
+        // under a resting pointer is clickable with no move off the row.
+        await leg(at("resting-click"), async () => {
+          const p = await cell(2, 0);
+          await page.mouse.move(p.x, p.y);
+          await cs(["write", "--tab-name", name, `printf '\\033[H\\033[2Jhttp%s\\nR316_%s\\n' '${REST_URL.slice(4)}' READY\n`]);
+          await waitScrollback(name, "R316_READY");
+          await sleep(300);
+          await page.mouse.click(p.x, p.y);
+          const menu = await waitMenu("resting click");
+          if (menu.target !== REST_URL) throw new Error(`menu shows ${JSON.stringify(menu)}`);
+          await closeAnyMenu();
+        });
+      } else {
+        results[at("resting-click")] = "not run: xterm.js reads a row's links anew only when the pointer enters the row (the row's xterm.js limit)";
+      }
 
       // The shell prints a URL, turns on mouse tracking and becomes a raw
       // recorder of what the PTY receives.

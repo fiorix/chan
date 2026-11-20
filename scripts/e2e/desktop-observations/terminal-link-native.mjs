@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // The link menu on chan-desktop's WebKitGTK page (terminal-link-native.sh
 // starts the desktop, the private xdg-open and the window). For each
-// backend: the terminal preference is written and the page reloaded; a new
-// terminal's shell writes its grid size to a file, clears the screen and
-// prints a URL on the top row (the printf's argument holds the URL's tail,
-// so the echoed command holds no link); a click by XTEST on the URL must
-// open the link menu showing it, and a click by XTEST on "Open in browser"
-// must put the URL in the private xdg-open's record.
+// backend: the terminal preference is written, which a new terminal reads
+// at spawn, with no reload; a new terminal's shell writes its grid size to a
+// file, clears the screen and prints a URL on the top row (the printf's
+// argument holds the URL's tail, so the echoed command holds no link); a
+// click by XTEST on the URL must open the link menu showing it, and a click
+// by XTEST on "Open in browser" must put the URL in the private xdg-open's
+// record.
 //
 // Exit 0 every backend held; 10 a fault (the wrapper turns it into 1); 2
 // the setup did not run (the page, the terminal or the printed URL never
@@ -175,10 +176,11 @@ async function setBackend(backend) {
     });
     if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
   }, backend === "ghostty");
-  await page.evaluate(() => { setTimeout(() => location.reload(), 0); return true; });
-  await delay(3000);
-  page.close();
-  page = await openPage();
+  // The page takes the preference from the server's config event, as a new
+  // terminal reads it at spawn; no reload, which would restore the tabs the
+  // page had saved, the last backend's closing terminal among them. The
+  // surface the terminal mounts says which backend it took.
+  await delay(1500);
 }
 
 /// The page selector of the named terminal's surface, from the server's own
@@ -192,12 +194,12 @@ async function surfaceOf(name, backend) {
   return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${SURFACE[backend]}`;
 }
 
-async function runBackend(backend) {
+async function runBackend(backend, offset) {
   const record = { ok: false };
   verdict.backends[backend] = record;
   const name = `LinkNative${backend}`;
   try {
-    await driveBackend(backend, name, record);
+    await driveBackend(backend, name, record, offset);
   } finally {
     // Closed whatever the outcome, so the next backend's run meets no
     // terminal of this one.
@@ -205,9 +207,8 @@ async function runBackend(backend) {
   }
 }
 
-async function driveBackend(backend, name, record) {
+async function driveBackend(backend, name, record, offset) {
   await setBackend(backend);
-  const offset = await calibrate();
   record.offset = offset;
   const size = join(values.workspace, `size-${backend}`);
   rmSync(size, { force: true });
@@ -216,10 +217,18 @@ async function driveBackend(backend, name, record) {
   await until(`the ${backend} terminal ${name}`, async () => {
     surface = await surfaceOf(name, backend);
     if (!surface) return { listed: false };
-    return page.evaluate((sel) => {
+    return page.evaluate((sel, tabSel) => {
       const box = document.querySelector(sel)?.getBoundingClientRect();
-      return { listed: true, shown: Boolean(box && box.width > 0 && box.height > 0) };
-    }, surface);
+      const tab = document.querySelector(tabSel);
+      const tabBox = tab?.getBoundingClientRect();
+      return {
+        listed: true,
+        shown: Boolean(box && box.width > 0 && box.height > 0),
+        // What the tab holds when it is not shown, for the setup's record.
+        tab: tab ? { active: tab.classList.contains("active"), width: tabBox.width, height: tabBox.height } : null,
+        mounted: tab ? (tab.querySelector(".terminal.xterm") ? "xterm" : tab.querySelector(".terminal-host > canvas") ? "ghostty" : "none") : null,
+      };
+    }, surface, surface.slice(0, surface.indexOf("]", surface.indexOf("data-terminal-tab-id")) + 1));
   }, (v) => v?.shown === true, 60_000, SetupError);
   record.surface = surface;
   const format = String.raw`\033[H\033[2Jhttp%s\nN316_%s\n`;
@@ -269,8 +278,9 @@ async function driveBackend(backend, name, record) {
 let status = 0;
 try {
   page = await openPage();
+  const offset = await calibrate();
   for (const backend of backends) {
-    await runBackend(backend);
+    await runBackend(backend, offset);
     const record = verdict.backends[backend];
     if (!record.ok) verdict.faults.push(backend);
     console.log(`${record.ok ? "PASS" : "FAIL"} terminal-link ${backend}${record.fault ? ` ${record.fault}` : ""}`);
