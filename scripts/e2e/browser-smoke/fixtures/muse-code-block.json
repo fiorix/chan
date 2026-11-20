@@ -1,0 +1,20 @@
+{
+  "source": "Muse Code 1.4.24 (1.4.24-R9131.1) with its real model on a PTY of 80 by 24 in an isolated guest, 2026-11-20T12:35Z, asked to run a harmless printf pipeline and print it in a bash code block",
+  "source_sha256": "5c95ed331f7671830327fc49df745bec87889b25b680c0c1a15f33ba41c73115",
+  "cols": 80,
+  "rows": 24,
+  "slices": {
+    "muse-code-block-scroll.bin": {
+      "source_offsets": [103339, 103961],
+      "sha256": "a42938dbf255b5d5bcfa24c17dc15221d5a17e11466dbea342eb5025fcf0350a",
+      "draws": "the code block's line on screen row 14 after a reverse index in a scroll region, cut at the last column, then a scroll of rows 1 to 14 into the history and the rest of the line on row 14"
+    },
+    "muse-code-block-cup.bin": {
+      "source_offsets": [104000, 104543],
+      "sha256": "d3eb0783acbec26686388ace3d14d05030d5be7fe4cd5ac241999743beb8596c",
+      "draws": "the same line redrawn on row 13, cut at the last column, and the rest after ESC[14;1H"
+    }
+  },
+  "row_prefix": "\u25c6   ",
+  "expected_command": "printf '%s\\n' wrapprobe-alpha wrapprobe-bravo wrapprobe-charlie wrapprobe-delta wrapprobe-echo wrapprobe-foxtrot | sort -r | uniq -c | head -n 50"
+}
