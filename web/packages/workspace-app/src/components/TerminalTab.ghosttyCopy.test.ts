@@ -130,6 +130,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     onResize() {
       return { dispose() {} };
     }
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return false;
     }

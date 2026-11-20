@@ -97,6 +97,7 @@ const ghostty = vi.hoisted(() => {
       this.resizeHandlers.push(handler);
       return { dispose() {} };
     }
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return false;
     }

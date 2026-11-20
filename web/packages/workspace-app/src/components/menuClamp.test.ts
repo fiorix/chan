@@ -42,6 +42,12 @@ describe("clampToViewport", () => {
     expect(clampToViewport(250, 210, { x: 100, y: 700 }).top).toBe(490);
   });
 
+  test("flips up to above a band, not over it", () => {
+    // A link menu opens under the pointer's band (690 to 700); flipped, its
+    // bottom edge sits at the band's top, so the pointer is never under it.
+    expect(clampToViewport(250, 210, { x: 100, y: 700, flipY: 690 }).top).toBe(480);
+  });
+
   test("floors a top-left underflow anchor to the margin", () => {
     // A trigger rect measured mid-transform can land past the top/left
     // edge; nothing above catches that, so both floor to the margin.

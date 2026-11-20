@@ -81,6 +81,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     attachCustomWheelEventHandler(handler?: (e: WheelEvent) => boolean): void {
       this.wheelHandler = handler ?? null;
     }
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return true;
     }

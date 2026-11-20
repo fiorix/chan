@@ -1365,6 +1365,8 @@ const calls = {
   /// Compile-time identity (chan version + cargo features). Used by
   /// the Settings "About" footer.
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
+  /// The serving process's identity alone, its host name among it.
+  metricsIdentity: () => req<Pick<MetricsView, "identity">>("GET", "/api/metrics"),
   metrics: (since?: number, signal?: AbortSignal) => req<MetricsView>("GET", `/api/metrics?history=true${since === undefined ? "" : `&since=${since}`}`, undefined, signal),
   /// Ready local extensions for this process. The catalog is served to any
   /// authenticated client. Over the gateway tunnel the owner and a grantee
@@ -1895,10 +1897,12 @@ export type WindowReplyRequest = {
 /// Body of `POST /api/open` (Contract C). snake_case to match the server's
 /// `OpenRequest`. `window_id` is the submitting window (`sessionWindowId()`);
 /// `target` is a workspace-relative or absolute path, or a serialized
-/// `chan://graph?...` link, forwarded verbatim.
+/// `chan://graph?...` link, forwarded verbatim. `must_exist` refuses a missing
+/// path with a 404 instead of creating it.
 export type OpenPathRequest = {
   window_id: string;
   target: string;
+  must_exist?: boolean;
 };
 
 /// Body of `POST /api/session/handover/reply` (the leader's answer to
