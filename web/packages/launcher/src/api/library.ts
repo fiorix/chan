@@ -60,8 +60,9 @@ export interface WindowRecord {
   control?: boolean;
   /** A window of a tmux control-mode connection, omitted on a plain row: the
    * launcher groups the row under its connection's card instead of its
-   * library's machine. Minted with its tabs parked for its first socket, never
-   * saved. */
+   * library's machine, and the connection's control terminal under the card
+   * of the machine whose terminal ran it. Minted with its tabs parked for its
+   * first socket, never saved. */
   tmux?: TmuxWindowMark;
   /**
    * Server-persisted visibility. The window is buried/hidden on the

@@ -5,6 +5,8 @@
  * of libghostty-vt (`vt/ghosttyVt.ts`).
  */
 
+import type { TerminalLinkKind } from './interfaces';
+
 // ============================================================================
 // Key Encoder Types
 // ============================================================================
@@ -271,9 +273,11 @@ export interface ILink {
   /** The range of the link in the buffer (may span multiple lines) */
   range: IBufferRange;
 
-  /** Called when the link is activated (clicked with modifier) */
-  activate(event: MouseEvent): void;
+  /** What the link points at: an OSC 8 hyperlink's URI as the program wrote it, or the matched URL */
+  target: string;
 
+  /** The provider that found it */
+  kind: TerminalLinkKind;
 }
 
 /**

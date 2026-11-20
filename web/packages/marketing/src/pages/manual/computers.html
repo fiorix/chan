@@ -106,7 +106,7 @@
 <section class="manual-block" id="connection">
   <h2><a class="heading-anchor" href="#connection">Connection health</a></h2>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="computers-connection-health" data-shot-kind="still">screenshot to capture<small>a devserver's card in front over a slow connection: 850 ms beside its name in the warning colour, and under its address the chart across the card, and Latest, Median, Worst and Since on one line</small></div>
+    <div class="shot-placeholder-frame" data-shot="computers-connection-health" data-shot-kind="still">screenshot to capture<small>a devserver's card in front over a slow connection: 850 ms beside its name in the warning colour, and under its address the chart across the card, and Latest, Median, Worst and Missed on one line</small></div>
     <figcaption>A slow devserver: its reply time beside its name, and the detail on the card in front.</figcaption>
   </figure>
   <p>Chan Desktop checks the connection to each devserver it is connected to, and marks how it is doing beside the devserver's name on its card.</p>
@@ -123,7 +123,7 @@
       </tbody>
     </table>
   </div>
-  <p>The card in front adds the detail under the devserver's address: a chart across the card of the last 60 checks with a red mark for each missed one, and under it, on one line, the latest, median and worst reply times and, as <strong>Since</strong>, the time of the last contact. On a narrow card the line wraps, Since first. The mark beside the name says how the connection is doing, with its count where it has one.</p>
+  <p>The card in front adds the detail under the devserver's address: a chart across the card of the last 60 checks with a red mark for each missed one, and under it, on one line, the latest, median and worst reply times and, as <strong>Missed</strong>, how many of those checks got no reply; its tooltip gives the count against the checks in the chart and the time of the last contact. On a narrow card the line wraps, Missed first. The mark beside the name says how the connection is doing, with its count where it has one.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
@@ -133,7 +133,7 @@
       <li>A sleep of the local machine does not read as slow or stalled: a check in flight across a sleep is not timed, and neither is a reply that took longer than 45 s. On Windows, a sleep under 45 s across a connection's very first check can show once as a slow reply, which the next two replies clear.</li>
       <li>No mark shows on This machine's card, on a devserver that is connecting or disconnected, or in a browser. A devserver that runs a chan too old to answer the check shows none either, except the reconnecting count while its connection is down.</li>
       <li>The mark and a window's cover watch different connections. A window can be covered while its devserver reads healthy, as when the window's own connection or its workspace is gone, and a devserver can read stalled while a window still gets data.</li>
-      <li>In privacy mode the mark keeps its colour, and its words and the detail hide behind one eye button per devserver.</li>
+      <li>Privacy mode leaves the mark, its words and the detail shown: they say how the connection is doing and name no machine.</li>
     </ul>
   </details>
 </section>

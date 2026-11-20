@@ -13,7 +13,6 @@ import Workspace from "./Workspace.svelte";
 import { api } from "../api/client";
 import type { SurveySpec } from "../api/client";
 import { terminalPreferences } from "../__tests__/standalone";
-import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import { __testSetStandalonePreferences, dismissCliReloadNotice, persistStateToHash } from "../state/store.svelte";
@@ -37,10 +36,6 @@ import {
   xterm,
 } from "../__tests__/terminalTab";
 
-vi.mock("../editor/external_links", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../editor/external_links")>()),
-  openExternalUrl: vi.fn(async () => {}),
-}));
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
@@ -53,6 +48,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   class GhosttyTerminal extends FakeTerminal {
     renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
     buffer = { active: {}, alternate: {} };
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() { return false; }
     hasFocusEvents() { return false; }
   }
@@ -823,9 +819,50 @@ describe("TerminalTab and the app around it", () => {
     }
   });
 
-  test("a clicked link opens through the external-link path", async () => {
+  test("a click on a URL xterm.js underlines opens the link menu with its target and host", async () => {
     await renderTerminal(terminalTab(), true);
-    xterm.linkHandlers.at(-1)!(new MouseEvent("click"), "https://example.com/docs");
-    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
+    const { handler, options } = xterm.webLinks.at(-1)!;
+    const range = { start: { x: 1, y: 1 }, end: { x: 30, y: 1 } };
+    const click = new MouseEvent("mouseup", { button: 0, detail: 1, clientX: 40, clientY: 40 });
+    options.hover(click, "https://github.com@evil.example/x", range);
+    handler(click, "https://github.com@evil.example/x");
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="terminal link menu"]')).not.toBeNull());
+    const menu = document.querySelector('[aria-label="terminal link menu"]')!;
+    expect(menu.querySelector("[data-terminal-link-target]")?.getAttribute("data-terminal-link-target")).toBe(
+      "https://github.com@evil.example/x",
+    );
+    expect(menu.querySelector("[data-terminal-link-host]")?.textContent).toBe("evil.example");
+  });
+
+  test("the link menu closes when its link's row changes and hands the keyboard it held back", async () => {
+    await renderTerminal(terminalTab(), true);
+    const term = xterm.terminals.at(-1)!;
+    let row = "https://example.com/a";
+    Object.defineProperty(term, "buffer", {
+      configurable: true,
+      get: () => ({ active: { viewportY: 0, getLine: (y: number) => (y === 0 ? { translateToString: () => row } : undefined) } }),
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const { handler, options } = xterm.webLinks.at(-1)!;
+      const click = new MouseEvent("mouseup", { button: 0, detail: 1, clientX: 40, clientY: 40 });
+      options.hover(click, "https://example.com/a", { start: { x: 1, y: 1 }, end: { x: 21, y: 1 } });
+      handler(click, "https://example.com/a");
+      const selector = '[aria-label="terminal link menu"]';
+      await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
+      // The menu holds the keyboard, on its first entry.
+      document.querySelector<HTMLButtonElement>(`${selector} button.mbtn`)!.focus();
+      clearTerminalFocuses();
+      vi.advanceTimersByTime(100);
+      await tick();
+      expect(document.querySelector(selector), "the same row: the menu stays").not.toBeNull();
+      row = "$ clear";
+      vi.advanceTimersByTime(100);
+      await tick();
+      expect(document.querySelector(selector)).toBeNull();
+      expect(terminalFocuses()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

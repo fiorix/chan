@@ -265,8 +265,8 @@ export function resetTerminals(): void {
   xterm.fit.failure = null;
   xterm.fit.size = null;
   xterm.webgl.splice(0);
+  xterm.webLinks.splice(0);
   xterm.webglThrows = false;
-  xterm.linkHandlers.splice(0);
   xterm.textareaFocus = false;
   resizeObservers.splice(0);
   globalThis.requestAnimationFrame = immediateFrame;

@@ -27,6 +27,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { clientFrameReader, startRelay } from "../browser-smoke/lib/flow-relay.mjs";
+import { chartSpansCard } from "./connection-chart-verdict.mjs";
 
 const run = promisify(execFile);
 const [inspector, work, chan, fixturePath] = process.argv.slice(2);
@@ -114,7 +115,18 @@ const READ = () => `(() => {
       misses: detail.querySelectorAll('.miss').length,
       runs: detail.querySelectorAll('.reading').length,
       chart: chart ? { ...edges(chart), height: getComputedStyle(chart).height } : null,
+      figures: edges(detail.querySelector('.figures')),
+      // Where the figures' words start: the first figure, inside the line's
+      // own padding, which the line's box takes in.
+      firstFigure: edges(detail.querySelector('.figures > span')),
+      missedTitle: detail.querySelector('.figures > span:last-child')?.getAttribute('title') ?? null,
       name: edges(slot.querySelector('.ds-name-row .row-name')),
+      header: (() => {
+        const header = slot.querySelector('.machine-header');
+        if (!header) return null;
+        const r = header.getBoundingClientRect();
+        return { left: Math.round(r.left + parseFloat(getComputedStyle(header).paddingLeft)) };
+      })(),
       actions: edges(slot.querySelector('.machine-actions')),
     } : null,
     faces: slot ? slot.querySelectorAll('.connection-face').length : -1,
@@ -228,21 +240,13 @@ async function cardToFront() {
 /// chart, whose text is nothing, so its words start at the figures.
 const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
 
-/// The chart spans the card: from the name's left edge to the right edge of
-/// the header's actions, at its fixed height.
-const chartSpansCard = (card) => {
-  const { chart, name, actions } = card?.detail ?? {};
-  return Boolean(chart && name && actions) && chart.height === "69px"
-    && Math.abs(chart.left - name.left) <= 2 && Math.abs(chart.right - actions.right) <= 2;
-};
-
 async function healthyLeg(host) {
   const healthy = await readUntil("healthy",
     (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && detailOpensOnFigures(card), 30_000);
   if (healthy?.ok) {
     pass("the card in front shows a healthy face beside the name and under the address a detail that opens on its chart", healthy.card);
-    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card from the name to the actions, 69 px high", healthy.card.detail);
-    else fault("the detail's chart does not span the card from the name to the actions at 69 px", healthy.card.detail);
+    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card at the header's inset to the actions, 69 px high, its figures under the name", healthy.card.detail);
+    else fault("the detail's chart does not span the card at the header's inset to the actions at 69 px with its figures under the name", healthy.card.detail);
   } else {
     fault("no healthy face beside the name with a detail under the address that opens on its chart", healthy?.card ?? null);
   }
@@ -260,9 +264,9 @@ const slowReply = (card, max) => {
   return card.face?.state === "slow" && seconds >= 1.2 && seconds <= max;
 };
 
-/// The last contact as the figures line reads it: the clock time after
-/// Since, the line's last figure and the detail's last words.
-const lastContact = (card) => /Since (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
+/// The last contact as the figures line gives it: the clock time at the
+/// end of the title of its last figure, Missed.
+const lastContact = (card) => /; last contact (.+)$/.exec(card?.detail?.missedTitle ?? "")?.[1] ?? null;
 
 // Every client frame of every flow, read past its request head; a flow
 // from the desktop's own client carries no Origin header.

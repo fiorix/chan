@@ -13,10 +13,11 @@ export type AnchorRect = {
 // Which gesture opened the bubble. The tab-strip click opens the
 // "tab" menu (rename / view config / lifecycle); a right-click in the
 // editor or terminal BODY opens the "body" menu (selection-aware
-// Cut/Copy/Paste + contextual actions). One bubble, two item sets; the
-// widget branches on this. Defaults to "tab" so any unconverted caller
-// keeps the full menu.
-export type TabMenuSource = "tab" | "body";
+// Cut/Copy/Paste + contextual actions); a click on a link a terminal
+// underlines opens the "link" menu (open and copy its target). One
+// bubble, three item sets; the widget branches on this. Defaults to
+// "tab" so any unconverted caller keeps the full menu.
+export type TabMenuSource = "tab" | "body" | "link";
 
 export const tabMenu = $state<{
   openForTabId: string | null;

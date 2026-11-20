@@ -75,6 +75,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
     buffer = { active: {}, alternate: {} };
     attachCustomWheelEventHandler(): void {}
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return false;
     }

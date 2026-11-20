@@ -1,4 +1,4 @@
-// A tmux -CC connection's control terminal shows on the card of the machine whose terminal ran it. Running `tmux -CC` in a local terminal buries the control terminal; This machine's card lists it as a buried row carrying the connection's detach, the connection's tmux windows stay on the connection's own card alone, and that card keeps the detach on its title. Detaching from the machine card's row ends the connection as the title's detach does: the tmux rows, the record and the connection's card go, the control window is released as a plain terminal window, and the source shell types again. The cards are read on two launcher pages: the devserver page that drives the connection lists them one under another, and a second page whose surface meta is rewritten to the desktop's deals them as chan-desktop's deck, where This machine's card is brought to the front before its row is read and its detach is clicked.
+// A tmux -CC connection's control terminal shows on the card of the machine whose terminal ran it. Running `tmux -CC` in a local terminal buries the control terminal; This machine's card lists it as a buried row carrying the connection's detach, and is the one card that lists it: the connection's own card lists the connection's tmux windows alone, without the control terminal, counts those rows on its badge, and keeps the detach on its title. Detaching from the machine card's row ends the connection as the title's detach does: the tmux rows, the record and the connection's card go, the control window is released as a plain terminal window, and the source shell types again. The cards are read on two launcher pages: the devserver page that drives the connection lists them one under another, and a second page whose surface meta is rewritten to the desktop's deals them as chan-desktop's deck, where This machine's card is brought to the front before its row is read and its detach is clicked.
 //
 // Runs on headless Chrome. Skips when tmux is not installed or the launcher bundle is missing.
 
@@ -67,6 +67,7 @@ function readCards() {
       name: (header?.querySelector(".machine-name") ?? header?.querySelector(".ds-id .row-name"))?.textContent?.trim() ?? null,
       slot: slot ? { label: slot.getAttribute("aria-label"), current: slot.getAttribute("aria-current") === "true", inert: !!card.closest("[inert]") } : null,
       title: [...(header?.querySelectorAll("button[aria-label]") ?? [])].map((button) => button.getAttribute("aria-label")),
+      count: card.querySelector(".machine-actions .count-badge")?.getAttribute("title") ?? null,
       rows: [...card.querySelectorAll(".term-list .row")].map((row) => {
         const note = row.querySelector(".row-buried");
         return {
@@ -84,8 +85,8 @@ function readCards() {
 /// The two cards while the connection runs, read against the feed's records:
 /// This machine lists the buried control terminal with the row's detach and
 /// its own plain terminals, and none of the connection's other windows; the
-/// connection's card keeps the title's detach and lists its windows, its
-/// control terminal buried with no action of its own.
+/// connection's card keeps the title's detach and lists its windows without
+/// the control terminal, and its badge counts those rows.
 function assertRunning(cards, rows, record, label) {
   const named = (name) => cards.filter((card) => card.name === name);
   check(named("This machine").length === 1 && named(CARD_TITLE).length === 1, `${label}: ${named("This machine").length} This machine card(s) and ${named(CARD_TITLE).length} connection card(s), not one each: ${JSON.stringify(cards)}`);
@@ -104,11 +105,14 @@ function assertRunning(cards, rows, record, label) {
   check(sorted(others) === sorted(plain), `${label}: This machine's other rows are ${JSON.stringify(others)}, not its plain terminals ${JSON.stringify(plain)}; the connection's windows must stay on its card`);
 
   check(connection.title.includes(TITLE_DETACH), `${label}: the connection's card title carries ${JSON.stringify(connection.title)}, not ${JSON.stringify(TITLE_DETACH)}`);
-  const own = rows.filter((w) => w.tmux?.connection === record.connection).map(displayName);
+  const listed = connection.rows.filter((r) => r.name === CONTROL_NAME || r.buried !== null);
+  check(listed.length === 0, `${label}: the connection's card lists the control terminal that This machine's card holds: ${JSON.stringify(listed)}`);
+  const own = rows.filter((w) => w.tmux?.connection === record.connection && !w.tmux.control).map(displayName);
   const unopened = record.windows.filter((tw) => !tw.chan_window).map((tw) => tw.name || tw.id);
   check(sorted(connection.rows.map((r) => r.name)) === sorted([...own, ...unopened]), `${label}: the connection's card lists ${JSON.stringify(connection.rows.map((r) => r.name))}, not its windows ${JSON.stringify([...own, ...unopened])}`);
-  const ownControl = connection.rows.filter((r) => r.name === CONTROL_NAME);
-  check(ownControl.length === 1 && ownControl[0].buried === "buried" && ownControl[0].buttons.length === 0, `${label}: the connection's card lists its control terminal as ${JSON.stringify(ownControl)}, not one buried row with no action`);
+  const count = connection.rows.length;
+  const badge = `${count} window${count === 1 ? "" : "s"}`;
+  check(connection.count === badge, `${label}: the connection's badge reads ${JSON.stringify(connection.count)}, not ${JSON.stringify(badge)} for the rows it lists`);
   return { machine, connection };
 }
 

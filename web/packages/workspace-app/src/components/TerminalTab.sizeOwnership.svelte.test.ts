@@ -30,6 +30,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   class GhosttyTerminal extends FakeTerminal {
     renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
     buffer = { active: {}, alternate: {} };
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() { return false; }
     hasFocusEvents() { return false; }
     // What chan's ghostty key listener reads and drives on a key.

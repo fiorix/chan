@@ -25,13 +25,14 @@ import type {
   IEvent,
   ITerminalOptions,
   TerminalChange,
+  TerminalLinkActivation,
   TerminalViewport,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
-import { SelectionManager } from './selection-manager';
+import { DRAG_THRESHOLD_CELLS, SelectionManager } from './selection-manager';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -67,15 +68,26 @@ export class Terminal {
   private currentHoveredLink?: ILink;
   private mouseMoveThrottleTimeout?: number;
   private pendingMouseMove?: MouseEvent;
+  // The primary press a click ends, read to tell a link click from the end of
+  // a drag or a press the program was sent.
+  private linkPress?: { x: number; y: number; reported: boolean };
 
   // Event emitters
   private dataEmitter = new EventEmitter<string>();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   private changeEmitter = new EventEmitter<TerminalChange>();
+  private linkEmitter = new EventEmitter<TerminalLinkActivation>();
   // Public event accessors (xterm.js compatibility)
   public readonly onData: IEvent<string> = this.dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
   public readonly onChange: IEvent<TerminalChange> = this.changeEmitter.event;
+  /**
+   * A click on a link: a primary-button click that ends neither a drag nor a
+   * double click, and whose press was not reported to a program tracking the
+   * mouse (Shift keeps a press from the program). With no listener a click on
+   * a link does nothing.
+   */
+  public readonly onLinkActivate: IEvent<TerminalLinkActivation> = this.linkEmitter.event;
 
   // Lifecycle state
   private isOpen = false;
@@ -482,6 +494,7 @@ export class Terminal {
       // Setup mouse event handling for links and scrollbar
       // Use capture phase to intercept scrollbar clicks before SelectionManager
       parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
+      parent.addEventListener('mousedown', this.handleLinkPress, { capture: true });
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
       parent.addEventListener('click', this.handleClick);
@@ -1074,6 +1087,7 @@ export class Terminal {
     this.dataEmitter.dispose();
     this.resizeEmitter.dispose();
     this.changeEmitter.dispose();
+    this.linkEmitter.dispose();
   }
 
   // ==========================================================================
@@ -1167,6 +1181,7 @@ export class Terminal {
     if (this.element) {
       this.element.removeEventListener('wheel', this.handleWheel);
       this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
+      this.element.removeEventListener('mousedown', this.handleLinkPress, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
       this.element.removeEventListener('click', this.handleClick);
@@ -1415,12 +1430,39 @@ export class Terminal {
   };
 
   /**
+   * Note the primary press a click may end. The input handler reports the
+   * same press to a program tracking the mouse unless Shift is held.
+   */
+  private handleLinkPress = (e: MouseEvent): void => {
+    this.linkPress =
+      e.button === 0
+        ? {
+            x: e.clientX,
+            y: e.clientY,
+            reported: !e.shiftKey && (this.wasmTerm?.hasMouseTracking() ?? false),
+          }
+        : undefined;
+  };
+
+  /**
    * Handle mouse click for link activation
    */
   private handleClick = async (e: MouseEvent): Promise<void> => {
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
     if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+
+    const press = this.linkPress;
+    this.linkPress = undefined;
+    // The second click of a double click selects a word, and a click whose
+    // press went to the program is the program's.
+    if (e.button !== 0 || e.detail > 1 || !press || press.reported) return;
+    // A press that moved as far as the selection manager's drag threshold
+    // made a selection, not a link click.
+    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
+    const dx = e.clientX - press.x;
+    const dy = e.clientY - press.y;
+    if (dx * dx + dy * dy >= threshold * threshold) return;
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();
@@ -1447,18 +1489,15 @@ export class Terminal {
       bufferRow = scrollbackLength + viewportRow;
     }
 
-    // Get the link at this position
     const link = await this.linkDetector.getLinkAt(x, bufferRow);
-
-    if (link) {
-      // Activate link
-      link.activate(e);
-
-      // Prevent default action if modifier key held
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-      }
-    }
+    if (!link || this.isDisposed) return;
+    const { start, end } = link.range;
+    this.linkEmitter.fire({
+      target: link.target,
+      kind: link.kind,
+      range: { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y } },
+      event: e,
+    });
   };
 
   /**

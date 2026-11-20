@@ -6,6 +6,9 @@
     Clipboard,
     ClipboardPaste,
     Command as CommandIcon,
+    ExternalLink,
+    FileText,
+    Link as LinkIcon,
     Pencil,
     Radio,
     Search,
@@ -39,7 +42,6 @@
   } from "../api/desktop";
   import { isOsFileDrag, shellEscapePaths } from "../state/fileDropGuard";
   import { resolveTerminalColors } from "../state/paneColor";
-  import { openExternalUrl } from "../editor/external_links";
   import {
     chordFor,
     consumeKey,
@@ -114,7 +116,10 @@
     setTransientStatus,
     surfaceThemeOverride,
     ui,
+    appInputBlocked,
   } from "../state/store.svelte";
+  import { middleEllipsis } from "../terminal/linkTarget";
+  import { TerminalLinkMenu, xtermLinkHandlers, type LinkRange } from "../terminal/linkMenu.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
@@ -186,7 +191,7 @@
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
+  import type { Terminal as GhosttyTerminal, TerminalLinkActivation } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -615,6 +620,9 @@
   const menuPos = $derived.by(() => {
     const a = tabMenu.anchor;
     if (!a) return { x: 0, y: 0 };
+    // A link menu's anchor is a band around the pointer: the menu opens
+    // under it and flips to above it, so a second click lands outside.
+    if (tabMenu.source === "link") return { x: Math.round(a.left), y: Math.round(a.bottom), flipY: Math.round(a.top) };
     return { x: Math.round(a.left), y: Math.round(a.bottom + 4) };
   });
   // The broadcast list, which the launcher's choice lists too. Self leads
@@ -1282,6 +1290,7 @@
         theme: terminalTheme(),
       });
       term = ghosttyTerm;
+      ghosttyTerm.onLinkActivate(onGhosttyLink);
       // Ghostty's auto-hiding scrollbar is painted onto the content without
       // clearing it (see installGhosttyOverlayScrollbar), so the columns under
       // it stay readable and there is no gutter to hold back. Reserving width
@@ -1373,6 +1382,8 @@
         scrollback: scrollbackLines,
         tabStopWidth: 8,
         theme: terminalTheme(),
+        // An OSC 8 link goes to the link menu, which judges its target.
+        linkHandler: xtermLinks.linkHandler,
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
@@ -1388,18 +1399,10 @@
         if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
       });
       term.loadAddon(serialize);
-      // Route terminal link clicks through the editor's external-open
-      // path: a new browser tab on web, the OS default browser under
-      // chan-desktop's Tauri webview. The default WebLinksAddon handler
-      // is window.open(_blank), which under WKWebView either no-ops or
-      // opens inside the app shell, so links highlighted on hover but the
-      // click never reached a real browser. openExternalUrl also gates on
-      // the scheme (http/https/mailto/tel).
-      term.loadAddon(
-        new WebLinksAddon((_event, uri) => {
-          void openExternalUrl(uri);
-        }),
-      );
+      // A URL in the text goes to the link menu too, never to the addon's
+      // default window.open, which under WKWebView does nothing or opens
+      // inside the app shell.
+      term.loadAddon(new WebLinksAddon(xtermLinks.webLink.handler, xtermLinks.webLink.options));
       termWriter = term;
     }
     // Neither backend's open() takes the keyboard; a terminal in the focused
@@ -1941,6 +1944,7 @@
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
         terminalCwdVirtual = frame.cwd_rel ?? null;
+        links.noteCwd();
       } else if (frame.type === "activity") {
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
       } else if (frame.type === "program") {
@@ -3253,7 +3257,8 @@
   const menuKeys = menuEscape({
     open: () => menuOpen,
     inside: (target) => target instanceof Element && !!target.closest(".terminal-tab-menu-bubble"),
-    close: closeTabMenu,
+    // The link menu holds the keyboard while it shows; Escape hands it back.
+    close: () => (tabMenu.source === "link" ? links.close(true) : closeTabMenu()),
   });
 
   function onDocPointerDown(e: PointerEvent): void {
@@ -3294,6 +3299,82 @@
       "body",
     );
   }
+
+  // ---- The menu on a link the terminal underlines ----
+  //
+  // Its state and actions live in `terminal/linkMenu.svelte.ts`; this tab
+  // gives it the terminal and the menu bubble, and closes it when the link's
+  // cells change or move on the screen.
+
+  const LINK_BAND_PX = 8;
+  const links = new TerminalLinkMenu({
+    blocked: appInputBlocked,
+    requestCwd: requestTerminalCwd,
+    cwd: () => terminalCwdAbs,
+    anchorKey: linkAnchorKey,
+    // The anchor is a band around the pointer, which the menu opens below
+    // and flips above (see `menuPos`).
+    open: ({ x, y }) =>
+      openTabMenu(tab.id, { left: x, right: x, top: y - LINK_BAND_PX, bottom: y + LINK_BAND_PX }, "link"),
+    close: () => {
+      if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
+    },
+    focusTerminal,
+  });
+  const xtermLinks = xtermLinkHandlers(
+    () => (backend === "xterm" ? (term as Terminal | null) : null),
+    (target, range, event) => void links.onLink(target, range, event),
+  );
+  const linkMenuOpen = $derived(menuOpen && tabMenu.source === "link" && links.menu !== null);
+  /// The longest target the menu shows whole; a longer one keeps both ends.
+  const LINK_TARGET_SHOWN = 72;
+
+  /// The rows a link sits on and where the viewport shows them; a change in
+  /// either means the menu no longer points at what is on the screen.
+  function linkAnchorKey(range: LinkRange): string | null {
+    const t = term;
+    if (!t) return null;
+    const top =
+      backend === "ghostty"
+        ? (t as GhosttyTerminal).getScrollbackLength() - Math.floor((t as GhosttyTerminal).getViewportY())
+        : (t as Terminal).buffer.active.viewportY;
+    const rows: string[] = [String(range.start.y - top)];
+    for (let y = range.start.y; y <= range.end.y; y++) {
+      rows.push(t.buffer.active.getLine(y)?.translateToString(true) ?? "");
+    }
+    return rows.join("\n");
+  }
+
+  function onGhosttyLink({ target, range, event }: TerminalLinkActivation): void {
+    void links.onLink(target, range, event);
+  }
+
+  /// The link menu takes the keyboard as it shows, onto its first live
+  /// entry, unless something above the panes holds it. It waits a frame for
+  /// the portal, whose move would drop the focus.
+  function takeLinkMenuFocus(node: HTMLElement): void {
+    requestAnimationFrame(() => {
+      const first = node.querySelector<HTMLButtonElement>("button.mbtn:not(:disabled)");
+      if (node.isConnected && first && mayFocus(first)) first.focus({ preventScroll: true });
+    });
+  }
+
+  // Closes the link menu when its link's cells change or move on the screen
+  // (output, a scroll, a resize) or a cover rises over the window, read ten
+  // times a second while it shows; the keyboard goes back to the terminal
+  // only if the menu held it.
+  $effect(() => {
+    if (!linkMenuOpen) return;
+    const watch = setInterval(() => {
+      if (!untrack(() => links.menu)) return;
+      const covered = appInputBlocked();
+      if (covered || links.stale()) {
+        const held = document.activeElement?.closest(".terminal-tab-menu-bubble") != null;
+        links.close(held && !covered);
+      }
+    }, 100);
+    return () => clearInterval(watch);
+  });
 </script>
 
 <svelte:window
@@ -3335,14 +3416,80 @@
   {#if menuOpen}
     <div
       class="terminal-tab-menu-bubble"
-      role={tabMenu.source === "body" ? "menu" : "dialog"}
+      role={tabMenu.source === "tab" ? "dialog" : "menu"}
       tabindex="-1"
-      aria-label={tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
+      aria-label={tabMenu.source === "link" ? "terminal link menu" : tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      {#if tabMenu.source === "body"}
+      {#if tabMenu.source === "link" && links.menu}
+        <!-- Link menu: the link's real target, a web link's host on a line
+             of its own (a target is untrusted, and its text can lead the eye
+             to another host), then its two entries. A long target keeps both
+             ends. A refused entry stays in place, disabled, with its reason. -->
+        {@const linkMenu = links.menu}
+        {@const link = linkMenu.link}
+        {@const target = link.kind === "web" ? link.url : link.path}
+        {@const clickChord = currentOS() === "mac" ? "\u2318 Click" : "Ctrl+Click"}
+        <div class="action-list" use:takeLinkMenuFocus>
+          {#if link.kind === "web" && link.host}
+            <div class="terminal-link-target">
+              <span>Host</span>
+              <span class="terminal-link-value" data-terminal-link-host={link.host}>{link.host}</span>
+            </div>
+          {/if}
+          <div class="terminal-link-target">
+            <span>{link.kind === "web" ? "Link" : "Path"}</span>
+            <span
+              class="terminal-link-value"
+              data-terminal-link-target={target}
+              title={target}
+            >{middleEllipsis(target, LINK_TARGET_SHOWN)}</span>
+          </div>
+          {#if link.kind === "web"}
+            <button
+              class="mbtn"
+              role="menuitem"
+              data-terminal-link-action="open-browser"
+              disabled={link.refusal !== null}
+              onclick={() => links.openInBrowser()}
+            >
+              <span class="mbtn-icon"><ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Open in browser</span>
+              <span class="mbtn-chord">{clickChord}</span>
+            </button>
+            {#if link.refusal}
+              <div class="terminal-link-reason" data-terminal-link-reason>{link.refusal}</div>
+            {/if}
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-link" onclick={() => links.copyTarget()}>
+              <span class="mbtn-icon"><LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Copy link</span>
+              <span class="mbtn-chord"></span>
+            </button>
+          {:else}
+            <button
+              class="mbtn"
+              role="menuitem"
+              data-terminal-link-action="open-editor"
+              disabled={linkMenu.editorRefusal !== null || linkMenu.editorBusy}
+              onclick={() => links.openInEditor()}
+            >
+              <span class="mbtn-icon"><FileText size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Open in editor</span>
+              <span class="mbtn-chord">{clickChord}</span>
+            </button>
+            {#if linkMenu.editorRefusal}
+              <div class="terminal-link-reason" data-terminal-link-reason>{linkMenu.editorRefusal}</div>
+            {/if}
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-path" onclick={() => links.copyTarget()}>
+              <span class="mbtn-icon"><Clipboard size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Copy path</span>
+              <span class="mbtn-chord"></span>
+            </button>
+          {/if}
+        </div>
+      {:else if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
              body): the live engine and the masking toggle, Find + Copy
              (selection or scrollback) + Paste + Copy scrollback, the Rich
@@ -4102,6 +4249,32 @@
   .terminal-backend-value {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .terminal-link-target {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 4px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    max-width: min(480px, calc(100vw - 40px));
+  }
+  /* The value wraps rather than ending in an ellipsis: an untrusted
+     target's end (the host after a long path, the name after a long
+     folder) must show, and the menu shortens it in the middle. */
+  .terminal-link-value {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .terminal-link-reason {
+    padding: 0 8px 6px 34px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    max-width: min(480px, calc(100vw - 40px));
+    overflow-wrap: anywhere;
   }
   .target-self {
     margin-left: 4px;

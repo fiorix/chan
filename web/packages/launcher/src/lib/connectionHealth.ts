@@ -12,6 +12,17 @@ import type { ConnectionHealth } from "../api/library";
 /// It scales the drawing and decides no face, so the row does not carry it.
 export const CONNECTION_CHART_FLOOR_MS = 400;
 
+/// How many finished pings the desktop keeps in a reading's history:
+/// CONNECTION_SAMPLE_CAP in chan-library (`devserver_registry.rs`).
+export const CONNECTION_SAMPLE_CAP = 60;
+
+/// One step of the chart is one ping, and it scrolls a step in this long:
+/// the desktop's FOCUSED_CADENCE (`desktop/src-tauri/src/connection_health.rs`),
+/// the pace it pings at while the Computers screen has the focus. An
+/// unfocused desktop pings less often, and the line then rests at its newest
+/// sample until the next comes.
+export const CONNECTION_SCROLL_MS = 3_000;
+
 /// The chart and its marks use one view box so the component and path math
 /// agree: CONNECTION_SPARKLINE_HEIGHT units tall and, until the detail it
 /// fills has been measured, CONNECTION_SPARKLINE_WIDTH units wide.
@@ -38,7 +49,8 @@ export function connectionSparklineWidth(boxWidth: number): number {
 
 /// Latest is the last answered ping; median and worst use the answered set.
 export type ConnectionFigures = { latest: number | null; median: number | null; worst: number | null };
-/// Each path is one uninterrupted answered run; misses hold baseline x coordinates.
+/// Each path is one uninterrupted answered run; misses hold baseline x
+/// coordinates. Both are drawn at rest, the newest sample at the right edge.
 export type ConnectionSparkline = { paths: string[]; misses: number[] };
 
 /// A reply time in words: milliseconds under a second, else seconds to a tenth.
@@ -107,14 +119,42 @@ export function connectionFigures(samples: readonly (number | null)[]): Connecti
   return { latest: answered.at(-1)!, median, worst: sorted.at(-1)! };
 }
 
+/// The width in view-box units of one step, one ping, in a chart `width`
+/// units wide. The steps are the same at every count of samples, so the line
+/// can scroll: a full history fills the chart with its oldest point one step
+/// past the left edge at rest, where it leaves while the newest comes in from
+/// one step past the right; a shorter one occupies the right of the chart.
+export function connectionSparklineStep(width: number): number {
+  return (width - 2 * CONNECTION_SPARKLINE_EDGE) / (CONNECTION_SAMPLE_CAP - 2);
+}
+
+/// The missed pings in the chart's window: the samples with no reply, one
+/// red mark each; null, shown as a dash, before any ping has finished.
+export function connectionMissed(samples: readonly (number | null)[]): number | null {
+  return samples.length === 0 ? null : samples.filter((rtt) => rtt === null).length;
+}
+
+/// The missed figure's title: the count against the pings in the window,
+/// and the clock time of the last contact, which the figure itself leaves
+/// out because a clock time on its own means nothing until it is set
+/// against a clock.
+export function connectionMissedTitle(samples: readonly (number | null)[], lastContact: number | null): string {
+  const missed = connectionMissed(samples);
+  const contact = `last contact ${connectionContactTime(lastContact)}`;
+  return missed === null
+    ? `No ping has finished yet; ${contact}`
+    : `${missed} of the last ${samples.length} pings got no reply; ${contact}`;
+}
+
 /// The chart floor keeps fast-connection jitter low; the larger of that
 /// floor and twice the median clips spikes without flattening normal reply
-/// times.
+/// times. The x coordinates keep two decimals: the line moves by fractions
+/// of a step, and points rounded to whole units would shift under it when a
+/// sample arrives.
 export function connectionSparkline(samples: readonly (number | null)[], width = CONNECTION_SPARKLINE_WIDTH, height = CONNECTION_SPARKLINE_HEIGHT): ConnectionSparkline {
   const ceiling = Math.max(CONNECTION_CHART_FLOOR_MS, (connectionFigures(samples).median ?? 0) * 2);
-  const x = (index: number) => Math.round(samples.length === 1
-    ? width / 2
-    : CONNECTION_SPARKLINE_EDGE + index * (width - 2 * CONNECTION_SPARKLINE_EDGE) / (samples.length - 1));
+  const step = connectionSparklineStep(width);
+  const x = (index: number) => Math.round((width - CONNECTION_SPARKLINE_EDGE - (samples.length - 1 - index) * step) * 100) / 100;
   const y = (rtt: number) => Math.round(height - CONNECTION_SPARKLINE_PAD - Math.min(rtt, ceiling) / ceiling * (height - 2 * CONNECTION_SPARKLINE_PAD));
   const paths: string[] = [];
   const misses: number[] = [];
@@ -135,6 +175,51 @@ export function connectionSparkline(samples: readonly (number | null)[], width =
   });
   flush();
   return { paths, misses };
+}
+
+/// How many samples `next` adds after `prev`: the fewest that leave `next`
+/// starting with what it keeps of `prev`, as the desktop's history adds its
+/// newest and, at its cap, drops its oldest. The row dates no sample, so this
+/// is how the page learns that one arrived. A run of equal readings matches
+/// at more than one count; the fewest draws the same line. Null when `next`
+/// does not continue `prev`: a shorter history, begun afresh, or one whose
+/// every sample is new, so nothing the chart drew stays to move.
+export function connectionSampleShift(prev: readonly (number | null)[], next: readonly (number | null)[]): number | null {
+  if (next.length < prev.length) return null;
+  for (let added = next.length - prev.length; added < next.length; added++) {
+    const kept = next.length - added;
+    const from = prev.length - kept;
+    let same = true;
+    for (let i = 0; same && i < kept; i++) same = next[i] === prev[from + i];
+    if (same) return added;
+  }
+  return null;
+}
+
+/// How many steps behind its newest sample the chart may draw before it
+/// speeds up. The page sees a sample on its next 2 s re-list, so on a 3 s
+/// cadence the samples it sees come 2 s and 4 s apart, and the line, moving a
+/// step per 3 s, trails by up to one and a third steps without falling
+/// further behind.
+const CONNECTION_SCROLL_SLACK = 2;
+
+/// The line's lag, in steps behind its newest sample, `elapsedMs` after it
+/// was `lag`. It closes at one step per CONNECTION_SCROLL_MS and stops at
+/// none, so it never draws past the newest sample. Beyond the slack, after
+/// several samples arrive at once (the misses of a lost socket, a re-list
+/// after the page was hidden), it closes at the steps beyond one per
+/// CONNECTION_SCROLL_MS: an exponential approach to the slack, whose speed
+/// meets the steady one there.
+export function connectionScrollLag(lag: number, elapsedMs: number): number {
+  let rest = elapsedMs;
+  if (lag > CONNECTION_SCROLL_SLACK) {
+    const over = lag - (CONNECTION_SCROLL_SLACK - 1);
+    const toSlack = CONNECTION_SCROLL_MS * Math.log(over);
+    if (rest < toSlack) return CONNECTION_SCROLL_SLACK - 1 + over * Math.exp(-rest / CONNECTION_SCROLL_MS);
+    lag = CONNECTION_SCROLL_SLACK;
+    rest -= toSlack;
+  }
+  return Math.max(0, lag - rest / CONNECTION_SCROLL_MS);
 }
 
 /// Clamp a slightly future timestamp while this page's clock and the row's

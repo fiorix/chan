@@ -6,8 +6,13 @@ import {
   connectionFaceLabel,
   connectionFaceName,
   connectionFigures,
+  connectionMissed,
+  connectionMissedTitle,
+  connectionSampleShift,
+  connectionScrollLag,
   connectionSparkline,
   connectionSparklineWidth,
+  CONNECTION_SCROLL_MS,
 } from "./connectionHealth";
 
 /// The reading the desktop serves for a connection slow from two 450 ms
@@ -103,49 +108,70 @@ describe("connection figures", () => {
   test("sorts reply times numerically for the median", () => {
     expect(connectionFigures([5, 100, 20, 30, 9])).toEqual({ latest: 9, median: 20, worst: 100 });
   });
+
+  test("counts the missed pings, the chart's red marks, with a dash before any ping finished", () => {
+    expect(connectionMissed([20, null, 24, null, null])).toBe(3);
+    expect(connectionMissed([20, 24])).toBe(0);
+    expect(connectionMissed([])).toBeNull();
+  });
+
+  test("titles the missed count against the window's pings, with the last contact", () => {
+    expect(connectionMissedTitle([20, null, 24], null)).toBe("1 of the last 3 pings got no reply; last contact -");
+    expect(connectionMissedTitle([], null)).toBe("No ping has finished yet; last contact -");
+  });
 });
 
+// At 64 units wide a step is one unit, so the newest point rests at 61 and
+// each older one a unit to its left.
 describe("chart", () => {
   test("breaks the line at misses and marks their baseline positions", () => {
-    expect(connectionSparkline([10, 20, null, 30, 40], 40, 40))
-      .toEqual({ paths: ["M 3 35 L 12 34", "M 29 34 L 37 33"], misses: [20] });
+    expect(connectionSparkline([10, 20, null, 30, 40], 64, 40))
+      .toEqual({ paths: ["M 57 35 L 58 34", "M 60 34 L 61 33"], misses: [59] });
   });
 
   test("keeps a slow-threshold floor and clips outliers above it", () => {
-    expect(connectionSparkline([10, 20, 1000], 20, 40).paths).toEqual(["M 3 35 L 10 34 L 17 4"]);
+    expect(connectionSparkline([10, 20, 1000], 64, 40).paths).toEqual(["M 59 35 L 60 34 L 61 4"]);
   });
 
   test("scales to twice the median once that passes the floor", () => {
-    expect(connectionSparkline([500, 600, 5000], 20, 40).paths).toEqual(["M 3 23 L 10 20 L 17 4"]);
+    expect(connectionSparkline([500, 600, 5000], 64, 40).paths).toEqual(["M 59 23 L 60 20 L 61 4"]);
   });
 
-  test("paints the first answer as an inset point", () => {
-    expect(connectionSparkline([100], 40, 40)).toEqual({ paths: ["M 20 28 L 20 28"], misses: [] });
+  test("paints the first answer as a point at the right edge", () => {
+    expect(connectionSparkline([100], 40, 40)).toEqual({ paths: ["M 37 28 L 37 28"], misses: [] });
   });
 
   test("a zero median keeps one millisecond of jitter low", () => {
-    expect(connectionSparkline([0, 0, 1], 40, 40).paths).toEqual(["M 3 36 L 20 36 L 37 36"]);
+    expect(connectionSparkline([0, 0, 1], 64, 40).paths).toEqual(["M 59 36 L 60 36 L 61 36"]);
   });
 
   test("paints a lone answer between missed pings", () => {
-    expect(connectionSparkline([null, 10, null], 40, 40)).toEqual({ paths: ["M 20 35 L 20 35"], misses: [3, 37] });
+    expect(connectionSparkline([null, 10, null], 64, 40)).toEqual({ paths: ["M 60 35 L 60 35"], misses: [59, 61] });
   });
 
-  test("marks misses at both inset edges", () => {
-    expect(connectionSparkline([null, 10, 20, null], 40, 40)).toEqual({ paths: ["M 14 35 L 26 34"], misses: [3, 37] });
+  test("marks misses on either side of a run", () => {
+    expect(connectionSparkline([null, 10, 20, null], 64, 40)).toEqual({ paths: ["M 59 35 L 60 34"], misses: [58, 61] });
   });
 
   test("keeps consecutive misses separate from zero reply times", () => {
-    expect(connectionSparkline([0, null, null, 0], 40, 40))
-      .toEqual({ paths: ["M 3 36 L 3 36", "M 37 36 L 37 36"], misses: [14, 26] });
+    expect(connectionSparkline([0, null, null, 0], 64, 40))
+      .toEqual({ paths: ["M 58 36 L 58 36", "M 61 36 L 61 36"], misses: [59, 60] });
   });
 
   test("marks every miss when no ping was answered", () => {
-    expect(connectionSparkline([null, null, null], 40, 40)).toEqual({ paths: [], misses: [3, 20, 37] });
+    expect(connectionSparkline([null, null, null], 64, 40)).toEqual({ paths: [], misses: [59, 60, 61] });
   });
 
   test("an empty history draws nothing", () => {
     expect(connectionSparkline([])).toEqual({ paths: [], misses: [] });
+  });
+
+  // The oldest of a full history leaves the left edge while the newest
+  // comes in at the right, so the history's first segment must be out of
+  // sight before it is dropped.
+  test("rests a full history with its oldest point a step past the left edge", () => {
+    const misses = connectionSparkline(Array<null>(60).fill(null), 64, 40).misses;
+    expect([misses[0], misses[1], misses.at(-1)]).toEqual([2, 3, 61]);
   });
 });
 
@@ -159,9 +185,56 @@ describe("chart width", () => {
     expect(connectionSparklineWidth(0)).toBe(180);
   });
 
-  test("spreads the points across the width it is given", () => {
+  test("steps the points by the width it is given, to two decimals", () => {
     expect(connectionSparkline([20, null, 24], connectionSparklineWidth(552)))
-      .toEqual({ paths: ["M 3 42 L 3 42", "M 381 42 L 381 42"], misses: [192] });
+      .toEqual({ paths: ["M 367.97 42 L 367.97 42", "M 381 42 L 381 42"], misses: [374.48] });
+  });
+});
+
+// The row dates no sample: the page learns of one from what a re-list
+// adds to the history it drew.
+describe("sample arrival", () => {
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+
+  test("counts what a history under the cap gains", () => {
+    expect(connectionSampleShift([20, null], [20, null, 24, 25])).toBe(2);
+  });
+
+  test("counts the newest a full history adds as it drops its oldest", () => {
+    expect(connectionSampleShift(range(1, 60), range(2, 60))).toBe(1);
+  });
+
+  test("counts several arrivals seen in one re-list", () => {
+    expect(connectionSampleShift(range(1, 60), [...range(4, 57), null, null, null])).toBe(3);
+  });
+
+  test("counts none in a re-list that brought nothing new", () => {
+    expect(connectionSampleShift(range(1, 60), range(1, 60))).toBe(0);
+  });
+
+  test("takes a shorter history for one begun afresh", () => {
+    expect(connectionSampleShift([20, 24, 30], [30])).toBeNull();
+  });
+
+  test("takes a history that keeps nothing of the last one for one begun afresh", () => {
+    expect(connectionSampleShift([20, 24, 30], [40, 41, 42])).toBeNull();
+  });
+});
+
+describe("scroll lag", () => {
+  test("closes a step per ping interval and stops at the newest sample", () => {
+    expect(connectionScrollLag(1, CONNECTION_SCROLL_MS / 2)).toBeCloseTo(0.5);
+    expect(connectionScrollLag(1, CONNECTION_SCROLL_MS * 2)).toBe(0);
+  });
+
+  test("keeps the steady pace two steps behind, where a 2 s re-list of a 3 s cadence leaves it", () => {
+    expect(connectionScrollLag(2, CONNECTION_SCROLL_MS)).toBeCloseTo(1);
+  });
+
+  test("catches up a burst, slowing to the steady pace at two steps behind", () => {
+    expect(connectionScrollLag(5, CONNECTION_SCROLL_MS)).toBeCloseTo(1 + 4 / Math.E);
+    expect(connectionScrollLag(5, CONNECTION_SCROLL_MS * Math.log(4))).toBeCloseTo(2);
+    expect(connectionScrollLag(5, CONNECTION_SCROLL_MS * (Math.log(4) + 0.5))).toBeCloseTo(1.5);
   });
 });
 

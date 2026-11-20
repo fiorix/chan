@@ -242,15 +242,23 @@
       gateways: new Map(),
     };
 
-    function windowModel(window: WindowRecord): ComputersWindow {
+    /** A window's row. `connection` names the tmux connection whose control
+     * terminal a machine lists, so two runs on one machine read apart, as
+     * the machine card's row does. */
+    function windowModel(window: WindowRecord, connection?: string): ComputersWindow {
       const key = windowKey(window);
       records.windows.set(key, window);
       return {
         key,
         name: privateText(windowRowLabel(window), "Window"),
         kind: window.kind,
-        context: window.kind === "workspace" ? workspaceNameForWindow(window) : undefined,
-        search: [window.label ?? "", window.title, window.workspace_path ?? "", window.kind].join(" "),
+        context:
+          connection !== undefined
+            ? privateText(connection, "tmux computer")
+            : window.kind === "workspace"
+              ? workspaceNameForWindow(window)
+              : undefined,
+        search: [window.label ?? "", window.title, window.workspace_path ?? "", window.kind, connection ?? ""].join(" "),
         hidden: !!window.hidden,
         control: window.control === true,
         current: isLauncherHost(window),
@@ -294,12 +302,21 @@
         leaderHeld: !canOpenWorkspaceWindow(workspace),
         reason: workspace.error ? privateText(workspace.error, "Workspace unavailable") : undefined,
         machine: named === machine ? undefined : named,
-        windows: windows.map(windowModel),
+        windows: windows.map((window) => windowModel(window)),
       };
     }
 
     function machineModel(node: MachineNode): ComputersMachine {
-      const loose = [...node.control, ...node.terminals, ...node.looseWindows];
+      // A tmux connection's control terminal is listed where the cards list
+      // it: under the machine whose terminal ran it, and under the
+      // connection only while no machine card holds it.
+      const loose = [
+        ...node.control.map((window) => windowModel(window)),
+        ...node.tmuxControls.map((row) =>
+          windowModel(row.window, tmuxWindowMachine(row.node.tmux, row.node.tmuxHost)),
+        ),
+        ...[...node.terminals, ...node.looseWindows].map((window) => windowModel(window)),
+      ];
       if (node.kind === "tmux") {
         const connection = node.connection!;
         const key = `tmux:${connection}`;
@@ -313,7 +330,7 @@
           attached: node.tmux !== null,
           workspaces: [],
           windows: [
-            ...loose.map(windowModel),
+            ...loose,
             ...node.unopened.map((window) => unopenedModel(connection, window)),
           ],
         };
@@ -326,7 +343,7 @@
           name: "This machine",
           search: `local ${hostOs}`,
           workspaces: node.workspaces.map((row) => workspaceModel(row.ws, row.windows, "This machine")),
-          windows: loose.map(windowModel),
+          windows: loose,
         };
       }
       records.devservers.set(devserver.id, devserver);
@@ -356,7 +373,7 @@
         editable: !devserver.gateway_id,
         revocable: hasDesktopBridge && !!devserver.gateway_id && devserver.shared && !devserver.native_trust_required,
         workspaces: node.workspaces.map((row) => workspaceModel(row.ws, row.windows, name)),
-        windows: loose.map(windowModel),
+        windows: loose,
       };
     }
 
@@ -378,7 +395,7 @@
 
     const model: ComputersModel = {
       machines: machineTree.machines.map(machineModel),
-      unplaced: machineTree.orphans.map(windowModel),
+      unplaced: machineTree.orphans.map((window) => windowModel(window)),
       gateways,
       recent: recentWindows.keys,
       // What this surface offers. The devserver page has no bridge to dial a
