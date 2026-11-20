@@ -22,8 +22,6 @@ export const xterm = {
   webgl: [] as Array<{ loadedInto: FakeTerminal | null; onContextLoss: (() => void) | null; disposed: boolean }>,
   /// When set, constructing a WebglAddon throws, as it does without WebGL.
   webglThrows: false,
-  /// The link handler each WebLinksAddon was given.
-  linkHandlers: [] as Array<(event: MouseEvent, uri: string) => void>,
   /// When set, each terminal opens a textarea in its host and focus() and
   /// blur() move DOM focus to and from it, as xterm's own textarea does.
   textareaFocus: false,
@@ -223,11 +221,7 @@ export function serializeAddonModule() {
 
 export function webLinksAddonModule() {
   return {
-    WebLinksAddon: class {
-      constructor(handler: (event: MouseEvent, uri: string) => void) {
-        xterm.linkHandlers.push(handler);
-      }
-    },
+    WebLinksAddon: class {},
   };
 }
 

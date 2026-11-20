@@ -16,7 +16,7 @@
     Users,
     X,
   } from "@lucide/svelte";
-  import { Terminal } from "@xterm/xterm";
+  import { Terminal, type IBufferRange } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
   import { SerializeAddon } from "@xterm/addon-serialize";
@@ -1388,6 +1388,9 @@
         scrollback: scrollbackLines,
         tabStopWidth: 8,
         theme: terminalTheme(),
+        // An OSC 8 link goes to the link menu, which judges its target, so
+        // the handler takes every scheme, not only http and https.
+        linkHandler: { allowNonHttpProtocols: true, activate: onXtermLink },
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
@@ -1403,17 +1406,25 @@
         if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
       });
       term.loadAddon(serialize);
-      // Route terminal link clicks through the editor's external-open
-      // path: a new browser tab on web, the OS default browser under
-      // chan-desktop's Tauri webview. The default WebLinksAddon handler
-      // is window.open(_blank), which under WKWebView either no-ops or
-      // opens inside the app shell, so links highlighted on hover but the
-      // click never reached a real browser. openExternalUrl also gates on
-      // the scheme (http/https/mailto/tel).
+      // A URL in the text goes to the link menu too, never to the addon's
+      // default window.open, which under WKWebView does nothing or opens
+      // inside the app shell. The addon hands its handler no range, so the
+      // menu takes the one its hover reported for the same URL.
+      let hoveredWebLink: { uri: string; range: IBufferRange } | null = null;
       term.loadAddon(
-        new WebLinksAddon((_event, uri) => {
-          void openExternalUrl(uri);
-        }),
+        new WebLinksAddon(
+          (event, uri) => {
+            if (hoveredWebLink?.uri === uri) onXtermLink(event, uri, hoveredWebLink.range);
+          },
+          {
+            hover: (_event, uri, range) => {
+              hoveredWebLink = { uri, range };
+            },
+            leave: () => {
+              hoveredWebLink = null;
+            },
+          },
+        ),
       );
       termWriter = term;
     }
@@ -3378,6 +3389,21 @@
 
   function onGhosttyLink({ target, range, event }: TerminalLinkActivation): void {
     void onTerminalLink(target, range, event);
+  }
+
+  /// xterm.js activates a link on the release that ends a press on it, with
+  /// a 1-based range. A drag that selected, a double click's second release
+  /// and a press sent to a program tracking the mouse are not link clicks;
+  /// Shift keeps a press from the program (installShiftSelectionBypass).
+  function onXtermLink(event: MouseEvent, target: string, range: IBufferRange): void {
+    const t = backend === "xterm" ? (term as Terminal | null) : null;
+    if (!t || event.button !== 0 || event.detail > 1 || t.hasSelection()) return;
+    if (t.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
+    const cells = {
+      start: { x: range.start.x - 1, y: range.start.y - 1 },
+      end: { x: range.end.x - 1, y: range.end.y - 1 },
+    };
+    void onTerminalLink(target, cells, event);
   }
 
   async function onTerminalLink(target: string, range: LinkRange, event: MouseEvent): Promise<void> {

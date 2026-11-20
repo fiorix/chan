@@ -13,7 +13,6 @@ import Workspace from "./Workspace.svelte";
 import { api } from "../api/client";
 import type { SurveySpec } from "../api/client";
 import { terminalPreferences } from "../__tests__/standalone";
-import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import { __testSetStandalonePreferences, dismissCliReloadNotice, persistStateToHash } from "../state/store.svelte";
@@ -37,10 +36,6 @@ import {
   xterm,
 } from "../__tests__/terminalTab";
 
-vi.mock("../editor/external_links", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../editor/external_links")>()),
-  openExternalUrl: vi.fn(async () => {}),
-}));
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
@@ -822,11 +817,5 @@ describe("TerminalTab and the app around it", () => {
       closeTeamDialog();
       field.remove();
     }
-  });
-
-  test("a clicked link opens through the external-link path", async () => {
-    await renderTerminal(terminalTab(), true);
-    xterm.linkHandlers.at(-1)!(new MouseEvent("click"), "https://example.com/docs");
-    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
   });
 });
