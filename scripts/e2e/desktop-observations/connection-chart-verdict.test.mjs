@@ -45,6 +45,16 @@ test("a line that moves right fails the motion verdict", () => {
   assert.ok(failed(verdict).includes("the line never moves right"));
 });
 
+test("a trace with no interval of 1.5 s or more fails the motion line rather than pass it unread", () => {
+  // Arrivals every 1 s: 20 readings in each interval clear the setup, and
+  // no interval is long enough to judge the motion.
+  const quick = [];
+  for (let t = 0; t <= 10_000; t += PERIOD) quick.push({ t, sig: Math.floor(t / 1000), marker: 300 - t * STEP / 3000 });
+  const verdict = judgeMotion(quick, false);
+  assert.equal(verdict.setup, true);
+  assert.deepEqual(failed(verdict), ["the line moves left between arrivals"]);
+});
+
 test("a stepping line passes the reduced-motion verdict, and a scrolling one fails it", () => {
   assert.deepEqual(failed(judgeMotion(stepping, true)), []);
   assert.deepEqual(failed(judgeMotion(scrolling, true)),
