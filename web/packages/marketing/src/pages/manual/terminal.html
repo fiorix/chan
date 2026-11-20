@@ -132,6 +132,7 @@
     <summary>Details and limits</summary>
     <ul>
       <li>With the ghostty engine, the default, a mouse selection, a double click and a triple click also copy to the clipboard.</li>
+      <li>Muse draws a line longer than the terminal is wide by itself, cutting it at the right edge, so the terminal sees no wrap. While Muse runs in a terminal with the ghostty engine, every copy joins a row that reaches the right edge with the row below it, so a command Muse printed across rows pastes as one line. A full-width rule of box-drawing characters and a row with a blank row below it keep their line breaks, and so do rows that stop short of the edge, such as Muse's prose. The xterm.js engine and other programs copy only the terminal's own wraps as one line.</li>
       <li>On the Linux desktop a selection also sets PRIMARY, and a middle click pastes PRIMARY on either engine, including text selected in another application. Copy keys and the menu's Copy use the regular clipboard.</li>
       <li>In a browser, selection and middle click follow the browser.</li>
       <li>With the ghostty engine a paste cannot end the bracketed paste a program asked for: escape, NUL, backspace, delete and the control characters such as <kbd>Ctrl+C</kbd>, <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+U</kbd> and <kbd>Ctrl+W</kbd> arrive as spaces. Tabs stay.</li>
