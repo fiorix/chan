@@ -195,6 +195,9 @@ export class InputHandler {
   private isComposing = false;
   private isDisposed = false;
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
+  // Buttons pressed with Shift held while tracking: the gesture is the
+  // terminal's (a selection, a link click), so none of it is reported.
+  private mouseButtonsBypassed = 0;
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -817,6 +820,13 @@ export class InputHandler {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
+    // Shift bypasses mouse reporting, as in xterm.js and native terminals:
+    // the press, its drag and its release stay with the terminal.
+    if (event.shiftKey) {
+      this.mouseButtonsBypassed |= 1 << event.button;
+      return;
+    }
+
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
@@ -841,6 +851,14 @@ export class InputHandler {
   private handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+
+    // A release ends the gesture its press began: a bypassed press is not
+    // reported, a reported one is, Shift or not, so the program never holds
+    // a button down.
+    if (this.mouseButtonsBypassed & (1 << event.button)) {
+      this.mouseButtonsBypassed &= ~(1 << event.button);
+      return;
+    }
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
@@ -867,6 +885,9 @@ export class InputHandler {
 
     if (!hasButtonMotion && !hasAnyMotion) return;
 
+    // Motion with Shift held, or during a bypassed press, is not reported.
+    if (event.shiftKey || this.mouseButtonsBypassed !== 0) return;
+
     // In button motion mode, only report if a button is pressed
     if (hasButtonMotion && !hasAnyMotion && this.mouseButtonsPressed === 0) return;
 
@@ -890,6 +911,7 @@ export class InputHandler {
   private handleWheel(event: WheelEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
+    if (event.shiftKey) return;
 
     const cell = this.pixelToCell(event);
     if (!cell) return;
