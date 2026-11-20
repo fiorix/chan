@@ -1,5 +1,6 @@
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { copiedText, VtCells, VtTerminal, type VtCell } from "@chan/ghostty-web-ng/vt";
+import { copiedText, ghosttyScrollbackText, VtCells, VtTerminal, type VtCell } from "@chan/ghostty-web-ng/vt";
+import { drawnWrapAbove, scrollbackAcrossDrawnWraps, textAcrossDrawnWraps } from "./drawnWraps";
 
 // ghostty-web's selection has four defects over chan's binding, and no
 // public call to fix any. Its Select all puts the selection at the absolute
@@ -22,9 +23,12 @@ import { copiedText, VtCells, VtTerminal, type VtCell } from "@chan/ghostty-web-
 // ghostty-web's own copies write through the writer chan gives, so every copy
 // path writes the same text the same way; a double click selects a word and a
 // triple click the whole line across soft wraps, as xterm.js's do
-// (`installGhosttyClickExtents`). A read the core cannot format
-// falls back to ghostty-web's own, stripped the same. The shape is
-// feature-detected, and an absent one leaves ghostty-web's selection as it is.
+// (`installGhosttyClickExtents`). In a session that runs Muse, the reads,
+// the clicks and Copy scrollback (`ghosttyCopyScrollback`) also take a row
+// Muse drew to its last column as soft-wrapped (drawnWraps.ts). A read the
+// core cannot format falls back to ghostty-web's own, stripped the same.
+// The shape is feature-detected, and an absent one leaves ghostty-web's
+// selection as it is.
 // Find writes its active match through the same anchors (ghosttyFind.ts).
 
 /// A cell of the selection: `absoluteRow` 0 is the oldest history row and the
@@ -70,10 +74,15 @@ export function selectionManagerOf(term: Terminal): SelectionManagerLike | null 
 
 /// Install chan's Select all, selection text and clipboard write on an
 /// opened ghostty-web terminal over the binding; ghostty-web's own copies
-/// hand their text to `write`. Returns false, changing nothing, when the
-/// terminal has no selection manager of the shape this reaches or runs
-/// another core.
-export function installGhosttySelection(term: Terminal, write: (text: string) => void): boolean {
+/// hand their text to `write`. A read joins drawn wraps while
+/// `joinsDrawnWraps` answers true, asked at each read, so the answer follows
+/// the program in front. Returns false, changing nothing, when the terminal
+/// has no selection manager of the shape this reaches or runs another core.
+export function installGhosttySelection(
+  term: Terminal,
+  write: (text: string) => void,
+  joinsDrawnWraps: () => boolean = () => false,
+): boolean {
   const manager = selectionManagerOf(term);
   const core = term.wasmTerm;
   if (!manager || !(core instanceof VtTerminal)) return false;
@@ -85,12 +94,8 @@ export function installGhosttySelection(term: Terminal, write: (text: string) =>
     if (!start || !end) return "";
     // A selection made backwards keeps its anchor as `start`; the core orders
     // the two corners itself.
-    const text = core.plainText({
-      startCol: start.col,
-      startRow: start.absoluteRow,
-      endCol: end.col,
-      endRow: end.absoluteRow,
-    });
+    const range = { startCol: start.col, startRow: start.absoluteRow, endCol: end.col, endRow: end.absoluteRow };
+    const text = (joinsDrawnWraps() ? textAcrossDrawnWraps(core, range) : null) ?? core.plainText(range);
     return copiedText(text ?? ownRead());
   };
 
@@ -134,25 +139,28 @@ function rowAt(core: VtTerminal, row: number): VtCells | null {
   return read ? cells : null;
 }
 
-/// Whether row `row` continues the row above it, a soft wrap between them.
-function continuesAbove(core: VtTerminal, row: number): boolean {
+/// Whether row `row` continues the row above it, a soft wrap between them,
+/// or with `drawn` a drawn wrap.
+function continuesAbove(core: VtTerminal, row: number, drawn: boolean): boolean {
   const history = core.getScrollbackLength();
-  return row < history ? core.isScrollbackRowWrapped(row) : core.isRowWrapped(row - history);
+  const wrapped = row < history ? core.isScrollbackRowWrapped(row) : core.isRowWrapped(row - history);
+  return wrapped || (drawn && drawnWrapAbove(core, row));
 }
 
 type Extent = { start: Anchor; end: Anchor };
 
 /// The word under a cell, with ghostty-web's word characters, carried into
-/// the rows a soft wrap joins it to, as xterm.js's double click does. Null
-/// when the cell is not a word character.
-export function wordAcrossWraps(core: VtTerminal, col: number, row: number): Extent | null {
+/// the rows a soft wrap joins it to, as xterm.js's double click does, and
+/// with `drawn` the rows a drawn wrap joins it to. Null when the cell is not
+/// a word character.
+export function wordAcrossWraps(core: VtTerminal, col: number, row: number, drawn = false): Extent | null {
   const cells = rowAt(core, row);
   if (!cells || !isWordCell(cells.at(col))) return null;
   let start = { col, absoluteRow: row };
   let startCells = cells;
   for (;;) {
     while (start.col > 0 && isWordCell(startCells.at(start.col - 1))) start.col--;
-    if (start.col > 0 || !continuesAbove(core, start.absoluteRow)) break;
+    if (start.col > 0 || !continuesAbove(core, start.absoluteRow, drawn)) break;
     const above = rowAt(core, start.absoluteRow - 1);
     if (!above || !isWordCell(above.at(above.length - 1))) break;
     start = { col: above.length - 1, absoluteRow: start.absoluteRow - 1 };
@@ -162,7 +170,7 @@ export function wordAcrossWraps(core: VtTerminal, col: number, row: number): Ext
   let endCells = cells;
   for (;;) {
     while (end.col < endCells.length - 1 && isWordCell(endCells.at(end.col + 1))) end.col++;
-    if (end.col < endCells.length - 1 || !continuesAbove(core, end.absoluteRow + 1)) break;
+    if (end.col < endCells.length - 1 || !continuesAbove(core, end.absoluteRow + 1, drawn)) break;
     const below = rowAt(core, end.absoluteRow + 1);
     if (!below || !isWordCell(below.at(0))) break;
     end = { col: 0, absoluteRow: end.absoluteRow + 1 };
@@ -173,12 +181,13 @@ export function wordAcrossWraps(core: VtTerminal, col: number, row: number): Ext
 
 /// The whole line a row belongs to, every row a soft wrap joins to it, as
 /// xterm.js's triple click selects it, to its last cell that is not blank,
-/// as ghostty-web's triple click ends a row. Null when the line is blank.
-export function lineAcrossWraps(core: VtTerminal, row: number): Extent | null {
+/// as ghostty-web's triple click ends a row, and with `drawn` every row a
+/// drawn wrap joins to it. Null when the line is blank.
+export function lineAcrossWraps(core: VtTerminal, row: number, drawn = false): Extent | null {
   let first = row;
-  while (first > 0 && continuesAbove(core, first)) first--;
+  while (first > 0 && continuesAbove(core, first, drawn)) first--;
   let last = row;
-  while (continuesAbove(core, last + 1)) last++;
+  while (continuesAbove(core, last + 1, drawn)) last++;
   for (let r = last; r >= first; r--) {
     const cells = rowAt(core, r);
     for (let c = (cells?.length ?? 0) - 1; c >= 0; c--) {
@@ -197,10 +206,14 @@ export function lineAcrossWraps(core: VtTerminal, row: number): Extent | null {
 /// whole wrapped line (`lineAcrossWraps`), each copied as ghostty-web copies
 /// its own, through `copyToClipboard`, and the click goes no further. A click
 /// that finds no word or an empty line is left to ghostty-web, which finds
-/// none either. Returns the listener's cleanup, or null, changing nothing,
+/// none either. A click walks across drawn wraps too while `joinsDrawnWraps`
+/// answers true. Returns the listener's cleanup, or null, changing nothing,
 /// when the terminal has no selection manager or canvas of the shape this
 /// reaches or runs another core.
-export function installGhosttyClickExtents(term: Terminal): (() => void) | null {
+export function installGhosttyClickExtents(
+  term: Terminal,
+  joinsDrawnWraps: () => boolean = () => false,
+): (() => void) | null {
   const manager = selectionManagerOf(term) as ClickSelectionManager | null;
   const core = term.wasmTerm;
   const host = term.element;
@@ -219,7 +232,8 @@ export function installGhosttyClickExtents(term: Terminal): (() => void) | null 
     if (event.target !== canvas || event.detail < 2) return;
     const cell = manager.pixelToCell(event.offsetX, event.offsetY);
     const row = manager.viewportRowToAbsolute(cell.row);
-    const extent = event.detail === 2 ? wordAcrossWraps(core, cell.col, row) : lineAcrossWraps(core, row);
+    const drawn = joinsDrawnWraps();
+    const extent = event.detail === 2 ? wordAcrossWraps(core, cell.col, row, drawn) : lineAcrossWraps(core, row, drawn);
     if (!extent) return;
     event.stopPropagation();
     manager.selectionStart = extent.start;
@@ -233,4 +247,13 @@ export function installGhosttyClickExtents(term: Terminal): (() => void) | null 
   };
   host.addEventListener("click", onClick, true);
   return () => host.removeEventListener("click", onClick, true);
+}
+
+/// Copy scrollback's text of a ghostty terminal: `ghosttyScrollbackText`,
+/// with every drawn wrap joined when `joinsDrawnWraps`, as a selection of
+/// the whole history and screen reads it.
+export function ghosttyCopyScrollback(term: Terminal, joinsDrawnWraps: boolean): string {
+  const core = term.wasmTerm;
+  const joined = joinsDrawnWraps && core instanceof VtTerminal ? scrollbackAcrossDrawnWraps(core) : null;
+  return joined !== null ? copiedText(joined) : ghosttyScrollbackText(term);
 }

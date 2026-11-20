@@ -216,9 +216,10 @@
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
-  import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
+  import { ghosttyCopyScrollback, installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
+  import { sessionRunsMuse } from "../terminal/drawnWraps";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
-  import { ghosttyScrollbackText, type GhosttyVt } from "@chan/ghostty-web-ng/vt";
+  import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -1442,12 +1443,12 @@
       if (!installGhosttySelection(ghosttyTerm, (text) => {
         void copyToClipboard(text);
         if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
-      })) {
+      }, runsMuse)) {
         console.warn(
           "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
         );
       }
-      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm);
+      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm, runsMuse);
       if (!ghosttyClickExtents) {
         console.warn(
           "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
@@ -2805,13 +2806,20 @@
   /// Scrollback text for the copy actions. The xterm backend serializes
   /// through the SerializeAddon (ANSI styling preserved). The ghostty
   /// backend has no serialize addon; its core formats the history and the
-  /// rows as plain text in one call (`ghosttyScrollbackText`), styling lost.
+  /// rows as plain text (`ghosttyCopyScrollback`), styling lost: one call,
+  /// and a call more for each row in a session that runs Muse.
   function scrollbackText(): string {
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal | null;
-      return ghosttyTerm ? ghosttyScrollbackText(ghosttyTerm) : "";
+      return ghosttyTerm ? ghosttyCopyScrollback(ghosttyTerm, runsMuse()) : "";
     }
     return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
+  }
+
+  /// Whether this terminal's session runs Muse, whose cut rows a ghostty
+  /// copy joins; asked at each copy, so it follows the program in front.
+  function runsMuse(): boolean {
+    return sessionRunsMuse(tab.submitAgent, tab.terminalProgram?.command);
   }
 
   // The terminal's copies write through writeClipboardText and refocus the
