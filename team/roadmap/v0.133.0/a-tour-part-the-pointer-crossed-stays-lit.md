@@ -1,6 +1,6 @@
 # A tour part the pointer crossed stays lit
 
-Status: Accepted for v0.133.0 by the owner on 2026-11-20 ("web marketing: once we hover over one of the terminal windows / videos, they get marked as selected and there's no way to deselect them; i want to be able to deselect by clicking away from it"); not started.
+Status: Accepted for v0.133.0 by the owner on 2026-11-20 ("web marketing: once we hover over one of the terminal windows / videos, they get marked as selected and there's no way to deselect them; i want to be able to deselect by clicking away from it"); built and reviewed: the fix, `scripts/e2e/315-marketing-tour-rest.mjs` red at the base and green at the tip in a Chrome guest, one reader accepting with notes. Open for the owner: a touch scroll that starts off a part also rests the awake part, since the rest listens for the press.
 
 Record: reported by the owner on 2026-11-20 from the chan.app home page. Not reproduced by a run before this row; the reading below is from the source.
 
