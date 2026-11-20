@@ -125,8 +125,8 @@ describe("the connection face on the Computers deck", () => {
       expect(chart.getAttribute("viewBox")).toBe("0 0 384 48");
       expect(chart.style.height).toBe("69px");
       expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 381 44");
-      expect([...chart.querySelectorAll(".reading")].map((path) => path.getAttribute("d"))).toEqual(["M 3 42 L 3 42", "M 381 42 L 381 42"]);
-      expect(chart.querySelector(".miss")!.getAttribute("d")).toBe("M 192 40 L 192 46");
+      expect([...chart.querySelectorAll(".reading")].map((path) => path.getAttribute("d"))).toEqual(["M 367.97 42 L 367.97 42", "M 381 42 L 381 42"]);
+      expect(chart.querySelector(".miss")!.getAttribute("d")).toBe("M 374.48 40 L 374.48 46");
       expect(observed.has(detail("ds-a")!), "nothing observes the detail's size").toBe(true);
       width = 276;
       observed.get(detail("ds-a")!)!();
