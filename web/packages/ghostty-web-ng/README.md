@@ -16,7 +16,7 @@ chan's terminal widget is derived from [ghostty-web](https://github.com/coder/gh
 
 `vt/` contains the libghostty-vt binding, the copy filter and their tests. `vt/index.ts` is the separate `./vt` export. The workspace app, its terminal tests, the binding tests and the terminal pixel harness under `scripts/e2e/terminal-pixels/` all use the vendored core, exported as `./vendor/ghostty-vt/ghostty-vt.wasm`.
 
-The widget exposes the subset chan uses rather than an xterm.js compatibility API. OSC 8 and plain URL links use the built-in providers. The widget owns viewport positioning and output following; the app supplies wheel calibration, selection, find, secret masking and theme updates. `Terminal.open()` does not take focus; the caller chooses when the terminal receives the keyboard. `blur()` releases focus from descendants, including the hidden input textarea, and cancels a pending focus retry.
+The widget exposes the subset chan uses rather than an xterm.js compatibility API. OSC 8 and plain URL links use the built-in providers; see Links below. The widget owns viewport positioning and output following; the app supplies wheel calibration, selection, find, secret masking and theme updates. `Terminal.open()` does not take focus; the caller chooses when the terminal receives the keyboard. `blur()` releases focus from descendants, including the hidden input textarea, and cancels a pending focus retry.
 
 ## Viewport and content changes
 
@@ -26,9 +26,17 @@ The viewport's `followOutput` policy is `"at-bottom"`. Writes keep a view anchor
 
 `term.onChange(({ kind }) => ...)` reports `"write"` after each non-empty synchronous core write and `"resize"` after a grid size change. The core and viewport are updated, terminal replies are sent and cached links are invalidated before the write event; the event precedes painting, including the immediate input-echo frame. An empty write queues its callback without emitting a change or consuming a pending input echo. Its subscription has `dispose()`, and disposing the terminal releases all change subscriptions. Emission uses a snapshot of subscribers, so a listener disposing itself does not skip the next listener. The dimension-bearing `onResize` event serves consumers that publish terminal size; an unchanged size emits neither resize event.
 
+## Links
+
+The link detector underlines what its two providers find: OSC 8 hyperlinks first, then URLs in the text (`http`, `https`, `mailto`, `ftp`, `ssh`, `git`, `tel`, `magnet`, `gemini`, `gopher`, `news`). A click on a link opens nothing by itself. `term.onLinkActivate(({ target, kind, range, event }) => ...)` reports it: `target` is the OSC 8 URI exactly as the program wrote it, or the matched URL, and can name another place than the text on the screen; `kind` is `"osc8"` or `"url"`; `range` holds the link's first and last cells, absolute rows with row zero at the oldest retained history row; `event` is the click, modifiers included. With no listener a click on a link does nothing; the widget calls `window.open` nowhere.
+
+Only a link click is reported: a primary-button click whose press neither moved as far as the selection manager's drag threshold (half a cell) nor was the second click of a double click, and whose press was not reported to a program tracking the mouse. chan's workspace app opens its link menu on the event.
+
+While a program tracks the mouse, the input handler reports no Shift gesture to it: not a Shift press, its drag or its release, nor Shift motion or a Shift wheel. A gesture is judged by its press, so a release ends what its press began. The selection manager selects on any drag, so Shift with a drag selects, and Shift with a click on a link is a link click.
+
 ## Type checking and tests
 
-TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and widget test suites under the workspace app's strict settings. `vitest.config.ts` selects the binding, input-handler and viewport suites. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
+TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and widget test suites under the workspace app's strict settings. `vitest.config.ts` selects the binding, input-handler, link and viewport suites. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
 
 The package's `tsconfig.json` is a build input for `lib/`: its ES2020 target preserves constructor-assigned class fields. Vite uses the nearest configuration that includes each file. The binding's separate configuration targets ES2022; it does not change how Vite compiles the widget. The workspace app's `src/terminal/ghosttyWidget.test.ts` pins the widget's class-field behavior.
 
