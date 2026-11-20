@@ -4,8 +4,8 @@
   // latest, median and worst reply times and the count of the misses, as
   // Missed, whose title adds the window's size and the last contact's clock
   // time. The face beside the name says the state, counting where it
-  // counts, so the detail does not repeat it. In privacy mode it is concealed
-  // behind the devserver's one connection reveal, the one beside its face.
+  // counts, so the detail does not repeat it. Privacy mode leaves it shown,
+  // as it does the face: it names no machine and no place.
   //
   // The line scrolls: the desktop pings every 3 s while it has the focus, and
   // between two samples the reading slides left a step, the newest coming in
@@ -14,10 +14,9 @@
   // holds them `lag` steps to the right of rest, and a frame loop closes the
   // lag while there is one. The row dates no sample, so an arrival is what a
   // re-list adds to the history (`connectionSampleShift`); the line stops at
-  // the newest sample and waits there for the next one. Reduced motion, a
-  // concealed detail and a history begun afresh draw at rest.
+  // the newest sample and waits there for the next one. Reduced motion and
+  // a history begun afresh draw at rest.
   import { untrack } from "svelte";
-  import { isConcealed } from "@chan/web-shared/privacy";
   import type { ConnectionHealth } from "../api/library";
   import {
     CONNECTION_CHART_HEIGHT_PX,
@@ -37,9 +36,8 @@
     formatConnectionMs,
   } from "../lib/connectionHealth";
 
-  let { health, field }: { health: ConnectionHealth; field: string } = $props();
+  let { health }: { health: ConnectionHealth } = $props();
 
-  const concealed = $derived(isConcealed(field));
   const figures = $derived(connectionFigures(health.samples));
   // The chart fills the detail's width at a fixed height, so it is drawn
   // for the width the detail has: measured at mount and on every resize the
@@ -78,7 +76,7 @@
     const samples = health.samples;
     const added = drawn && connectionSampleShift(drawn, samples);
     drawn = samples;
-    lag = added == null || concealed || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    lag = added == null || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
       ? 0
       : untrack(() => lag) + added;
   });
@@ -100,29 +98,25 @@
 </script>
 
 <div class="connection-detail" bind:this={box} data-face={health.face} role="group" aria-label="Connection details">
-  {#if concealed}
-    <span class="redacted" aria-label="connection details hidden">Hidden</span>
-  {:else}
-    <svg class="sparkline" viewBox={`0 0 ${chartWidth} ${CONNECTION_SPARKLINE_HEIGHT}`} style:height={`${CONNECTION_CHART_HEIGHT_PX}px`} role="img" aria-label="Recent reply times and missed pings">
-      <path class="baseline" d={`M ${CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE} L ${chartWidth - CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE}`} />
-      <!-- The reading's window: the baseline's extent and a unit past each
-           end, so a point at rest at either end keeps its round cap, and a
-           line coming in or leaving is cut there. Its view box is its own
-           place in the chart, so it draws in the chart's units. -->
-      <svg class="trace" x={CONNECTION_SPARKLINE_EDGE - 1} width={chartWidth - 2 * CONNECTION_SPARKLINE_EDGE + 2} height={CONNECTION_SPARKLINE_HEIGHT} viewBox={`${CONNECTION_SPARKLINE_EDGE - 1} 0 ${chartWidth - 2 * CONNECTION_SPARKLINE_EDGE + 2} ${CONNECTION_SPARKLINE_HEIGHT}`}>
-        <g transform={`translate(${offset} 0)`}>
-          {#each sparkline.paths as path}<path class="reading" d={path} />{/each}
-          {#each sparkline.misses as x}<path class="miss" d={`M ${x} ${CONNECTION_SPARKLINE_MISS_TOP} L ${x} ${CONNECTION_SPARKLINE_MISS_BOTTOM}`} />{/each}
-        </g>
-      </svg>
+  <svg class="sparkline" viewBox={`0 0 ${chartWidth} ${CONNECTION_SPARKLINE_HEIGHT}`} style:height={`${CONNECTION_CHART_HEIGHT_PX}px`} role="img" aria-label="Recent reply times and missed pings">
+    <path class="baseline" d={`M ${CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE} L ${chartWidth - CONNECTION_SPARKLINE_EDGE} ${CONNECTION_SPARKLINE_BASELINE}`} />
+    <!-- The reading's window: the baseline's extent and a unit past each
+         end, so a point at rest at either end keeps its round cap, and a
+         line coming in or leaving is cut there. Its view box is its own
+         place in the chart, so it draws in the chart's units. -->
+    <svg class="trace" x={CONNECTION_SPARKLINE_EDGE - 1} width={chartWidth - 2 * CONNECTION_SPARKLINE_EDGE + 2} height={CONNECTION_SPARKLINE_HEIGHT} viewBox={`${CONNECTION_SPARKLINE_EDGE - 1} 0 ${chartWidth - 2 * CONNECTION_SPARKLINE_EDGE + 2} ${CONNECTION_SPARKLINE_HEIGHT}`}>
+      <g transform={`translate(${offset} 0)`}>
+        {#each sparkline.paths as path}<path class="reading" d={path} />{/each}
+        {#each sparkline.misses as x}<path class="miss" d={`M ${x} ${CONNECTION_SPARKLINE_MISS_TOP} L ${x} ${CONNECTION_SPARKLINE_MISS_BOTTOM}`} />{/each}
+      </g>
     </svg>
-    <div class="figures">
-      <span>Latest <strong>{fmt(figures.latest)}</strong></span>
-      <span>Median <strong>{fmt(figures.median)}</strong></span>
-      <span>Worst <strong>{fmt(figures.worst)}</strong></span>
-      <span title={connectionMissedTitle(health.samples, health.last_contact)}>Missed <strong>{connectionMissed(health.samples) ?? "-"}</strong></span>
-    </div>
-  {/if}
+  </svg>
+  <div class="figures">
+    <span>Latest <strong>{fmt(figures.latest)}</strong></span>
+    <span>Median <strong>{fmt(figures.median)}</strong></span>
+    <span>Worst <strong>{fmt(figures.worst)}</strong></span>
+    <span title={connectionMissedTitle(health.samples, health.last_contact)}>Missed <strong>{connectionMissed(health.samples) ?? "-"}</strong></span>
+  </div>
 </div>
 
 <style>
@@ -142,5 +136,4 @@
      figures, never inside one, so Missed goes first to the next line. */
   .figures { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; white-space: nowrap; }
   .figures strong { color: var(--text); font-weight: 600; }
-  .redacted { display: inline-block; width: 8em; border-radius: 4px; color: transparent; user-select: none; background: repeating-linear-gradient(135deg, var(--text-secondary, #888) 0 2px, transparent 2px 4px); opacity: 0.55; }
 </style>

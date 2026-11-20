@@ -1,7 +1,8 @@
 // A connected devserver's connection face on the Computers deck: the face
 // beside its name on every card, the detail under its address on the card
-// in front, nothing on the local machine's card or a row with no reading,
-// and both behind one reveal in privacy mode.
+// in front, and nothing on the local machine's card or a row with no
+// reading. That privacy mode leaves both shown is read by the desktop
+// driver connection-chart-native.sh.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
@@ -203,33 +204,6 @@ describe("the connection face on the Computers deck", () => {
     expect(detailText("ds-a")).toBe("Latest - Median - Worst - Missed -");
     expect(face("ds-b")!.textContent!.trim()).toBe("");
     expect(face("ds-b")!.title).toBe("Connection recovering");
-  });
-
-  it("keeps the colour in privacy mode and puts the words and detail behind one reveal", async () => {
-    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", since: NOW - 27_000, rtt_ms: 1_300 }))];
-    await setPrivacy({ enabled: true });
-    mountDeck("ds-a");
-    expect(face("ds-a")!.dataset.face).toBe("slow");
-    expect(face("ds-a")!.title).toBe("Connection details");
-    expect(slot("ds-a").textContent).not.toContain("1.3 s");
-    expect(slot("ds-a").textContent).not.toContain("Median");
-    const reveals = slot("ds-a").querySelectorAll<HTMLButtonElement>('[aria-label="Reveal connection details"]');
-    expect(reveals).toHaveLength(1);
-    reveals[0]!.click();
-    flushSync();
-    expect(face("ds-a")!.textContent).toContain("1.3 s");
-    expect(detailText("ds-a")).toContain("Median 22 ms");
-  });
-
-  it("keeps the privacy reveal out of the face's image, whose children a screen reader skips", async () => {
-    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", rtt_ms: 1_300 }))];
-    await setPrivacy({ enabled: true });
-    mountDeck("ds-a");
-    const reveal = face("ds-a")!.querySelector<HTMLButtonElement>('[aria-label="Reveal connection details"]')!;
-    expect(reveal.closest('[role="img"]'), "the reveal sits inside the image").toBeNull();
-    const image = face("ds-a")!.querySelector<HTMLElement>('[role="img"]')!;
-    expect(image.getAttribute("aria-label")).toBe("Connection details");
-    expect(image.querySelector("button, a, input")).toBeNull();
   });
 });
 

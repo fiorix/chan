@@ -204,7 +204,6 @@
   // connection to; null without one, and for a row from a producer that
   // sends no key.
   const health = (ds: DevserverEntry) => ds.connection_health ?? null;
-  const connectionField = (ds: DevserverEntry): string => `devserver:${ds.id}:connection`;
   // The face's image, by id: the edit button around a configured devserver's
   // identity is labelled for its action, which replaces what it holds for a
   // screen reader, so it names the face as its description.
@@ -586,7 +585,7 @@
     </span>
     <PrivateField field={`devserver:${ds.id}:name`} label="computer name"><span class="row-name">{devserverName(ds)}</span></PrivateField>
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
-    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} field={connectionField(ds)} id={faceId(ds)} />{/if}
+    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} id={faceId(ds)} />{/if}
   </span>
   <span class="ds-addr-row">
     <span class="ds-glyph"></span>
@@ -829,7 +828,7 @@
       </div>
       {#if active && health(ds)}
         <!-- The card in front carries its connection detail under the address. -->
-        <div class="ds-health"><ConnectionDetail health={health(ds)!} field={connectionField(ds)} /></div>
+        <div class="ds-health"><ConnectionDetail health={health(ds)!} /></div>
       {/if}
       {#if hasContent(node)}
         {@render machineContent(node)}

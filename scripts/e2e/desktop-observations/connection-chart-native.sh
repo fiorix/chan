@@ -4,8 +4,9 @@
 # inside the card (`inset`), what its fourth figure reads (`figures`), and
 # how its line moves between and across the samples the desktop's pings add
 # (`motion`), or with prefers-reduced-motion set in the desktop's GTK
-# settings (`reduced`, alone, since the desktop reads the setting at its
-# start). With no leg named: `inset figures motion`.
+# settings (`reduced`), or with privacy mode on (`privacy`); each of those
+# two runs alone, since the desktop reads its setting at its start. With no
+# leg named: `inset figures motion`.
 # connection-chart-native.mjs owns the devserver, the relay and the verdicts.
 #
 # Exit 0 when every leg named held, 1 when one did not, 2 when a step the
@@ -14,16 +15,16 @@ set -euo pipefail
 umask 077
 LEGS=("$@")
 [ "${#LEGS[@]}" -gt 0 ] || LEGS=(inset figures motion)
-REDUCED=0
+ALONE=""
 for leg in "${LEGS[@]}"; do
     case "$leg" in
     inset | figures | motion) ;;
-    reduced) REDUCED=1 ;;
-    *) echo "usage: $0 [inset] [figures] [motion] | reduced" >&2; exit 2 ;;
+    reduced | privacy) ALONE="$leg" ;;
+    *) echo "usage: $0 [inset] [figures] [motion] | reduced | privacy" >&2; exit 2 ;;
     esac
 done
-if [ "$REDUCED" = 1 ] && [ "${#LEGS[@]}" != 1 ]; then
-    echo "usage: $0 [inset] [figures] [motion] | reduced" >&2
+if [ -n "$ALONE" ] && [ "${#LEGS[@]}" != 1 ]; then
+    echo "usage: $0 [inset] [figures] [motion] | reduced | privacy" >&2
     exit 2
 fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,12 +32,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 obs_setup connection-chart
 obs_need node
-if [ "$REDUCED" = 1 ]; then
+if [ "$ALONE" = reduced ]; then
     # WebKitGTK answers prefers-reduced-motion from GTK's
     # gtk-enable-animations, which GTK 3 reads from this file with no
     # settings daemon; the page's own reading of the query is the check.
     mkdir -p "$HOME/.config/gtk-3.0"
     printf '[Settings]\ngtk-enable-animations=0\n' > "$HOME/.config/gtk-3.0/settings.ini"
+fi
+if [ "$ALONE" = privacy ]; then
+    # The desktop's own config, read at its start; the page's hidden
+    # computer name is the check.
+    mkdir -p "$CHAN_HOME/desktop"
+    printf '{"privacy":{"enabled":true,"mask_terminal_secrets":false,"revision":1}}\n' > "$CHAN_HOME/desktop/config.json"
 fi
 INSPECTOR="127.0.0.1:$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"

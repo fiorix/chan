@@ -16,6 +16,10 @@
 //   reduced  the same reading with prefers-reduced-motion in effect (the
 //            shell driver sets it in the desktop's GTK settings): it holds
 //            between arrivals and steps at each.
+//   privacy  with privacy mode on from the desktop's start (the shell
+//            driver writes it in the desktop's config): the computer's name
+//            is hidden, and the chart, the figures and the face's name show
+//            live with no reveal for them.
 //
 // The marked reading is one ping the relay holds 150 ms each way, so its
 // reply time reads about 300 ms where the guest's loopback reads under one:
@@ -33,7 +37,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { clientFrameReader, startRelay } from "../browser-smoke/lib/flow-relay.mjs";
-import { judgeFigures, judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
+import { judgeFigures, judgeInset, judgeMotion, judgePrivacy } from "./connection-chart-verdict.mjs";
 
 const run = promisify(execFile);
 const [inspector, work, chan, ...legs] = process.argv.slice(2);
@@ -92,7 +96,13 @@ async function inPage(expression) {
   return (await inspectAll(expression)).map((page) => page.value).find((value) => value != null && !value.skip) ?? null;
 }
 
-const SLOT = `[...document.querySelectorAll('.slot')].find((s) => [...s.querySelectorAll('.ds-name-row .row-name')].some((n) => n.textContent.trim() === ${JSON.stringify(LABEL)}))`;
+// The devserver's card by its name; in privacy mode, which hides the name,
+// as the one card with a devserver's name row, the run having registered
+// one devserver.
+const PRIVACY_RUN = legs.includes("privacy");
+const SLOT = PRIVACY_RUN
+  ? `[...document.querySelectorAll('.slot')].find((s) => s.getAttribute('data-key') !== 'local' && s.querySelector('.ds-name-row'))`
+  : `[...document.querySelectorAll('.slot')].find((s) => [...s.querySelectorAll('.ds-name-row .row-name')].some((n) => n.textContent.trim() === ${JSON.stringify(LABEL)}))`;
 
 /// Runs in the page: the card's state and the boxes the inset leg reads.
 function pageCard(slotExpression, markerMaxY) {
@@ -116,6 +126,13 @@ function pageCard(slotExpression, markerMaxY) {
     points,
     highs,
     reduced: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    privacy: {
+      nameHidden: Boolean(slot.querySelector('[aria-label="computer name hidden"]')),
+      reveals: slot.querySelectorAll('[aria-label="Reveal connection details"]').length,
+      faceTitle: slot.querySelector(".ds-name-row .connection-face")?.getAttribute("title") ?? null,
+      chart: Boolean(chart),
+      figures: slot.querySelector(".ds-health .figures")?.textContent.replace(/\s+/g, " ").trim() ?? null,
+    },
     missed: (() => {
       const figure = slot.querySelector(".ds-health .figures > span:last-child");
       return { text: figure?.textContent.replace(/\s+/g, " ").trim() ?? null, title: figure?.getAttribute("title") ?? null };
@@ -262,8 +279,12 @@ async function setup() {
   await readUntil((card) => card.front, 15_000, "the devserver's card did not come to the front");
   await sleep(600); // the deck's turn
   await run("xdotool", ["windowactivate", "--sync", host]);
-  const card = await readUntil((c) => c.face === "healthy" && c.points >= 4, 60_000,
-    "the card in front did not read healthy with four points on its chart");
+  // Privacy mode hid the chart before, so a privacy run waits on the face
+  // alone and lets its leg judge the chart.
+  const card = PRIVACY_RUN
+    ? await readUntil((c) => c.face === "healthy", 60_000, "the card in front did not read healthy")
+    : await readUntil((c) => c.face === "healthy" && c.points >= 4, 60_000,
+      "the card in front did not read healthy with four points on its chart");
   try {
     await run("import", ["-window", host, path.join(work, "shots", "chart.png")], { timeout: 15_000 });
   } catch (error) {
@@ -278,6 +299,17 @@ async function insetLeg(card) {
   const lines = judgeInset(boxes);
   report("inset", lines);
   return lines.every((l) => l.pass);
+}
+
+async function privacyLeg() {
+  const last = await until(async () => {
+    const card = await readCard();
+    return { ok: Boolean(card && card.points >= 4), card };
+  }, 20_000);
+  const verdict = judgePrivacy(last?.card ?? null);
+  report("privacy", verdict.lines);
+  if (!verdict.setup) throw new SetupNotRun("privacy mode is not in effect on the card: its name shows");
+  return verdict.lines.every((l) => l.pass);
 }
 
 function figuresLeg(card) {
@@ -316,6 +348,7 @@ try {
   for (const leg of legs) {
     const held = leg === "inset" ? await insetLeg(card)
       : leg === "figures" ? figuresLeg(await readCard())
+        : leg === "privacy" ? await privacyLeg()
         : await motionLeg(await readCard(), leg === "reduced");
     legStates.push({ leg, pass: held });
     console.log(`leg ${leg} ${held ? "pass" : "fail"}`);

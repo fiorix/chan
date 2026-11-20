@@ -89,6 +89,24 @@ export function judgeFigures(missed) {
   ];
 }
 
+/// The privacy verdict: with privacy mode on (the computer's name hidden,
+/// the setup), the chart draws its reading, the figures line reads, the
+/// face's title names the face, and no reveal stands for the connection.
+export function judgePrivacy(card) {
+  const p = card?.privacy ?? {};
+  const lines = [line("privacy mode hides the computer's name", true, p.nameHidden ?? null, p.nameHidden === true)];
+  if (!lines[0].pass) return { setup: false, lines };
+  lines.push(
+    line("the chart draws its reading", "a chart with points", { chart: p.chart, points: card.points },
+      p.chart === true && card.points > 0),
+    line("the figures line reads", "Latest ... Missed ...", p.figures, /^Latest .* Missed \S+$/.test(p.figures ?? "")),
+    line("the face's title names the face", "Connection <state>", p.faceTitle,
+      /^Connection /.test(p.faceTitle ?? "") && p.faceTitle !== "Connection details"),
+    line("no reveal stands for the connection", 0, p.reveals, p.reveals === 0),
+  );
+  return { setup: true, lines };
+}
+
 /// The inset verdict from the boxes the page read: the chart's drawn extent
 /// (the baseline's ends) inside the card.
 export function judgeInset(boxes) {

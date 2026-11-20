@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { judgeFigures, judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
+import { judgeFigures, judgeInset, judgeMotion, judgePrivacy } from "./connection-chart-verdict.mjs";
 
 // Offline verdict test for connection-chart-native.mjs: made traces of a
 // line that steps at each arrival, as the chart did, of one that scrolls,
@@ -68,6 +68,15 @@ test("the fourth figure must read Missed 0 with its count and last contact in it
   assert.equal(passes({ text: "Missed 0", title: "0 of the last 12 pings got no reply; last contact 13:41:07" }), true);
   assert.equal(passes({ text: "Since 13:41:07", title: null }), false);
   assert.equal(passes({ text: "Missed 0", title: "0 of the last 12 pings got no reply; last contact -" }), false);
+});
+
+test("privacy mode must leave the chart, the figures and the face's name shown", () => {
+  const shown = { points: 12, privacy: { nameHidden: true, reveals: 0, faceTitle: "Connection healthy", chart: true, figures: "Latest 1 ms Median 1 ms Worst 2 ms Missed 0" } };
+  const hidden = { points: 0, privacy: { nameHidden: true, reveals: 1, faceTitle: "Connection details", chart: false, figures: null } };
+  assert.deepEqual(judgePrivacy(shown).lines.filter((l) => !l.pass), []);
+  assert.deepEqual(judgePrivacy(hidden).lines.filter((l) => !l.pass).map((l) => l.name),
+    ["the chart draws its reading", "the figures line reads", "the face's title names the face", "no reveal stands for the connection"]);
+  assert.equal(judgePrivacy({ points: 12, privacy: { ...shown.privacy, nameHidden: false } }).setup, false);
 });
 
 test("the insets compare the baseline's ends with the card's edges", () => {
