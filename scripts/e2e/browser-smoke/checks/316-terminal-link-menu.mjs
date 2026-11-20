@@ -7,16 +7,18 @@
 // NOTES-REL), an OSC 8 `file://<uname -n>/<abs>/notes316.md` (NOTES-ABS),
 // an OSC 8 `file:///<abs>/missing316.md` (MISSING), an OSC 8 `file://`
 // on another host (FOREIGN) and an OSC 8 `~/link316-home.md` (HOME), a file
-// the shell first writes in its $HOME. The printf's format string holds the escapes and its
-// arguments the targets, so the echoed command line holds no link and no
-// marker. A cell's pixels come from the surface's box and the grid `stty`
-// reported; nothing reads the page's terminal objects. `window.open` is
-// stubbed in the page and records what the browser would have opened.
+// the shell first writes in its $HOME. The printf's format string holds the
+// escapes and its arguments the targets, so the echoed command line holds no
+// link and no marker. A cell's pixels come from the surface's box and the
+// grid `stty` reported; nothing reads the page's terminal objects.
+// `window.open` is stubbed in the page and records what the browser would
+// have opened.
 //
-// Every click on a link but resting-click's first moves the pointer to
-// another row and then onto the link, as a hand does: xterm.js reads a row's links anew only when the
-// pointer enters the row (Linkifier `_handleHover`), so a link printed into
-// the row under a pointer resting there is found only once it leaves the row.
+// Before each click on a link the pointer moves to another row and then onto
+// the link, as a hand does, in every leg but resting-click: xterm.js reads a
+// row's links anew only when the pointer enters the row (Linkifier
+// `_handleHover`), so a link printed into the row under a pointer resting
+// there is found only once it leaves the row.
 //
 // Legs, each on both backends unless noted:
 //   url-menu        a click on the URL opens the menu with "Open in

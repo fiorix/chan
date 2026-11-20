@@ -254,7 +254,8 @@ async function driveBackend(backend, name, record, offset) {
       if (!node || !button) return null;
       const r = button.getBoundingClientRect();
       return {
-        target: node.querySelector("[data-terminal-link-target]")?.textContent ?? null,
+        // The whole target: the menu may show a long one cut in the middle.
+        target: node.querySelector("[data-terminal-link-target]")?.getAttribute("data-terminal-link-target") ?? null,
         disabled: button.disabled,
         button: { x: r.left + r.width / 2, y: r.top + r.height / 2 },
       };
