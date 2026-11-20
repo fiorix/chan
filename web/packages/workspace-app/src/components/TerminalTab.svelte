@@ -16,7 +16,7 @@
     Users,
     X,
   } from "@lucide/svelte";
-  import { Terminal, type IBufferRange } from "@xterm/xterm";
+  import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
   import { SerializeAddon } from "@xterm/addon-serialize";
@@ -42,7 +42,6 @@
   } from "../api/desktop";
   import { isOsFileDrag, shellEscapePaths } from "../state/fileDropGuard";
   import { resolveTerminalColors } from "../state/paneColor";
-  import { openExternalUrl } from "../editor/external_links";
   import {
     chordFor,
     consumeKey,
@@ -118,15 +117,9 @@
     surfaceThemeOverride,
     ui,
     appInputBlocked,
-    copyTextToClipboard,
   } from "../state/store.svelte";
-  import {
-    classifyTerminalLink,
-    needsServerHost,
-    resolveTerminalPath,
-    type TerminalLinkTarget,
-  } from "../terminal/linkTarget";
-  import { editorRefusalForWindow, openTerminalFileInEditor, serverHostName } from "../terminal/linkActions";
+  import { middleEllipsis } from "../terminal/linkTarget";
+  import { TerminalLinkMenu, xtermLinkHandlers, type LinkRange } from "../terminal/linkMenu.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
@@ -1388,9 +1381,8 @@
         scrollback: scrollbackLines,
         tabStopWidth: 8,
         theme: terminalTheme(),
-        // An OSC 8 link goes to the link menu, which judges its target, so
-        // the handler takes every scheme, not only http and https.
-        linkHandler: { allowNonHttpProtocols: true, activate: onXtermLink },
+        // An OSC 8 link goes to the link menu, which judges its target.
+        linkHandler: xtermLinks.linkHandler,
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
@@ -1408,24 +1400,8 @@
       term.loadAddon(serialize);
       // A URL in the text goes to the link menu too, never to the addon's
       // default window.open, which under WKWebView does nothing or opens
-      // inside the app shell. The addon hands its handler no range, so the
-      // menu takes the one its hover reported for the same URL.
-      let hoveredWebLink: { uri: string; range: IBufferRange } | null = null;
-      term.loadAddon(
-        new WebLinksAddon(
-          (event, uri) => {
-            if (hoveredWebLink?.uri === uri) onXtermLink(event, uri, hoveredWebLink.range);
-          },
-          {
-            hover: (_event, uri, range) => {
-              hoveredWebLink = { uri, range };
-            },
-            leave: () => {
-              hoveredWebLink = null;
-            },
-          },
-        ),
-      );
+      // inside the app shell.
+      term.loadAddon(new WebLinksAddon(xtermLinks.webLink.handler, xtermLinks.webLink.options));
       termWriter = term;
     }
     // Neither backend's open() takes the keyboard; a terminal in the focused
@@ -1967,7 +1943,7 @@
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
         terminalCwdVirtual = frame.cwd_rel ?? null;
-        noteTerminalCwd();
+        links.noteCwd();
       } else if (frame.type === "activity") {
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
       } else if (frame.type === "program") {
@@ -3274,7 +3250,7 @@
     open: () => menuOpen,
     inside: (target) => target instanceof Element && !!target.closest(".terminal-tab-menu-bubble"),
     // The link menu holds the keyboard while it shows; Escape hands it back.
-    close: () => (tabMenu.source === "link" ? closeLinkMenu(true) : closeTabMenu()),
+    close: () => (tabMenu.source === "link" ? links.close(true) : closeTabMenu()),
   });
 
   function onDocPointerDown(e: PointerEvent): void {
@@ -3318,58 +3294,32 @@
 
   // ---- The menu on a link the terminal underlines ----
   //
-  // A plain click on a link opens a menu at the pointer that shows the
-  // link's real target (`terminal/linkTarget.ts`): "Open in browser" and
-  // "Copy link" for a web link, "Open in editor" and "Copy path" for a file
-  // link. Ctrl or Cmd with the click runs the first entry with no menu. The
-  // backends decide what a link click is (not a drag, not a double click's
-  // second click, not a press a program tracking the mouse was sent); the
-  // menu holds the keyboard until Escape, an entry, or a change to the
-  // link's cells or their place on the screen closes it.
+  // Its state and actions live in `terminal/linkMenu.svelte.ts`; this tab
+  // gives it the terminal and the menu bubble, and closes it when the link's
+  // cells change or move on the screen.
 
-  /// A link's cells, 0-based, rows absolute (0 the oldest history row),
-  /// both ends included.
-  type LinkRange = { start: { x: number; y: number }; end: { x: number; y: number } };
-  type LinkMenu = {
-    link: TerminalLinkTarget;
-    range: LinkRange;
-    /// The link's rows and their place on the screen when the menu opened.
-    anchor: string | null;
-    /// The cwd replies seen before the click asked for a fresh one.
-    cwdSince: number;
-    editorBusy: boolean;
-    /// Why "Open in editor" is off: refused before the menu showed, or by
-    /// the press.
-    editorRefusal: string | null;
-  };
-  let linkMenu = $state<LinkMenu | null>(null);
-  const linkMenuOpen = $derived(menuOpen && tabMenu.source === "link" && linkMenu !== null);
   const LINK_BAND_PX = 8;
-  const CWD_WAIT_MS = 1500;
-  let cwdReplies = 0;
-  let cwdWaiters: Array<() => void> = [];
-
-  function noteTerminalCwd(): void {
-    cwdReplies += 1;
-    for (const wake of cwdWaiters.splice(0)) wake();
-  }
-
-  /// The shell's directory as the server read it after the click: the
-  /// reply the click asked for, or the last one when none comes in time.
-  async function terminalCwdAfter(since: number): Promise<string | null> {
-    if (cwdReplies <= since) {
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          cwdWaiters = cwdWaiters.filter((wake) => wake !== done);
-          resolve();
-        };
-        const timer = setTimeout(done, CWD_WAIT_MS);
-        cwdWaiters.push(done);
-      });
-    }
-    return terminalCwdAbs;
-  }
+  const links = new TerminalLinkMenu({
+    blocked: appInputBlocked,
+    requestCwd: requestTerminalCwd,
+    cwd: () => terminalCwdAbs,
+    anchorKey: linkAnchorKey,
+    // The anchor is a band around the pointer, which the menu opens below
+    // and flips above (see `menuPos`).
+    open: ({ x, y }) =>
+      openTabMenu(tab.id, { left: x, right: x, top: y - LINK_BAND_PX, bottom: y + LINK_BAND_PX }, "link"),
+    close: () => {
+      if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
+    },
+    focusTerminal,
+  });
+  const xtermLinks = xtermLinkHandlers(
+    () => (backend === "xterm" ? (term as Terminal | null) : null),
+    (target, range, event) => void links.onLink(target, range, event),
+  );
+  const linkMenuOpen = $derived(menuOpen && tabMenu.source === "link" && links.menu !== null);
+  /// The longest target the menu shows whole; a longer one keeps both ends.
+  const LINK_TARGET_SHOWN = 72;
 
   /// The rows a link sits on and where the viewport shows them; a change in
   /// either means the menu no longer points at what is on the screen.
@@ -3388,93 +3338,7 @@
   }
 
   function onGhosttyLink({ target, range, event }: TerminalLinkActivation): void {
-    void onTerminalLink(target, range, event);
-  }
-
-  /// xterm.js activates a link on the release that ends a press on it, with
-  /// a 1-based range. A drag that selected, a double click's second release
-  /// and a press sent to a program tracking the mouse are not link clicks;
-  /// Shift keeps a press from the program (installShiftSelectionBypass).
-  function onXtermLink(event: MouseEvent, target: string, range: IBufferRange): void {
-    const t = backend === "xterm" ? (term as Terminal | null) : null;
-    if (!t || event.button !== 0 || event.detail > 1 || t.hasSelection()) return;
-    if (t.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
-    const cells = {
-      start: { x: range.start.x - 1, y: range.start.y - 1 },
-      end: { x: range.end.x - 1, y: range.end.y - 1 },
-    };
-    void onTerminalLink(target, cells, event);
-  }
-
-  async function onTerminalLink(target: string, range: LinkRange, event: MouseEvent): Promise<void> {
-    if (appInputBlocked()) return;
-    const cwdSince = cwdReplies;
-    requestTerminalCwd();
-    const link = classifyTerminalLink(target, needsServerHost(target) ? await serverHostName() : null);
-    const editorRefusal = link.kind === "file" ? (link.refusal ?? editorRefusalForWindow()) : null;
-    if (event.ctrlKey || event.metaKey) {
-      const refusal = link.kind === "web" ? link.refusal : (editorRefusal ?? (await openLinkFile(link, cwdSince)));
-      if (refusal) {
-        ui.status = `open failed: ${refusal}`;
-        ui.statusKind = "persistent";
-      } else if (link.kind === "web") {
-        void openExternalUrl(link.url);
-      }
-      return;
-    }
-    linkMenu = { link, range, anchor: linkAnchorKey(range), cwdSince, editorBusy: false, editorRefusal };
-    const { clientX: x, clientY: y } = event;
-    openTabMenu(tab.id, { left: x, right: x, top: y - LINK_BAND_PX, bottom: y + LINK_BAND_PX }, "link");
-  }
-
-  /// Open a file link as `cs open` in the terminal's shell would: a
-  /// relative path against the shell's directory. Resolves to the refusal,
-  /// or null once the open is on its way.
-  async function openLinkFile(link: Extract<TerminalLinkTarget, { kind: "file" }>, cwdSince: number): Promise<string | null> {
-    let path = link.path;
-    if (link.relative) {
-      const cwd = await terminalCwdAfter(cwdSince);
-      if (!cwd) return "the shell's directory is unknown";
-      path = resolveTerminalPath(path, cwd);
-    }
-    return openTerminalFileInEditor(path);
-  }
-
-  function closeLinkMenu(refocus: boolean): void {
-    if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
-    linkMenu = null;
-    if (refocus) focusTerminal();
-  }
-
-  function openLinkInBrowser(): void {
-    const menu = linkMenu;
-    closeLinkMenu(true);
-    if (menu?.link.kind === "web" && !menu.link.refusal) void openExternalUrl(menu.link.url);
-  }
-
-  async function openLinkInEditor(): Promise<void> {
-    const menu = linkMenu;
-    if (!menu || menu.link.kind !== "file" || menu.editorBusy || menu.editorRefusal) return;
-    menu.editorBusy = true;
-    const refusal = await openLinkFile(menu.link, menu.cwdSince);
-    menu.editorBusy = false;
-    if (linkMenu !== menu) return;
-    if (refusal) menu.editorRefusal = refusal;
-    else closeLinkMenu(false);
-  }
-
-  async function copyLinkTarget(): Promise<void> {
-    const menu = linkMenu;
-    if (!menu) return;
-    closeLinkMenu(true);
-    const web = menu.link.kind === "web";
-    await copyTextToClipboard(menu.link.kind === "web" ? menu.link.url : menu.link.path, {
-      onSuccess: () => setTransientStatus(web ? "Copied link" : "Copied path"),
-      onError: (msg) => {
-        ui.status = `copy failed: ${msg}`;
-        ui.statusKind = "persistent";
-      },
-    });
+    void links.onLink(target, range, event);
   }
 
   /// The link menu takes the keyboard as it shows, onto its first live
@@ -3488,22 +3352,20 @@
   }
 
   // Closes the link menu when its link's cells change or move on the screen
-  // (output, a scroll, a resize) or a cover rises over the window; the
-  // keyboard goes back to the terminal only if the menu held it.
+  // (output, a scroll, a resize) or a cover rises over the window, read ten
+  // times a second while it shows; the keyboard goes back to the terminal
+  // only if the menu held it.
   $effect(() => {
     if (!linkMenuOpen) return;
-    let frame = requestAnimationFrame(function check() {
-      const menu = untrack(() => linkMenu);
-      if (!menu) return;
+    const watch = setInterval(() => {
+      if (!untrack(() => links.menu)) return;
       const covered = appInputBlocked();
-      if (covered || linkAnchorKey(menu.range) !== menu.anchor) {
+      if (covered || links.stale()) {
         const held = document.activeElement?.closest(".terminal-tab-menu-bubble") != null;
-        closeLinkMenu(held && !covered);
-        return;
+        links.close(held && !covered);
       }
-      frame = requestAnimationFrame(check);
-    });
-    return () => cancelAnimationFrame(frame);
+    }, 100);
+    return () => clearInterval(watch);
   });
 </script>
 
@@ -3553,19 +3415,29 @@
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      {#if tabMenu.source === "link" && linkMenu}
-        <!-- Link menu: the link's real target, then its two entries. A
-             refused entry stays in place, disabled, with its reason. -->
+      {#if tabMenu.source === "link" && links.menu}
+        <!-- Link menu: the link's real target, a web link's host on a line
+             of its own (a target is untrusted, and its text can lead the eye
+             to another host), then its two entries. A long target keeps both
+             ends. A refused entry stays in place, disabled, with its reason. -->
+        {@const linkMenu = links.menu}
         {@const link = linkMenu.link}
+        {@const target = link.kind === "web" ? link.url : link.path}
         {@const clickChord = currentOS() === "mac" ? "\u2318 Click" : "Ctrl+Click"}
         <div class="action-list" use:takeLinkMenuFocus>
+          {#if link.kind === "web" && link.host}
+            <div class="terminal-link-target">
+              <span>Host</span>
+              <span class="terminal-link-value" data-terminal-link-host={link.host}>{link.host}</span>
+            </div>
+          {/if}
           <div class="terminal-link-target">
             <span>{link.kind === "web" ? "Link" : "Path"}</span>
             <span
               class="terminal-link-value"
-              data-terminal-link-target
-              title={link.kind === "web" ? link.url : link.path}
-            >{link.kind === "web" ? link.url : link.path}</span>
+              data-terminal-link-target={target}
+              title={target}
+            >{middleEllipsis(target, LINK_TARGET_SHOWN)}</span>
           </div>
           {#if link.kind === "web"}
             <button
@@ -3573,7 +3445,7 @@
               role="menuitem"
               data-terminal-link-action="open-browser"
               disabled={link.refusal !== null}
-              onclick={openLinkInBrowser}
+              onclick={() => links.openInBrowser()}
             >
               <span class="mbtn-icon"><ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="mbtn-label">Open in browser</span>
@@ -3582,7 +3454,7 @@
             {#if link.refusal}
               <div class="terminal-link-reason" data-terminal-link-reason>{link.refusal}</div>
             {/if}
-            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-link" onclick={copyLinkTarget}>
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-link" onclick={() => links.copyTarget()}>
               <span class="mbtn-icon"><LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="mbtn-label">Copy link</span>
               <span class="mbtn-chord"></span>
@@ -3593,7 +3465,7 @@
               role="menuitem"
               data-terminal-link-action="open-editor"
               disabled={linkMenu.editorRefusal !== null || linkMenu.editorBusy}
-              onclick={openLinkInEditor}
+              onclick={() => links.openInEditor()}
             >
               <span class="mbtn-icon"><FileText size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="mbtn-label">Open in editor</span>
@@ -3602,7 +3474,7 @@
             {#if linkMenu.editorRefusal}
               <div class="terminal-link-reason" data-terminal-link-reason>{linkMenu.editorRefusal}</div>
             {/if}
-            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-path" onclick={copyLinkTarget}>
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-path" onclick={() => links.copyTarget()}>
               <span class="mbtn-icon"><Clipboard size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="mbtn-label">Copy path</span>
               <span class="mbtn-chord"></span>
@@ -4379,12 +4251,13 @@
     font-size: 12px;
     max-width: min(480px, calc(100vw - 40px));
   }
+  /* The value wraps rather than ending in an ellipsis: an untrusted
+     target's end (the host after a long path, the name after a long
+     folder) must show, and the menu shortens it in the middle. */
   .terminal-link-value {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }

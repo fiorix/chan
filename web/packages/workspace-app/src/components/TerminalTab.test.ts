@@ -818,4 +818,19 @@ describe("TerminalTab and the app around it", () => {
       field.remove();
     }
   });
+
+  test("a click on a URL xterm.js underlines opens the link menu with its target and host", async () => {
+    await renderTerminal(terminalTab(), true);
+    const { handler, options } = xterm.webLinks.at(-1)!;
+    const range = { start: { x: 1, y: 1 }, end: { x: 30, y: 1 } };
+    const click = new MouseEvent("mouseup", { button: 0, detail: 1, clientX: 40, clientY: 40 });
+    options.hover(click, "https://github.com@evil.example/x", range);
+    handler(click, "https://github.com@evil.example/x");
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="terminal link menu"]')).not.toBeNull());
+    const menu = document.querySelector('[aria-label="terminal link menu"]')!;
+    expect(menu.querySelector("[data-terminal-link-target]")?.getAttribute("data-terminal-link-target")).toBe(
+      "https://github.com@evil.example/x",
+    );
+    expect(menu.querySelector("[data-terminal-link-host]")?.textContent).toBe("evil.example");
+  });
 });

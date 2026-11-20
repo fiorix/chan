@@ -12,14 +12,18 @@ import { isOpenableExternalUrl } from "../editor/external_links";
 // `~/` names the home of the user the server runs as, and a `file:` URI
 // is a path on the machine that wrote it, so one naming another host than the
 // server's is refused rather than opened somewhere it does not live. Nothing
-// is stripped from a path: the open path takes no line number, so a `:12` or
-// `#L12` suffix stays part of the name.
+// is stripped from a bare path: the open path takes no line number, so a
+// `:12` or `#L12` suffix stays part of its name. A `file:` URI's path is its
+// URL path, without the query or fragment.
 
 export type TerminalLinkTarget =
   | {
       kind: "web";
       /// The target as written.
       url: string;
+      /// The host the URL names, as the browser reads it (the part after any
+      /// `user@`), or null when it names none (`mailto:`, `tel:`).
+      host: string | null;
       /// Why the browser does not open it, or null when it does.
       refusal: string | null;
     }
@@ -37,10 +41,14 @@ export type TerminalLinkTarget =
 const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
 const DRIVE_PATH = /^[a-z]:[\\/]/i;
 
-/// Classify a link's target. `serverHost` is the host name of the machine the
-/// terminal runs on, when the app knows it; a `file:` URI with no host,
-/// `localhost` or that name is a path on that machine.
-export function classifyTerminalLink(target: string, serverHost: string | null): TerminalLinkTarget {
+/// Classify a link's target. `serverHost` answers the host name of the
+/// machine the terminal runs on, or null when the app does not know it; it
+/// is asked only for a `file:` URI that names a host, since one with no host
+/// (a URL reads `localhost` as none) is a path on that machine.
+export async function classifyTerminalLink(
+  target: string,
+  serverHost: () => Promise<string | null>,
+): Promise<TerminalLinkTarget> {
   const text = target.trim();
   if (DRIVE_PATH.test(text)) return { kind: "file", path: text, relative: false, refusal: null };
   const scheme = SCHEME.exec(text)?.[1]?.toLowerCase();
@@ -49,10 +57,19 @@ export function classifyTerminalLink(target: string, serverHost: string | null):
     return {
       kind: "web",
       url: text,
+      host: urlHost(text),
       refusal: isOpenableExternalUrl(text) ? null : `${scheme}: links do not open in a browser`,
     };
   }
   return { kind: "file", path: text, relative: !text.startsWith("/") && !isHomePath(text), refusal: null };
+}
+
+function urlHost(text: string): string | null {
+  try {
+    return new URL(text).host || null;
+  } catch {
+    return null;
+  }
 }
 
 /// Whether `path` names the home directory (`~` alone, or `~/` and a path
@@ -61,17 +78,7 @@ export function isHomePath(path: string): boolean {
   return path === "~" || path.startsWith("~/");
 }
 
-/// The host of a `file:` URI that names another machine, or null for one on
-/// the server's: no host or the server's own host name. `host` is a parsed
-/// URL's, which a `file:` URL gives in lower case and as empty for
-/// `localhost`.
-function foreignFileHost(host: string, serverHost: string | null): string | null {
-  if (host === "") return null;
-  if (serverHost !== null && host === serverHost.toLowerCase()) return null;
-  return host;
-}
-
-function fileUri(text: string, serverHost: string | null): TerminalLinkTarget {
+async function fileUri(text: string, serverHost: () => Promise<string | null>): Promise<TerminalLinkTarget> {
   let url: URL;
   try {
     url = new URL(text);
@@ -86,25 +93,25 @@ function fileUri(text: string, serverHost: string | null): TerminalLinkTarget {
   }
   // `file:///C:/x` names a drive path.
   if (/^\/[a-z]:\//i.test(path)) path = path.slice(1);
-  const foreign = foreignFileHost(url.hostname, serverHost);
+  // A `file:` URL's host is lower case, and empty for none or `localhost`.
+  const host = url.hostname;
+  const foreign = host !== "" && host !== (await serverHost())?.toLowerCase();
   return {
     kind: "file",
     path,
     relative: false,
-    refusal: foreign === null ? null : `on another host (${foreign})`,
+    refusal: foreign ? `on another host (${host})` : null,
   };
 }
 
-/// Whether a file link's host is one the app has to ask the server's name
-/// for before it can tell this machine from another.
-export function needsServerHost(target: string): boolean {
-  const text = target.trim();
-  if (SCHEME.exec(text)?.[1]?.toLowerCase() !== "file") return false;
-  try {
-    return new URL(text).hostname !== "";
-  } catch {
-    return false;
-  }
+/// `text` cut to at most `max` characters by an ellipsis in the middle, so
+/// both ends show: a long path keeps its name, a long URL its start and its
+/// end.
+export function middleEllipsis(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const keep = max - 1;
+  const head = Math.ceil(keep / 2);
+  return `${text.slice(0, head)}\u2026${text.slice(text.length - (keep - head))}`;
 }
 
 /// `path` resolved against the directory `cwd`, with `.` and `..` folded as
