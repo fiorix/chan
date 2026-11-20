@@ -261,12 +261,15 @@
   // A machine shows its content block while connected, while a fresh dial is
   // `connecting`, while its feed is `unreachable` (a live-but-degraded connection
   // whose record still exists -- keep its windows visible so each can raise its
-  // own DisconnectOverlay Reconnect), or while it still owns a control terminal.
-  // The last clause keeps a disconnected devserver's DEAD "process exited" control
-  // row mounted (the script died, connection torn down, control terminal kept
-  // alive) so it can flash for attention and the user can open it to read the
-  // death reason; the row clears once the control terminal is closed and its
-  // record leaves the feed.
+  // own DisconnectOverlay Reconnect), or while it still owns a control terminal,
+  // its own or a tmux connection's.
+  // The own control terminal clause keeps a disconnected devserver's DEAD
+  // "process exited" control row mounted (the script died, connection torn
+  // down, control terminal kept alive) so it can flash for attention and the
+  // user can open it to read the death reason; the row clears once the control
+  // terminal is closed and its record leaves the feed. The tmux clause keeps a
+  // tmux connection's control terminal that the tree moved here, off the
+  // connection's card, so that terminal is never on no card.
   function hasContent(node: MachineNode): boolean {
     return (
       node.kind === "local" ||
@@ -274,7 +277,8 @@
         (connected(node.devserver) ||
           node.devserver.status === "connecting" ||
           node.devserver.status === "unreachable" ||
-          node.control.length > 0))
+          node.control.length > 0 ||
+          node.tmuxControls.length > 0))
     );
   }
 
@@ -342,11 +346,12 @@
 {/snippet}
 
 <!-- A tmux connection's control terminal on the card of the machine whose
-     terminal ran `tmux -CC`: buried as on the connection's card, with the
-     connection's detach on the row, since this card has no connection title
-     to carry it. The context names the connection and its session, so two
-     runs on one machine read apart. A record that has not arrived places no
-     row here (the tree's rule), so the row always has a connection to ask.
+     terminal ran `tmux -CC`, the one card that lists it while the connection
+     runs: buried, with the connection's detach on the row, since this card
+     has no connection title to carry it. The context names the connection
+     and its session, so two runs on one machine read apart. A record that
+     has not arrived places no row here (the tree keeps it on the connection's
+     card), so the row always has a connection to ask.
      The read-only surface, which can ask nothing, shows the row alone. -->
 {#snippet tmuxControlRow(row: TmuxControlRow)}
   {@const connection = tmuxWindowMachine(row.node.tmux, row.node.tmuxHost)}
@@ -511,8 +516,9 @@
     {#if node.control.length || node.tmuxControls.length || node.terminals.length || node.unopened.length}
       <!-- A tmux card's rows are the connection's windows, and the section
            says so; its windows with no chan window yet follow the open ones.
-           A machine's control terminals lead, its own and then those of the
-           tmux connections its terminals ran. -->
+           Its control terminal leads only while no machine card holds it
+           (the tree's rule). A machine's control terminals lead, its own and
+           then those of the tmux connections its terminals ran. -->
       <div class="section-label">{node.kind === "tmux" ? "Windows" : "Terminals"}</div>
       <div class="term-list">
         {#each node.control as w (w.window_id)}

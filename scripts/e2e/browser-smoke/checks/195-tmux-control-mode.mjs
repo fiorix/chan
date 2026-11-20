@@ -267,7 +267,8 @@ export default {
       check(!store.some((row) => row.tmux), "a tmux row reached windows.json");
       check(!minted.tmuxWindow.hidden, "the tmux window is minted hidden");
       // The connection is a record of the feed and a card in the launcher,
-      // titled for its local origin, with the control terminal as its row.
+      // titled for its local origin; the control terminal is a row of the
+      // card of the machine that ran it.
       const record = await poll("the connection record with its tmux window", async () => {
         const records = await connections();
         const row = records.find((c) => c.connection === minted.control.tmux.connection);
