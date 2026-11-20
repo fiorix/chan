@@ -7,6 +7,9 @@
 //
 // Legs (argv after the work paths, any of):
 //   inset    the baseline's ends against the card's edges: equal insets.
+//   figures  the detail's fourth figure: Missed 0 on a relay that drops
+//            nothing, its title the count against the window's pings and
+//            the last contact's clock time.
 //   motion   a marked reading's on-screen x, read in the page every 50 ms
 //            over 12 s: it moves left between arrivals, never right, and
 //            does not jump at an arrival.
@@ -30,7 +33,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { clientFrameReader, startRelay } from "../browser-smoke/lib/flow-relay.mjs";
-import { judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
+import { judgeFigures, judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
 
 const run = promisify(execFile);
 const [inspector, work, chan, ...legs] = process.argv.slice(2);
@@ -113,6 +116,10 @@ function pageCard(slotExpression, markerMaxY) {
     points,
     highs,
     reduced: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    missed: (() => {
+      const figure = slot.querySelector(".ds-health .figures > span:last-child");
+      return { text: figure?.textContent.replace(/\s+/g, " ").trim() ?? null, title: figure?.getAttribute("title") ?? null };
+    })(),
     boxes: {
       card: box(slot.querySelector("section.card")),
       health: box(slot.querySelector(".ds-health")),
@@ -273,6 +280,12 @@ async function insetLeg(card) {
   return lines.every((l) => l.pass);
 }
 
+function figuresLeg(card) {
+  const lines = judgeFigures(card.missed);
+  report("figures", lines);
+  return lines.every((l) => l.pass);
+}
+
 async function motionLeg(card, reduced) {
   const leg = reduced ? "reduced" : "motion";
   if (card.reduced !== reduced) {
@@ -301,7 +314,9 @@ const legStates = [];
 try {
   const card = await setup();
   for (const leg of legs) {
-    const held = leg === "inset" ? await insetLeg(card) : await motionLeg(await readCard(), leg === "reduced");
+    const held = leg === "inset" ? await insetLeg(card)
+      : leg === "figures" ? figuresLeg(await readCard())
+        : await motionLeg(await readCard(), leg === "reduced");
     legStates.push({ leg, pass: held });
     console.log(`leg ${leg} ${held ? "pass" : "fail"}`);
   }

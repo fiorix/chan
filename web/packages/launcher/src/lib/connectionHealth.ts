@@ -128,6 +128,24 @@ export function connectionSparklineStep(width: number): number {
   return (width - 2 * CONNECTION_SPARKLINE_EDGE) / (CONNECTION_SAMPLE_CAP - 2);
 }
 
+/// The missed pings in the chart's window: the samples with no reply, one
+/// red mark each; null, shown as a dash, before any ping has finished.
+export function connectionMissed(samples: readonly (number | null)[]): number | null {
+  return samples.length === 0 ? null : samples.filter((rtt) => rtt === null).length;
+}
+
+/// The missed figure's title: the count against the pings in the window,
+/// and the clock time of the last contact, which the figure itself leaves
+/// out because a clock time on its own means nothing until it is set
+/// against a clock.
+export function connectionMissedTitle(samples: readonly (number | null)[], lastContact: number | null): string {
+  const missed = connectionMissed(samples);
+  const contact = `last contact ${connectionContactTime(lastContact)}`;
+  return missed === null
+    ? `No ping has finished yet; ${contact}`
+    : `${missed} of the last ${samples.length} pings got no reply; ${contact}`;
+}
+
 /// The chart floor keeps fast-connection jitter low; the larger of that
 /// floor and twice the median clips spikes without flattening normal reply
 /// times. The x coordinates keep two decimals: the line moves by fractions

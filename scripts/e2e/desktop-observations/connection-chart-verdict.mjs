@@ -76,6 +76,19 @@ export function judgeMotion(trace, reduced) {
   return { setup: true, lines };
 }
 
+/// The figures verdict: the detail's fourth figure counts the missed pings,
+/// none on a loopback relay that drops nothing, and its title gives that
+/// count against the window's pings and the last contact's clock time.
+export function judgeFigures(missed) {
+  const title = /^0 of the last ([1-9]\d*) pings got no reply; last contact (.+)$/.exec(missed.title ?? "");
+  return [
+    line("the fourth figure counts the missed pings", "Missed 0", missed.text, missed.text === "Missed 0"),
+    line("its title gives the count against the window and the last contact",
+      "0 of the last <M> pings got no reply; last contact <clock time>", missed.title,
+      Boolean(title) && title[2] !== "-"),
+  ];
+}
+
 /// The inset verdict from the boxes the page read: the chart's drawn extent
 /// (the baseline's ends) inside the card.
 export function judgeInset(boxes) {

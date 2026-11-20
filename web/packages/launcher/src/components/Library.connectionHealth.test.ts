@@ -88,7 +88,7 @@ describe("the connection face on the Computers deck", () => {
     expect(face("ds-a")!.dataset.face).toBe("slow");
     expect(face("ds-a")!.textContent!.trim()).toBe("1.3 s");
     expect(face("ds-a")!.title).toBe("Connection slow, 1.3 s");
-    expect(detailText("ds-a")).toBe(`Latest 1.3 s Median 660 ms Worst 1.3 s Since ${connectionContactTime(NOW - 1_000)}`);
+    expect(detailText("ds-a")).toBe("Latest 1.3 s Median 660 ms Worst 1.3 s Missed 0");
     const header = slot("ds-a").querySelector(".machine-header")!;
     expect(header.compareDocumentPosition(detail("ds-a")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -106,11 +106,13 @@ describe("the connection face on the Computers deck", () => {
     expect(detailText("ds-a")).toMatch(/^Latest /);
   });
 
-  it("puts the last contact on the figures line, after Latest, Median and Worst, as Since", () => {
-    library.devservers = [computer("ds-a", "alpha", reading({ last_contact: NOW - 4_000 }))];
+  it("puts the missed count on the figures line, after Latest, Median and Worst, with the last contact in its title", () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ last_contact: NOW - 4_000, samples: [20, null, 24] }))];
     mountDeck("ds-a");
-    const figures = [...detail("ds-a")!.querySelectorAll(".figures > span")].map((el) => el.textContent!.replace(/\s+/g, " ").trim());
-    expect(figures).toEqual(["Latest 24 ms", "Median 22 ms", "Worst 24 ms", `Since ${connectionContactTime(NOW - 4_000)}`]);
+    const spans = [...detail("ds-a")!.querySelectorAll<HTMLElement>(".figures > span")];
+    const figures = spans.map((el) => el.textContent!.replace(/\s+/g, " ").trim());
+    expect(figures).toEqual(["Latest 24 ms", "Median 22 ms", "Worst 24 ms", "Missed 1"]);
+    expect(spans.at(-1)!.title).toBe(`1 of the last 3 pings got no reply; last contact ${connectionContactTime(NOW - 4_000)}`);
     expect(detail("ds-a")!.lastElementChild!.matches(".figures"), "a line follows the figures").toBe(true);
   });
 
@@ -198,7 +200,7 @@ describe("the connection face on the Computers deck", () => {
     mountDeck("ds-a");
     expect(face("ds-a")!.textContent!.trim()).toBe("");
     expect(face("ds-a")!.title).toBe("Connection status unknown");
-    expect(detailText("ds-a")).toBe("Latest - Median - Worst - Since -");
+    expect(detailText("ds-a")).toBe("Latest - Median - Worst - Missed -");
     expect(face("ds-b")!.textContent!.trim()).toBe("");
     expect(face("ds-b")!.title).toBe("Connection recovering");
   });

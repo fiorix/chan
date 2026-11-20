@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
+import { judgeFigures, judgeInset, judgeMotion } from "./connection-chart-verdict.mjs";
 
 // Offline verdict test for connection-chart-native.mjs: made traces of a
 // line that steps at each arrival, as the chart did, of one that scrolls,
@@ -61,6 +61,13 @@ test("a trace with no marked reading across an arrival carries no verdict", () =
 test("a trace too sparse inside an interval carries no verdict", () => {
   const sparse = scrolling.filter((_r, i) => i % 10 === 0);
   assert.equal(judgeMotion(sparse, false).setup, false);
+});
+
+test("the fourth figure must read Missed 0 with its count and last contact in its title", () => {
+  const passes = (missed) => judgeFigures(missed).every((l) => l.pass);
+  assert.equal(passes({ text: "Missed 0", title: "0 of the last 12 pings got no reply; last contact 13:41:07" }), true);
+  assert.equal(passes({ text: "Since 13:41:07", title: null }), false);
+  assert.equal(passes({ text: "Missed 0", title: "0 of the last 12 pings got no reply; last contact -" }), false);
 });
 
 test("the insets compare the baseline's ends with the card's edges", () => {

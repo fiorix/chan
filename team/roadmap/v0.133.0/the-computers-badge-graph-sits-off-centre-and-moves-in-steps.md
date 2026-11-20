@@ -15,15 +15,17 @@ Read at `793d86522`, by reading; nothing run.
 ## Desired contract
 
 1. Between samples the line moves left continuously, one sample width per ping interval, and the newest reading enters from the right edge; an arriving sample makes no jump: the drawn position just before and just after an arrival agree to within a pixel.
-2. The data is untouched: the same samples, the same scale and ceiling rule, the same miss marks and figures. A late sample or a slower cadence (an unfocused desktop pings every 20 s) never draws a reading that was not measured: the line holds at its last sample until the next arrives; the motion clamps and never extrapolates.
+2. The data is untouched: the same samples, the same scale and ceiling rule, the same miss marks, and the same latest, median and worst figures. A late sample or a slower cadence (an unfocused desktop pings every 20 s) never draws a reading that was not measured: the line holds at its last sample until the next arrives; the motion clamps and never extrapolates.
 3. With `prefers-reduced-motion: reduce` the chart steps, one sample per arrival, as it does today.
 4. The baseline and the chart's edges stay put; only the reading and its miss marks move, clipped to the chart.
 5. The chart's left and right insets inside the card are equal within 1 px, measured in the rendered page: the detail takes the header's 0.2rem inset on both sides and the chart spans the card, while the figures line keeps its indent under the devserver's name.
 6. One step is one ping at every count of samples. A history under 60 samples grows from the right: its newest sample at the right edge, the line filling leftward over the first three minutes of a connection's history; a full history rests with its oldest point one step past the left edge.
+7. The fourth figure under the chart is "Missed <N>", the number of pings in the chart's window with no reply (its red marks, counted), in place of "Since <clock time>". The owner: "can you recommend something better than 'since: {hh:mm:ss}' for the chart? there's no much base to comparison there, users would have to look at a clock to match". Its title reads "<N> of the last <M> pings got no reply; last contact <clock time>", M the samples in the window and the time a dash before any contact; before any ping has finished the figure reads "-" like the others. The line still wraps between figures, never inside one.
 
 ## Boundaries
 
 - `ConnectionDetail.svelte`, `connectionHealth.ts` and its tests, the `.ds-health` rule in `Library.svelte`, the launcher's size ceiling in `web/packages/launcher/vite.config.ts` (82 KiB), and the chart check of the connection face driver.
+- The fourth figure's words and title, the manual's description of the detail (`web/packages/marketing/src/pages/manual/computers.html`) and the face driver's reading of the last contact.
 - Not the desktop's feed, its ping cadence or its sampling, the row the launcher reads, the chart's 400 ms floor, or the figures' wrapping.
 
 ## Acceptance
@@ -32,7 +34,8 @@ Read at `793d86522`, by reading; nothing run.
 2. The same driver with reduced motion set in the desktop's GTK settings reads the position unchanged between arrivals.
 3. The same driver reads the chart's drawn extent (the baseline's ends) against the card and finds the left and right insets equal within 1 px. Red at the base; green at the tip.
 4. The connection face driver (`scripts/e2e/desktop-observations/connection-face-native.sh`) stays green, its chart check following the chosen layout.
-5. Unit tests cover only what the driver cannot reach: how the page counts the samples a new history adds, and the pace of the catch-up after a burst; each dies to one named mutation.
+5. Unit tests cover only what the driver cannot reach: how the page counts the samples a new history adds, and the pace of the catch-up after a burst; each dies to one named mutation; the same for the missed count and its title.
+6. The chart driver's `figures` leg reads the fourth figure as "Missed 0" over its relay, which drops nothing, with the count, the window and a last contact in its title: red at the base, which reads Since; green at the tip. The face driver reads the last contact from that title.
 
 ## Decided
 
@@ -41,3 +44,4 @@ The owner, 2026-11-20 (recorded at 13:22:47Z), each with the recommendation take
 1. The insets: "Chart breaks out (Recommended)". The chart gets equal insets, about 16 px each side, and spans the card; the figures line keeps its indent under the name (contract 5).
 2. The launcher's gzipped JS ceiling, 78 KiB, which the motion takes to 78.3 KiB from 77.7 KiB: "Raise to 82 KiB (Recommended)", with the comment's stale size corrected.
 3. A history under 60 samples: "Grow from the right (Recommended)". A fixed time axis: the newest sample at the right edge, the line filling leftward over the first minutes (contract 6).
+4. The fourth figure, 2026-11-20 (recorded at 13:30:25Z): offered a missed count, the current state's duration or the last reply's age in place of Since, the owner took "Missed count (Recommended)": the pings in the chart's window with no reply, the count's window and the last contact's clock time in its tooltip (contract 7).

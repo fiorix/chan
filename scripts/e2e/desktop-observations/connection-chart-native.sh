@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Read the connection chart on a direct devserver's card in front of the
 # native Linux desktop's Computers screen under Xvfb: where the chart sits
-# inside the card (`inset`), and how its line moves between and across the
-# samples the desktop's pings add (`motion`), or with prefers-reduced-motion
-# set in the desktop's GTK settings (`reduced`, alone, since the desktop
-# reads the setting at its start). With no leg named: `inset motion`.
+# inside the card (`inset`), what its fourth figure reads (`figures`), and
+# how its line moves between and across the samples the desktop's pings add
+# (`motion`), or with prefers-reduced-motion set in the desktop's GTK
+# settings (`reduced`, alone, since the desktop reads the setting at its
+# start). With no leg named: `inset figures motion`.
 # connection-chart-native.mjs owns the devserver, the relay and the verdicts.
 #
 # Exit 0 when every leg named held, 1 when one did not, 2 when a step the
@@ -12,17 +13,17 @@
 set -euo pipefail
 umask 077
 LEGS=("$@")
-[ "${#LEGS[@]}" -gt 0 ] || LEGS=(inset motion)
+[ "${#LEGS[@]}" -gt 0 ] || LEGS=(inset figures motion)
 REDUCED=0
 for leg in "${LEGS[@]}"; do
     case "$leg" in
-    inset | motion) ;;
+    inset | figures | motion) ;;
     reduced) REDUCED=1 ;;
-    *) echo "usage: $0 [inset] [motion] | reduced" >&2; exit 2 ;;
+    *) echo "usage: $0 [inset] [figures] [motion] | reduced" >&2; exit 2 ;;
     esac
 done
 if [ "$REDUCED" = 1 ] && [ "${#LEGS[@]}" != 1 ]; then
-    echo "usage: $0 [inset] [motion] | reduced" >&2
+    echo "usage: $0 [inset] [figures] [motion] | reduced" >&2
     exit 2
 fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

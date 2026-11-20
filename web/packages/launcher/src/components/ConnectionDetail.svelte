@@ -1,8 +1,9 @@
 <script lang="ts">
   // A connected devserver's connection detail on its card in front: the last
   // 60 finished pings with a red mark at each miss, then one line of the
-  // latest, median and worst reply times and the last contact to the second,
-  // as Since. The face beside the name says the state, counting where it
+  // latest, median and worst reply times and the count of the misses, as
+  // Missed, whose title adds the window's size and the last contact's clock
+  // time. The face beside the name says the state, counting where it
   // counts, so the detail does not repeat it. In privacy mode it is concealed
   // behind the devserver's one connection reveal, the one beside its face.
   //
@@ -25,8 +26,9 @@
     CONNECTION_SPARKLINE_HEIGHT,
     CONNECTION_SPARKLINE_MISS_BOTTOM,
     CONNECTION_SPARKLINE_MISS_TOP,
-    connectionContactTime,
     connectionFigures,
+    connectionMissed,
+    connectionMissedTitle,
     connectionSampleShift,
     connectionScrollLag,
     connectionSparkline,
@@ -118,7 +120,7 @@
       <span>Latest <strong>{fmt(figures.latest)}</strong></span>
       <span>Median <strong>{fmt(figures.median)}</strong></span>
       <span>Worst <strong>{fmt(figures.worst)}</strong></span>
-      <span>Since <strong>{connectionContactTime(health.last_contact)}</strong></span>
+      <span title={connectionMissedTitle(health.samples, health.last_contact)}>Missed <strong>{connectionMissed(health.samples) ?? "-"}</strong></span>
     </div>
   {/if}
 </div>
@@ -137,7 +139,7 @@
   .reading { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .miss { fill: none; stroke: var(--danger); stroke-width: 2; stroke-linecap: round; }
   /* One line of figures; a card too narrow for the four wraps it between
-     figures, never inside one, so Since goes first to the next line. */
+     figures, never inside one, so Missed goes first to the next line. */
   .figures { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; white-space: nowrap; }
   .figures strong { color: var(--text); font-weight: 600; }
   .redacted { display: inline-block; width: 8em; border-radius: 4px; color: transparent; user-select: none; background: repeating-linear-gradient(135deg, var(--text-secondary, #888) 0 2px, transparent 2px 4px); opacity: 0.55; }

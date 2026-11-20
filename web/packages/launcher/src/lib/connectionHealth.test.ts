@@ -6,6 +6,8 @@ import {
   connectionFaceLabel,
   connectionFaceName,
   connectionFigures,
+  connectionMissed,
+  connectionMissedTitle,
   connectionSampleShift,
   connectionScrollLag,
   connectionSparkline,
@@ -105,6 +107,17 @@ describe("connection figures", () => {
 
   test("sorts reply times numerically for the median", () => {
     expect(connectionFigures([5, 100, 20, 30, 9])).toEqual({ latest: 9, median: 20, worst: 100 });
+  });
+
+  test("counts the missed pings, the chart's red marks, with a dash before any ping finished", () => {
+    expect(connectionMissed([20, null, 24, null, null])).toBe(3);
+    expect(connectionMissed([20, 24])).toBe(0);
+    expect(connectionMissed([])).toBeNull();
+  });
+
+  test("titles the missed count against the window's pings, with the last contact", () => {
+    expect(connectionMissedTitle([20, null, 24], null)).toBe("1 of the last 3 pings got no reply; last contact -");
+    expect(connectionMissedTitle([], null)).toBe("No ping has finished yet; last contact -");
   });
 });
 
