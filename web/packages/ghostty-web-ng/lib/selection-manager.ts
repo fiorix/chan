@@ -19,6 +19,13 @@ import type { Terminal } from './terminal';
 // Type Definitions
 // ============================================================================
 
+/**
+ * How far a press moves, in cell widths, before it is a drag that selects
+ * rather than a click. The terminal reads the same distance to tell a link
+ * click from the end of a drag.
+ */
+export const DRAG_THRESHOLD_CELLS = 0.5;
+
 export interface SelectionCoordinates {
   startCol: number;
   startRow: number;
@@ -413,8 +420,8 @@ export class SelectionManager {
         if (!this.dragThresholdMet) {
           const dx = e.offsetX - this.mouseDownX;
           const dy = e.offsetY - this.mouseDownY;
-          // Use 50% of cell width as threshold to scale with font size
-          const threshold = this.renderer.getMetrics().width * 0.5;
+          // Scaled by the cell width so it follows the font size
+          const threshold = this.renderer.getMetrics().width * DRAG_THRESHOLD_CELLS;
           if (dx * dx + dy * dy < threshold * threshold) {
             return; // Below threshold, ignore
           }
@@ -461,7 +468,7 @@ export class SelectionManager {
         if (!this.dragThresholdMet) {
           const dx = e.clientX - (canvas.getBoundingClientRect().left + this.mouseDownX);
           const dy = e.clientY - (canvas.getBoundingClientRect().top + this.mouseDownY);
-          const threshold = this.renderer.getMetrics().width * 0.5;
+          const threshold = this.renderer.getMetrics().width * DRAG_THRESHOLD_CELLS;
           if (dx * dx + dy * dy < threshold * threshold) {
             return;
           }

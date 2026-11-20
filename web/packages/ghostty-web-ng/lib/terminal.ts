@@ -32,7 +32,7 @@ import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
-import { SelectionManager } from './selection-manager';
+import { DRAG_THRESHOLD_CELLS, SelectionManager } from './selection-manager';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -1459,7 +1459,7 @@ export class Terminal {
     if (e.button !== 0 || e.detail > 1 || !press || press.reported) return;
     // A press that moved as far as the selection manager's drag threshold
     // made a selection, not a link click.
-    const threshold = this.renderer.charWidth * 0.5;
+    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
     const dx = e.clientX - press.x;
     const dy = e.clientY - press.y;
     if (dx * dx + dy * dy >= threshold * threshold) return;

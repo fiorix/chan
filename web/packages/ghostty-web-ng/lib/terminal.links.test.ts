@@ -5,6 +5,7 @@ import type { TerminalLinkActivation } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
+import { DRAG_THRESHOLD_CELLS } from './selection-manager';
 import { Terminal } from './terminal';
 
 let module: WebAssembly.Module;
@@ -105,8 +106,12 @@ describe('link activation', () => {
     // The second click of a double click on the link: a word selection.
     await click(term, cell(3, 0), { ...cell(3, 0), detail: 2 });
     expect(seen).toEqual([]);
-    // A press that moved less than the selection's drag threshold is a click.
-    await click(term, cell(3, 0), { x: cell(3, 0).x + 2, y: cell(3, 0).y });
+    // The selection's drag threshold, half a cell: a press moved that far
+    // selected, one moved a pixel less is a click.
+    const half = CELL.width * DRAG_THRESHOLD_CELLS;
+    await click(term, cell(3, 0), { x: cell(3, 0).x + half, y: cell(3, 0).y });
+    expect(seen).toEqual([]);
+    await click(term, cell(3, 0), { x: cell(3, 0).x + half - 1, y: cell(3, 0).y });
     expect(seen.map((link) => link.target)).toEqual(['https://example.com/drag']);
   });
 
