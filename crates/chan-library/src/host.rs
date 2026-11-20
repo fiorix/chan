@@ -30,8 +30,8 @@ use crate::root_locks::{KeyedLockGuard, RootCall, RootCalls, RootKeys, RootLocks
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
-    terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts,
-    TenantBuilder, TerminalTenantOptions, UnserveMode,
+    terminal_tenant_root, BrowserWindowTarget, HostControl, MissingPath, OpenOutsideAck,
+    TenantArtifacts, TenantBuilder, TerminalTenantOptions, UnserveMode,
 };
 use crate::terminal_sessions::{
     CloseReason, TerminalExit, TmuxConnectionStatus, TmuxControl, TmuxRequest, TmuxWindowHook,
@@ -4115,6 +4115,7 @@ impl WorkspaceHost {
         &self,
         requested: &Path,
         caller_window_id: &str,
+        missing: MissingPath,
     ) -> Result<OpenOutsideAck, Error> {
         // A minted window is created by the surface that asked for it: a
         // browser-origin caller gets a browser-origin row, which the desktop
@@ -4127,7 +4128,7 @@ impl WorkspaceHost {
             .find(|row| row.window_id == caller_window_id)
             .map(|row| row.origin)
             .unwrap_or_default();
-        self.open_in_standalone_window_as(requested, caller_origin)
+        self.open_in_standalone_window_as(requested, caller_origin, missing)
             .await
     }
 
@@ -4140,7 +4141,7 @@ impl WorkspaceHost {
         &self,
         requested: &Path,
     ) -> Result<OpenOutsideAck, Error> {
-        self.open_in_standalone_window_as(requested, WindowOrigin::Native)
+        self.open_in_standalone_window_as(requested, WindowOrigin::Native, MissingPath::Create)
             .await
     }
 
@@ -4148,6 +4149,7 @@ impl WorkspaceHost {
         &self,
         requested: &Path,
         caller_origin: WindowOrigin,
+        missing: MissingPath,
     ) -> Result<OpenOutsideAck, Error> {
         let (files, pending, session_registry, events_tx) =
             {
@@ -4187,7 +4189,7 @@ impl WorkspaceHost {
                 (record.window_id, true, target)
             }
         };
-        let open = match files.open_frame(&window_id, requested) {
+        let open = match files.open_frame(&window_id, requested, missing) {
             Ok(open) => open,
             Err(message) => {
                 // A window minted for a path that cannot be opened would show
@@ -6640,8 +6642,9 @@ impl HostControl for WorkspaceHost {
         &self,
         requested: &Path,
         caller_window_id: &str,
+        missing: MissingPath,
     ) -> Result<OpenOutsideAck, Error> {
-        self.open_outside_workspace(requested, caller_window_id)
+        self.open_outside_workspace(requested, caller_window_id, missing)
             .await
     }
 
