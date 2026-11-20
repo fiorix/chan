@@ -4601,8 +4601,7 @@ impl QueueSource {
 /// chord must arrive as its OWN keypress, and live probing found no fixed
 /// sub-idle gap safe across the required input shapes. A Gemini message
 /// therefore takes a `Body` entry and a `Chord` entry that the drainer
-/// separates with a full idle gate, and a muse message, which is encoded as
-/// gemini's, takes the same two. Everything else is one `Whole` entry.
+/// separates with a full idle gate. Everything else is one `Whole` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessagePart {
     Whole,
@@ -4634,8 +4633,8 @@ struct QueuedMessage {
     part: MessagePart,
 }
 
-/// Message depth of a queue: the count of TAIL entries. A split Gemini or muse
-/// message contributes exactly one tail, so this counts messages, not entries.
+/// Message depth of a queue: the count of TAIL entries. A split Gemini message
+/// contributes exactly one tail, so this counts messages, not entries.
 fn msg_depth(queue: &VecDeque<QueuedMessage>) -> usize {
     queue
         .iter()
@@ -4655,8 +4654,8 @@ fn fresh_queue_state() -> (Mutex<VecDeque<QueuedMessage>>, AtomicI64, AtomicBool
     )
 }
 
-/// The entries one logical message occupies, in order. A Gemini or muse body
-/// and its bare CR are separate entries; everything else is one.
+/// The entries one logical message occupies, in order. A Gemini body and its
+/// bare CR are separate entries; everything else is one.
 fn message_parts(data: &str, submit: Option<&ResolvedSubmit>) -> &'static [MessagePart] {
     match submit {
         Some(submit) if chan_shell::splits_submit_chord(data, submit) => {
@@ -6343,8 +6342,8 @@ impl Session {
     /// dropped).
     /// Returns the message depth after the push: the poke's 1-based position
     /// among the PENDING MESSAGES, the same number the SPA badge and
-    /// `cs terminal list --json` show. A Gemini or muse poke occupies two
-    /// entries and still reports position 1 on an empty queue.
+    /// `cs terminal list --json` show. A Gemini poke occupies two entries and
+    /// still reports position 1 on an empty queue.
     fn enqueue_cs_write(&self, data: String, submit: Option<ResolvedSubmit>) -> Option<usize> {
         self.enqueue(data, submit, QueueSource::CsWrite, None)
     }
@@ -8382,7 +8381,7 @@ mod tests {
             SubmitAgent::Codex => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Gemini => "{}\r",
             SubmitAgent::Kimi => "\x1b[200~{}\x1b[201~\r",
-            SubmitAgent::Muse => "{}\r",
+            SubmitAgent::Muse => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::OpenCode => "\x1b[200~{}\x1b[201~\r",
         };
         ResolvedSubmit {
@@ -9768,6 +9767,138 @@ mod tests {
         assert!(events.try_recv().is_err(), "no intermediate badge churn");
     }
 
+    /// Five submitted Muse messages queue as five whole entries and select as
+    /// one batch, which pops whole and leaves nothing behind.
+    #[test]
+    fn a_muse_run_of_submitted_messages_selects_as_one_batch() {
+        let session = test_session_with_ring(1024);
+        let muse = built_in_submit(SubmitAgent::Muse);
+        for index in 1..=5 {
+            session.enqueue_cs_write(format!("message {index}"), Some(muse.clone()));
+        }
+        let mut queue = session.write_queue.lock().expect("queue");
+        assert_eq!(
+            queue.iter().map(|entry| entry.part).collect::<Vec<_>>(),
+            vec![MessagePart::Whole; 5],
+            "a muse message is one whole entry"
+        );
+        assert_eq!(msg_depth(&queue), 5);
+        assert_eq!(
+            select_batch_prefix(&queue, WRITE_QUEUE_BATCH_MAX_BYTES),
+            BatchSelection {
+                count: 5,
+                stop: BatchStopReason::End,
+            }
+        );
+        let (popped, stop) = pop_batch(&mut queue, WRITE_QUEUE_BATCH_MAX_BYTES);
+        assert_eq!(stop, BatchStopReason::End);
+        assert_eq!(
+            popped
+                .iter()
+                .map(|entry| entry.data.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "message 1",
+                "message 2",
+                "message 3",
+                "message 4",
+                "message 5"
+            ]
+        );
+        assert!(queue.is_empty());
+    }
+
+    /// A Muse run ends where the other batchable agents' runs end: at a raw
+    /// write, a Rich Prompt turn, a runtime override and a different agent.
+    #[test]
+    fn a_muse_run_ends_at_raw_rich_prompt_override_and_another_agent() {
+        let muse = built_in_submit(SubmitAgent::Muse);
+        let submitted = || queued_message("muse", Some(muse.clone()), QueueSource::CsWrite);
+        let mut overridden = muse.clone();
+        overridden.source = SubmitTemplateSource::Override;
+        let cases = [
+            (
+                queued_message("raw", None, QueueSource::CsWrite),
+                BatchStopReason::NoSubmit,
+            ),
+            (
+                queued_message("rich", Some(muse.clone()), QueueSource::RichPrompt),
+                BatchStopReason::RichPrompt,
+            ),
+            (
+                queued_message("override", Some(overridden), QueueSource::CsWrite),
+                BatchStopReason::Override,
+            ),
+            (
+                queued_message(
+                    "opencode",
+                    Some(built_in_submit(SubmitAgent::OpenCode)),
+                    QueueSource::CsWrite,
+                ),
+                BatchStopReason::DifferentSubmit,
+            ),
+            (
+                queued_message(
+                    "gemini",
+                    Some(built_in_submit(SubmitAgent::Gemini)),
+                    QueueSource::CsWrite,
+                ),
+                BatchStopReason::UnbatchableAgent,
+            ),
+        ];
+        for (boundary, expected) in cases {
+            let queue = VecDeque::from([submitted(), submitted(), boundary, submitted()]);
+            assert_eq!(
+                select_batch_prefix(&queue, WRITE_QUEUE_BATCH_MAX_BYTES),
+                BatchSelection {
+                    count: 2,
+                    stop: expected,
+                }
+            );
+        }
+    }
+
+    /// The drained Muse batch is one input holding the framed batch inside
+    /// one bracketed paste and the CR after it, and one depth event.
+    #[test]
+    fn five_muse_notifications_drain_as_one_bracketed_input_and_one_depth_event() {
+        let (session, command_rx) = test_session_with_commands(1024);
+        let muse = built_in_submit(SubmitAgent::Muse);
+        for index in 1..=5 {
+            session.enqueue_cs_write(format!("message {index}"), Some(muse.clone()));
+        }
+        let framed = {
+            let messages: Vec<QueuedMessage> = (1..=5)
+                .map(|index| {
+                    queued_message(
+                        &format!("message {index}"),
+                        Some(muse.clone()),
+                        QueueSource::CsWrite,
+                    )
+                })
+                .collect();
+            let refs: Vec<&QueuedMessage> = messages.iter().collect();
+            format_notification_batch(&refs)
+        };
+        let mut events = session.output_tx.subscribe();
+        let base = now_unix_millis();
+        session.last_output_at.store(base, Ordering::Relaxed);
+
+        session.try_drain_batch(base + WRITE_QUEUE_QUIET_MS + 10);
+
+        let PtyCommand::Input(data) = command_rx.try_recv().expect("one controller command") else {
+            panic!("a muse batch must be one input command");
+        };
+        assert_eq!(
+            String::from_utf8(data).unwrap(),
+            format!("\x1b[200~{framed}\x1b[201~\r")
+        );
+        assert!(command_rx.try_recv().is_err(), "one controller command");
+        assert_eq!(session.queue_depth(), 0);
+        assert!(matches!(events.try_recv(), Ok(SessionEvent::QueueDepth(0))));
+        assert!(events.try_recv().is_err(), "no intermediate badge churn");
+    }
+
     #[test]
     fn five_claude_notifications_drain_as_one_two_part_sequence() {
         let (session, command_rx) = test_session_with_commands(1024);
@@ -10407,61 +10538,82 @@ mod tests {
         (entries, depth, writes)
     }
 
+    /// A Muse message alone is one queue entry, drained as one write: the
+    /// cleaned body framed in bracketed paste, then the CR, the bytes an
+    /// opencode message takes, at every body shape up to the message cap.
     #[test]
-    fn a_muse_message_takes_the_entries_and_bytes_a_gemini_one_does() {
+    fn a_muse_message_is_one_entry_and_one_bracketed_write() {
         assert_eq!(
             SubmitAgent::from_agent_name("muse").map(SubmitAgent::name),
             Some("muse")
         );
         let muse = SubmitAgent::from_agent_name("muse").expect("muse is a submit agent");
         let at_the_cap = "x".repeat(MAX_TERMINAL_WRITE_BYTES);
-        let bodies = ["poke", "one\ntwo\n\nthree", at_the_cap.as_str()];
-        let as_muse = queued_entries_depth_and_writes(built_in_submit(muse), &bodies);
-        let as_gemini =
-            queued_entries_depth_and_writes(built_in_submit(SubmitAgent::Gemini), &bodies);
-        assert_eq!(
-            (as_gemini.0, as_gemini.1),
-            (6, 3),
-            "a body entry and a chord entry for each of three messages"
-        );
-        assert_eq!(as_muse, as_gemini);
+        for body in [
+            "poke",
+            "one\ntwo\n\nthree",
+            "one\x1b[201~\x03\x7f\nline\tlast",
+            at_the_cap.as_str(),
+        ] {
+            let as_muse = queued_entries_depth_and_writes(built_in_submit(muse), &[body]);
+            let cleaned = body.replace(['\x1b', '\x03', '\x7f'], " ");
+            assert_eq!(
+                as_muse,
+                (
+                    1,
+                    1,
+                    vec![format!("\x1b[200~{cleaned}\n\x1b[201~\r").into_bytes()]
+                ),
+                "a muse message of {} bytes",
+                body.len()
+            );
+            assert_eq!(
+                as_muse,
+                queued_entries_depth_and_writes(built_in_submit(SubmitAgent::OpenCode), &[body])
+            );
+        }
     }
 
     #[test]
     fn bracketing_split_queue_delivers_framed_body_then_bare_chord() {
         let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
-        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
-            let submit = ResolvedSubmit {
-                agent,
-                template: "\x1b[200~{}\x1b[201~\r".into(),
-                source: chan_shell::SubmitTemplateSource::Override,
-            };
-            let (entries, depth, writes) = queued_entries_depth_and_writes(submit, &[hostile]);
-            assert_eq!((entries, depth), (2, 1));
-            assert_eq!(
-                writes,
-                vec![
-                    b"\x1b[200~one [201~  \nline\tlast\n\x1b[201~".to_vec(),
-                    b"\r".to_vec(),
-                ],
-                "{} queued body and chord use the resolved framing",
-                agent.name()
-            );
-        }
+        let override_for = |agent| ResolvedSubmit {
+            agent,
+            template: "\x1b[200~{}\x1b[201~\r".into(),
+            source: chan_shell::SubmitTemplateSource::Override,
+        };
+        let (entries, depth, writes) =
+            queued_entries_depth_and_writes(override_for(SubmitAgent::Gemini), &[hostile]);
+        assert_eq!((entries, depth), (2, 1));
+        assert_eq!(
+            writes,
+            vec![
+                b"\x1b[200~one [201~  \nline\tlast\n\x1b[201~".to_vec(),
+                b"\r".to_vec(),
+            ],
+            "gemini's queued body and chord use the resolved framing"
+        );
+        // Muse does not split: its bracketing override is one entry and one
+        // cleaned, framed write with the CR.
+        let (entries, depth, writes) =
+            queued_entries_depth_and_writes(override_for(SubmitAgent::Muse), &[hostile]);
+        assert_eq!((entries, depth), (1, 1));
+        assert_eq!(
+            writes,
+            vec![b"\x1b[200~one [201~  \nline\tlast\n\x1b[201~\r".to_vec()]
+        );
     }
 
     #[test]
     fn bracketing_split_queue_keeps_builtin_body_and_chord_bytes() {
         let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
-        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
-            let (entries, depth, writes) =
-                queued_entries_depth_and_writes(built_in_submit(agent), &[hostile]);
-            assert_eq!((entries, depth), (2, 1));
-            assert_eq!(
-                writes,
-                vec![format!("{hostile}\n").into_bytes(), b"\r".to_vec()]
-            );
-        }
+        let (entries, depth, writes) =
+            queued_entries_depth_and_writes(built_in_submit(SubmitAgent::Gemini), &[hostile]);
+        assert_eq!((entries, depth), (2, 1));
+        assert_eq!(
+            writes,
+            vec![format!("{hostile}\n").into_bytes(), b"\r".to_vec()]
+        );
     }
 
     #[test]

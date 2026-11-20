@@ -2255,8 +2255,8 @@
   /// session's write queue (shared FIFO with `cs terminal write`) and applies
   /// the submit encoding when the agent is idle. Deliberately NOT `sendInput`
   /// (the raw keystroke path bypasses the queue). `agent` picks
-  /// the encoding (claude CSI, codex/opencode bracketed paste + CR, gemini
-  /// and muse split CR); omitted defaults to claude server-side, and a name
+  /// the encoding (claude CSI, agy/codex/kimi/muse/opencode bracketed paste
+  /// + CR, gemini split CR); omitted defaults to claude server-side, and a name
   /// the server does not know as an agent ("none") gets no chord. A Rich
   /// Prompt is its own agent turn: the notification batcher never folds it
   /// into a batch.
