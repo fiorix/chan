@@ -18,6 +18,14 @@ describe("classifyTerminalLink", () => {
     expect(await classifyTerminalLink("https://github.com@evil.example/x", serverHost)).toMatchObject({
       host: "evil.example",
     });
+    // A port the browser would contact is part of the host it shows.
+    expect(await classifyTerminalLink("https://example.com:8443/a", serverHost)).toMatchObject({
+      host: "example.com:8443",
+    });
+    // An international name shows as the browser contacts it, in punycode.
+    expect(await classifyTerminalLink("https://\u4f8b\u3048.jp/", serverHost)).toMatchObject({
+      host: "xn--r8jz45g.jp",
+    });
   });
 
   test("a scheme the external-open gate refuses is a web link it names", async () => {
@@ -91,7 +99,9 @@ describe("middleEllipsis", () => {
   test("a long target keeps both ends", () => {
     expect(middleEllipsis("short", 10)).toBe("short");
     expect(middleEllipsis("https://trusted.example/aaaaaaaa@evil.example", 21)).toBe(
-      "https://tr…il.example",
+      "https://tr\u2026il.example",
     );
+    // An odd number of kept characters gives the head the extra one.
+    expect(middleEllipsis("abcdefghijklmnop", 10)).toBe("abcde\u2026mnop");
   });
 });

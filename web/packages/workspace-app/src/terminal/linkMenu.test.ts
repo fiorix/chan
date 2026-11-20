@@ -94,6 +94,16 @@ describe("TerminalLinkMenu", () => {
     expect(log).toEqual(["open", "close", "focus"]);
   });
 
+  test("the menu is stale once the link's rows or their place on the screen change", async () => {
+    let anchor = "row 4: https://example.com/a";
+    const { value } = host({ anchorKey: () => anchor });
+    const links = new TerminalLinkMenu(value);
+    await links.onLink("https://example.com/a", RANGE, click());
+    expect(links.stale()).toBe(false);
+    anchor = "row 3: https://example.com/a";
+    expect(links.stale()).toBe(true);
+  });
+
   test("a refused open keeps the menu with the entry disabled and its reason", async () => {
     const { value } = host();
     const links = new TerminalLinkMenu(value);
