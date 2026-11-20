@@ -5,16 +5,23 @@
 // writes `stty size` to a file there, clears the screen and prints, one a
 // row from the top: a URL, an OSC 8 link to `./notes316.md` (text
 // NOTES-REL), an OSC 8 `file://<uname -n>/<abs>/notes316.md` (NOTES-ABS),
-// an OSC 8 `file:///<abs>/missing316.md` (MISSING) and an OSC 8 `file://`
-// on another host (FOREIGN). The printf's format string holds the escapes and its
+// an OSC 8 `file:///<abs>/missing316.md` (MISSING), an OSC 8 `file://`
+// on another host (FOREIGN) and an OSC 8 `~/link316-home.md` (HOME), a file
+// the shell first writes in its $HOME. The printf's format string holds the escapes and its
 // arguments the targets, so the echoed command line holds no link and no
 // marker. A cell's pixels come from the surface's box and the grid `stty`
 // reported; nothing reads the page's terminal objects. `window.open` is
 // stubbed in the page and records what the browser would have opened.
 //
+// Every click on a link first moves the pointer to another row and then onto
+// the link, as a hand does: xterm.js reads a row's links anew only when the
+// pointer enters the row (Linkifier `_handleHover`), so a link printed into
+// the row under a pointer resting there is found only once it leaves the row.
+//
 // Legs, each on both backends unless noted:
 //   url-menu        a click on the URL opens the menu with "Open in
-//                   browser" and the URL; pressing it reaches the opener.
+//                   browser" and the URL, and the menu takes the keyboard
+//                   onto that entry; pressing it reaches the opener.
 //   rel-editor      (ghostty) a click on NOTES-REL shows the relative
 //                   target and "Open in editor"; pressing it opens an editor
 //                   tab on the seeded file, resolved against the shell's
@@ -24,6 +31,11 @@
 //   abs-editor      the same for NOTES-ABS, the file: URI on this host.
 //   missing         "Open in editor" on MISSING ends disabled, "not found".
 //   foreign         "Open in editor" on FOREIGN shows disabled with the host.
+//   home-editor     (ghostty) "Open in editor" on HOME opens the file in the
+//                   server's home: an editor tab, or, where the file is
+//                   outside the workspace and no host serves it, the refusal
+//                   naming the expanded path, never "not found". xterm.js
+//                   underlines no `~/` OSC 8 target, as with NOTES-REL.
 //   escape-typing   Escape closes the menu, and typing reaches the PTY.
 //   output-closes   output that clears the screen closes an open menu.
 //   ctrl-click      Ctrl with a click opens the URL with no menu.
@@ -54,7 +66,8 @@ const TRACK_URL = "https://example.com/track316";
 const FOREIGN = "file://elsewhere.invalid/etc/hosts";
 const MENU = '.terminal-tab-menu-bubble[aria-label="terminal link menu"]';
 const SENTINEL = "SMOKE316_CLIPBOARD_SENTINEL";
-const ROW = { url: 0, rel: 1, abs: 2, missing: 3, foreign: 4 };
+const ROW = { url: 0, rel: 1, abs: 2, missing: 3, foreign: 4, home: 5 };
+const HOME_FILE = "link316-home.md";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -104,6 +117,7 @@ export default {
     const results = {};
     const failures = [];
     const tabs = [];
+    const homeFiles = new Set();
 
     async function waitScrollback(tab, needle, timeoutMs = 30_000) {
       const deadline = Date.now() + timeoutMs;
@@ -216,12 +230,15 @@ export default {
       const sizeFile = join(dir, `size316-${backend}`);
       rmSync(sizeFile, { force: true });
 
-      const format = String.raw`\033[H\033[2Jhttp%s\n\033]8;;%s\033\\NOTES-REL\033]8;;\033\\\n\033]8;;%s\033\\NOTES-ABS\033]8;;\033\\\n\033]8;;%s\033\\MISSING\033]8;;\033\\\n\033]8;;%s\033\\FOREIGN\033]8;;\033\\\nL316_%s\n`;
-      const print = `cd ${DIR} && stty size > size316-${backend} && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' READY\n`;
+      const format = String.raw`\033[H\033[2Jhttp%s\n\033]8;;%s\033\\NOTES-REL\033]8;;\033\\\n\033]8;;%s\033\\NOTES-ABS\033]8;;\033\\\n\033]8;;%s\033\\MISSING\033]8;;\033\\\n\033]8;;%s\033\\FOREIGN\033]8;;\033\\\n\033]8;;%s\033\\HOME\033]8;;\033\\\nL316_%s\n`;
+      const homeRecord = join(dir, `home316-${backend}`);
+      const print = `cd ${DIR} && stty size > size316-${backend} && printf '%s' "$HOME" > home316-${backend} && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
       await cs(["write", "--tab-name", name, print]);
       await waitScrollback(name, "L316_READY");
       if (!existsSync(sizeFile)) throw new Error(`${backend}: the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
+      const home = existsSync(homeRecord) ? readFileSync(homeRecord, "utf8").trim() : "";
+      if (home) homeFiles.add(join(home, HOME_FILE));
       await sleep(500);
 
       async function cell(col, rowIndex) {
@@ -233,8 +250,14 @@ export default {
         const h = box.height / rows;
         return { x: box.left + (col + 0.5) * w, y: box.top + (rowIndex + 0.5) * h, w, h };
       }
+      // Onto a cell from another row, as a hand moves (see the header).
+      const approach = async (p) => {
+        await page.mouse.move(p.x, p.y + 3 * p.h);
+        await page.mouse.move(p.x, p.y);
+      };
       const clickRow = async (rowIndex, col = 2) => {
         const p = await cell(col, rowIndex);
+        await approach(p);
         await page.mouse.click(p.x, p.y);
       };
       const press = async (action) => {
@@ -246,7 +269,7 @@ export default {
       await leg(at("url-menu"), async () => {
         const before = (await opened()).length;
         await clickRow(ROW.url);
-        const menu = await waitMenu("url click");
+        const menu = await waitMenu("url click with the keyboard on its entry", (m) => m.focused);
         const open = menu.rows.find((r) => r.action === "open-browser");
         if (menu.target !== URL_316 || !open || open.disabled || !menu.rows.some((r) => r.action === "copy-link")) {
           throw new Error(`menu shows ${JSON.stringify(menu)}`);
@@ -294,6 +317,7 @@ export default {
       await leg(at("ctrl-click"), async () => {
         const before = (await opened()).length;
         const p = await cell(2, ROW.url);
+        await approach(p);
         await page.keyboard.down("Control");
         await page.mouse.click(p.x, p.y);
         await page.keyboard.up("Control");
@@ -305,6 +329,7 @@ export default {
       await leg(at("double-click"), async () => {
         const before = (await opened()).length;
         const p = await cell(4, ROW.url);
+        await approach(p);
         await page.mouse.click(p.x, p.y, { count: 2 });
         await expectNoMenu("double click");
         const now = await opened();
@@ -323,8 +348,36 @@ export default {
           await activateTab(name);
           await sleep(500);
         });
+        await leg(at("home-editor"), async () => {
+          if (!home) throw new Error("the shell wrote no $HOME");
+          await clickRow(ROW.home);
+          const menu = await waitMenu("home click");
+          if (menu.target !== `~/${HOME_FILE}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
+            throw new Error(`menu shows ${JSON.stringify(menu)}`);
+          }
+          await press("open-editor");
+          const expanded = join(home, HOME_FILE);
+          const deadline = Date.now() + 10_000;
+          for (;;) {
+            const shown = await menuShown();
+            if (!shown) {
+              // Opened here, or routed to the window that serves it.
+              await activateTab(name).catch(() => {});
+              await sleep(500);
+              return { opened: expanded };
+            }
+            if (shown.reason) {
+              if (!shown.reason.includes(expanded)) throw new Error(`the open was refused without the home path: ${JSON.stringify(shown)}`);
+              await closeAnyMenu();
+              return { refusedNaming: expanded };
+            }
+            if (Date.now() > deadline) throw new Error(`the open answered nothing: ${JSON.stringify(shown)}`);
+            await sleep(100);
+          }
+        });
       } else {
         results[at("rel-editor")] = "not run: xterm.js's OSC 8 provider drops a target that is not an absolute URL";
+        results[at("home-editor")] = "not run: xterm.js's OSC 8 provider drops a target that is not an absolute URL";
       }
 
       await leg(at("abs-editor"), async () => {
@@ -382,6 +435,7 @@ export default {
       await leg(at("shift-click"), async () => {
         const before = recorded().length;
         const p = await cell(2, 0);
+        await approach(p);
         await page.keyboard.down("Shift");
         await page.mouse.click(p.x, p.y);
         await page.keyboard.up("Shift");
@@ -447,6 +501,7 @@ export default {
         } catch {}
       }
       rmSync(dir, { recursive: true, force: true });
+      for (const file of homeFiles) rmSync(file, { force: true });
       await cdp.detach().catch(() => {});
       if (restoreError) {
         if (runError) console.error(`[316-terminal-link-menu] restore failed: ${restoreError.message}`);
