@@ -1784,6 +1784,54 @@ describe("tmux windows", () => {
       "New: New terminal",
     ]);
   });
+
+  it("tells two control terminals on one machine apart by their connections", async () => {
+    const connection = (id: string, session: string): TmuxConnectionEntry => ({
+      connection: id,
+      library_id: "lib-a",
+      origin: { program: "tmux", command: "tmux -CC", local: true },
+      version: "3.5",
+      session: { id: `$${session}`, name: session },
+      windows: [],
+      window_cap: 8,
+      errors: [],
+      control_window: `${id}-control`,
+    });
+    const control = (id: string): WindowRecord => ({
+      ...terminalRecord,
+      window_id: `${id}-control`,
+      library_id: "lib-a",
+      title: "Control terminal",
+      ordinal: 0,
+      label: undefined,
+      control: true,
+      hidden: true,
+      tmux: { connection: id, control: true },
+    });
+    library.devservers = [alpha];
+    library.tmuxConnections = [connection("tm-1", "main"), connection("tm-2", "work")];
+    library.windows = [control("tm-1"), control("tm-2")];
+    open();
+    await filterBy("windows");
+    // The machine card's rows name their connections; so do these.
+    const rows = items().filter((row) => row.title === "Control terminal");
+    expect(rows.map((row) => row.subtitle)).toEqual(["tmux -CC on alpha (main)", "tmux -CC on alpha (work)"]);
+    // A query for the session finds its connection's control terminal alone;
+    // at the root, where machines interleave, the row names its machine too.
+    await query("work");
+    expect(items().filter((row) => row.title === "Control terminal").map((row) => row.subtitle)).toEqual([
+      "tmux -CC on alpha (work) \u00b7 alpha",
+    ]);
+    // Privacy mode conceals the connection on the row, and the query still
+    // finds it.
+    await setPrivacy({ enabled: true });
+    open();
+    await query("work");
+    const listed = items().map((row) => row.id);
+    expect(listed).toContain("computers:window:lib-a:tm-2-control");
+    expect(listed).not.toContain("computers:window:lib-a:tm-1-control");
+    expect(target.textContent).not.toContain("(work)");
+  });
 });
 
 describe("browser Show readiness", () => {
