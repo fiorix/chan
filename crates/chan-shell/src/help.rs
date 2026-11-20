@@ -1653,14 +1653,16 @@ longest run of consecutive submitted messages sharing the
 target's proven built-in encoding is framed as a single
 chronological prompt, so a burst of notifications costs one agent
 turn instead of one turn each and the agent can reconcile them
-before acting. A write with no --submit, a gemini or muse target, a
-Rich Prompt turn and a runtime submit override each end that run and
-are delivered on their own. The command prints the message's
+before acting. agy, claude, codex, kimi, muse and opencode take
+such a batch; gemini takes one message per turn. A write with no
+--submit, a gemini target, a Rich Prompt turn and a runtime submit
+override each end that run and are delivered on their own. The command prints the message's
 position among the target's pending messages and returns at
 once; it never waits for the agent's reply.
 
-The queue holds 100 entries per target, where a gemini or muse message
-costs two entries and every other message costs one. The queue is
+The queue holds 100 entries per target, where a gemini message
+costs two entries and every other message, muse's included, costs
+one. The queue is
 dropped when the session is recycled (restarted). "Idle" is
 detected from the quiescence of visible output (a repaint that
 is escape sequences alone does not count), so a target sitting
@@ -1685,9 +1687,9 @@ corrected, so read the ack. ONE chord is encoded per command, so
 target a mixed-agent group per session rather than by group.
 
 The applied encodings: claude appends a chord, agy, codex, kimi,
-and opencode wrap the text in bracketed paste plus a CR, gemini and
-muse take the CR as its own later queue entry, one idle gate after
-the body. Inside a bracketed paste, built in or overridden, the
+muse and opencode wrap the text in bracketed paste plus a CR in one
+write, gemini takes the CR as its own later queue entry, one idle
+gate after the body. Inside a bracketed paste, built in or overridden, the
 text's ESC, NUL, ENQ, EOT, BS, DEL and tty control characters
 (Ctrl+C, Ctrl+U, Ctrl+Z and the like) are sent as spaces, as a
 terminal's paste sends them, so the text cannot end the bracket
@@ -1736,7 +1738,8 @@ SIDE EFFECTS:
   --submit gemini is one logical queued message and one ack, but it
   occupies TWO entries: text, then a bare CR after a full idle gate.
   A 0.51 live sweep found no fixed sub-idle gap safe at 64 KiB.
-  --submit muse is encoded the same way and costs the same two.
+  --submit muse costs one entry: bracketed paste and its CR in one
+  write, as agy, codex, kimi and opencode take it.
 
 CAUTIONS:
   Message cap: 4096 UTF-8 bytes before any submit newline or chord.

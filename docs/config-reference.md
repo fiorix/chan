@@ -118,13 +118,13 @@ template = '{}\r'
 template = '\e[200~{}\e[201~\r'
 
 [muse]
-template = '{}\r'
+template = '\e[200~{}\e[201~\r'
 
 [opencode]
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini and muse deliver a non-empty normalized body before their submit chord, in separate ordered PTY writes. With a bracketing override, the body write includes the template prefix and the first closing bracket after `{}`; only the suffix after that bracket is the chord. A template with no chord sends one body write, and an empty body sends only the chord, without an empty bracket pair. An unclosed bracket keeps the remaining template with the body; chan does not add a closing marker.
+The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini delivers a non-empty normalized body before its submit chord, in separate ordered PTY writes; every other agent receives its template's bytes in one write. With a bracketing override, the body write includes the template prefix and the first closing bracket after `{}`; only the suffix after that bracket is the chord. A template with no chord sends one body write, and an empty body sends only the chord, without an empty bracket pair. An unclosed bracket keeps the remaining template with the body; chan does not add a closing marker. Submitted messages queued for agy, claude, codex, kimi, muse or opencode under the built-in template drain as one framed batch per agent turn; gemini, and any agent under an override, take one message per turn.
 
 When the part of a template before `{}` leaves a bracketed paste open (an `\e[200~` with no `\e[201~` after it), a default or an override alike, the body's NUL, ENQ, EOT, BS, ESC and DEL bytes and its Ctrl+C, `Ctrl+\`, Ctrl+U, Ctrl+Z, Ctrl+Q, Ctrl+S, Ctrl+W, Ctrl+V, Ctrl+R and Ctrl+O characters are sent as spaces, as a terminal's paste sends them, so a body holding `\e[201~` cannot end the bracket early; line feeds and tabs are kept. Any other template sends the body unchanged.
 

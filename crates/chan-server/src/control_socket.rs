@@ -2422,8 +2422,7 @@ async fn require_single_pane_window(window_id: &str, ctx: &ControlSocketCtx) -> 
 const TEAM_SPAWN_POKE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Gap between the body write and the submit-chord write of a multi-write
-/// poke (gemini and muse: the prompt, then the bare CR as a distinct
-/// keypress). The gap lets the agent render + settle on the body before the
+/// poke (gemini: the prompt, then the bare CR as a distinct keypress). The gap lets the agent render + settle on the body before the
 /// CR arrives, so the CR is read as Enter rather than coalesced into the
 /// body's read. The queue-based poke paths (cs / Rich Prompt) get this
 /// separation for free from the drainer's idle-gating; this direct-write
@@ -2452,8 +2451,7 @@ struct TeamSpawn {
     failed: Vec<(String, String)>,
     /// One exact session handle per AGENT member plus the ordered PTY writes
     /// that deliver and submit its identity prompt. Most agents use one write;
-    /// gemini and muse use two with a gap so the CR remains a distinct
-    /// keypress.
+    /// gemini uses two with a gap so the CR remains a distinct keypress.
     pokes: Vec<TeamPoke>,
     /// Each spawned member's tab name + live `session_id`, for the
     /// SPA-surfacing push (`WindowCommand::TeamSpawned`).
@@ -2668,9 +2666,8 @@ async fn deliver_team_pokes(pokes: &mut [TeamPoke]) -> TeamPokeResult {
         .await
         {
             Ok(true) => {
-                // Most agents have a single write; gemini and muse have two
-                // (prompt, then the bare CR), which must arrive as distinct
-                // keypresses.
+                // Most agents have a single write; gemini has two (prompt,
+                // then the bare CR), which must arrive as distinct keypresses.
                 for (index, write) in poke.writes.iter().enumerate() {
                     if index > 0 {
                         tokio::time::sleep(SUBMIT_SPLIT_GAP).await;
@@ -10730,7 +10727,7 @@ is_lead = false
     }
 
     #[test]
-    fn spawn_team_muse_lead_gets_its_body_then_a_bare_cr() {
+    fn spawn_team_muse_lead_gets_one_bracketed_write() {
         let (root, registry) = empty_registry();
         let mut config = spawnable_config();
         let lead = config
@@ -10749,17 +10746,17 @@ is_lead = false
             .collect();
         assert_eq!(
             writes.len(),
-            2,
-            "a muse lead's identity poke is a body write, then a chord write: {writes:?}"
+            1,
+            "a muse lead's identity poke is one write: {writes:?}"
         );
         assert!(
-            writes[0].starts_with("# Team work")
-                && writes[0].contains("You are @@Lead")
-                && writes[0].ends_with('\n')
-                && !writes[0].contains('\r'),
-            "the body write carries the prompt and no chord: {writes:?}"
+            writes[0].starts_with("\x1b[200~# Team work") && writes[0].contains("You are @@Lead"),
+            "the muse lead body starts inside bracketed paste: {writes:?}"
         );
-        assert_eq!(writes[1], "\r", "the chord write is the bare CR");
+        assert!(
+            writes[0].ends_with("\n\x1b[201~\r"),
+            "the muse lead submits after the bracketed paste: {writes:?}"
+        );
     }
 
     // The open_survey frame must carry the target tab as camelCase
