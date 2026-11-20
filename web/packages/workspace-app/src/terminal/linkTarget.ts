@@ -8,7 +8,8 @@ import { isOpenableExternalUrl } from "../editor/external_links";
 // A target with a scheme other than `file:` is a web link, opened through the
 // editor's external-open gate. A `file:` URI, an absolute path and a relative
 // path are file links. `cs open` typed in the terminal's shell is the model:
-// a relative path resolves against the shell's directory, and a `file:` URI
+// a relative path resolves against the shell's directory, a path starting
+// `~/` names the home of the user the server runs as, and a `file:` URI
 // is a path on the machine that wrote it, so one naming another host than the
 // server's is refused rather than opened somewhere it does not live. Nothing
 // is stripped from a path: the open path takes no line number, so a `:12` or
@@ -26,7 +27,8 @@ export type TerminalLinkTarget =
       kind: "file";
       /// The path: a `file:` URI's decoded path, or the target as written.
       path: string;
-      /// Whether `path` resolves against the shell's directory.
+      /// Whether `path` resolves against the shell's directory. A path that
+      /// starts `~/` does not: the open expands it against the server's home.
       relative: boolean;
       /// Why the editor does not open it, or null when it may.
       refusal: string | null;
@@ -50,7 +52,13 @@ export function classifyTerminalLink(target: string, serverHost: string | null):
       refusal: isOpenableExternalUrl(text) ? null : `${scheme}: links do not open in a browser`,
     };
   }
-  return { kind: "file", path: text, relative: !text.startsWith("/"), refusal: null };
+  return { kind: "file", path: text, relative: !text.startsWith("/") && !isHomePath(text), refusal: null };
+}
+
+/// Whether `path` names the home directory (`~` alone, or `~/` and a path
+/// under it). `~user` names another user's home and is not one.
+export function isHomePath(path: string): boolean {
+  return path === "~" || path.startsWith("~/");
 }
 
 /// The host of a `file:` URI that names another machine, or null for one on

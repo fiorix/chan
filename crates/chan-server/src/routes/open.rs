@@ -15,8 +15,10 @@
 //!
 //! `must_exist` is the terminal link menu's mode: a path that does not exist
 //! answers 404 `{error}` before anything is routed or created, so a link opens
-//! what is there or nothing. `cs open` and the launcher's Open leave it off
-//! and keep creating a missing file.
+//! what is there or nothing, and a target starting `~/` (or `~` alone) names
+//! the home of the user the server runs as, which the link's shell would
+//! have expanded. `cs open` and the launcher's Open leave it off and keep
+//! creating a missing file.
 //!
 //! Mounted on the OPEN workspace-tenant api block (tunnel-reachable)
 //! DELIBERATELY: a tunnel caller gains no new capability class here. Every
@@ -45,7 +47,8 @@ use crate::state::AppState;
 /// Body of `POST /api/open` (Contract C). `window_id` is the submitting
 /// window (`sessionWindowId()` in the SPA). `target` is a workspace-relative
 /// or absolute path, or a serialized `chan://graph?...` link. `must_exist`
-/// refuses a missing path instead of creating it; absent, it is false.
+/// refuses a missing path instead of creating it and expands a leading `~/`
+/// against the server's home; absent, it is false.
 #[derive(Deserialize)]
 pub struct OpenRequest {
     pub window_id: String,
@@ -91,8 +94,20 @@ pub async fn api_open(
         Err(e) => return crate::error::err_state(&e),
     };
     // Relative targets resolve against the workspace root (the launcher has
-    // no cwd, unlike `cs open`); absolute ones pass verbatim.
-    let requested = PathBuf::from(&target);
+    // no cwd, unlike `cs open`); absolute ones pass verbatim. A link's `~/`
+    // is the home of the user the server runs as, as its shell would read it.
+    let requested = match home_relative(&target).filter(|_| req.must_exist) {
+        Some(rest) => match dirs::home_dir() {
+            Some(home) => home.join(rest),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "the server has no home directory to expand ~ against".into(),
+                );
+            }
+        },
+        None => PathBuf::from(&target),
+    };
     let requested = if requested.is_absolute() {
         requested
     } else {
@@ -159,6 +174,17 @@ pub async fn api_open(
         Ok(Ok(message)) => ok_message(message),
         Ok(Err(error)) => err(StatusCode::BAD_REQUEST, error),
         Err(failed) => failed.into_response(),
+    }
+}
+
+/// The part of `target` under the home directory when it starts with `~/` or
+/// is `~` alone; None otherwise. `~user` names another user's home, which
+/// the server does not look up, so it stays a relative name.
+fn home_relative(target: &str) -> Option<&str> {
+    if target == "~" {
+        Some("")
+    } else {
+        target.strip_prefix("~/")
     }
 }
 
@@ -409,6 +435,30 @@ mod tests {
         let (status, body) = post_open_existing(router, path.to_str().unwrap()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], guidance(&path));
+    }
+
+    #[tokio::test]
+    async fn must_exist_reads_a_tilde_as_the_server_home() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let name = format!("chan-open-test-missing-{}.md", std::process::id());
+        let (status, body) = post_open_existing(router, &format!("~/{name}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let home = dirs::home_dir().expect("a home directory");
+        assert_eq!(
+            body["error"],
+            format!("not found: {}", home.join(&name).display())
+        );
+        assert!(!root.path().join("~").exists(), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[test]
+    fn home_relative_takes_a_leading_tilde_alone() {
+        assert_eq!(home_relative("~/notes/a.md"), Some("notes/a.md"));
+        assert_eq!(home_relative("~"), Some(""));
+        assert_eq!(home_relative("~other/a.md"), None);
+        assert_eq!(home_relative("./~/a.md"), None);
+        assert_eq!(home_relative("/home/me/a.md"), None);
     }
 
     #[tokio::test]

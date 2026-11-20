@@ -4,15 +4,18 @@ import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte"
 import { setTransientStatus } from "../state/store.svelte";
 import { openBrowserInActivePane, openInActivePane } from "../state/tabs.svelte";
 import { windowCaps } from "../state/windowCaps";
+import { isHomePath } from "./linkTarget";
 
 // The terminal link menu's "Open in editor", by what the window can open.
 // A workspace window opens through `POST /api/open` in its must-exist mode:
 // `cs open` semantics (a directory opens the file browser, text the editor, a
 // path outside the workspace routes to the window that serves it) except
-// that a missing file is refused, not created. A standalone terminal window
+// that a missing file is refused, not created, and a leading `~/` is the
+// server's home, which the route expands. A standalone terminal window
 // mounts no `/api/open`; one that browses the server's files opens the path
-// through its own file surface, after the same existence check. A window
-// with no files opens nothing.
+// through its own file surface, after the same existence check, with `~/`
+// taken from the home its file context names. A window with no files opens
+// nothing.
 
 const NOT_FOUND = "not found";
 
@@ -21,9 +24,9 @@ export function editorRefusalForWindow(): string | null {
   return windowCaps.workspace || windowCaps.files ? null : "this window opens no files";
 }
 
-/// Open the absolute `path` in this window as `cs open` would, refusing a
-/// missing one. Resolves to the reason it was refused, or null once the open
-/// is on its way.
+/// Open the absolute or home (`~/`) `path` in this window as `cs open`
+/// would, refusing a missing one. Resolves to the reason it was refused, or
+/// null once the open is on its way.
 export async function openTerminalFileInEditor(path: string): Promise<string | null> {
   const refusal = editorRefusalForWindow();
   if (refusal) return refusal;
@@ -37,7 +40,11 @@ export async function openTerminalFileInEditor(path: string): Promise<string | n
     }
   }
   const context = filesContext.current;
-  const wire = context ? wirePathFromAbsolute(context, path.replace(/\\/g, "/")) : null;
+  const wire = !context
+    ? null
+    : isHomePath(path)
+      ? [context.homeWire, path.slice(2).replace(/\/+$/, "")].filter(Boolean).join("/")
+      : wirePathFromAbsolute(context, path.replace(/\\/g, "/"));
   if (wire === null) return "outside the files this window opens";
   if (wire === "") {
     openBrowserInActivePane({ select: "" });

@@ -47,13 +47,20 @@ describe("classifyTerminalLink", () => {
     expect(needsServerHost("file://localhost/srv/notes.md")).toBe(false);
   });
 
-  test("a bare path is a file link, relative unless it starts at the root", () => {
+  test("a bare path is a file link, relative unless it starts at the root or the home", () => {
     expect(classifyTerminalLink("/etc/hosts", HOST)).toEqual({
       kind: "file",
       path: "/etc/hosts",
       relative: false,
       refusal: null,
     });
+    expect(classifyTerminalLink("~/notes/today.md", HOST)).toEqual({
+      kind: "file",
+      path: "~/notes/today.md",
+      relative: false,
+      refusal: null,
+    });
+    expect(classifyTerminalLink("~other/today.md", HOST)).toMatchObject({ relative: true });
     expect(classifyTerminalLink("./dev/notes.md:12", HOST)).toEqual({
       kind: "file",
       path: "./dev/notes.md:12",
