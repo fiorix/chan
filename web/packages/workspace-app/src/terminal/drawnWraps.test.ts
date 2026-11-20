@@ -5,7 +5,13 @@ import { GhosttyVt, ghosttyScrollbackText, VtTerminal } from "@chan/ghostty-web-
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { sessionRunsMuse } from "./drawnWraps";
-import { ghosttyCopyScrollback, installGhosttyClickExtents, installGhosttySelection } from "./ghosttySelection";
+import {
+  ghosttyCopyScrollback,
+  installGhosttyClickExtents,
+  installGhosttySelection,
+  lineAcrossWraps,
+  wordAcrossWraps,
+} from "./ghosttySelection";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const FIXTURES = "../../../scripts/e2e/browser-smoke/fixtures";
@@ -162,6 +168,32 @@ describe.each(DRAWS)("a command Muse drew across two rows ($name)", ({ bytes }) 
     expect(ghosttyCopyScrollback(term, false).split("\n").filter(Boolean)).toEqual([FIRST_ROW, SECOND_ROW]);
   });
 
+  test("a selection inside the second row reads that row alone", async () => {
+    const { term, select } = await museTerminal(bytes, true);
+    select([0, LINE_ROW + 1], [20, LINE_ROW + 1]);
+    expect(term.getSelection()).toBe(SECOND_ROW.slice(0, 21));
+  });
+
+  test("scrolled into the history, a double and a triple click still span both rows", async () => {
+    const { term, core, history, manager } = await museTerminal(bytes, true);
+    core.write(`\x1b[${ROWS};1H${"\n".repeat(ROWS)}`);
+    const first = history + LINE_ROW;
+    expect(core.getScrollbackLength(), "both rows are history rows").toBeGreaterThan(first + 1);
+    const cutWord = FIRST_ROW.length - FIRST_ROW.lastIndexOf(" ") - 1;
+    expect(wordAcrossWraps(core, COLS - 1, first, true)).toEqual({
+      start: { col: COLS - cutWord, absoluteRow: first },
+      end: { col: 2, absoluteRow: first + 1 },
+    });
+    const line = lineAcrossWraps(core, first + 1, true);
+    expect(line).toEqual({
+      start: { col: 0, absoluteRow: first },
+      end: { col: SECOND_ROW.length - 1, absoluteRow: first + 1 },
+    });
+    manager.selectionStart = line!.start;
+    manager.selectionEnd = line!.end;
+    expect(term.getSelection()).toBe(PREFIX + COMMAND);
+  });
+
   test("the reading follows the program in front: Muse gone, the break is back", async () => {
     const { term, muse, select } = await museTerminal(bytes, true);
     select(COMMAND_START, COMMAND_END);
@@ -182,6 +214,17 @@ describe("in a Muse session, rows that are not a cut line keep their breaks", ()
     click(3, 2, 1);
     expect(writes).toEqual(["next line"]);
     expect(ghosttyCopyScrollback(term, true)).toBe(`${RULE}\nnext line`);
+  });
+
+  test.each([
+    ["heavy", "\u2501".repeat(COLS)],
+    ["double", "\u2550".repeat(COLS)],
+    ["broken by spaces", `${"\u2500 ".repeat(COLS / 2 - 1)}\u2500\u2500`],
+  ])("a full-width %s rule over a line stays two lines", async (_, rule) => {
+    expect(rule.length).toBe(COLS);
+    const { term, select } = await museTerminal(`${rule}\r\nnext line`, true);
+    select([0, 0], [COLS - 1, 1]);
+    expect(term.getSelection()).toBe(`${rule}\nnext line`);
   });
 
   test("a line drawn to the last column over a rule stays two lines", async () => {

@@ -48,18 +48,18 @@ function rowText(core: VtTerminal, row: number, from: number, to: number): strin
 /// cell is read first, one formatter call, since reading a history row's
 /// cells costs a few wasm calls a cell and a whole-history copy asks this
 /// of every row; both whole rows are read only when that cell holds text.
+/// A row past the last reads empty, so it continues nothing.
 function drawnWrapAt(core: VtTerminal, row: number, cols: number): boolean {
   if (row < 1 || !rowText(core, row - 1, cols - 1, cols - 1)) return false;
   const above = rowText(core, row - 1, 0, cols - 1);
   const below = rowText(core, row, 0, cols - 1);
-  return !!above && !!below && !RULE.test(above) && !RULE.test(below);
+  return above !== null && !!below && !RULE.test(above) && !RULE.test(below);
 }
 
 /// Whether row `row` of the history and the screen, 0 the oldest history
 /// row, continues the row above it by a drawn wrap.
 export function drawnWrapAbove(core: VtTerminal, row: number): boolean {
-  const { cols, rows } = core.getDimensions();
-  return row < core.getScrollbackLength() + rows && drawnWrapAt(core, row, cols);
+  return drawnWrapAt(core, row, core.getDimensions().cols);
 }
 
 /// The text of `range` as a copy reads it (`VtTerminal.plainText`), with
@@ -70,16 +70,14 @@ export function drawnWrapAbove(core: VtTerminal, row: number): boolean {
 /// Null when the range holds no drawn wrap or the core cannot format a
 /// piece, for the caller's own read.
 export function textAcrossDrawnWraps(core: VtTerminal, range: TextRange): string | null {
-  const { cols, rows } = core.getDimensions();
-  const history = core.getScrollbackLength();
+  const { cols } = core.getDimensions();
   const forwards =
     range.startRow < range.endRow || (range.startRow === range.endRow && range.startCol <= range.endCol);
   const start = forwards ? { col: range.startCol, row: range.startRow } : { col: range.endCol, row: range.endRow };
   const end = forwards ? { col: range.endCol, row: range.endRow } : { col: range.startCol, row: range.startRow };
-  const lastRow = Math.min(end.row, history + rows - 1);
   let text = "";
   let from = start;
-  for (let row = start.row + 1; row <= lastRow; row++) {
+  for (let row = start.row + 1; row <= end.row; row++) {
     if (!drawnWrapAt(core, row, cols)) continue;
     const piece = core.plainText({ startCol: from.col, startRow: from.row, endCol: cols - 1, endRow: row - 1 });
     if (piece === null) return null;
