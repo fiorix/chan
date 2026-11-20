@@ -21,6 +21,12 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+[tourrest]: v0.133.0/a-tour-part-the-pointer-crossed-stays-lit.md
+[tmuxcard]: v0.133.0/a-tmux-connections-card-lists-the-buried-terminal-that-ran-it.md
+[badgescroll]: v0.133.0/the-computers-badge-graph-sits-off-centre-and-moves-in-steps.md
+[termlinks]: v0.133.0/a-link-in-a-ghostty-terminal-underlines-on-hover-and-a-click-does-nothing.md
+[musebatch]: v0.133.0/messages-queued-for-a-muse-agent-arrive-one-per-turn.md
+[musecopy]: v0.133.0/a-command-a-muse-agent-prints-across-rows-copies-with-a-line-break-at-each-row.md
 [ghosttyng]: v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [streamlag]: v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
@@ -43,10 +49,16 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.133.0
 
-Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved here, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands.
+Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved here, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands. On 2026-11-20 the owner raised six rows, each built that day, reviewed with end-to-end checks red at the base and green at the tip, and merged into the integration branch: a tour part the pointer crossed stays lit ([tourrest]), a tmux connection's card lists its control terminal ([tmuxcard]), the Computers badge graph sits off centre and moves in steps ([badgescroll]), a click on a ghostty terminal's link does nothing ([termlinks]), messages queued for a Muse agent arrive one per turn ([musebatch]) and a command a Muse agent prints across rows copies with a break at each row ([musecopy]). A merged row whose acceptance is all read reads `closed`; one with a reading or a question left for the owner reads `owner`.
 
 | Item | State | Next |
 | --- | --- | --- |
+| [a crossed tour part stays lit][tourrest] | merged | owner |
+| [a tmux card lists its control terminal][tmuxcard] | merged | closed |
+| [the badge graph off centre, in steps][badgescroll] | merged | closed |
+| [a ghostty link click does nothing][termlinks] | merged | owner |
+| [Muse messages arrive one per turn][musebatch] | merged | closed |
+| [a Muse command copies with breaks][musecopy] | merged | closed |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 | [cap: three walks, no folder layer][capwalks] | not started | build |
