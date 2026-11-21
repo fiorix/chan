@@ -9,6 +9,7 @@
   import { DEFAULT_WAVE_SPEED } from "./lib/plasmaBackground";
   import SelectionBar from "./components/SelectionBar.svelte";
   import ScreenFlip from "./components/ScreenFlip.svelte";
+  import KeyBar from "./components/KeyBar.svelte";
   import Library from "./components/Library.svelte";
   import Gateways from "./components/Gateways.svelte";
   import NewWorkspaceDialog from "./components/NewWorkspaceDialog.svelte";
@@ -232,6 +233,10 @@
     </ScreenFlip>
   </main>
 
+  {#if hasDesktopBridge}
+    <KeyBar />
+  {/if}
+
   {#if !readOnly}
     <SelectionBar />
   {/if}
@@ -291,7 +296,9 @@
   }
 
   /* Equal space above and below centers the deck in the whole window. The
-     top bar occupies the upper space; the lower space clears the bulk bar. */
+     top bar occupies the upper space; the lower space clears the bulk bar and
+     holds the key bar along its bottom edge, inside the band's 4rem floor, so
+     the key bar takes none of the deck's height. */
   .launcher-surface.deck {
     display: grid;
     height: 100vh;
@@ -301,6 +308,11 @@
 
   .launcher-surface.deck > :global(.topbar) {
     align-self: start;
+  }
+
+  .launcher-surface.deck > :global(.key-bar) {
+    grid-row: 3;
+    align-self: end;
   }
 
   .content {

@@ -14,7 +14,6 @@
     <h2>All windows</h2>
     <span class="count">{rows.length}</span>
   </header>
-  <p class="hint">↑ ↓ rows · ← → controls · Enter focuses · h show/hide</p>
   {#if rows.length === 0}
     <p class="empty">No windows yet. Open one from a machine card.</p>
   {:else}
@@ -39,9 +38,8 @@
   .card-header { flex-shrink: 0; gap: 0.6rem; }
   h2 { font-size: 0.95rem; font-weight: 600; margin: 0; flex: 1; }
   .count { color: var(--text-secondary); font-size: 0.8rem; }
-  .hint, .empty { color: var(--text-secondary); font-size: 0.78rem; }
-  .hint { margin: 0.35rem 0 0.9rem; }
-  .windows { list-style: none; padding: 2px; margin: 0; overflow-y: auto; min-height: 0; }
+  .empty { color: var(--text-secondary); font-size: 0.78rem; }
+  .windows { list-style: none; padding: 2px; margin: 0.6rem 0 0; overflow-y: auto; min-height: 0; }
   li { border-radius: 8px; outline: none; }
   li + li { margin-top: 4px; }
   li:focus, li:focus-within { outline: 1px solid var(--launcher-focus-color, var(--brand)); outline-offset: -1px; }
