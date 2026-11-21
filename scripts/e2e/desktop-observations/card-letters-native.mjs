@@ -12,13 +12,13 @@
 //   nothing     with nothing focused, a key that reaches the page as a trusted
 //               keydown on the body: o asks for nothing and the card stays
 //               connected, and no card shows a ring.
+//   control     a press on a workspace row's button released off it, which
+//               activates nothing: the button holds focus with no ring of its
+//               own, and its row paints the one ring.
 //   row         a click on an empty point of a workspace row served on the
 //               devserver: the row holds focus and paints one ring, and t
 //               opens a window of that workspace, with no new terminal
 //               window, which is what the header's t would open.
-//   control     a press on a workspace row's button released off it, which
-//               activates nothing: the button holds focus with no ring of its
-//               own, and its row paints the one ring.
 //   terminal    from a clicked card, t opens a terminal window on that
 //               devserver, read from the devserver's own windows feed. A new
 //               native X window is recorded beside it and decides nothing.
@@ -468,6 +468,9 @@ async function controlLeg() {
   await blur();
   const before = await readControl();
   if (!before?.point) throw new SetupNotRun("the workspace row's button was not found");
+  // A row that held focus while its t raised another window can keep its
+  // computed ring through a scripted blur, so this leg runs before that one.
+  if (before.rowsWithRing !== 0 || before.cardsWithRing !== 0) throw new SetupNotRun(`a ring survived the blur: ${JSON.stringify(before)}`);
   const windows = (await devserverWindows()).map((window) => window.window_id);
   await xdo("windowactivate", "--sync", host, "mousemove", Math.round(before.point.x + offset.dx), Math.round(before.point.y + offset.dy));
   await sleep(150);
@@ -502,7 +505,7 @@ async function terminalLeg() {
   return verdict(true, { window: opened.fresh, nativeNew });
 }
 
-const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["row", rowLeg], ["control", controlLeg], ["terminal", terminalLeg]];
+const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["control", controlLeg], ["row", rowLeg], ["terminal", terminalLeg]];
 let status = 3;
 try {
   await setup();
