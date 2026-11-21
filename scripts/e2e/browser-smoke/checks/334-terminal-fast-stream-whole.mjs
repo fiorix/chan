@@ -1,5 +1,6 @@
-// `seq 1 400000` through a ghostty terminal in headless Chrome arrives whole.
-// The check reads every byte the page's socket handed to the app and walks
+// `seq 1 400000` through a ghostty terminal that falls behind arrives whole,
+// in headless Chrome with the page's CPU throttled 20 times: unthrottled, the
+// page keeps up with this load and the check would prove nothing. It reads every byte the page's socket handed to the app and walks
 // the numbers in order, then reads what the terminal itself retains: its
 // history and screen must be consecutive numbers ending at the last one, with
 // no lag line and no missed-bytes line. It says nothing about WebKit or the
@@ -16,6 +17,7 @@ const NAME = "FastStream334";
 const COUNT = 400_000;
 const BEGIN = "__SEQ334_BEGIN__";
 const END = "__SEQ334_END__";
+const CPU_THROTTLE = 20;
 
 export default {
   name: "terminal-fast-stream-whole",
@@ -42,6 +44,7 @@ export default {
       await openAttachedTerminal(ctx, page, cs, windowId, NAME, "ghostty", ["--command", command]);
       const read = () => page.evaluate((name) => __streamProbe.read(name), NAME);
       await until("the terminal socket is ready", read, (state) => state?.ready);
+      await page.emulateCPUThrottling(CPU_THROTTLE);
       await page.evaluate((name, begin, count, end) => {
         __streamProbe.verifySeq(name, begin, count, end);
         __streamProbe.input(name, "\r");
@@ -49,6 +52,7 @@ export default {
 
       const finished = await until("the stream reaches its end marker", read,
         (state) => state.verifier.done || state.verifier.mismatch || state.errors.length > 0, 240_000);
+      await page.emulateCPUThrottling(null);
       assert.deepEqual(finished.errors, [], "the terminal prints no lag line");
       assert.equal(finished.verifier.mismatch, null, "every number arrives once and in order");
       assert.equal(finished.verifier.lines, COUNT, "the page handled the whole sequence");
@@ -65,8 +69,11 @@ export default {
       }
       assert.equal(numbers.at(-1), COUNT, "the retained text ends at the last number");
       await ctx.shot("334-whole-stream");
-      return { lines: finished.verifier.lines, retainedLines: numbers.length, acks: finished.acks };
+      return {
+        cpuThrottle: CPU_THROTTLE, lines: finished.verifier.lines, retainedLines: numbers.length, acks: finished.acks,
+      };
     } finally {
+      await page.emulateCPUThrottling(null).catch(() => {});
       await cs(["close", "--tab-name", NAME]).catch(() => {});
       await restoreTerminalPrefs(ctx, page, token, original);
     }
