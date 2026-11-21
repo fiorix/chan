@@ -72,6 +72,18 @@ function missedLines(term: { written: string[] }): string[] {
 }
 
 describe("same-socket stream recovery on xterm", () => {
+  test("an xterm view neither asks for an acknowledged stream nor reports one", async () => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    expect(new URL(socket.url, "http://localhost").searchParams.has("ack")).toBe(false);
+    await attach(socket, { id: SESSION });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await output(socket, "A".repeat(4096));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(frames(socket, "ack")).toEqual([]);
+  });
+
   test("cursor equals the frame seq, replay applies once, one missed line", async () => {
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     const { term } = await mountTerminal(TerminalTab, tab!);
