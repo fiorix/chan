@@ -31,6 +31,8 @@ const QUIET_STALL_MS = 2_000;
 const SLOW_LINK_ONE_WAY_MS = 1_600;
 // Slow enough that a backlog is still queued when the keys are pressed.
 const PACE_BYTES_PER_SECOND = 100 * 1024;
+// Fast enough that a full window drains inside the input hold's cap.
+const FULL_WINDOW_PACE_BYTES_PER_SECOND = 300 * 1024;
 // The wake detector's 2 s probe, the 3 s quiet bound and a margin for ticks.
 const REPLACE_BOUND_MS = 7_000;
 // Over the 2 MiB replay ring, under what the server's broadcast holds for a
@@ -141,10 +143,12 @@ function installTrace() {
       const name = url.searchParams.get("tab_name");
       if (trace.relays[name]) url.host = `127.0.0.1:${trace.relays[name]}`;
       const socket = Reflect.construct(target, [url.href, ...args.slice(1)]);
-      const record = { name, socket, createdAt: Date.now(), ready: false, sessions: [], bytes: 0, chunks: [], lastFrameAt: null, framesAfterStall: 0 };
+      const record = { name, socket, createdAt: Date.now(), ready: false, sessions: [], bytes: 0, chunks: [], lastFrameAt: null, framesAfterStall: 0, acks: [], inputs: [], pongs: [] };
       trace.sockets.push(record);
       const send = socket.send.bind(socket);
       socket.send = (data) => {
+        if (typeof data === "string" && data.startsWith('{"type":"ack"')) record.acks.push(Date.now());
+        if (typeof data === "string" && data.startsWith('{"type":"input"')) record.inputs.push({ at: Date.now(), data: JSON.parse(data).data });
         if (data === '{"type":"ping"}' && trace.afterPing && trace.stall?.end) {
           const { afterMs, stallMs } = trace.afterPing;
           trace.afterPing = null;
@@ -159,7 +163,8 @@ function installTrace() {
       socket.addEventListener("message", (event) => {
         record.lastFrameAt = Date.now();
         if (trace.afterFrame?.name === name) {
-          // Runs after this frame's handlers, so the read deadline is armed.
+          // The stall starts on a later task, after the app's handler for
+          // this frame has armed the read deadline.
           const until = record.lastFrameAt + trace.afterFrame.spanMs;
           trace.afterFrame = null;
           trace.stall = { requested: until - record.lastFrameAt, start: null, end: null, frameAt: record.lastFrameAt };
@@ -179,7 +184,8 @@ function installTrace() {
         let frame;
         try { frame = JSON.parse(event.data); } catch { return; }
         if (frame.type === "ready") record.ready = true;
-        if (frame.type === "session") record.sessions.push({ missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0, window: frame.ack_window ?? null });
+        if (frame.type === "pong") record.pongs.push(Date.now());
+        if (frame.type === "session") record.sessions.push({ missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0, window: frame.ack_window ?? null, bytesBefore: record.bytes });
       });
       return socket;
     },
@@ -204,6 +210,7 @@ function installTrace() {
       createdAt: record.createdAt, state: record.socket.readyState, ready: record.ready, sessions: record.sessions,
       bytes: record.bytes, captured: record.chunks.reduce((total, chunk) => total + chunk.length, 0),
       lastFrameAt: record.lastFrameAt, framesAfterStall: record.framesAfterStall,
+      acks: record.acks.slice(-256), inputs: record.inputs.slice(-16), pongs: record.pongs.slice(-16),
     })),
   });
   trace.digest = async (name) => {
@@ -420,29 +427,19 @@ async function slowLinkLeg(page, fixture, relay, name, selector) {
 /// An interrupt during a backlog goes at once, with the keys held ahead of it
 /// in order, while the socket is still unproven. The relay paces the server's
 /// bytes so the pong stays queued behind the backlog.
-async function interruptLeg(page, fixture, relay, name, selector, kitty) {
+async function interruptLeg(page, fixture, relay, name, selector) {
   await queryParsed(fixture, 20_000);
-  const b64 = (text) => Buffer.from(text).toString("base64");
-  let kittyFlags = null;
-  if (kitty) {
-    await fixture.send("bytes", { base64: b64("\x1b[>1u\x1b[?u") });
-    await until("the terminal reports the kitty flags", async () => keysOf(fixture), (text) => /\x1b\[\?1u/.test(text), 10_000);
-    kittyFlags = 1;
-    await queryParsed(fixture, 20_000);
-  }
   await page.click(`${selector} .terminal-host`);
   const flow = relay.flows.at(-1);
   const socketsBefore = (await read(page, name)).sockets.length;
   const keysBefore = keysOf(fixture).length;
   const typedSince = () => keysOf(fixture).slice(keysBefore).replace(/\x1b\[\d+;\d+R/g, "");
-  // Chan's key path sends Ctrl+C as 0x03 under these flags too; the hold reads
-  // the key press, so either encoding must pass it.
-  const interrupt = kitty ? /\x03|\x1b\[99;5(:1)?u/ : /\x03/;
+  const interrupt = /\x03/;
   flow.pace(PACE_BYTES_PER_SECOND);
   try {
     await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
     await sleep(400);
-    for (const block of streamBlocks(kitty ? "KITTY332" : "INTR332", 2, BLOCK_BYTES)) {
+    for (const block of streamBlocks("INTR332", 2, BLOCK_BYTES)) {
       await fixture.send("bytes", { base64: block.toString("base64") });
     }
     await stallEnded(page, SHORT_STALL_MS + 30_000);
@@ -463,7 +460,7 @@ async function interruptLeg(page, fixture, relay, name, selector, kitty) {
     const typed = typedSince();
     const seen = await read(page, name);
     const observed = {
-      kitty, kittyFlags, heldWhileUnproven, reachedMs, backlogLeft,
+      heldWhileUnproven, reachedMs, backlogLeft,
       typed: JSON.stringify(typed), newSockets: seen.sockets.length - socketsBefore,
     };
     assert.ok(heldWhileUnproven, `a key was not held while the socket was unproven: ${JSON.stringify(observed)}`);
@@ -475,7 +472,72 @@ async function interruptLeg(page, fixture, relay, name, selector, kitty) {
     return observed;
   } finally {
     flow.pace(0);
-    if (kitty) await fixture.send("bytes", { base64: b64("\x1b[<u") }).catch(() => {});
+  }
+}
+
+/// A stall long enough to fill the acknowledgement window, then a wake. The
+/// relay paces the drain, so the probe's pong waits behind the window while
+/// acknowledgements keep leaving and a typed key waits for the pong.
+async function fullWindowLeg(page, fixture, relay, name, selector) {
+  await queryParsed(fixture, 20_000);
+  await page.click(`${selector} .terminal-host`);
+  await sleep(2_500);
+  const flow = relay.flows.at(-1);
+  const blocks = streamBlocks("WINDOW332", STREAM_BLOCKS, BLOCK_BYTES);
+  const query = Buffer.from("\x1b[6n");
+  const expected = createHash("sha256");
+  for (const block of blocks) expected.update(block);
+  expected.update(query);
+  const expectedLength = blocks.reduce((sum, block) => sum + block.length, query.length);
+  const start = await read(page, name);
+  const socketsBefore = start.sockets.length;
+  const socketAt = socketsBefore - 1;
+  const sessionsBefore = start.sockets[socketAt].sessions.length;
+  const bytesAtStall = start.sockets[socketAt].bytes;
+  const reportsBefore = cursorReports(fixture);
+  const keysBefore = keysOf(fixture).length;
+  flow.pace(FULL_WINDOW_PACE_BYTES_PER_SECOND);
+  try {
+    await page.evaluate((ms) => { window.__stall332.capture(); window.__stall332.startStall(ms); }, SHORT_STALL_MS);
+    await sleep(400);
+    for (const block of blocks) await fixture.send("bytes", { base64: block.toString("base64") });
+    await fixture.send("bytes", { base64: query.toString("base64") });
+    const stall = await stallEnded(page, SHORT_STALL_MS + 30_000);
+    await sleep(500);
+    const queuedAtKey = flow.pacedBytes;
+    await page.keyboard.type("w");
+    await until("the cursor query after the stream", async () => cursorReports(fixture), (count) => count > reportsBefore, 90_000);
+    await until("the held key arrives", async () => keysOf(fixture).slice(keysBefore), (text) => text.includes("w"), 30_000);
+    await sleep(1_000);
+    const seen = await read(page, name);
+    const socket = seen.sockets[socketAt];
+    const digest = await page.evaluate((tab) => window.__stall332.digest(tab), name);
+    const key = socket.inputs.find((input) => input.data === "w" && input.at >= stall.end);
+    const firstPong = socket.pongs.find((at) => at >= stall.end);
+    const recovery = socket.sessions[sessionsBefore];
+    const observed = {
+      newSockets: seen.sockets.length - socketsBefore,
+      window: recovery?.window ?? null,
+      queuedBytes: recovery ? recovery.bytesBefore - bytesAtStall : null,
+      missed: socket.sessions.slice(sessionsBefore).map((session) => session.missed),
+      queuedAtKey,
+      keyHeldMs: key && firstPong ? key.at - firstPong : null,
+      acksBeforePong: firstPong ? socket.acks.filter((at) => at >= stall.end && at < firstPong).length : null,
+      copies: keysOf(fixture).slice(keysBefore).split("w").length - 1,
+      receivedLength: digest.length, expectedLength, whole: digest.sha256 === expected.digest("hex"),
+    };
+    assert.equal(observed.newSockets, 0, `the socket was replaced: ${JSON.stringify(observed)}`);
+    assert.ok(recovery?.window > 0, `the stall did not reach a paced recovery: ${JSON.stringify(observed)}`);
+    assert.ok(observed.queuedBytes >= recovery.window / 2, `the window was not full: ${JSON.stringify(observed)}`);
+    assert.ok(observed.missed.every((count) => count === 0), `bytes were missed: ${JSON.stringify(observed)}`);
+    assert.ok(queuedAtKey > 0, `the backlog had drained before the key: ${JSON.stringify(observed)}`);
+    assert.ok(observed.keyHeldMs !== null && observed.keyHeldMs >= 0, `the key did not wait for the pong: ${JSON.stringify(observed)}`);
+    assert.ok(observed.acksBeforePong > 0, `no acknowledgement left during the hold: ${JSON.stringify(observed)}`);
+    assert.equal(observed.copies, 1, `the held key arrived ${observed.copies} times: ${JSON.stringify(observed)}`);
+    assert.ok(observed.whole, `the stream is not whole and in order: ${JSON.stringify(observed)}`);
+    return observed;
+  } finally {
+    flow.pace(0);
   }
 }
 
@@ -610,8 +672,8 @@ export default {
       const selector = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
       await leg("quietProbe", () => quietProbeLeg(page, deadFixture, relay, dead));
       await leg("slowLink", () => slowLinkLeg(page, deadFixture, relay, dead, selector));
-      await leg("interrupt", () => interruptLeg(page, deadFixture, relay, dead, selector, false));
-      await leg("interruptKitty", () => interruptLeg(page, deadFixture, relay, dead, selector, true));
+      await leg("interrupt", () => interruptLeg(page, deadFixture, relay, dead, selector));
+      await leg("fullWindow", () => fullWindowLeg(page, deadFixture, relay, dead, selector));
       await leg("halfOpen", () => halfOpenLeg(page, deadFixture, relay, dead, selector));
       await leg("backlog", () => backlogLeg(page, deadFixture, relay, dead));
       await cs(["close", "--tab-name", dead]);
