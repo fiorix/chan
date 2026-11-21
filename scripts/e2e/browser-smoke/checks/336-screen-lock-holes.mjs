@@ -420,7 +420,11 @@ export default {
           assert.equal(r.fullscreenAfterTheme, null, "a theme change under the lock does not put the player in fullscreen");
           assert.equal(r.topAfterTheme, "lock", "the lock still paints over the player after the theme change");
           // A request made while the lock is up, as one racing the lock is.
+          // Refused, it would enter nothing, and the readings below would
+          // hold whatever the guard did. Puppeteer evaluates with a user
+          // gesture, which is the activation it spends.
           r.requestUnderLock = await page.evaluate((slide) => document.querySelector(slide).requestFullscreen().then(() => "entered", (error) => String(error)), SLIDE);
+          assert.equal(r.requestUnderLock, "entered", "precondition: the request under the lock enters fullscreen");
           r.fullscreenAfterRequest = await until("a fullscreen entered under the lock is left", fullscreen, (now) => now === null, 3000)
             .catch(async () => fullscreen());
           r.topAfterRequest = await topAtCentre();
