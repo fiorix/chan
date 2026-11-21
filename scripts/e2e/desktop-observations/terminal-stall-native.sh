@@ -22,9 +22,9 @@ workspace="$OBS_WORK/workspace-stall"
 mkdir -p "$workspace"
 printf '# Stall\n' > "$workspace/README.md"
 chan serve "$workspace" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive 'workspace handoff failed'
-workspace_xid() { obs_x_local_window_titled "$workspace"; }
-obs_wait 60 'native workspace window' workspace_xid
+obs_wait 60 'native workspace window' obs_x_local_window_titled "$workspace"
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval '/workspace-' "$1"; }
+# shellcheck disable=SC2329 # obs_wait runs it.
 page_answers() { page_eval 'document.readyState' | grep -q complete; }
 obs_wait 60 'native workspace inspector' page_answers
 CHAN_WINDOW_ID="$(page_eval "new URLSearchParams(location.search).get('w')" | tr -d '"')"
