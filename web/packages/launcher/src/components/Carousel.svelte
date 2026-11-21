@@ -409,7 +409,11 @@
     outline-offset: 2px;
   }
 
-  .slot :global([data-deck-row]:focus) {
+  /* A letter acts on the row around the focused control, and a control the
+     mouse focused draws no ring of its own, so the innermost row around it
+     draws the selection. A control with its own ring lights no row. */
+  .slot :global([data-deck-row]:focus),
+  .slot :global([data-deck-row]:has(:focus:not(:focus-visible)):not(:has([data-deck-row]:focus-within))) {
     outline: 1px solid var(--launcher-focus-color, var(--brand));
     outline-offset: -1px;
     border-radius: 8px;
