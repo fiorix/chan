@@ -1,0 +1,371 @@
+// A page whose main thread stalls past the wake threshold keeps a healthy
+// terminal socket: what the engine queued during the stall is parsed once and
+// in order, on the same socket, and nothing is replayed. A socket whose peer
+// stopped answering is still replaced, within a stated bound of its last
+// frame, even when a queued backlog keeps it busy for a while after the wake.
+// Ghostty only.
+
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
+import { join } from "node:path";
+import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
+import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+
+const WAKE_STALL_MS = 30_000;
+// Past the 45 s read deadline, whose timer is due while the page is stalled.
+const LONG_STALL_MS = 50_000;
+const SHORT_STALL_MS = 8_000;
+// The wake detector's 2 s probe, the 3 s quiet bound and a margin for ticks.
+const REPLACE_BOUND_MS = 7_000;
+// Over the 2 MiB replay ring, under what the server's broadcast holds for a
+// socket that is not reading, so a replaced socket shows a loss and a kept one
+// shows none.
+const STREAM_BLOCKS = 4;
+const BLOCK_BYTES = 700 * 1024;
+const NOTICE = "Reconnected. Input typed while disconnected may not have been sent.";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function streamBlocks(prefix, blocks, blockBytes) {
+  const out = [];
+  let row = 0;
+  for (let block = 0; block < blocks; block += 1) {
+    const lines = [];
+    let size = 0;
+    while (size < blockBytes) {
+      const line = `${prefix}:${String(row).padStart(8, "0")}\r\n`;
+      lines.push(line);
+      size += line.length;
+      row += 1;
+    }
+    out.push(Buffer.from(lines.join(""), "latin1"));
+  }
+  return out;
+}
+
+/// A TCP relay whose flows can go silent in both directions with their
+/// sockets left open, which is what a peer lost across a sleep looks like from
+/// the page: the socket reads OPEN, sends succeed and nothing comes back.
+async function startRelay(targetPort) {
+  const flows = [];
+  const server = createServer((client) => {
+    const upstream = connect({ host: "127.0.0.1", port: targetPort });
+    const flow = { client, upstream, dead: false, toClient: 0 };
+    flows.push(flow);
+    client.on("data", (chunk) => { if (!flow.dead) upstream.write(chunk); });
+    upstream.on("data", (chunk) => {
+      if (flow.dead) return;
+      flow.toClient += chunk.length;
+      client.write(chunk);
+    });
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => { if (!flow.dead) client.destroy(); });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  return {
+    port: server.address().port,
+    flows,
+    kill(flow) { flow.dead = true; },
+    async close() {
+      for (const flow of flows) { flow.client.destroy(); flow.upstream.destroy(); }
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+function installTrace() {
+  if (window.__stall332) return;
+  const Native = window.WebSocket;
+  const trace = window.__stall332 = { sockets: [], relays: {}, capturing: false, stall: null };
+  window.WebSocket = new Proxy(Native, {
+    construct(target, args) {
+      const url = new URL(args[0], location.href);
+      if (!url.pathname.endsWith("/api/terminal/ws")) return Reflect.construct(target, args);
+      const name = url.searchParams.get("tab_name");
+      if (trace.relays[name]) url.host = `127.0.0.1:${trace.relays[name]}`;
+      const socket = Reflect.construct(target, [url.href, ...args.slice(1)]);
+      const record = { name, socket, createdAt: Date.now(), ready: false, sessions: [], bytes: 0, chunks: [], lastFrameAt: null, framesAfterStall: 0 };
+      trace.sockets.push(record);
+      socket.addEventListener("message", (event) => {
+        record.lastFrameAt = Date.now();
+        if (trace.stall?.end && record.lastFrameAt >= trace.stall.end) record.framesAfterStall += 1;
+        if (typeof event.data !== "string") {
+          const bytes = new Uint8Array(event.data);
+          record.bytes += bytes.length;
+          if (trace.capturing) record.chunks.push(bytes);
+          return;
+        }
+        let frame;
+        try { frame = JSON.parse(event.data); } catch { return; }
+        if (frame.type === "ready") record.ready = true;
+        if (frame.type === "session") record.sessions.push({ missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0 });
+      });
+      return socket;
+    },
+  });
+  trace.restore = () => { window.WebSocket = Native; delete window.__stall332; };
+  trace.capture = () => {
+    trace.capturing = true;
+    for (const record of trace.sockets) record.chunks = [];
+  };
+  // Starts on its own task, so the evaluate that asks for it returns first.
+  trace.startStall = (ms) => {
+    trace.stall = { requested: ms, start: null, end: null };
+    setTimeout(() => {
+      trace.stall.start = Date.now();
+      while (Date.now() < trace.stall.start + ms) { /* hold the main thread */ }
+      trace.stall.end = Date.now();
+    }, 100);
+  };
+  trace.read = (name) => ({
+    stall: trace.stall,
+    sockets: trace.sockets.filter((record) => record.name === name).map((record) => ({
+      createdAt: record.createdAt, state: record.socket.readyState, ready: record.ready, sessions: record.sessions,
+      bytes: record.bytes, captured: record.chunks.reduce((total, chunk) => total + chunk.length, 0),
+      lastFrameAt: record.lastFrameAt, framesAfterStall: record.framesAfterStall,
+    })),
+  });
+  trace.digest = async (name) => {
+    const chunks = trace.sockets.filter((record) => record.name === name).flatMap((record) => record.chunks);
+    const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const whole = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) { whole.set(chunk, at); at += chunk.length; }
+    const hash = await crypto.subtle.digest("SHA-256", whole);
+    return { length: total, sha256: [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("") };
+  };
+}
+
+const read = (page, name) => page.evaluate((tab) => window.__stall332.read(tab), name);
+
+async function until(label, probe, accept, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  do {
+    last = await probe();
+    if (accept(last)) return last;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error(`${label}: ${JSON.stringify(last)}`);
+}
+
+const keysOf = (fixture) => Buffer.concat(fixture.records.filter((record) => record.type === "keys")
+  .map((record) => Buffer.from(record.base64, "base64"))).toString("latin1");
+const cursorReports = (fixture) => (keysOf(fixture).match(/\x1b\[\d+;\d+R/g) ?? []).length;
+
+/// The terminal answers a cursor query only once its parser reaches it, so
+/// the answer proves everything written ahead of the query was parsed.
+async function queryParsed(fixture, timeoutMs) {
+  const before = cursorReports(fixture);
+  await fixture.send("bytes", { base64: Buffer.from("\x1b[6n").toString("base64") });
+  await until("the terminal answers a cursor query", async () => cursorReports(fixture), (count) => count > before, timeoutMs);
+}
+
+async function stallEnded(page, timeoutMs) {
+  return until("the page stall ended", () => page.evaluate(() => window.__stall332.stall),
+    (stall) => stall?.end, timeoutMs);
+}
+
+async function openTab(ctx, page, cs, windowId, name, fixture) {
+  const spawnArgs = ["--command", `stty -opost -echo && ${fixture.command}`,
+    ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
+  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+  await fixture.ready();
+  await until("the terminal socket is ready", () => read(page, name), (seen) => seen.sockets.at(-1)?.ready, 30_000);
+  return row;
+}
+
+/// A stall under a fast stream, the stream written while the page is stalled.
+async function streamLeg(page, fixture, name, stallMs, prefix) {
+  await queryParsed(fixture, 20_000);
+  const blocks = streamBlocks(prefix, STREAM_BLOCKS, BLOCK_BYTES);
+  const query = Buffer.from("\x1b[6n");
+  const expected = createHash("sha256");
+  for (const block of blocks) expected.update(block);
+  expected.update(query);
+  const expectedLength = blocks.reduce((sum, block) => sum + block.length, query.length);
+  const reportsBefore = cursorReports(fixture);
+  await page.evaluate((ms) => { window.__stall332.capture(); window.__stall332.startStall(ms); }, stallMs);
+  await sleep(400);
+  for (const block of blocks) await fixture.send("bytes", { base64: block.toString("base64") });
+  await fixture.send("bytes", { base64: query.toString("base64") });
+  const stall = await stallEnded(page, stallMs + 60_000);
+  assert.ok(stall.end - stall.start >= stallMs, `the page was stalled for ${stall.end - stall.start} ms`);
+  let answered = true;
+  await until("the cursor query after the stream", async () => cursorReports(fixture), (count) => count > reportsBefore, 90_000)
+    .catch(() => { answered = false; });
+  // A replacement after the drain would still count against this leg.
+  await sleep(6_000);
+  const seen = await read(page, name);
+  const digest = await page.evaluate((tab) => window.__stall332.digest(tab), name);
+  const observed = {
+    stallMs: stall.end - stall.start,
+    answered,
+    sockets: seen.sockets.length,
+    sessionFrames: seen.sockets.flatMap((socket) => socket.sessions).length,
+    missed: seen.sockets.flatMap((socket) => socket.sessions).map((session) => session.missed),
+    expectedLength,
+    receivedLength: digest.length,
+    whole: digest.sha256 === expected.digest("hex"),
+  };
+  assert.equal(observed.sockets, 1, `the healthy socket was replaced: ${JSON.stringify(observed)}`);
+  assert.equal(observed.sessionFrames, 1, `the socket was reattached: ${JSON.stringify(observed)}`);
+  assert.deepEqual(observed.missed, [0], `bytes were reported missed: ${JSON.stringify(observed)}`);
+  assert.ok(observed.answered, `the parser never reached the end of the stream: ${JSON.stringify(observed)}`);
+  assert.equal(observed.receivedLength, expectedLength, `stream length: ${JSON.stringify(observed)}`);
+  assert.ok(observed.whole, `the stream is not whole and in order: ${JSON.stringify(observed)}`);
+  return observed;
+}
+
+/// An idle healthy terminal across a wake: nothing is sent to it and nothing
+/// about its connection changes.
+async function idleLeg(page, fixture, name) {
+  await queryParsed(fixture, 20_000);
+  const before = await read(page, name);
+  await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+  await stallEnded(page, SHORT_STALL_MS + 30_000);
+  await sleep(REPLACE_BOUND_MS);
+  const after = await read(page, name);
+  const notice = await page.evaluate((text) => document.body.innerText.includes(text), NOTICE);
+  const observed = {
+    socketsBefore: before.sockets.length, socketsAfter: after.sockets.length,
+    sessionsBefore: before.sockets.flatMap((socket) => socket.sessions).length,
+    sessionsAfter: after.sockets.flatMap((socket) => socket.sessions).length,
+    bytesBefore: before.sockets.at(-1).bytes, bytesAfter: after.sockets.at(-1).bytes, notice,
+  };
+  assert.equal(observed.socketsAfter, observed.socketsBefore, `an idle socket was replaced: ${JSON.stringify(observed)}`);
+  assert.equal(observed.sessionsAfter, observed.sessionsBefore, `an idle socket was reattached: ${JSON.stringify(observed)}`);
+  assert.equal(observed.bytesAfter, observed.bytesBefore, `an idle terminal received output: ${JSON.stringify(observed)}`);
+  assert.equal(observed.notice, false, "an idle terminal shows the Reconnected note");
+  await queryParsed(fixture, 20_000);
+  return observed;
+}
+
+/// A peer lost across a wake: the socket is replaced within the bound, a key
+/// typed into it before then is reported, and the terminal works afterward.
+async function halfOpenLeg(page, fixture, relay, name, selector) {
+  await queryParsed(fixture, 20_000);
+  await page.click(`${selector} .terminal-host`);
+  const before = (await read(page, name)).sockets.length;
+  const flow = relay.flows.at(-1);
+  relay.kill(flow);
+  await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+  const stall = await stallEnded(page, SHORT_STALL_MS + 30_000);
+  await page.keyboard.type("q");
+  const replaced = await until("the dead socket is replaced", () => read(page, name),
+    (seen) => seen.sockets.length > before && seen.sockets.at(-1).ready, 30_000);
+  const replacement = replaced.sockets.at(-1);
+  const replaceMs = replacement.createdAt - stall.end;
+  assert.ok(replaceMs <= REPLACE_BOUND_MS, `replaced ${replaceMs} ms after the stall, past the ${REPLACE_BOUND_MS} ms bound`);
+  const delivered = keysOf(fixture).includes("q");
+  const notice = await until("the lost key is reported", () => page.evaluate((text) => document.body.innerText.includes(text), NOTICE),
+    (shown) => shown || delivered, 5_000);
+  assert.ok(delivered || notice, "a key lost to the dead socket was neither delivered nor reported");
+  await page.keyboard.type("Z");
+  await fixture.waitFor((record) => record.type === "keys" && Buffer.from(record.base64, "base64").includes("Z"));
+  await queryParsed(fixture, 20_000);
+  return { replaceMs, delivered, notice };
+}
+
+/// A peer lost with a backlog already queued: the backlog drains, which is no
+/// proof the peer is there, and the socket is replaced within the bound of its
+/// last frame with nothing lost.
+async function backlogLeg(page, fixture, relay, name) {
+  await queryParsed(fixture, 20_000);
+  const before = (await read(page, name)).sockets.length;
+  const flow = relay.flows.at(-1);
+  const [block] = streamBlocks("BACKLOG332", 1, 400 * 1024);
+  const sentBefore = flow.toClient;
+  await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+  await sleep(400);
+  await fixture.send("bytes", { base64: block.toString("base64") });
+  await until("the relay forwarded the backlog", async () => flow.toClient - sentBefore, (sent) => sent >= block.length, 6_000);
+  relay.kill(flow);
+  await stallEnded(page, SHORT_STALL_MS + 30_000);
+  const replaced = await until("the socket behind the backlog is replaced", () => read(page, name),
+    (seen) => seen.sockets.length > before && seen.sockets.at(-1).ready, 30_000);
+  const old = replaced.sockets[before - 1];
+  const replacement = replaced.sockets.at(-1);
+  const afterLastFrameMs = replacement.createdAt - old.lastFrameAt;
+  assert.ok(old.framesAfterStall > 0, "the backlog drained after the stall");
+  assert.ok(afterLastFrameMs <= REPLACE_BOUND_MS, `replaced ${afterLastFrameMs} ms after its last frame, past the ${REPLACE_BOUND_MS} ms bound`);
+  assert.deepEqual(replacement.sessions.map((session) => session.missed), [0], "the redial reported missed bytes");
+  await queryParsed(fixture, 20_000);
+  return { drainedFrames: old.framesAfterStall, afterLastFrameMs };
+}
+
+export default {
+  name: "terminal-stall-keeps-socket",
+  async run(ctx) {
+    if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
+    const { page } = ctx;
+    await page.bringToFront();
+    const windowId = await page.evaluate(() => new URL(location.href).searchParams.get("w")?.trim()
+      || sessionStorage.getItem("chan.session.window")?.trim() || "");
+    assert.ok(windowId, "the check page has a window id");
+    await ctx.waitWindowLive(windowId);
+    const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+      cwd: ctx.workspaceDir,
+      env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
+      timeout: 90_000,
+    });
+    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+    const original = await readTerminalPrefs(page, token);
+    const result = {};
+    const pageErrors = [];
+    const onError = (error) => pageErrors.push(String(error));
+    page.on("pageerror", onError);
+    const fixtures = [];
+    const openTabs = new Set();
+    let relay;
+    const openFixture = async (label) => {
+      const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, `332-${label}-output.bin`), deadlineMs: 60_000 });
+      fixtures.push(fixture);
+      return fixture;
+    };
+    try {
+      await writeTerminalPrefs(page, token, { ghostty: true });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      await ctx.waitWindowLive(windowId);
+      await page.evaluate(installTrace);
+
+      const healthy = "Stall332";
+      const healthyFixture = await openFixture("healthy");
+      openTabs.add(healthy);
+      await openTab(ctx, page, cs, windowId, healthy, healthyFixture);
+      result.idle = await idleLeg(page, healthyFixture, healthy);
+      result.stream = await streamLeg(page, healthyFixture, healthy, WAKE_STALL_MS, "STALL332");
+      result.longStream = await streamLeg(page, healthyFixture, healthy, LONG_STALL_MS, "LONG332");
+      await cs(["close", "--tab-name", healthy]);
+      openTabs.delete(healthy);
+
+      relay = await startRelay(Number(new URL(ctx.serverUrl).port));
+      const dead = "Dead332";
+      await page.evaluate((tab, port) => { window.__stall332.relays[tab] = port; }, dead, relay.port);
+      const deadFixture = await openFixture("dead");
+      openTabs.add(dead);
+      const row = await openTab(ctx, page, cs, windowId, dead, deadFixture);
+      const selector = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
+      result.halfOpen = await halfOpenLeg(page, deadFixture, relay, dead, selector);
+      result.backlog = await backlogLeg(page, deadFixture, relay, dead);
+      await cs(["close", "--tab-name", dead]);
+      openTabs.delete(dead);
+      assert.deepEqual(pageErrors, []);
+    } finally {
+      writeFileSync(join(ctx.outDir, "332-result.json"), `${JSON.stringify({ result, pageErrors }, null, 2)}\n`);
+      page.off("pageerror", onError);
+      for (const name of openTabs) await cs(["close", "--tab-name", name]).catch(() => {});
+      await page.evaluate(() => window.__stall332?.restore()).catch(() => {});
+      await relay?.close().catch(() => {});
+      for (const fixture of fixtures) await fixture.close().catch(() => {});
+      await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
+    }
+  },
+};
