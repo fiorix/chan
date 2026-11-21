@@ -162,11 +162,14 @@ const LEGS = [
     async run(page) {
       const { x, y } = await namePoint(page, DIR);
       await page.touchscreen.tap(x, y);
+      // The second tap must land on a row of the folder, inside the guard's
+      // 400 ms, or the leg would prove nothing about that row.
+      await page.waitForFunction((x, y, dir) =>
+        document.elementFromPoint(x, y)?.closest('[role="option"]')?.title.includes(`${dir}/`),
+      { timeout: 350, polling: "raf" }, x, y, DIR);
       await page.touchscreen.tap(x, y);
       await waitDirectory(page, DIR);
       await sleep(700);
-      const under = await page.evaluate((x, y) => document.elementFromPoint(x, y)?.closest('[role="option"]')?.title ?? null, x, y);
-      assert.ok(under?.includes(`${DIR}/`), `a row of the folder lies under the finger: ${under}`);
       assert.deepEqual(await openFileTabs(page), [], "the second tap opened nothing");
     },
   },
@@ -225,6 +228,17 @@ const LEGS = [
       }));
       assert.ok(shape.height < 44, `a mouse row keeps its height: ${shape.height}`);
       if (shape.hasButton) assert.equal(shape.button, "none", "a mouse sees no menu button");
+      // A hovered menu row scales past the menu's box, so a mouse's menu must
+      // not be a scroller.
+      await row.click({ button: "right" });
+      await page.waitForSelector('.ctx[role="menu"]', { visible: true, timeout: 5_000 });
+      const menu = await page.$eval(".ctx", (el) => {
+        const style = getComputedStyle(el);
+        return { overflowY: style.overflowY, maxHeight: style.maxHeight };
+      });
+      assert.deepEqual(menu, { overflowY: "visible", maxHeight: "none" }, "a mouse's row menu keeps its box");
+      await page.keyboard.press("Escape");
+      await page.waitForSelector('.ctx[role="menu"]', { hidden: true, timeout: 5_000 });
       await row.click();
       await sleep(500);
       assert.deepEqual(await selectedNames(page), ["alpha.md"]);
