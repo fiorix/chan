@@ -553,6 +553,12 @@ async function halfOpenLeg(page, fixture, relay, name, selector) {
   // An earlier leg's last key gets its ping 1 s later. Answered first, so a
   // Reconnected note here can only be about this leg's key.
   await sleep(2_500);
+  // The latest round trip sets the probe's deadline, and an earlier leg's slow
+  // link or paced backlog can leave a long one, up to the 10 s cap. A heartbeat
+  // on the link as it is now gives this leg the 3 s floor its bound is about.
+  const lastPong = (await read(page, name)).sockets.at(-1).pongs.at(-1) ?? 0;
+  await until("a heartbeat on the settled link", () => read(page, name),
+    (seen) => (seen.sockets.at(-1).pongs.at(-1) ?? 0) > lastPong, 25_000);
   const before = (await read(page, name)).sockets.length;
   const flow = relay.flows.at(-1);
   relay.kill(flow);
