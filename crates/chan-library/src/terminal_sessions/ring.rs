@@ -54,7 +54,12 @@ impl RingBuffer {
         };
         let start_seq = end_seq.saturating_sub(replay.len() as u64);
         let mut ring = Self::new_at(cap, start_seq);
-        ring.push(replay);
+        // Eviction drops whole chunks, so a restored tail keeps the chunk size
+        // of the reads it came from: one long chunk would leave the ring
+        // whole at the first push past capacity.
+        for chunk in replay.chunks(super::PTY_READ_BYTES) {
+            ring.push(chunk);
+        }
         ring
     }
 

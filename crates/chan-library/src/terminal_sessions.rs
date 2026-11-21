@@ -9557,6 +9557,23 @@ mod tests {
     }
 
     #[test]
+    fn restored_ring_keeps_a_position_inside_the_window_past_its_first_eviction() {
+        let cap = 4 * PTY_READ_BYTES;
+        let replay: Vec<u8> = (0..cap).map(|i| (i % 251) as u8).collect();
+        let end = replay.len() as u64;
+        let mut ring = RingBuffer::new_with_replay(cap, end, &replay);
+        let inside_window = end - cap as u64 / 2;
+
+        ring.push(b"x");
+
+        let (tail, missed) = ring.snapshot_since(Some(inside_window));
+        assert_eq!(missed, 0, "one push past capacity evicts one read's worth");
+        let mut expected = replay[inside_window as usize..].to_vec();
+        expected.push(b'x');
+        assert_eq!(tail.concat(), expected);
+    }
+
+    #[test]
     fn restored_ring_without_replay_reports_pre_import_bytes_as_missed() {
         let ring = RingBuffer::new_with_replay(1024, 552, b"");
 
