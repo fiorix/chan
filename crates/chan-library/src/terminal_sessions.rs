@@ -6188,6 +6188,7 @@ impl Session {
         )
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
         self.attach_resuming_with_progress(Resume::Since(since), None)
     }
