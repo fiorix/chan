@@ -165,4 +165,22 @@ describe("same-socket stream recovery on xterm", () => {
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     expect(frames(socket, "input"), "a replayed query is answered nowhere").toEqual([]);
   });
+
+  test("a restart on the live socket answers the new shell's query", async () => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket, { id: SESSION, generation: 1 });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await output(socket, "\x1bc");
+    term.replyDuringWrite = CPR;
+    socket.sent.splice(0);
+
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 4, generation: 2, missed_bytes: 0, replay_bytes: 4,
+    });
+    await output(socket, "\x1b[6n");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(frames(socket, "input"), "the terminal never parsed this shell's output").toEqual([CPR]);
+  });
 });

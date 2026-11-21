@@ -1832,9 +1832,12 @@
         const priorId = tab.terminalSessionId;
         // A recovery on the live socket replays what the terminal never
         // parsed, like a redial's first frame: generated replies to the
-        // replay stay local in both cases.
+        // replay stay local in both cases. A restart on the live socket has
+        // a new generation: its replay is the new shell's first output, and
+        // the queries in it are waiting for an answer.
         const duplicateReplay =
-          (reattaching && !dialSawSession) || (dialSawSession && frame.id === priorId);
+          (reattaching && !dialSawSession) ||
+          (dialSawSession && frame.id === priorId && frame.generation === serverGeneration);
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
