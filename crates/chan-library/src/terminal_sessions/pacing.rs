@@ -13,8 +13,10 @@ const NO_PROGRESS_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct Pacing {
-    /// Half the ring. A read under credit is at most this long, so eviction
-    /// cannot reach a position this close to the end of the stream.
+    /// Half the ring. A read under credit is at most this long, so eviction,
+    /// which drops whole chunks, cannot reach a position this close to the
+    /// end of the stream. A ring under twice `PTY_READ_BYTES` can still hold
+    /// one longer chunk from before a view attached; a resume then counts it.
     window: u64,
     state: Mutex<State>,
     changed: Condvar,

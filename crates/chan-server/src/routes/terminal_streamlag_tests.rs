@@ -1802,6 +1802,11 @@ async fn only_the_known_ack_version_is_advertised_and_a_stray_ack_is_harmless() 
         frame.get("ack_window").is_none(),
         "unknown version: {frame}"
     );
+    let (_word, frame) = rig.attach_with("&ack=next").await;
+    assert!(
+        frame.get("ack_window").is_none(),
+        "unknown spelling: {frame}"
+    );
     let (mut plain, frame) = rig.attach().await;
     assert!(frame.get("ack_window").is_none(), "no ack key: {frame}");
     ack(&mut plain, number(&frame, "generation"), 1).await;

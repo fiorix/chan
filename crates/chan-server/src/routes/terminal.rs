@@ -49,8 +49,9 @@ pub struct TerminalQuery {
     since: Option<u64>,
     /// `1` when this client reports what it has parsed with `ack` frames. A
     /// server without this key ignores it and advertises no `ack_window`, so
-    /// the client then sends none.
-    ack: Option<u8>,
+    /// the client then sends none. A string, so that a later value is an
+    /// unknown version here and not a refused dial.
+    ack: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
     /// A hidden view's candidate may size only a PTY no client has sized yet.
@@ -565,7 +566,7 @@ pub async fn api_terminal_ws(
         // the marker and takes the capability-rooted branch above.
         None
     };
-    let flow = if query.ack == Some(1) {
+    let flow = if query.ack.as_deref() == Some("1") {
         OutputFlow::Acknowledged
     } else {
         OutputFlow::Unacknowledged
