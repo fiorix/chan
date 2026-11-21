@@ -187,10 +187,10 @@
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
     if (rowKey) {
       if (ownsArrows(target) || !(target instanceof Element) || target.closest("form, [role=dialog]")) return;
-      // Only the slot holding focus is the card selection, the state its ring
-      // draws. With focus on the page nothing is selected, and a letter must
-      // not connect or disconnect a machine with no ring on the screen.
-      const row = target === slot ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
+      // A letter acts on the selection the user can see: the card's ring is
+      // the slot's :focus-visible, the same reading its stylesheet makes.
+      const selected = target === slot && slot.matches(":focus-visible");
+      const row = selected ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
       if (!row || !slot.contains(row)) return;
       const button = rowControls(row).find((control) =>
         control instanceof HTMLButtonElement && control.dataset.deckKey === letter);

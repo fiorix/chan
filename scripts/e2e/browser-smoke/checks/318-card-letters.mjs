@@ -1,5 +1,5 @@
 // A row letter pressed on a Computers card selected as a whole, the card
-// itself holding focus, acts on the row Enter takes from the card, which on a
+// itself holding focus with its ring showing, acts on the row Enter takes from the card, which on a
 // devserver's card is its header: `t` asks for a terminal on that devserver
 // and `o` disconnects or connects it. With nothing selected it does nothing.
 // The built launcher runs on the desktop surface against this check's own
@@ -16,14 +16,20 @@
 //      stays on the card;
 //   4. nothing focused: with focus on the page, no dialog and the surface
 //      not inert, t and o ask for nothing;
-//   5. header row: t and o with the header row focused act as before;
-//   6. outside the deck: t and o with a top bar button focused ask for
+//   5. pointer: with the card focused by a mouse click on its empty body and
+//      no ring showing, t and o ask for nothing; the slot's :focus-visible as
+//      the keydown reads it is recorded, since an engine may set it there;
+//   6. header row: t and o with the header row focused act as before;
+//   7. outside the deck: t and o with a top bar button focused ask for
 //      nothing;
-//   7. dialog: with the devserver's edit dialog open the surface is inert
+//   8. dialog: with the devserver's edit dialog open the surface is inert
 //      and cannot hold focus on the card, so the letters are pressed with
 //      focus on the page, and ask for nothing;
-//   8. workspace row: t and o with the workspace row focused act on the
+//   9. workspace row: t and o with the workspace row focused act on the
 //      workspace, not on the devserver.
+// Every leg reaches the card and its rows as the owner does, by the keyboard:
+// an arrow turns the deck away and back, which focuses the card, and Down
+// walks to a row.
 // A leg's precondition failing is reported as a precondition, apart from
 // the leg's own red.
 //
@@ -175,23 +181,58 @@ async function focusAt(page) {
     const active = document.activeElement;
     if (!slot) return { at: "no card" };
     const front = slot.getAttribute("aria-current") === "true" && !slot.closest("[inert]");
-    if (active === slot) return { at: "card", front };
-    if (active === slot.querySelector(".machine-header")) return { at: "header", front };
-    if (active === slot.querySelector(".ws-head")) return { at: "workspace", front };
-    if (active === document.body) return { at: "page", front };
-    return { at: `${active?.tagName.toLowerCase()} ${active?.getAttribute("aria-label") ?? active?.className ?? ""}`, front };
+    const ring = Boolean(active?.matches(":focus-visible"));
+    if (active === slot) return { at: "card", front, ring };
+    if (active === slot.querySelector(".machine-header")) return { at: "header", front, ring };
+    if (active === slot.querySelector(".ws-head")) return { at: "workspace", front, ring };
+    if (active === document.body) return { at: "page", front, ring };
+    return { at: `${active?.tagName.toLowerCase()} ${active?.getAttribute("aria-label") ?? active?.className ?? ""}`, front, ring };
   }, DISCONNECT, CONNECT);
 }
 
-/// Focus the devserver card itself, its header row or its workspace row.
+const blur = (page) => page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+
+/// How many presses of Down take the selected card to each of its rows.
+const ROW_PRESSES = { card: 0, header: 1, workspace: 2 };
+
+/// Select the devserver's card, its header row or its workspace row by the
+/// keyboard: an arrow turns the deck away and another turns it back, which
+/// focuses the card with its ring, and Down walks its rows.
 async function focusOn(page, where) {
-  await page.evaluate((disconnect, connect, place) => {
-    const slot = document.querySelector(disconnect)?.closest(".slot") ?? document.querySelector(connect)?.closest(".slot");
-    const target = place === "card" ? slot : slot?.querySelector(place === "header" ? ".machine-header" : ".ws-head");
-    target?.focus({ preventScroll: true });
-  }, DISCONNECT, CONNECT, where);
+  try {
+    await blur(page);
+    const own = await page.$eval(DISCONNECT, (button) => button.closest(".slot").dataset.key);
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction((key) => document.querySelector('.slot[aria-current="true"]')?.dataset.key !== key, { timeout: 10_000 }, own);
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForFunction((key) => {
+      const slot = document.querySelector('.slot[aria-current="true"]');
+      return slot?.dataset.key === key && document.activeElement === slot;
+    }, { timeout: 10_000 }, own);
+    await showCarouselCard(page, DISCONNECT, 15_000);
+    for (let i = 0; i < ROW_PRESSES[where]; i += 1) await page.keyboard.press("ArrowDown");
+  } catch (error) {
+    throw new Precondition(`the keyboard did not reach the devserver's ${where}: ${error.message}`);
+  }
   const reading = await focusAt(page);
-  precondition(reading.at === where && reading.front, `focus is not on the devserver's ${where} in front: ${JSON.stringify(reading)}`);
+  precondition(reading.at === where && reading.front && reading.ring, `focus is not on the devserver's ${where} in front with its ring: ${JSON.stringify(reading)}`);
+}
+
+/// A point on the front card's body that is neither a row nor a control.
+function emptyCardPoint(disconnect) {
+  const slot = document.querySelector(disconnect)?.closest(".slot");
+  if (!slot) return null;
+  const box = slot.getBoundingClientRect();
+  for (let y = box.bottom - 12; y > box.top; y -= 8) {
+    for (const share of [0.5, 0.25, 0.75]) {
+      const x = box.left + box.width * share;
+      const element = document.elementFromPoint(x, y);
+      if (element && slot.contains(element) && !element.closest("[data-deck-row], button, a, input, select, textarea, label")) {
+        return { x, y, element: `${element.tagName.toLowerCase()}.${element.getAttribute("class") ?? ""}` };
+      }
+    }
+  }
+  return null;
 }
 
 const asked = (page) => page.evaluate(() => window.__asked318.slice());
@@ -210,6 +251,7 @@ async function press(page, letter) {
 /// The devserver connected, its workspace on and running, as the launcher
 /// renders them; a leg that failed half way is put back by the pointer.
 async function connected(page, backend) {
+  await page.waitForSelector(`${DISCONNECT}, ${CONNECT}`, { timeout: 15_000 });
   if (await page.$(CONNECT)) {
     await page.$eval(CONNECT, (button) => button.click());
     await page.waitForSelector(DISCONNECT, { timeout: 15_000 });
@@ -236,6 +278,11 @@ export default {
       await page.evaluateOnNewDocument(() => {
         const native = window.fetch.bind(window);
         window.__asked318 = [];
+        // Capture runs before the deck's handler, so this is the reading the
+        // handler makes of the key's target.
+        window.addEventListener("keydown", (event) => {
+          window.__keydown318 = { key: event.key, ring: event.target instanceof Element && event.target.matches(":focus-visible") };
+        }, true);
         window.fetch = (input, init = {}) => {
           const method = (init.method ?? "GET").toUpperCase();
           if (method !== "GET") {
@@ -261,7 +308,7 @@ export default {
         const reading = { asks: {} };
         result.legs[name] = reading;
         try {
-          await connected(page, backend);
+          await connected(page, backend).catch((error) => { throw new Precondition(`the devserver was not put back connected: ${error.message}`); });
           await body(reading);
           reading.passed = true;
           step(`${name} passed`);
@@ -320,6 +367,26 @@ export default {
         r.stillConnected = Boolean(await page.$(DISCONNECT));
         check(r.asks.t.length === 0 && r.asks.o.length === 0, `t and o with nothing focused asked for ${JSON.stringify(r.asks)}`);
         check(r.stillConnected, "the devserver is not shown connected after o with nothing focused");
+      });
+
+      await leg("pointerCard", async (r) => {
+        r.presses = [];
+        // t first: if a letter acts, o changes the card and t would have no
+        // button left to press. Each letter gets a click of its own, because
+        // a key press can turn the ring on for the next one.
+        for (const letter of ["t", "o"]) {
+          await blur(page);
+          const point = await page.evaluate(emptyCardPoint, DISCONNECT);
+          precondition(point, "the front card has no point that is neither a row nor a control");
+          await page.mouse.click(point.x, point.y);
+          const before = await focusAt(page);
+          precondition(before.at === "card" && before.front, `the mouse click on ${point.element} did not focus the card: ${JSON.stringify(before)}`);
+          precondition(before.ring === false, `the slot matches :focus-visible after a mouse click: ${JSON.stringify(before)}`);
+          const asks = await press(page, letter);
+          r.presses.push({ letter, point, before, atKeydown: await page.evaluate(() => window.__keydown318), asks });
+        }
+        const acted = r.presses.filter((reading) => reading.asks.length > 0);
+        check(acted.length === 0, `a mouse-focused card took a letter: ${JSON.stringify(acted.map(({ letter, asks, atKeydown }) => ({ letter, asks, ringAtKeydown: atKeydown?.ring })))}`);
       });
 
       await leg("headerRow", async (r) => {
