@@ -1,10 +1,10 @@
 // `seq 1 400000` through a ghostty terminal that falls behind arrives whole,
 // in headless Chrome with the page's CPU throttled 20 times: unthrottled, the
-// page keeps up with this load and the check would prove nothing. It reads every byte the page's socket handed to the app and walks
-// the numbers in order, then reads what the terminal itself retains: its
-// history and screen must be consecutive numbers ending at the last one, with
-// no lag line and no missed-bytes line. It says nothing about WebKit or the
-// xterm.js engine.
+// page keeps up with this load and the check would prove nothing. It reads
+// every byte the page's sockets handed to the app and walks the numbers in
+// order, then reads what the terminal itself retains: its history and screen
+// must be consecutive numbers ending at the last one, with no lag line and no
+// missed-bytes line. It says nothing about WebKit or the xterm.js engine.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -51,11 +51,12 @@ export default {
       }, NAME, BEGIN, COUNT, END);
 
       const finished = await until("the stream reaches its end marker", read,
-        (state) => state.verifier.done || state.verifier.mismatch || state.errors.length > 0, 240_000);
+        (state) => state.verifier.done || state.verifier.mismatch || state.allErrors.length > 0, 240_000);
       await page.emulateCPUThrottling(null);
-      assert.deepEqual(finished.errors, [], "the terminal prints no lag line");
+      assert.deepEqual(finished.allErrors, [], "the terminal prints no lag line");
       assert.equal(finished.verifier.mismatch, null, "every number arrives once and in order");
       assert.equal(finished.verifier.lines, COUNT, "the page handled the whole sequence");
+      assert.equal(finished.socketCount, 1, "the view kept its socket");
       assert.equal(finished.sessions.length, 1, "no recovery was needed");
 
       const retained = await readGhosttyText(page);

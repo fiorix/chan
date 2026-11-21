@@ -9,10 +9,15 @@ export function installStreamProbe() {
   const Native = globalThis.WebSocket;
   const setHandler = Object.getOwnPropertyDescriptor(Native.prototype, "onmessage").set;
   const sockets = [];
+  // A redial replays from the cursor, so one stream outlives its sockets.
+  const verifiers = new Map();
   const view = (entry) => ({
     name: entry.name, askedAck: entry.askedAck, handled: entry.handled, frames: entry.frames,
     acks: entry.acks, lastAck: entry.lastAck, sessions: entry.sessions, errors: entry.errors,
-    cursor: entry.cursor, ready: entry.ready, stalls: entry.stalls, verifier: entry.verifier?.state ?? null,
+    cursor: entry.cursor, ready: entry.ready, stalls: entry.stalls,
+    verifier: verifiers.get(entry.name)?.state ?? null,
+    socketCount: sockets.filter((other) => other.name === entry.name).length,
+    allErrors: sockets.filter((other) => other.name === entry.name).flatMap((other) => other.errors),
   });
   globalThis.WebSocket = class extends Native {
     constructor(url, protocols) {
@@ -22,7 +27,7 @@ export function installStreamProbe() {
       const entry = {
         peer: this, name: parsed.searchParams.get("tab_name"), askedAck: parsed.searchParams.get("ack"),
         handled: 0, frames: 0, acks: 0, lastAck: null, sessions: [], errors: [], cursor: null, ready: false,
-        stalls: [], verifier: null,
+        stalls: [],
       };
       sockets.push(entry);
       const send = this.send.bind(this);
@@ -44,7 +49,7 @@ export function installStreamProbe() {
               entry.handled += event.data.byteLength;
               entry.frames += 1;
               if (entry.ready) entry.cursor += event.data.byteLength;
-              entry.verifier?.push(new Uint8Array(event.data));
+              verifiers.get(entry.name)?.push(new Uint8Array(event.data));
             } else if (typeof event.data === "string") {
               let frame = null;
               try { frame = JSON.parse(event.data); } catch { /* not a control frame */ }
@@ -78,7 +83,7 @@ export function installStreamProbe() {
       const tail = encoder.encode(end);
       let want = head, at = 0;
       const line = () => encoder.encode(`${state.next}\r\n`);
-      find(name).verifier = {
+      verifiers.set(name, {
         state,
         push(bytes) {
           for (let index = 0; index < bytes.length && !state.done && !state.mismatch; index += 1) {
@@ -102,7 +107,7 @@ export function installStreamProbe() {
             }
           }
         },
-      };
+      });
     },
     /// Stop the page's main thread for `ms`, recording what it had handled.
     stall(name, ms) {
