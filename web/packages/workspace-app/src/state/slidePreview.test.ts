@@ -676,6 +676,26 @@ describe("the slide player under the screen lock", () => {
     expect(requestFullscreen).not.toHaveBeenCalled();
   });
 
+  test("a player opened under the lock leaves the keyboard on the lock", () => {
+    raiseLock();
+    lockRoot!.focus();
+    const handle = play();
+    expect(document.activeElement, "as it opens").toBe(lockRoot);
+    handle.close();
+    expect(document.activeElement, "as it closes").toBe(lockRoot);
+  });
+
+  test("a player closed under the lock does not refocus what it opened from", () => {
+    const opener = document.body.appendChild(document.createElement("button"));
+    opener.focus();
+    const handle = play();
+    raiseLock();
+    lockRoot!.focus();
+    handle.close();
+    expect(document.activeElement, "the lock keeps the keyboard").toBe(lockRoot);
+    opener.remove();
+  });
+
   test("on chan-desktop the native window still follows the deck's mode under the lock", async () => {
     const invoke = vi.fn(async () => undefined);
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: { invoke }, configurable: true });
