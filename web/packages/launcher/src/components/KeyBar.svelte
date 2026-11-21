@@ -5,8 +5,9 @@
   // the deck's keycap rule also sets its row shortcuts and its keys sheet, and
   // its shortcut column is measured in that face. The bar is a legend and holds
   // no control, so nothing in it takes focus, and a window too narrow for one
-  // line clips its end as the footer does. On the Gateways screen it lists the
-  // two letters that act there.
+  // line clips its end as the footer does. On the Gateways screen Enter
+  // activates, since it presses a row's first control and a gateway has no
+  // window to focus, and the letters are the two that act there.
   import { screen, type LauncherScreen } from "../state/screen.svelte";
 
   type KeyHint = { keys: readonly string[]; does: string };
@@ -23,6 +24,9 @@
       { keys: ["h"], does: "show/hide" },
     ],
     gateways: [
+      { keys: ["↑", "↓"], does: "rows" },
+      { keys: ["←", "→"], does: "controls" },
+      { keys: ["Enter"], does: "activates" },
       { keys: ["g"], does: "screens" },
       { keys: ["o"], does: "on/off" },
     ],
