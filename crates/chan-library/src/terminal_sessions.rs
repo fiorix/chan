@@ -54,8 +54,8 @@ mod tmux_gate;
 use bytes::{contains_subslice, VisibleScan};
 #[cfg(target_os = "linux")]
 pub use child_identity::{current_boot_id, process_start_time, RecordedChildIdentity};
-pub use pacing::OutputProgress;
 use pacing::Pacing;
+pub use pacing::{OutputFlow, OutputProgress};
 #[cfg(windows)]
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
@@ -1758,17 +1758,18 @@ impl AttachHandle {
         &self.id
     }
 
-    /// Opt this WebSocket into sent-byte pacing. Recapture the original replay
-    /// request and its subscription together before sending any prelude bytes.
-    /// Ordinary library and CLI attachments never hold the PTY reader.
-    pub fn with_output_progress(self) -> Self {
+    /// Track this WebSocket's output under `flow`. Recapture the original
+    /// replay request and its subscription together before sending any prelude
+    /// bytes. Only an acknowledging client holds the PTY reader; ordinary
+    /// library and CLI attachments have no lease at all.
+    pub fn with_output_progress(self, flow: OutputFlow) -> Self {
         if self.progress.is_some() {
             return self;
         }
         let attached = self
             .session
             .clone()
-            .attach_resuming_with_progress(self.resume, true);
+            .attach_resuming_with_progress(self.resume, Some(flow));
         attached.focus_epoch.store(
             self.focus_epoch.swap(0, Ordering::Relaxed),
             Ordering::Relaxed,
@@ -1776,7 +1777,7 @@ impl AttachHandle {
         attached
     }
 
-    /// The sent-byte lease, when this attachment opted into reader pacing.
+    /// The output lease, when this attachment is a tracked WebSocket.
     pub fn output_progress(&self) -> Option<OutputProgress> {
         self.progress.clone()
     }
@@ -1785,10 +1786,10 @@ impl AttachHandle {
     /// entry has gone. A live alternate screen keeps its raw delta here; callers
     /// append it without the fresh-attach reset and transfer focus ownership.
     pub fn replay_from(&self, seq: u64) -> Self {
-        let attached = self
-            .session
-            .clone()
-            .attach_resuming_with_progress(Resume::Live(seq), self.progress.is_some());
+        let attached = self.session.clone().attach_resuming_with_progress(
+            Resume::Live(seq),
+            self.progress.as_ref().map(OutputProgress::flow),
+        );
         attached.focus_epoch.store(
             self.focus_epoch.swap(0, Ordering::Relaxed),
             Ordering::Relaxed,
@@ -6190,13 +6191,13 @@ impl Session {
     }
 
     fn attach_resuming(self: Arc<Self>, resume: Resume) -> AttachHandle {
-        self.attach_resuming_with_progress(resume, false)
+        self.attach_resuming_with_progress(resume, None)
     }
 
     fn attach_resuming_with_progress(
         self: Arc<Self>,
         resume: Resume,
-        holding: bool,
+        flow: Option<OutputFlow>,
     ) -> AttachHandle {
         self.attach_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-util"))]
@@ -6252,7 +6253,7 @@ impl Session {
             let sent_seq = ring
                 .end_seq()
                 .saturating_sub(replay.iter().map(|chunk| chunk.len() as u64).sum::<u64>());
-            let ((rx, lifecycle_rx), progress) = self.pacing.subscribe(sent_seq, holding, || {
+            let ((rx, lifecycle_rx), progress) = self.pacing.subscribe(sent_seq, flow, || {
                 (self.output_tx.subscribe(), self.lifecycle_tx.subscribe())
             });
             let mut program_status_rx = output.status.published.subscribe();
@@ -6279,7 +6280,7 @@ impl Session {
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         #[cfg(any(test, feature = "test-util"))]
-        if holding {
+        if flow.is_some() {
             fire_attach_seam(&self.id, AttachSeam::AttachProgressAfterRingLock);
         }
         let generation = self.generation;

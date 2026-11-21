@@ -21,9 +21,9 @@ use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
-    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramReading, ProgramStatusSnapshot,
-    QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle, TerminalExit,
-    TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
+    AttachHandle, CloseReason, CreateError, CreateOptions, OutputFlow, ProgramReading,
+    ProgramStatusSnapshot, QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle,
+    TerminalExit, TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
     ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
@@ -47,6 +47,10 @@ pub struct TerminalQuery {
     h: Option<String>,
     session: Option<String>,
     since: Option<u64>,
+    /// `1` when this client reports what it has parsed with `ack` frames. A
+    /// server without this key ignores it and advertises no `ack_window`, so
+    /// the client then sends none.
+    ack: Option<u8>,
     cols: Option<u16>,
     rows: Option<u16>,
     /// A hidden view's candidate may size only a PTY no client has sized yet.
@@ -241,6 +245,12 @@ enum ClientFrame {
     /// double-delivery, or (removed=false) when it had already drained.
     #[serde(rename = "cancel-prompt")]
     CancelPrompt { id: String },
+    /// The cumulative raw output position this client has parsed into its
+    /// terminal, for a socket whose `session` frame advertised `ack_window`.
+    /// A position from another generation describes a previous PTY life and
+    /// is ignored.
+    #[serde(rename = "ack")]
+    Ack { generation: u64, seq: u64 },
     /// `{ "type": "ping" }` -- the terminal heartbeat, same vocabulary as the
     /// watcher socket's (`routes/ws.rs`). Answered with [`ServerFrame::Pong`]
     /// on this socket so a live-but-quiet tab keeps a frame flowing in each
@@ -334,6 +344,11 @@ enum ServerFrame {
         /// Ring bytes sent immediately after this frame, excluding the
         /// alternate-screen prelude and private-mode reassert.
         replay_bytes: usize,
+        /// The most output this socket leaves unacknowledged, present only
+        /// when the client dialed with `ack=1`. Its presence is what allows
+        /// the client to send `ack` frames.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ack_window: Option<u64>,
         bytes_since_focus: u64,
         /// MESSAGE depth of the shared write queue at attach time (a gemini
         /// text+chord pair counts once), so every (re)attach re-syncs the
@@ -550,7 +565,13 @@ pub async fn api_terminal_ws(
         // the marker and takes the capability-rooted branch above.
         None
     };
+    let flow = if query.ack == Some(1) {
+        OutputFlow::Acknowledged
+    } else {
+        OutputFlow::Unacknowledged
+    };
     let opts = TerminalWsOptions {
+        flow,
         session_id: query.session,
         since: query.since,
         size,
@@ -815,6 +836,7 @@ fn broadcast_response(state: &AppState, frame: Result<String, String>) -> Respon
 struct TerminalWsOptions {
     session_id: Option<String>,
     since: Option<u64>,
+    flow: OutputFlow,
     /// The spawn size: the query's, with the defaults for a dimension it
     /// leaves out.
     size: PtySize,
@@ -1279,7 +1301,7 @@ async fn terminal_ws(
         }
     };
     let mut shutdown_rx = state.shutdown_rx.clone();
-    session = session.with_output_progress();
+    session = session.with_output_progress(opts.flow);
     let mut socket = TerminalSocket::new(
         socket,
         state.clone(),
@@ -1335,7 +1357,9 @@ async fn terminal_ws(
         let progress = session
             .output_progress()
             .expect("terminal socket has output progress");
-        if recover || progress.needs_replay() || restarting {
+        // A view that fell behind recovers once its client has parsed what
+        // it was sent, so the replay never stacks on a stopped page's queue.
+        if restarting || ((recover || progress.needs_replay()) && progress.drained()) {
             let next = if restarting {
                 let Some(next) = state.terminal_sessions.attach_for_ws(session.id(), None) else {
                     break;
@@ -1344,7 +1368,7 @@ async fn terminal_ws(
                     .input
                     .focus
                     .is_some_and(|epoch| session.withdraw_focus(epoch));
-                let next = next.with_output_progress();
+                let next = next.with_output_progress(opts.flow);
                 socket.input.cancel_cwd();
                 socket.input.focus = if focused {
                     next.set_focused(true)
@@ -1353,7 +1377,7 @@ async fn terminal_ws(
                 };
                 next
             } else {
-                session.replay_from(progress.seq()).with_output_progress()
+                session.replay_from(progress.seq())
             };
             drop(progress);
             session = next;
@@ -1417,9 +1441,11 @@ async fn terminal_ws(
         let progress = session
             .output_progress()
             .expect("terminal socket has output progress");
-        if progress.needs_replay() {
+        let behind = recover || progress.needs_replay();
+        if behind && progress.drained() {
             continue;
         }
+        let may_send = !behind && progress.send_credit() != Some(0);
         #[cfg(all(test, unix))]
         program_status_tests::loop_gate(session.id()).await;
         tokio::select! {
@@ -1460,7 +1486,7 @@ async fn terminal_ws(
             message = futures::StreamExt::next(&mut socket.stream) => {
                 if socket.receive(&session, message).is_err() { break; }
             }
-            event = session.rx.recv() => {
+            event = session.rx.recv(), if may_send => {
                 match event {
                     Ok(event) => {
                         // A request received during the earlier reply batch
@@ -1577,15 +1603,15 @@ async fn send_attach_prelude(
         size
     };
     for chunk in &session.replay {
-        if socket
-            .send(session, Message::binary(chunk.clone()))
-            .await
-            .is_err()
-        {
-            return Err(());
-        }
-        if let Some(progress) = session.output_progress() {
-            progress.sent_output(chunk.len());
+        let mut rest = chunk.as_slice();
+        while !rest.is_empty() {
+            let credit = socket.output_credit(session).await?;
+            let (head, tail) = rest.split_at(rest.len().min(credit));
+            socket.send(session, Message::binary(head.to_vec())).await?;
+            if let Some(progress) = session.output_progress() {
+                progress.sent_output(head.len());
+            }
+            rest = tail;
         }
     }
     if !recovering
@@ -1662,6 +1688,9 @@ fn session_frame_with_pty(session: &AttachHandle, pty: Option<SessionPty>) -> Se
         generation: session.generation,
         missed_bytes: session.missed_bytes,
         replay_bytes: session.replay.iter().map(Vec::len).sum(),
+        ack_window: session
+            .output_progress()
+            .and_then(|progress| progress.ack_window()),
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
@@ -2706,6 +2735,7 @@ mod tests {
             generation: 3,
             missed_bytes: 0,
             replay_bytes: 7,
+            ack_window: None,
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
@@ -2732,6 +2762,7 @@ mod tests {
             generation: 0,
             missed_bytes: 0,
             replay_bytes: 0,
+            ack_window: None,
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],

@@ -103,6 +103,40 @@ impl TerminalSocket {
         }
     }
 
+    /// How many raw bytes the client's window allows now, waiting for an
+    /// acknowledgement when it is full. Input stays live during the wait. An
+    /// end of the session ends the wait with an error: the socket drops and
+    /// the client redials into the outcome the server retained.
+    pub(super) async fn output_credit(&mut self, session: &AttachHandle) -> Result<usize, ()> {
+        let Some(progress) = session.output_progress() else {
+            return Ok(usize::MAX);
+        };
+        let mut lifecycle = session.lifecycle_rx.clone();
+        let mut shutdown = self.state.shutdown_rx.clone();
+        loop {
+            match progress.send_credit() {
+                None => return Ok(usize::MAX),
+                Some(credit) if credit > 0 => return Ok(credit),
+                Some(_) => {}
+            }
+            if matches!(
+                &*lifecycle.borrow_and_update(),
+                Some(SessionLifecycle::Closed(_) | SessionLifecycle::Restarted)
+            ) {
+                return Err(());
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => return Err(()),
+                changed = lifecycle.changed() => changed.map_err(|_| ())?,
+                result = self.input.next_cwd() => self.input.complete_cwd(result)?,
+                message = self.stream.next() => {
+                    self.input.receive(&self.state, session, message)?;
+                }
+            }
+        }
+    }
+
     pub(super) async fn frame(
         &mut self,
         session: &AttachHandle,
@@ -346,6 +380,13 @@ impl InputState {
                 state
                     .last_activity
                     .store(now_unix_secs(), Ordering::Relaxed);
+            }
+            Ok(ClientFrame::Ack { generation, seq }) => {
+                if generation == session.generation {
+                    if let Some(progress) = session.output_progress() {
+                        progress.acknowledge(seq);
+                    }
+                }
             }
             Ok(ClientFrame::Ping) => {
                 self.reply(ServerFrame::Pong)?;

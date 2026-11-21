@@ -32,7 +32,10 @@ fn expected_suffix(alt_screen: bool, enabled: &[u16]) -> Vec<u8> {
 fn missed_live_tail_reconciles_every_mode_and_both_screen_targets() {
     for alt_screen in [false, true] {
         let session = test_session_with_ring(32);
-        let attached = session.clone().attach(None).with_output_progress();
+        let attached = session
+            .clone()
+            .attach(None)
+            .with_output_progress(OutputFlow::Acknowledged);
         session.record_output(b"\x1b[?1049;1000h");
         session.record_output(b"\x1b[?1049;1000l\x1b[?1006h");
         if alt_screen {
@@ -54,7 +57,10 @@ fn fresh_attach_keeps_the_enables_only_prelude() {
 
 fn assert_lossless_live_sequence(prefix: &[u8], continuation: &[u8]) {
     let session = test_session_with_ring(1024);
-    let attached = session.clone().attach(None).with_output_progress();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     session.record_output(b"\x1b[?2004h");
     session.record_output(prefix);
     let mut recovered = attached.replay_from(0);
@@ -97,7 +103,10 @@ fn missed_tail_mouse_enables_follow_every_competing_reset() {
     for protocol in [9, 1000, 1002, 1003] {
         for encoding in [1006, 1016] {
             let session = test_session_with_ring(32);
-            let attached = session.clone().attach(None).with_output_progress();
+            let attached = session
+                .clone()
+                .attach(None)
+                .with_output_progress(OutputFlow::Acknowledged);
             session.record_output(format!("\x1b[?{protocol};{encoding}h").as_bytes());
             session.record_output(&[b'x'; 40]);
             let recovered = attached.replay_from(0);

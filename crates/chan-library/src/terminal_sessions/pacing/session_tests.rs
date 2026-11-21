@@ -28,7 +28,10 @@ fn reader_caps_reads_at_the_holding_views_half_ring(imported: bool) {
     }
     {
         let session = test_session_with_ring(1024);
-        let _attached = session.clone().attach(None).with_output_progress();
+        let _attached = session
+            .clone()
+            .attach(None)
+            .with_output_progress(OutputFlow::Acknowledged);
         let mut probe = Probe { sizes: Vec::new() };
         let running = ReaderRunning::start(&session);
         session.read_output(&mut probe, running, imported, &Arc::new(Mutex::new(None)));
@@ -45,7 +48,7 @@ fn progress_recaptures_original_resume_and_counts_only_sent_raw_bytes() {
     session.record_output(b"abcd");
     let attached = session.clone().attach(Some(2));
     session.record_output(b"ef");
-    let attached = attached.with_output_progress();
+    let attached = attached.with_output_progress(OutputFlow::Acknowledged);
     assert_eq!(attached.replay.concat(), b"cdef");
     let progress = attached.output_progress().expect("WebSocket lease");
     assert_eq!(progress.seq(), 2, "snapshot end is not the sent cursor");
@@ -141,7 +144,7 @@ fn imported_progress_keeps_the_restored_nonzero_output_coordinates() {
     let attached = registry
         .attach("pacing-imported-origin", Some(7))
         .expect("restored session")
-        .with_output_progress();
+        .with_output_progress(OutputFlow::Acknowledged);
     let progress = attached.output_progress().expect("WebSocket lease");
     let initial_cursor = progress.seq();
     progress.sent_output(5);
@@ -191,7 +194,10 @@ fn imported_progress_keeps_the_restored_nonzero_output_coordinates() {
 #[test]
 fn live_replay_keeps_alt_screen_deltas_and_exact_missed_count() {
     let session = test_session_with_ring(64);
-    let attached = session.clone().attach(None).with_output_progress();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     session.record_output(b"\x1b[?1049hALT");
     assert!(
         session.clone().attach(None).replay.is_empty(),
@@ -232,7 +238,7 @@ fn progress_upgrade_and_same_session_replay_transfer_focus_ownership() {
     let session = test_session_with_ring(1024);
     let attached = session.clone().attach(None);
     let epoch = attached.set_focused(true).expect("focus epoch");
-    let attached = attached.with_output_progress();
+    let attached = attached.with_output_progress(OutputFlow::Acknowledged);
     assert_eq!(attached.focus_epoch.load(Ordering::Relaxed), epoch);
     assert_eq!(
         session.focus_epoch.load(Ordering::Relaxed),
@@ -259,7 +265,10 @@ fn retained_lifecycle_survives_broadcast_eviction_and_registry_independence() {
         SessionEvent::Restarted,
     ] {
         let session = test_session_with_ring(1024);
-        let mut attached = session.clone().attach(None).with_output_progress();
+        let mut attached = session
+            .clone()
+            .attach(None)
+            .with_output_progress(OutputFlow::Acknowledged);
         session.record_output(b"tail");
         session.broadcast(event.clone());
         for _ in 0..BROADCAST_CAP + 1 {
@@ -296,7 +305,10 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
     use super::super::tests::test_session_with_commands;
     let (mut session, commands) = test_session_with_commands(1024);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-input-exit".into();
-    let attached = session.clone().attach(None).with_output_progress();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     arm_attach_seam(
@@ -365,7 +377,10 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
 fn reader_stop_wakes_a_pacing_wait_before_sealing_the_ring() {
     let mut session = test_session_with_ring(1024);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-reader-stop".into();
-    let _attached = session.clone().attach(None).with_output_progress();
+    let _attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     session.record_output(&[b'x'; 512]);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -398,7 +413,10 @@ fn tmux_control_protocol_reads_bypass_a_slow_control_view() {
     });
     session.record_output(b"\x1bP1000p%begin 1 1 0\r\n%end 1 1 0\r\n");
     assert!(session.tmux.lock().expect("tmux gate").in_control_mode());
-    let attached = session.clone().attach(None).with_output_progress();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     let progress = attached.output_progress().expect("lease");
     session.record_plain_output(&[b'x'; 512]);
     struct EmptyProbe(usize);
@@ -425,7 +443,10 @@ fn tmux_control_protocol_reads_bypass_a_slow_control_view() {
 async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once() {
     let mut session = test_session_with_ring(128);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-many-reads".into();
-    let mut attached = session.clone().attach(None).with_output_progress();
+    let mut attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     let progress = attached.output_progress().expect("lease");
     let expected: Vec<u8> = (0..1200)
         .flat_map(|line| format!("{line:06}\n").into_bytes())
@@ -470,10 +491,12 @@ async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once()
             match attached.rx.recv().await {
                 Ok(SessionEvent::Output(bytes)) => {
                     // Sending this chunk completes before its raw cursor and
-                    // consumed-event credit move. No synthetic bytes count.
+                    // consumed-event credit move, and the client parses it
+                    // before acknowledging. No synthetic bytes count.
                     rendered.extend_from_slice(&bytes);
                     progress.sent_output(bytes.len());
                     progress.sent_event();
+                    progress.acknowledge(progress.seq());
                 }
                 Ok(_) => progress.sent_event(),
                 Err(error) => return Err(error),
@@ -497,7 +520,7 @@ async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once()
         reads > BROADCAST_CAP,
         "fixture exceeds one broadcast buffer of reads"
     );
-    assert!(!cut_loose, "each completed raw send keeps the view holding");
+    assert!(!cut_loose, "each acknowledgement keeps the view holding");
     assert_eq!(
         rendered, expected,
         "paced reader delivers every byte exactly once"
@@ -511,7 +534,10 @@ async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once()
 
 fn assert_lifecycle_transition_wakes_credit(transition: fn(&Session), expected: SessionLifecycle) {
     let session = test_session_with_ring(1024);
-    let attached = session.clone().attach(None).with_output_progress();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
     session.record_output(&[b'x'; 512]);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();

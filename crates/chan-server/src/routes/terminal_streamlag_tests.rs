@@ -197,11 +197,20 @@ impl Rig {
     }
 
     async fn attach(&self) -> (Client, Value) {
+        self.attach_with("").await
+    }
+
+    /// Attach as a client that reports what it has parsed.
+    async fn attach_acking(&self) -> (Client, Value) {
+        self.attach_with("&ack=1").await
+    }
+
+    async fn attach_with(&self, query: &str) -> (Client, Value) {
         let mut client = bounded(
             "attach terminal socket",
             dial_terminal_with_small_buffer(
                 self.address,
-                &format!("session={}&cols=80&rows=24", self.handle.id()),
+                &format!("session={}&cols=80&rows=24{query}", self.handle.id()),
             ),
         )
         .await;
@@ -268,6 +277,20 @@ async fn send(client: &mut Client, frame: Value) {
     )
     .await
     .expect("client frame writes");
+}
+
+async fn ack(client: &mut Client, generation: u64, seq: u64) {
+    send(
+        client,
+        json!({"type": "ack", "generation": generation, "seq": seq}),
+    )
+    .await;
+}
+
+fn number(frame: &Value, key: &str) -> u64 {
+    frame[key]
+        .as_u64()
+        .unwrap_or_else(|| panic!("numeric {key} in {frame}"))
 }
 
 async fn next_binary(client: &mut Client) -> Vec<u8> {
@@ -632,7 +655,7 @@ const DONE_MARKER: &[u8] = b"__STREAM_DONE__";
 async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, Value, Vec<u8>) {
     let mut client = bounded(
         "attach terminal socket",
-        dial_terminal_with_small_buffer(address, &format!("session={id}&cols=80&rows=24")),
+        dial_terminal_with_small_buffer(address, &format!("session={id}&cols=80&rows=24&ack=1")),
     )
     .await;
     let mut session = None;
@@ -661,9 +684,9 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
     }
 }
 
-/// Acceptance 2's second clause on real sockets, in part: what is asserted
-/// is that the program finishes without the stalled view reading (no
-/// earlier than about the 5 s release bound, by the >= 4 s check) and the
+/// A view that stops reading and acknowledging, on real sockets: what is
+/// asserted is that the program finishes without it (no earlier than about
+/// the 5 s release bound, by the >= 4 s check) and the
 /// stalled view recovers without loss (one same-generation session frame,
 /// zero missed bytes, the retained tail once, the replay suffix and the
 /// cursor arithmetic asserted exact). The 5 s value is pinned
@@ -698,7 +721,7 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // 2.7 MB (6,888,927 minus 4,194,304), far past what A's fixed 64 KiB
     // socket buffers absorb (doubled on Linux), so a check must park the
     // reader before the flood ends.
-    let (mut stalled, initial) = rig.attach().await;
+    let (mut stalled, initial) = rig.attach_acking().await;
     // The hold is observed structurally: the reader parks waiting for
     // progress while A holds the session back.
     let held = Arc::new(AtomicBool::new(false));
@@ -710,6 +733,8 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // the start time below carries no attach latency on any schedule.
     let (mut draining, b_session, mut received) =
         attach_collecting(rig.address, rig.handle.id()).await;
+    let b_generation = number(&b_session, "generation");
+    let b_start = number(&b_session, "seq") - received.len() as u64;
     let started = std::time::Instant::now();
     rig.handle.send_input(b"\n");
     let pre_frame = loop {
@@ -743,6 +768,7 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         match frame {
             ClientMessage::Binary(bytes) => {
                 received.extend_from_slice(&bytes);
+                ack(&mut draining, b_generation, b_start + received.len() as u64).await;
                 if received.ends_with(DONE_MARKER) {
                     break;
                 }
@@ -832,6 +858,9 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let resume_bound = std::time::Duration::from_secs(60);
     let mut sessions = 0;
     let mut tail = Vec::new();
+    let generation = number(&initial, "generation");
+    let resumed_at = number(&initial, "seq") + pre_frame as u64;
+    ack(&mut stalled, generation, resumed_at).await;
     let recovery = loop {
         if std::time::Instant::now() > resume_at + resume_bound {
             panic!(
@@ -855,6 +884,8 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
             }
             ClientMessage::Binary(bytes) => {
                 tail.extend_from_slice(&bytes);
+                // Recovery waits until the view has parsed its backlog.
+                ack(&mut stalled, generation, resumed_at + tail.len() as u64).await;
             }
             other => panic!("stalled view ended during recovery: {other:?}"),
         }
@@ -912,7 +943,17 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
                     "one recovery session frame: {frame}"
                 );
             }
-            ClientMessage::Binary(bytes) => tail.extend_from_slice(&bytes),
+            ClientMessage::Binary(bytes) => {
+                tail.extend_from_slice(&bytes);
+                // The replay is itself paced by the window.
+                let replayed = (tail.len() - stale_len) as u64;
+                ack(
+                    &mut stalled,
+                    generation,
+                    recovery_seq - replay as u64 + replayed,
+                )
+                .await;
+            }
             other => panic!("stalled view ended during recovery: {other:?}"),
         }
     }
@@ -1274,16 +1315,16 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
     let rig = Rig::new(1024,
         "stty -onlcr; IFS= read -r start; seq -f %.0f 1 1000000; printf '__STREAM_%s__' DONE; IFS= read -r finish"
     ).await;
-    let (mut client, initial) = rig.attach().await;
+    let (mut client, initial) = rig.attach_acking().await;
     assert_eq!(initial["missed_bytes"], 0);
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
     let mut expected = String::new();
     for number in 1..=1_000_000 {
         writeln!(&mut expected, "{number}").unwrap();
     }
     expected.push_str("__STREAM_DONE__");
-    let mut pending = PendingSend::at_least(rig.handle.id(), 1);
     send(&mut client, json!({"type":"input", "data":"start\n"})).await;
-    pending.wait().await;
     let mut bytes = Vec::with_capacity(expected.len());
     let mut reads = 0;
     while bytes.len() < expected.len() {
@@ -1310,6 +1351,7 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
             ClientMessage::Binary(data) => {
                 reads += 1;
                 bytes.extend_from_slice(&data);
+                ack(&mut client, generation, start + bytes.len() as u64).await;
                 // One frame per turn leaves the already-backpressured writer runnable.
                 tokio::task::yield_now().await;
             }
@@ -1406,6 +1448,310 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
         "an exit drain did not supply the stream under test"
     );
     send(&mut client, json!({"type":"input", "data":"finish\n"})).await;
+}
+
+/// The WebKit shape: the socket keeps delivering every frame to a page that
+/// parses none of them, so only the missing acknowledgement can show it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_that_reads_without_acknowledging_is_bounded_and_resumes_with_a_count() {
+    use std::fmt::Write as _;
+
+    const RING: usize = 2 * 1024 * 1024;
+    let _gate = pty_test_lock();
+    let rig = Rig::new(
+        RING,
+        "stty -onlcr; read -r _; seq -f %.0f 1 1000000; printf '__STREAM_DONE__'; read -r _",
+    )
+    .await;
+    let (mut stopped, initial) = rig.attach_acking().await;
+    let window = number(&initial, "ack_window");
+    assert_eq!(window, (RING / 2) as u64, "the window is half the ring");
+    let (mut live, live_session, mut live_bytes) =
+        attach_collecting(rig.address, rig.handle.id()).await;
+    let live_generation = number(&live_session, "generation");
+    let live_start = number(&live_session, "seq") - live_bytes.len() as u64;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    let mut expected = String::new();
+    for line in 1..=1_000_000 {
+        writeln!(&mut expected, "{line}").expect("write to a string");
+    }
+    expected.push_str("__STREAM_DONE__");
+
+    rig.handle.send_input(b"\n");
+    let mut unparsed = Vec::new();
+    let hang = tokio::time::sleep(std::time::Duration::from_secs(120));
+    tokio::pin!(hang);
+    loop {
+        tokio::select! {
+            frame = stopped.next() => match frame.expect("stopped view open").expect("frame") {
+                ClientMessage::Binary(bytes) => unparsed.extend_from_slice(&bytes),
+                ClientMessage::Text(text) => {
+                    let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                    assert_ne!(frame["type"], "error", "no lag line: {frame}");
+                    assert_ne!(frame["type"], "session", "no replay before an ack: {frame}");
+                }
+                other => panic!("stopped view ended: {other:?}"),
+            },
+            frame = live.next() => match frame.expect("live view open").expect("frame") {
+                ClientMessage::Binary(bytes) => {
+                    live_bytes.extend_from_slice(&bytes);
+                    ack(&mut live, live_generation, live_start + live_bytes.len() as u64).await;
+                    if live_bytes.ends_with(DONE_MARKER) {
+                        break;
+                    }
+                }
+                ClientMessage::Text(text) => {
+                    let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                    assert_ne!(frame["type"], "error", "live view error: {frame}");
+                }
+                other => panic!("live view ended: {other:?}"),
+            },
+            _ = &mut hang => panic!(
+                "the stream never finished: live {} of {} bytes, stopped view holds {}",
+                live_bytes.len(), expected.len(), unparsed.len(),
+            ),
+        }
+    }
+    assert!(
+        live_bytes.ends_with(expected.as_bytes()),
+        "the acknowledging view holds every byte, once and in order"
+    );
+    assert!(
+        unparsed.len() as u64 <= window,
+        "the engine's queue stays inside the window: {} > {window}",
+        unparsed.len()
+    );
+    assert_eq!(
+        unparsed,
+        expected.as_bytes()[..unparsed.len()],
+        "what the stopped view holds is the stream's head"
+    );
+    rig.handle.resize(pty_size(Some(101), Some(33)));
+    until("the resize applied", || rig.handle.size().cols == 101).await;
+
+    // A position from another PTY life moves nothing.
+    let sent = start + unparsed.len() as u64;
+    ack(&mut stopped, generation + 1, sent).await;
+    let silent = tokio::time::timeout(std::time::Duration::from_millis(400), stopped.next()).await;
+    assert!(
+        silent.is_err(),
+        "an acknowledgement of another generation resumes nothing: {silent:?}"
+    );
+
+    ack(&mut stopped, generation, sent).await;
+    let recovery = loop {
+        if let ClientMessage::Text(text) = next(&mut stopped).await {
+            let frame: Value = serde_json::from_str(&text).expect("control JSON");
+            assert_ne!(frame["type"], "error", "no lag line on resume: {frame}");
+            if frame["type"] == "session" {
+                break frame;
+            }
+        }
+    };
+    let replay = number(&recovery, "replay_bytes");
+    let missed = number(&recovery, "missed_bytes");
+    let end = number(&recovery, "seq");
+    assert!(missed > 0, "the ring moved past the stopped view");
+    assert_eq!(
+        sent + missed + replay,
+        end,
+        "the count closes the gap between the view's cursor and the server's"
+    );
+    let replay_start = end - replay;
+    let mut replayed = Vec::new();
+    loop {
+        match next(&mut stopped).await {
+            ClientMessage::Binary(bytes) => {
+                replayed.extend_from_slice(&bytes);
+                let raw = (replayed.len() as u64).min(replay);
+                ack(&mut stopped, generation, replay_start + raw).await;
+                assert!(
+                    (replayed.len() as u64) < replay + window,
+                    "the replay honours the window"
+                );
+            }
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "no lag line on replay: {frame}");
+                if frame["type"] == "ready" {
+                    assert_eq!(frame["cols"], 101, "the missed resize is restored");
+                    break;
+                }
+            }
+            other => panic!("stopped view ended in replay: {other:?}"),
+        }
+    }
+    assert_eq!(
+        replayed[..replay as usize],
+        expected.as_bytes()[expected.len() - replay as usize..],
+        "the resume carries the ring's tail, once"
+    );
+    send(&mut live, json!({"type": "input", "data": "\n"})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(
+        64 * 1024,
+        "stty -onlcr; read -r _; seq -f %.0f 1 200000; printf '__STREAM_DONE__'; read -r _",
+    )
+    .await;
+    let (mut old, initial) = rig.attach().await;
+    assert!(
+        initial.get("ack_window").is_none(),
+        "no window is advertised to a client that did not ask: {initial}"
+    );
+    let held = Arc::new(AtomicBool::new(false));
+    arm_attach_seam(rig.handle.id(), AttachSeam::ReaderWaitingForProgress, {
+        let held = held.clone();
+        move || held.store(true, Ordering::SeqCst)
+    });
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None)
+        .expect("watch the session");
+    rig.handle.send_input(b"\n");
+    let mut tail = Vec::new();
+    bounded(
+        "the program runs to its end with a view not reading",
+        async {
+            while !tail.ends_with(DONE_MARKER) {
+                match watcher.rx.recv().await {
+                    Ok(SessionEvent::Output(bytes)) => {
+                        tail.extend_from_slice(&bytes);
+                        let keep = tail.len().saturating_sub(DONE_MARKER.len());
+                        tail.drain(..keep);
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(error) => panic!("session ended: {error}"),
+                }
+            }
+        },
+    )
+    .await;
+    assert!(
+        !held.load(Ordering::SeqCst),
+        "a client that does not acknowledge never makes the reader wait"
+    );
+
+    // It then reads on and hears the loss as a count, never as a lag line.
+    // An early recovery can still fit the ring, so the count is the sum.
+    let (mut missed, mut recoveries, mut end) = (0, 0, Vec::new());
+    while !end.ends_with(DONE_MARKER) {
+        match next(&mut old).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "the lag line is gone: {frame}");
+                if frame["type"] == "session" {
+                    recoveries += 1;
+                    missed += number(&frame, "missed_bytes");
+                    assert!(
+                        frame.get("ack_window").is_none(),
+                        "a recovery does not enroll it either: {frame}"
+                    );
+                }
+            }
+            ClientMessage::Binary(bytes) => {
+                end.extend_from_slice(&bytes);
+                let keep = end.len().saturating_sub(DONE_MARKER.len());
+                end.drain(..keep);
+            }
+            other => panic!("old client ended: {other:?}"),
+        }
+    }
+    assert!(recoveries > 0, "the view fell behind and recovered");
+    assert!(missed > 0, "the loss is counted");
+    send(&mut old, json!({"type": "input", "data": "\n"})).await;
+}
+
+/// A tmux pane's producer cannot be held, so its view gets the bound and the
+/// count: the socket stops at the window and resumes from the ring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_tmux_view_is_bounded_by_the_window_and_resumes_with_a_count() {
+    let _gate = pty_test_lock();
+    let ring = 8 * 1024;
+    let rig = Rig::tmux(ring).await;
+    let (mut client, initial) = rig.attach_acking().await;
+    let window = number(&initial, "ack_window");
+    let generation = number(&initial, "generation");
+    // Two floods outrun the broadcast's 1,024 events as well as the ring.
+    let mut flood = rig.flood();
+    flood.extend(rig.flood());
+    let mut unparsed = Vec::new();
+    // The socket goes quiet at the window; a read that times out is the bound.
+    while let Ok(frame) =
+        tokio::time::timeout(std::time::Duration::from_millis(400), next(&mut client)).await
+    {
+        match frame {
+            ClientMessage::Binary(bytes) => unparsed.extend_from_slice(&bytes),
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "no lag line: {frame}");
+                assert_ne!(frame["type"], "session", "no replay before an ack: {frame}");
+            }
+            other => panic!("the pane's socket ended: {other:?}"),
+        }
+    }
+    assert!(
+        unparsed.len() as u64 >= window && unparsed.len() as u64 <= window + CHUNK_BYTES as u64,
+        "the view holds the window and at most one more event: {}",
+        unparsed.len()
+    );
+    assert_eq!(unparsed, flood[..unparsed.len()], "the stream's head");
+    let sent = number(&initial, "seq") + unparsed.len() as u64;
+    ack(&mut client, generation, sent).await;
+    let recovery = loop {
+        match next(&mut client).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "no lag line on resume: {frame}");
+                if frame["type"] == "session" {
+                    break frame;
+                }
+            }
+            ClientMessage::Binary(bytes) => panic!("output before recovery: {} bytes", bytes.len()),
+            other => panic!("the pane's socket ended: {other:?}"),
+        }
+    };
+    let (missed, replay) = (
+        number(&recovery, "missed_bytes"),
+        number(&recovery, "replay_bytes"),
+    );
+    assert!(missed > 0, "the ring moved past the view: {recovery}");
+    assert_eq!(
+        sent + missed + replay,
+        number(&recovery, "seq"),
+        "the count closes the gap to the server's cursor"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_known_ack_version_is_advertised_and_a_stray_ack_is_harmless() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let (_acking, frame) = rig.attach_acking().await;
+    assert_eq!(number(&frame, "ack_window"), 32 * 1024);
+    let (_future, frame) = rig.attach_with("&ack=2").await;
+    assert!(
+        frame.get("ack_window").is_none(),
+        "unknown version: {frame}"
+    );
+    let (mut plain, frame) = rig.attach().await;
+    assert!(frame.get("ack_window").is_none(), "no ack key: {frame}");
+    ack(&mut plain, number(&frame, "generation"), 1).await;
+    send(&mut plain, json!({"type": "ping"})).await;
+    loop {
+        if let ClientMessage::Text(text) = next(&mut plain).await {
+            let frame: Value = serde_json::from_str(&text).expect("control JSON");
+            assert_ne!(frame["type"], "error", "a stray ack is ignored: {frame}");
+            if frame["type"] == "pong" {
+                break;
+            }
+        }
+    }
 }
 
 struct CwdHold {
