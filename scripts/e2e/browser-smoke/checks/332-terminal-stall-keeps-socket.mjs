@@ -241,8 +241,9 @@ const keysOf = (fixture) => Buffer.concat(fixture.records.filter((record) => rec
   .map((record) => Buffer.from(record.base64, "base64"))).toString("latin1");
 const cursorReports = (fixture) => (keysOf(fixture).match(/\x1b\[\d+;\d+R/g) ?? []).length;
 
-/// The terminal answers a cursor query only once its parser reaches it, so
-/// the answer proves everything written ahead of the query was parsed.
+/// On a page that is running and caught up, the terminal's answer shows its
+/// parser reached the query. Behind a stall or a paced link it shows nothing:
+/// the library answers an unanswered query itself after 150 ms.
 async function queryParsed(fixture, timeoutMs) {
   const before = cursorReports(fixture);
   await fixture.send("bytes", { base64: Buffer.from("\x1b[6n").toString("base64") });
@@ -494,7 +495,6 @@ async function fullWindowLeg(page, fixture, relay, name, selector) {
   const socketAt = socketsBefore - 1;
   const sessionsBefore = start.sockets[socketAt].sessions.length;
   const bytesAtStall = start.sockets[socketAt].bytes;
-  const reportsBefore = cursorReports(fixture);
   const keysBefore = keysOf(fixture).length;
   flow.pace(FULL_WINDOW_PACE_BYTES_PER_SECOND);
   try {
@@ -506,7 +506,8 @@ async function fullWindowLeg(page, fixture, relay, name, selector) {
     await sleep(500);
     const queuedAtKey = flow.pacedBytes;
     await page.keyboard.type("w");
-    await until("the cursor query after the stream", async () => cursorReports(fixture), (count) => count > reportsBefore, 90_000);
+    await until("the whole stream arrives", () => read(page, name),
+      (now) => now.sockets.reduce((total, record) => total + record.captured, 0) >= expectedLength, 90_000);
     await until("the held key arrives", async () => keysOf(fixture).slice(keysBefore), (text) => text.includes("w"), 30_000);
     await sleep(1_000);
     const seen = await read(page, name);
