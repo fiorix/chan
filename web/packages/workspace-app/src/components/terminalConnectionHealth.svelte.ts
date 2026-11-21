@@ -83,10 +83,21 @@ export function createTerminalConnectionHealth(
       lastInputAt = Math.min(lastInputAt, now() - 1);
       probe.pingSent();
     },
-    pongArrived() {
-      if (!open || disposed) return;
+    /// True when the pong answers a ping sent since the timings were last
+    /// forgotten: pongs pair with pings in order, and only those keep a time.
+    pongArrived(): boolean {
+      if (!open || disposed) return false;
       const answeredAt = probe.pongReceived();
       if (answeredAt !== null && answeredAt > lastInputAt) noticeInputOutstanding = false;
+      return answeredAt !== null;
+    },
+    /// The page's clock jumped with pings in flight, so their pongs time nothing.
+    forgetPingTimings() {
+      probe.forgetTimings();
+    },
+    /// The socket's latest round trip, or null before its first.
+    get rttMs() {
+      return probe.rttMs;
     },
     inputSent() {
       if (!open || disposed) return;

@@ -596,7 +596,7 @@ function pageInFront(): boolean {
 
 /// The wake probe's deadline for a socket whose latest round trip took
 /// `rttMs`, or that has none measured.
-function probeDeadlineMs(rttMs: number | null): number {
+export function probeDeadlineMs(rttMs: number | null): number {
   if (rttMs === null) return WS_PROBE_DEADLINE_MS;
   return Math.min(
     WS_PROBE_DEADLINE_MAX_MS,

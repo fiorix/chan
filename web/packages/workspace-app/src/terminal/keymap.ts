@@ -123,6 +123,21 @@ export function controlSlashBytes(
   return null;
 }
 
+/// Whether a key press is one of the terminal's interrupts: Ctrl+C, Ctrl+Z or
+/// Ctrl+\. Read from the key rather than the bytes it sends, since the kitty
+/// keyboard protocol encodes Ctrl+C as an escape sequence and not as 0x03.
+/// `resolved` is the key on the user's layout (state/shortcuts.ts
+/// resolvedEventKey).
+export function isTerminalInterruptKey(
+  ev: KeyboardEvent,
+  resolved: { key: string; shiftKey: boolean } | null,
+): boolean {
+  if (ev.type !== "keydown" || !ev.ctrlKey || ev.metaKey || ev.altKey || ev.shiftKey) return false;
+  if (!resolved || resolved.shiftKey) return false;
+  const key = resolved.key.toLowerCase();
+  return key === "c" || key === "z" || key === "\\";
+}
+
 /// A CSI sequence as xterm.js's parser hands it to a handler: the prefix
 /// (one of `<=>?`) and intermediates it collected, the final character and
 /// the params. The params are never empty: an absent param reads 0.

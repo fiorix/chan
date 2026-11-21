@@ -2,13 +2,11 @@
 // is either a machine sleep, which can leave a half-open socket that still
 // reads OPEN, or a main-thread stall, after which the engine may hold a large
 // backlog on a healthy socket that a redial would throw away. Only the socket
-// can tell them apart, so the owner pings it and this module reads the answer.
+// can tell them apart, so the owner pings it and this module times the wait.
 //
-// The pong of that ping ends the probe. The server answers pings in order, so
-// counting pongs identifies it without an id on the wire, and an earlier
-// heartbeat's pong, which may have been queued before a sleep, does not count.
-// Any other frame only extends the deadline: a backlog queued before a sleep
-// still drains from a socket whose peer is gone.
+// The answer to a ping sent since the wake ends the probe. Any other frame
+// only extends the deadline: a backlog queued before a sleep still drains from
+// a socket whose peer is gone.
 
 /// How often a running probe reads the clock.
 export const TERMINAL_WAKE_TICK_MS = 250;
@@ -18,8 +16,6 @@ export const TERMINAL_WAKE_TICK_MS = 250;
 export const TERMINAL_WAKE_TICK_CREDIT_MS = 2 * TERMINAL_WAKE_TICK_MS;
 
 export interface TerminalWakeProbeOptions {
-  /// Quiet time, with the page running, after which the socket is given up on.
-  quietLimitMs: number;
   /// The socket did not answer. The probe has already stopped.
   onSilent: () => void;
   /// Clock, in milliseconds. Defaults to `Date.now`.
@@ -30,50 +26,57 @@ export interface TerminalWakeProbeOptions {
 }
 
 export interface TerminalWakeProbe {
-  /// Whether a probe is waiting for its pong.
+  /// Whether a probe is waiting for its answer.
   readonly active: boolean;
   /// Start a probe, or move a running one onto a new ping after another wake.
-  /// Call just before sending the ping: a socket may answer inside the send.
-  begin(): void;
-  pingSent(): void;
+  /// `quietLimitMs` is the quiet time, with the page running, after which the
+  /// socket is given up on. Call just before sending the ping: a socket may
+  /// answer inside the send.
+  begin(quietLimitMs: number): void;
   frameReceived(): void;
-  pongReceived(): void;
-  /// The socket is gone: stop, and forget its pings and pongs.
+  /// A ping sent since the wake was answered.
+  answered(): void;
+  /// The socket is gone: stop.
   reset(): void;
 }
 
 export function createTerminalWakeProbe(options: TerminalWakeProbeOptions): TerminalWakeProbe {
   const now = options.now ?? (() => Date.now());
   const hidden = options.hidden ?? (() => document.visibilityState === "hidden");
-  let pingsSent = 0;
-  let pongsReceived = 0;
-  // The count of pongs at which the probe's own ping has been answered.
-  let awaitedPong: number | null = null;
+  let limitMs = 0;
   let quietMs = 0;
   let lastTickAt = 0;
+  // A late tick reached the limit: the next one decides, after the frames the
+  // stall held back have had their turn.
+  let confirming = false;
   let timer: ReturnType<typeof setInterval> | null = null;
 
   const stop = () => {
     if (timer !== null) clearInterval(timer);
     timer = null;
-    awaitedPong = null;
+    confirming = false;
   };
   const tick = () => {
     const at = now();
     const elapsed = Math.max(0, at - lastTickAt);
     lastTickAt = at;
-    quietMs += hidden() ? elapsed : Math.min(elapsed, TERMINAL_WAKE_TICK_CREDIT_MS);
-    if (quietMs < options.quietLimitMs) return;
+    const pageHidden = hidden();
+    quietMs += pageHidden ? elapsed : Math.min(elapsed, TERMINAL_WAKE_TICK_CREDIT_MS);
+    if (quietMs < limitMs) return;
+    if (!pageHidden && elapsed > TERMINAL_WAKE_TICK_CREDIT_MS && !confirming) {
+      confirming = true;
+      return;
+    }
     stop();
     options.onSilent();
   };
 
   return {
     get active() {
-      return awaitedPong !== null;
+      return timer !== null;
     },
-    begin() {
-      awaitedPong = pingsSent + 1;
+    begin(quietLimitMs) {
+      limitMs = quietLimitMs;
       if (timer === null) {
         quietMs = 0;
         lastTickAt = now();
@@ -82,22 +85,18 @@ export function createTerminalWakeProbe(options: TerminalWakeProbeOptions): Term
         // A hidden page's throttled timers can report a gap on every tick,
         // and restarting the count there would never reach the limit.
         quietMs = 0;
+        confirming = false;
       }
-    },
-    pingSent() {
-      pingsSent += 1;
     },
     frameReceived() {
       quietMs = 0;
+      confirming = false;
     },
-    pongReceived() {
-      pongsReceived += 1;
-      if (awaitedPong !== null && pongsReceived >= awaitedPong) stop();
+    answered() {
+      stop();
     },
     reset() {
       stop();
-      pingsSent = 0;
-      pongsReceived = 0;
     },
   };
 }

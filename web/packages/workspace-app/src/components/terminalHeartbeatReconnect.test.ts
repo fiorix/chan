@@ -124,14 +124,14 @@ describe("terminal heartbeat", () => {
     const socket = lastSocket();
     await attach(socket, "sess-keep");
 
-    // No inbound frames at all: pings go out unanswered and the deadline
-    // force-closes the zombie.
+    // No inbound frames at all: pings go out unanswered, and at the deadline
+    // the socket gets one last probe before it is replaced.
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     expect(socket.readyState).toBe(3);
-    expect(TerminalSocket.all).toHaveLength(1);
 
-    // The redial fires after the first backoff step and reattaches by id.
-    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    // The replacement reattaches by id.
     expect(TerminalSocket.all).toHaveLength(2);
     expect(lastSocket().url).toContain("session=sess-keep");
     expect(tab.terminalSessionId).toBe("sess-keep");
@@ -169,9 +169,12 @@ describe("terminal heartbeat", () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket());
 
-    // Trip the deadline, then fail every dial the moment it is scheduled in.
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
-    // Delays consumed: 500 (the trip's redial), then doubling per failed dial.
+    // Trip the deadline and its probe, whose replacement dials at once, then
+    // fail every dial the moment it is scheduled in.
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all).toHaveLength(2);
+    lastSocket().failDial();
+    // Delays consumed: doubling per failed dial.
     const delays = [500, 1000, 2000, 4000, 8000, 8000, 8000];
     for (const delay of delays) {
       const count = TerminalSocket.all.length;
@@ -294,7 +297,7 @@ describe("wake recycle", () => {
     expect(socket.readyState).toBe(TerminalSocket.OPEN);
   });
 
-  test("a read deadline that fires late after a stall probes instead of closing", async () => {
+  test("a read deadline that fires after a stall probes instead of closing", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
     await attach(socket, "sess-stall");
@@ -304,12 +307,12 @@ describe("wake recycle", () => {
       for (; answered < pings(socket); answered += 1) await pong(socket);
     };
 
-    // The deadline's timer is the first thing to run after the stall: the
-    // wall clock jumps just before it is due, ahead of the wake detector.
+    // The deadline's timer is the first thing to run after the stall, and
+    // only just late, so nothing but the socket's answer can clear it.
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS - 1);
-    vi.setSystemTime(Date.now() + 10_000);
+    vi.setSystemTime(Date.now() + 100);
     await vi.advanceTimersByTimeAsync(1);
-    expect(socket.readyState, "the late deadline leaves the socket open").toBe(TerminalSocket.OPEN);
+    expect(socket.readyState, "the deadline leaves the socket open").toBe(TerminalSocket.OPEN);
 
     await answerPings();
     await vi.advanceTimersByTimeAsync(WAKE_PROBE_MS);

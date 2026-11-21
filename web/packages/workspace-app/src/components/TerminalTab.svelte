@@ -23,12 +23,13 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
-  import { api, sessionWindowId, withTokenQuery } from "../api/client";
+  import { api, sessionWindowId, windowLibraryId, withTokenQuery } from "../api/client";
   import {
     createSocket,
+    probeDeadlineMs,
     WS_CONNECT_DEADLINE_MS,
     WS_PING_MS,
-    WS_PROBE_DEADLINE_MS,
+    WS_PROBE_DEADLINE_MAX_MS,
     WS_READ_DEADLINE_MS,
     WS_RECONNECT_BACKOFF_MIN_MS,
     WS_RECONNECT_BACKOFF_MAX_MS,
@@ -150,6 +151,7 @@
   } from "../terminal/connection";
   import {
     controlSlashBytes,
+    isTerminalInterruptKey,
     copyTerminalKeyboardProtocolState,
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
@@ -249,6 +251,7 @@
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
+  import { createTerminalInputHold, type HeldInput } from "./terminalInputHold";
   import { createTerminalWakeProbe } from "./terminalWakeProbe";
   import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
 
@@ -434,14 +437,37 @@
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
-  // How late the read deadline's timer may fire and still mean what it says.
-  const READ_DEADLINE_LATE_MS = 1_000;
+  // On a connection that takes no wake probe, how long an expired read
+  // deadline waits before closing: its timer can run ahead of frames a stall
+  // left queued, and any of them cancels the close.
+  const READ_DEADLINE_GRACE_MS = 1_000;
   const wakeProbe = createTerminalWakeProbe({
-    quietLimitMs: WS_PROBE_DEADLINE_MS,
     onSilent: () => {
-      if (ws?.readyState === WebSocket.OPEN) void connect();
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      inputHold.awaitReplacement(WS_CONNECT_DEADLINE_MS);
+      void connect();
     },
   });
+  const inputHold = createTerminalInputHold({
+    canSend: () => ws?.readyState === WebSocket.OPEN,
+    deliver: (entry) => {
+      // A composer that stopped waiting for this message has told the user it
+      // failed and kept the text, so sending it now could run it twice.
+      if (entry.promptId) {
+        const pending = tab.pendingPrompt;
+        if (pending?.id !== entry.promptId || pending.phase !== "sent") return;
+      }
+      noteUserFrame(entry, send(entry.frame));
+    },
+    onDropped: () => {
+      if (status !== "exited") terminalConnection.inputRefused();
+    },
+  });
+  // The session a running hold's input was typed for. A redial that lands on
+  // another one must not type it into a program the user never saw.
+  let heldFor: { id: string | undefined; generation: number | null } | null = null;
+  // Set while a key press that interrupts is being dispatched.
+  let interruptKeyPress = false;
   // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
   // loaded at connect time, primed into the xterm on the attach prelude only
   // when the frame keeps the cached session id and the server confirms the
@@ -692,12 +718,8 @@
   $effect(() => () => terminalConnection.dispose());
 
   $effect(() => {
-    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
-      const sent = sendInput(data, binary);
-      if (!terminalMouseReport(data)) {
-        if (sent) terminalConnection.inputSent();
-        else if (status !== "exited") terminalConnection.inputRefused();
-      }
+    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary, interrupt) => {
+      sendUserFrame(inputEntry(data, binary, !terminalMouseReport(data)), interrupt ?? false);
     });
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
@@ -1115,18 +1137,37 @@
   // same detector over a healthy socket, whose queued output a redial would
   // discard. So a wake pings the socket, and wakeProbe redials through the
   // resume path (sessionId/since/generation) only if neither that ping's pong
-  // nor any other frame arrives for its quiet limit. Input sent meanwhile stays
-  // in flight, so the Reconnected note reports it if the socket is replaced. A
-  // socket that is not OPEN is already reconnecting (or intentionally closed);
-  // leave it alone.
+  // nor any other frame arrives for the watcher's RTT-scaled deadline. What the
+  // user sends meanwhile waits in inputHold and goes once to whichever socket
+  // wins. A socket that is not OPEN is already reconnecting (or intentionally
+  // closed); leave it alone.
   function probePtySocketAfterWake(): void {
-    // The control terminal is a single-shot local runner owned by the desktop
-    // exit watcher; a wake redial would mint a fresh session whose tenant
-    // default re-runs the devserver connect script.
-    if (ui.terminalControl) return;
+    if (skipsWakeProbe()) return;
     if (ws?.readyState !== WebSocket.OPEN) return;
-    wakeProbe.begin();
+    terminalConnection.forgetPingTimings();
+    wakeProbe.begin(probeDeadlineMs(terminalConnection.rttMs));
+    if (!inputHold.active) heldFor = { id: tab.terminalSessionId, generation: serverGeneration };
+    inputHold.begin(WS_PROBE_DEADLINE_MAX_MS);
     sendPing();
+  }
+
+  // The control terminal is a single-shot local runner owned by the desktop
+  // exit watcher; a wake redial would mint a fresh session whose tenant default
+  // re-runs the devserver connect script. The desktop's embedded server shares
+  // the machine's sleep, so its socket cannot go half-open across one. A
+  // browser on a loopback host gets no such pass: it may be an ssh tunnel to a
+  // remote devserver.
+  function skipsWakeProbe(): boolean {
+    return ui.terminalControl || (isTauriDesktop() && windowLibraryId() === "local");
+  }
+
+  function noteInterruptKey(e: KeyboardEvent): void {
+    if (!isTerminalInterruptKey(e, resolvedEventKey(e))) return;
+    interruptKeyPress = true;
+    // The renderers send the key's bytes within this event's dispatch.
+    setTimeout(() => {
+      interruptKeyPress = false;
+    }, 0);
   }
 
   // The live WebGL context can be lost long after mount (GPU reset,
@@ -1479,6 +1520,7 @@
         );
       }
     }
+    host.addEventListener("keydown", noteInterruptKey, true);
     if (backend === "ghostty") {
       ghosttyKeyParity = installGhosttyKeyParity(host, {
         terminal: term as GhosttyTerminal,
@@ -1614,7 +1656,6 @@
   function sendPing(): void {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     terminalConnection.pingSent();
-    wakeProbe.pingSent();
     send({ type: "ping" });
   }
 
@@ -1634,21 +1675,24 @@
     // desktop exit watcher; it never heartbeats or read-deadline-force-closes.
     if (ui.terminalControl) return;
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
-    const armedAt = Date.now();
     deadlineTimer = setTimeout(() => {
       deadlineTimer = null;
-      // A running wake probe owns the verdict, and a deadline that fires late
-      // ran after a stall, possibly ahead of frames the stall left queued.
+      // This timer can run ahead of frames a stall left queued, so expiry is
+      // a suspicion: the socket gets the wake probe, or on a connection that
+      // takes none a moment for a queued frame to cancel the close.
       if (wakeProbe.active) return;
-      if (Date.now() - armedAt > WS_READ_DEADLINE_MS + READ_DEADLINE_LATE_MS) {
+      if (!skipsWakeProbe()) {
         probePtySocketAfterWake();
         return;
       }
-      try {
-        ws?.close();
-      } catch {
-        // Already CLOSING/CLOSED; the pending onclose still drives the redial.
-      }
+      deadlineTimer = setTimeout(() => {
+        deadlineTimer = null;
+        try {
+          ws?.close();
+        } catch {
+          // Already CLOSING/CLOSED; the pending onclose still drives the redial.
+        }
+      }, READ_DEADLINE_GRACE_MS);
     }, WS_READ_DEADLINE_MS);
   }
 
@@ -1824,8 +1868,10 @@
         return;
       }
       if (frame.type === "pong") {
-        terminalConnection.pongArrived();
-        wakeProbe.pongReceived();
+        if (terminalConnection.pongArrived() && wakeProbe.active) {
+          wakeProbe.answered();
+          inputHold.release();
+        }
         return;
       }
       if (frame.type === "ready") {
@@ -1847,6 +1893,14 @@
         // frame.id that differs is a fresh shell replacing the reaped session,
         // not a same-id live resume.
         const priorId = tab.terminalSessionId;
+        if (
+          inputHold.active &&
+          heldFor &&
+          ((heldFor.id !== undefined && heldFor.id !== frame.id) ||
+            (heldFor.generation !== null && heldFor.generation !== frame.generation))
+        ) {
+          inputHold.abandon();
+        }
         const duplicateReplay = reattaching && !dialSawSession;
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
@@ -1951,6 +2005,9 @@
         if (missedBytes > 0 && !resetBeforeReplay) {
           writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
+        // A replacement socket has attached to the same session: what waited
+        // for it goes now. The server reads it after the replay it is sending.
+        if (!wakeProbe.active) inputHold.release();
       } else if (frame.type === "renamed") {
         if (tab.terminalSessionId) {
           resolveTerminalMetadataRename(
@@ -2009,6 +2066,7 @@
         resolvePromptCancelled(tab, frame.id, frame.removed);
       } else if (frame.type === "closed") {
         status = "exited";
+        inputHold.abandon();
         statusDetail = `session ended (${frame.reason})`;
         // The session (and its write queue) is gone: zero the badge and
         // fail any in-flight prompt so the bubble unlocks with its text.
@@ -2043,6 +2101,7 @@
         }
       } else if (frame.type === "exit") {
         status = "exited";
+        inputHold.abandon();
         // A session restored across a server restart has no reapable child,
         // so its exit frame carries no code.
         statusDetail = frame.code == null ? "exited" : `exit ${frame.code}`;
@@ -2090,6 +2149,7 @@
       // bounce, the read-deadline forcing a zombie closed, a failed dial --
       // redials.
       if (status === "exited" || ui.terminalControl) return;
+      inputHold.awaitReplacement(WS_CONNECT_DEADLINE_MS);
       statusDetail = "reconnecting";
       const delay = reconnectBackoffMs;
       reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, WS_RECONNECT_BACKOFF_MAX_MS);
@@ -2300,6 +2360,17 @@
   /// so the orchestrator can retry a freshly-spawned lead, and when the
   /// session is gone, where no retry can succeed.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    // Untagged prompts are the orchestrator's, which retries on a refusal.
+    if (id && inputHold.active) {
+      term?.scrollToBottom();
+      inputHold.offer({
+        frame: { type: "prompt", data, ...(agent ? { agent } : {}), id },
+        size: data.length,
+        countsAsInput: true,
+        promptId: id,
+      });
+      return true;
+    }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (id && status !== "exited") terminalConnection.inputRefused();
       return false;
@@ -2315,6 +2386,10 @@
   /// `prompt-cancelled` ack (removed: true|false). Returns whether the WS was
   /// open.
   function sendCancelPrompt(id: string): boolean {
+    if (inputHold.remove(id)) {
+      resolvePromptCancelled(tab, id, true);
+      return true;
+    }
     return send({ type: "cancel-prompt", id });
   }
 
@@ -2449,19 +2524,45 @@
   }
 
   function sendUserInput(data: string, binary = false, probeInput = true): void {
-    const sent = sendInput(data, binary);
-    if (probeInput && !terminalMouseReport(data)) {
-      if (sent) terminalConnection.inputSent();
-      else if (status !== "exited") terminalConnection.inputRefused();
-    }
-    broadcastTerminalInput(tab, data, binary);
+    const interrupt = interruptKeyPress;
+    sendUserFrame(inputEntry(data, binary, probeInput && !terminalMouseReport(data)), interrupt);
+    broadcastTerminalInput(tab, data, binary, interrupt);
     // Cross-window broadcast: same-group members in OTHER windows live in the
     // shared terminal registry and are unreachable from this window's SPA, so
     // the server fans the input to them. Same-window members are covered by
     // `broadcastTerminalInput` above.
     if (tab.broadcastEnabled) {
-      send(binary ? { type: "broadcast-input", data, binary } : { type: "broadcast-input", data });
+      sendUserFrame({
+        frame: binary ? { type: "broadcast-input", data, binary } : { type: "broadcast-input", data },
+        size: data.length,
+        countsAsInput: false,
+      }, interrupt);
     }
+  }
+
+  function inputEntry(data: string, binary: boolean | undefined, countsAsInput: boolean): HeldInput {
+    return {
+      frame: binary ? { type: "input", data, binary } : { type: "input", data },
+      size: data.length,
+      countsAsInput,
+    };
+  }
+
+  /// Everything the user originates reaches the socket here, through the hold
+  /// while the socket is unproven.
+  function sendUserFrame(entry: HeldInput, interrupt: boolean): void {
+    if (inputHold.active) {
+      if (interrupt) inputHold.interrupt(entry);
+      else inputHold.offer(entry);
+      return;
+    }
+    noteUserFrame(entry, send(entry.frame));
+  }
+
+  function noteUserFrame(entry: HeldInput, sent: boolean): void {
+    if (!entry.countsAsInput) return;
+    if (sent) terminalConnection.inputSent();
+    else if (status !== "exited") terminalConnection.inputRefused();
   }
 
   function handleGhosttyData(data: string): void {
@@ -2708,6 +2809,7 @@
       activityPulseTimer = null;
     }
     closeSocket();
+    inputHold.abandon();
     replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
@@ -2718,6 +2820,7 @@
     ghosttyClickExtents?.();
     ghosttyClickExtents = null;
     ghosttyReportedFocus = null;
+    host?.removeEventListener("keydown", noteInterruptKey, true);
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
     ghosttyScrollbarClickGate?.();

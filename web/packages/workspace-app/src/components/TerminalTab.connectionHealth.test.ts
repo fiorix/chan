@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import { WS_PING_MS, WS_PROBE_DEADLINE_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
@@ -112,9 +112,11 @@ describe("terminal connection in the tab", () => {
     await receive(first, { type: "pong" });
     term.type("x");
     if (path === "server close") first.close();
-    else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + WS_PROBE_DEADLINE_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-connection-pill]'), "no note while it reconnects").toBeNull();
+    if (path === "server close") {
+      expect(target.querySelector('[data-terminal-connection-pill]'), "no note while it reconnects").toBeNull();
+    }
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const next = TerminalSocket.all.at(-1)!;
     expect(next).not.toBe(first);
@@ -222,7 +224,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
-  test("a key typed into a socket that a wake then replaces shows the note", async () => {
+  test("a key typed during a wake's probe goes once to the replacement, with no note", async () => {
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
@@ -230,8 +232,28 @@ describe("terminal connection in the tab", () => {
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100);
     term.type("x");
-    expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
+    const typed = (socket: TerminalSocket) => sentFrames(socket).filter((frame) => frame.type === "input" && frame.data === "x");
+    expect(typed(first), "held off the suspect socket").toEqual([]);
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    expect(typed(replacement), "not before the replacement has attached").toEqual([]);
+    await attach(replacement);
+    await tick();
+    expect(typed(first)).toEqual([]);
+    expect(typed(replacement)).toHaveLength(1);
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("a key sent before the wake was noticed still shows the note when the socket is replaced", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    term.type("x");
+    expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100 + WS_PROBE_DEADLINE_MS);
     const replacement = TerminalSocket.all.at(-1)!;
     expect(replacement).not.toBe(first);
     await attach(replacement);
@@ -261,12 +283,18 @@ describe("terminal connection in the tab", () => {
   });
 
   test("keys refused while a read deadline's close is held warn on the next socket", async () => {
+    // The desktop's embedded server takes no wake probe, so its read deadline
+    // still closes the socket.
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     first.holdClose = true;
     await attach(first);
     await receive(first, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + 1_000);
     await tick();
     expect(first.readyState).toBe(2);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
