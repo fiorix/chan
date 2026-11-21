@@ -483,6 +483,9 @@ async function interruptLeg(page, fixture, relay, name, selector, kitty) {
 async function halfOpenLeg(page, fixture, relay, name, selector) {
   await queryParsed(fixture, 20_000);
   await page.click(`${selector} .terminal-host`);
+  // An earlier leg's last key gets its ping 1 s later. Answered first, so a
+  // Reconnected note here can only be about this leg's key.
+  await sleep(2_500);
   const before = (await read(page, name)).sockets.length;
   const flow = relay.flows.at(-1);
   relay.kill(flow);
