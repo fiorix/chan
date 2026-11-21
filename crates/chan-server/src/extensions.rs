@@ -71,6 +71,7 @@ pub(crate) struct ExtensionView {
 pub(crate) enum ExtensionCapability {
     SessionContext,
     Presentation,
+    Microphone,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1070,7 +1071,10 @@ mod tests {
         let entry = extension_entry(
             "echo",
             "Echo",
-            vec![ExtensionCapability::Presentation],
+            vec![
+                ExtensionCapability::Presentation,
+                ExtensionCapability::Microphone,
+            ],
             &ExtensionHandshake {
                 url: "http://127.0.0.1:4567/echo?mode=test#app".to_string(),
                 token: "a token/+".to_string(),
@@ -1098,7 +1102,13 @@ mod tests {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
         assert!(!view.entry_path.contains("a%20token"));
-        assert_eq!(view.capabilities, [ExtensionCapability::Presentation]);
+        assert_eq!(
+            view.capabilities,
+            [
+                ExtensionCapability::Presentation,
+                ExtensionCapability::Microphone
+            ]
+        );
         assert!(view.singleton);
         assert_eq!(view.commands[0].id, "say-hello");
 

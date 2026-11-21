@@ -16,6 +16,7 @@
     EXTENSION_KEYMAP_MESSAGE,
     EXTENSION_SESSION_CONTEXT_MESSAGE,
     EXTENSION_VIEW_STATE_MESSAGE,
+    extensionMicrophoneRequest,
     extensionPresentationAction,
     extensionHostKeys,
     hostKeyId,
@@ -23,6 +24,7 @@
     isExtensionKeydownMessage,
     keyboardEventFromExtension,
   } from "../state/extensionBridge";
+  import { ExtensionMicrophone } from "../state/extensionMicrophone";
   import {
     EXTENSION_COMMAND_MESSAGE,
     EXTENSION_READY_MESSAGE,
@@ -76,6 +78,9 @@
   // Fail-closed until the first postHostKeys: only a relayed chord whose
   // identity matches an advertised host key is dispatched locally.
   let advertisedKeys = new Set<string>();
+  const microphone = new ExtensionMicrophone((event) => {
+    frame?.contentWindow?.postMessage(event, "*");
+  });
 
   // The command context as it reads with this tab focused: a row's check is
   // the catalog's state for the tab the menu belongs to.
@@ -121,6 +126,7 @@
 
   function closeOwnTab(): void {
     menu?.close();
+    microphone.cancel();
     setExtensionPresenting(tab.id, false);
     void closeTab(paneId, tab.id);
   }
@@ -187,6 +193,7 @@
   }
 
   function onFrameLoad(): void {
+    microphone.cancel();
     resetExtensionFrame(tab.id);
     postHostKeys();
     postSessionContext();
@@ -212,6 +219,11 @@
       else if (!event.data.ok) notify(`${tab.title} refused the command`);
       return;
     }
+    const microphoneRequest = extensionMicrophoneRequest(event.data);
+    if (microphoneRequest) {
+      if (extensionHasCapability(extension, "microphone")) microphone.handle(microphoneRequest);
+      return;
+    }
     const presentation = extensionPresentationAction(event.data);
     if (!presentation || !presents) return;
     if (presentation === "toggle") toggleExtensionPresentation(tab.id, tab.extensionId);
@@ -224,6 +236,7 @@
     document.addEventListener("visibilitychange", postViewState);
   });
   onDestroy(() => {
+    microphone.cancel();
     unregisterFrame?.();
     window.removeEventListener("message", onFrameMessage);
     document.removeEventListener("visibilitychange", postViewState);

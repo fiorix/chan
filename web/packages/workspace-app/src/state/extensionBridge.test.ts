@@ -6,7 +6,9 @@ import { allCommands } from "./commands";
 import {
   EXTENSION_KEYDOWN_MESSAGE,
   EXTENSION_KEYMAP_MESSAGE,
+  EXTENSION_MICROPHONE_REQUEST,
   EXTENSION_PRESENTATION_REQUEST,
+  extensionMicrophoneRequest,
   extensionPresentationAction,
   extensionHostKeys,
   hostKeyId,
@@ -132,6 +134,26 @@ describe("extension host keyboard bridge", () => {
         action: "fullscreen",
       }),
     ).toBeNull();
+  });
+
+  test("accepts only bounded microphone requests", () => {
+    for (const action of ["start", "stop", "cancel"]) {
+      expect(
+        extensionMicrophoneRequest({
+          type: EXTENSION_MICROPHONE_REQUEST,
+          request_id: "request-1",
+          action,
+        }),
+      ).toMatchObject({ request_id: "request-1", action });
+    }
+    for (const request of [
+      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "", action: "start" },
+      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "x".repeat(129), action: "start" },
+      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "request-1", action: "record" },
+      { type: EXTENSION_MICROPHONE_REQUEST, action: "start" },
+    ]) {
+      expect(extensionMicrophoneRequest(request)).toBeNull();
+    }
   });
 });
 

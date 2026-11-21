@@ -76,7 +76,7 @@ Each regular `.toml` file declares one local subprocess. The lowercase file stem
 | `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
 | `command` | `String` | required | Executable to spawn; a bare name resolves through the serving process's `PATH` (for a service-run devserver, the one its unit or plist records; see [the environment](extensions.md#the-environment)), and `./name` resolves from the extension config directory |
 | `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
-| `capabilities` | `String[]` | `[]` | Host grants: `session-context` and/or `presentation`; an unknown value rejects the declaration |
+| `capabilities` | `String[]` | `[]` | Host grants: `session-context`, `presentation`, and/or `microphone`; an unknown value rejects the declaration |
 
 ```toml
 name = "Echo test"
