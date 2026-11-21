@@ -2932,7 +2932,9 @@ export function hasBrowserTab(): boolean {
   );
 }
 
-type TerminalInputSink = (data: string, binary?: boolean) => void;
+/// `interrupt` marks input from an interrupt key press, which does not wait
+/// behind a terminal's held input.
+type TerminalInputSink = (data: string, binary?: boolean, interrupt?: boolean) => void;
 const terminalInputSinks = new Map<string, TerminalInputSink>();
 type TerminalCloseSink = () => boolean | void | Promise<boolean | void>;
 const terminalCloseSinks = new Map<string, TerminalCloseSink>();
@@ -3163,7 +3165,12 @@ async function runTerminalCloseSinks(tabs: Tab[]): Promise<boolean> {
 /// windows can share a chan-server. A sink whose id is not present
 /// in the current layout is skipped silently; do not fan out by sink
 /// id alone or via a server-side bus without preserving this boundary.
-export function broadcastTerminalInput(sourceTab: TerminalTab, data: string, binary = false): void {
+export function broadcastTerminalInput(
+  sourceTab: TerminalTab,
+  data: string,
+  binary = false,
+  interrupt = false,
+): void {
   if (!sourceTab.broadcastEnabled) return;
   // `terminalBroadcastMemberIds` already scopes to the source's group;
   // the group re-check below is defensive (a member could change group
@@ -3174,7 +3181,7 @@ export function broadcastTerminalInput(sourceTab: TerminalTab, data: string, bin
   for (const tab of allTerminalTabs()) {
     if (tab.id === sourceTab.id || !targets.has(tab.id)) continue;
     if (terminalTabGroup(tab) !== group) continue;
-    terminalInputSinks.get(tab.id)?.(data, binary);
+    terminalInputSinks.get(tab.id)?.(data, binary, interrupt);
   }
 }
 

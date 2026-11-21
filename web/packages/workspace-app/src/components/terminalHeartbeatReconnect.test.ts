@@ -9,13 +9,14 @@
 // the host smoke + the gateway rig.
 
 import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
   setSocketFactory,
   WS_CONNECT_DEADLINE_MS,
   WS_PING_MS,
+  WS_PROBE_DEADLINE_MS,
   WS_READ_DEADLINE_MS,
   WS_RECONNECT_BACKOFF_MIN_MS,
   WS_RECONNECT_BACKOFF_MAX_MS,
@@ -24,6 +25,7 @@ import { acquireDocSession, resetDocSyncForTests } from "../state/docSync.svelte
 import { acquireSceneSession, resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { ui } from "../state/store.svelte";
 import { WAKE_PROBE_MS } from "../wakeGap";
+import { TERMINAL_WAKE_TICK_MS } from "./terminalWakeProbe";
 import {
   bumpTabFocusPulse,
   type FileTab,
@@ -31,6 +33,7 @@ import {
 import {
   installTerminalDom,
   mountTerminal,
+  output,
   resetTerminals,
   TerminalSocket,
   terminalTab,
@@ -123,14 +126,17 @@ describe("terminal heartbeat", () => {
     const socket = lastSocket();
     await attach(socket, "sess-keep");
 
-    // No inbound frames at all: pings go out unanswered and the deadline
-    // force-closes the zombie.
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    // No inbound frames at all: pings go out unanswered, and at the deadline
+    // the socket gets one last probe before it is replaced.
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS - 1);
+    const pingsBeforeDeadline = pings(socket);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pings(socket), "the deadline sends the probe's ping").toBe(pingsBeforeDeadline + 1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     expect(socket.readyState).toBe(3);
-    expect(TerminalSocket.all).toHaveLength(1);
 
-    // The redial fires after the first backoff step and reattaches by id.
-    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    // The replacement reattaches by id.
     expect(TerminalSocket.all).toHaveLength(2);
     expect(lastSocket().url).toContain("session=sess-keep");
     expect(tab.terminalSessionId).toBe("sess-keep");
@@ -168,9 +174,12 @@ describe("terminal heartbeat", () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket());
 
-    // Trip the deadline, then fail every dial the moment it is scheduled in.
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
-    // Delays consumed: 500 (the trip's redial), then doubling per failed dial.
+    // Trip the deadline and its probe, whose replacement dials at once, then
+    // fail every dial the moment it is scheduled in.
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all).toHaveLength(2);
+    lastSocket().failDial();
+    // Delays consumed: doubling per failed dial.
     const delays = [500, 1000, 2000, 4000, 8000, 8000, 8000];
     for (const delay of delays) {
       const count = TerminalSocket.all.length;
@@ -258,20 +267,133 @@ describe("wake recycle", () => {
     }
   });
 
-  test("an ordinary tab still redials with its prior session id after a wake", async () => {
+  test("a socket that stays silent after a wake redials with its session id", async () => {
     const tab = terminalTab();
     await mountTerminal(TerminalTab, tab, { focused: false });
     const socket = lastSocket();
     await attach(socket, "sess-wake");
+    await pong(socket);
     expect(TerminalSocket.all).toHaveLength(1);
 
     await wake();
+    expect(pings(socket), "the wake probes the socket").toBe(2);
+    expect(TerminalSocket.all, "the socket gets its quiet limit").toHaveLength(1);
 
-    // The recycle forces a reconnect through the normal resume path: a
-    // second dial carrying the same session id, replaying missed bytes.
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+
+    // The replacement takes the normal resume path: a second dial carrying
+    // the same session id, replaying missed bytes.
     expect(TerminalSocket.all).toHaveLength(2);
     expect(lastSocket().url).toContain("session=sess-wake");
     expect(tab.terminalSessionId).toBe("sess-wake");
+  });
+
+  test("a socket that answers the wake's ping is kept", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-wake");
+    await pong(socket);
+
+    await wake();
+    await pong(socket);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 2);
+
+    expect(TerminalSocket.all).toHaveLength(1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
+  });
+
+  test("output during a probe extends the wait from its last frame", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-busy");
+    await pong(socket);
+
+    await wake();
+    for (let second = 0; second < 6; second += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await output(socket, "x");
+    }
+    expect(TerminalSocket.all, "frames keep the socket").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS - TERMINAL_WAKE_TICK_MS);
+    expect(TerminalSocket.all, "inside the bound of the last frame").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(TERMINAL_WAKE_TICK_MS);
+    expect(TerminalSocket.all, "replaced at the bound of the last frame").toHaveLength(2);
+  });
+
+  test("a desktop window of a remote library is probed", async () => {
+    const url = window.location.href;
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    window.history.replaceState(null, "", "?lib=lib-remote");
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      window.history.replaceState(null, "", url);
+    });
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-remote");
+    await pong(socket);
+
+    await wake();
+    expect(pings(socket), "the wake pings it").toBe(2);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all, "and replaces it when it stays silent").toHaveLength(2);
+  });
+
+  test("a pong of a ping sent before the wake does not settle the probe", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-stale");
+    // The ping sent at open is still in flight across the wake.
+    await wake();
+    expect(pings(socket)).toBe(2);
+    await pong(socket);
+
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all, "the wake's own ping went unanswered").toHaveLength(2);
+  });
+
+  test("the probe's deadline follows the socket's round trip", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-slow");
+    // The ping sent at open takes 2 s to answer: a deadline of 8 s.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pong(socket);
+
+    await wake();
+    await vi.advanceTimersByTimeAsync(8_000 - 500);
+    expect(TerminalSocket.all, "inside four round trips").toHaveLength(1);
+    await pong(socket);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 4);
+    expect(TerminalSocket.all, "answered in time").toHaveLength(1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
+  });
+
+  test("a read deadline that fires after a stall probes instead of closing", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-stall");
+    await pong(socket);
+    let answered = 1;
+    const answerPings = async () => {
+      for (; answered < pings(socket); answered += 1) await pong(socket);
+    };
+
+    // The deadline's timer is the first thing to run after the stall, and
+    // only just late, so nothing but the socket's answer can clear it.
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS - 1);
+    const pingsBeforeDeadline = pings(socket);
+    vi.setSystemTime(Date.now() + 100);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pings(socket), "the deadline sends the probe's ping").toBe(pingsBeforeDeadline + 1);
+    expect(socket.readyState, "the deadline leaves the socket open").toBe(TerminalSocket.OPEN);
+
+    await answerPings();
+    await vi.advanceTimersByTimeAsync(WAKE_PROBE_MS);
+    await answerPings();
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 2);
+    expect(TerminalSocket.all).toHaveLength(1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
   });
 });
 

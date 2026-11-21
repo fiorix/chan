@@ -5,6 +5,7 @@ import {
   createTerminalKeyboardProtocolState,
   disableXtermModifierKeys,
   handleTerminalMetaKey,
+  isTerminalInterruptKey,
   queryXtermModifierKeys,
   resetTerminalKeyboardProtocolState,
   restoreKeyboardProtocolState,
@@ -216,5 +217,28 @@ describe("terminal meta key mapping", () => {
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", shiftKey: true }), restored)).toBe(
       "\x1b[13;2u",
     );
+  });
+});
+
+describe("isTerminalInterruptKey", () => {
+  const resolved = (key: string, shiftKey = false) => ({ key, shiftKey });
+
+  test.each(["c", "C", "z", "\\"])("Ctrl+%s interrupts", (key) => {
+    expect(isTerminalInterruptKey(keyEvent({ key, ctrlKey: true }), resolved(key))).toBe(true);
+  });
+
+  test.each([
+    ["no Ctrl", { key: "c" }, resolved("c")],
+    ["Ctrl+Shift+C, the copy chord", { key: "C", ctrlKey: true, shiftKey: true }, resolved("c", true)],
+    ["Ctrl+Alt+C", { key: "c", ctrlKey: true, altKey: true }, resolved("c")],
+    ["Cmd+Ctrl+C", { key: "c", ctrlKey: true, metaKey: true }, resolved("c")],
+    ["another letter", { key: "x", ctrlKey: true }, resolved("x")],
+    ["a key that resolves to no chord", { key: "c", ctrlKey: true }, null],
+  ])("%s does not", (_label, init, key) => {
+    expect(isTerminalInterruptKey(keyEvent(init), key)).toBe(false);
+  });
+
+  test("a key release does not", () => {
+    expect(isTerminalInterruptKey(keyEvent({ type: "keyup", key: "c", ctrlKey: true }), resolved("c"))).toBe(false);
   });
 });

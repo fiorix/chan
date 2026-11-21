@@ -1,14 +1,28 @@
 // @vitest-environment jsdom
 
 import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
-import { WS_PING_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import {
+  WS_CONNECT_DEADLINE_MS,
+  WS_PING_MS,
+  WS_PROBE_DEADLINE_MS,
+  WS_READ_DEADLINE_MS,
+  WS_RECONNECT_BACKOFF_MAX_MS,
+  WS_RECONNECT_BACKOFF_MIN_MS,
+} from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { broadcastTerminalInput, registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
+import {
+  beginPendingPrompt,
+  broadcastTerminalInput,
+  failPendingPrompt,
+  registerTerminalInputSink,
+  sendCancelToTerminal,
+  sendPromptToTerminal,
+} from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -112,9 +126,11 @@ describe("terminal connection in the tab", () => {
     await receive(first, { type: "pong" });
     term.type("x");
     if (path === "server close") first.close();
-    else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + WS_PROBE_DEADLINE_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-connection-pill]'), "no note while it reconnects").toBeNull();
+    if (path === "server close") {
+      expect(target.querySelector('[data-terminal-connection-pill]'), "no note while it reconnects").toBeNull();
+    }
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const next = TerminalSocket.all.at(-1)!;
     expect(next).not.toBe(first);
@@ -180,7 +196,7 @@ describe("terminal connection in the tab", () => {
     await receive(first, { type: "pong" });
     await vi.advanceTimersByTimeAsync(3900);
     vi.setSystemTime(Date.now() + 30_000);
-    await vi.advanceTimersByTimeAsync(2100);
+    await vi.advanceTimersByTimeAsync(2100 + WS_PROBE_DEADLINE_MS);
     await tick();
     const recycled = TerminalSocket.all.at(-1)!;
     expect(recycled).not.toBe(first);
@@ -207,7 +223,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
-  test("a wake recycle of a healthy socket shows no note", async () => {
+  test("a wake over a healthy socket keeps it and shows no note", async () => {
     const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
@@ -215,9 +231,278 @@ describe("terminal connection in the tab", () => {
     const dials = TerminalSocket.all.length;
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 2);
     await tick();
-    expect(TerminalSocket.all.length).toBeGreaterThan(dials);
+    expect(TerminalSocket.all.length).toBe(dials);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("a key typed during a wake's probe goes once to the replacement, with no note", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    term.type("x");
+    const typed = (socket: TerminalSocket) => sentFrames(socket).filter((frame) => frame.type === "input" && frame.data === "x");
+    expect(typed(first), "held off the suspect socket").toEqual([]);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    expect(typed(replacement), "not before the replacement has attached").toEqual([]);
+    await attach(replacement);
+    await tick();
+    expect(typed(first)).toEqual([]);
+    expect(typed(replacement)).toHaveLength(1);
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("a key sent before the wake was noticed still shows the note when the socket is replaced", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    term.type("x");
+    expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100 + WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    await tick();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  /// Mount a terminal, attach it and wake it into a running probe.
+  async function wokenTerminal() {
+    const tab = terminalTab();
+    const { target, term } = await mountTerminal(TerminalTab, tab, { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    return { tab, target, term, first };
+  }
+
+  const framesOfType = (socket: TerminalSocket, type: string) => sentFrames(socket).filter((frame) => frame.type === type);
+
+  test("a key held across a redial onto another session is dropped and owes the note", async () => {
+    const { target, term, first } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement, { id: "sess-other" });
+    await tick();
+    expect(framesOfType(replacement, "input")).toEqual([]);
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  test("a Rich Prompt submitted during a probe goes once to the replacement", async () => {
+    const { tab, first } = await wokenTerminal();
+    expect(sendPromptToTerminal(tab.id, "hello", "claude", "p1")).toBe(true);
+    beginPendingPrompt(tab, "p1");
+    expect(framesOfType(first, "prompt")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    await attach(replacement);
+    expect(framesOfType(first, "prompt")).toEqual([]);
+    expect(framesOfType(replacement, "prompt").map((frame) => frame.id)).toEqual(["p1"]);
+  });
+
+  test("a Rich Prompt its composer gave up on during a probe is not sent", async () => {
+    const { tab } = await wokenTerminal();
+    sendPromptToTerminal(tab.id, "hello", "claude", "p1");
+    beginPendingPrompt(tab, "p1");
+    failPendingPrompt(tab);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    await attach(replacement);
+    expect(framesOfType(replacement, "prompt")).toEqual([]);
+  });
+
+  test("a Rich Prompt recalled during a probe never reaches a socket", async () => {
+    const { tab, first } = await wokenTerminal();
+    sendPromptToTerminal(tab.id, "hello", "claude", "p1");
+    beginPendingPrompt(tab, "p1");
+    expect(sendCancelToTerminal(tab.id, "p1")).toBe(true);
+    expect(tab.pendingPrompt?.phase).toBe("recalled");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    await attach(replacement);
+    for (const socket of [first, replacement]) {
+      expect(framesOfType(socket, "prompt")).toEqual([]);
+      expect(framesOfType(socket, "cancel-prompt")).toEqual([]);
+    }
+  });
+
+  test("an interrupt key goes at once whatever bytes it encodes to", async () => {
+    const { target, term, first } = await wokenTerminal();
+    term.type("k");
+    expect(framesOfType(first, "input")).toEqual([]);
+    // Under the kitty keyboard protocol Ctrl+C need not be byte 0x03.
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x1b[99;5u");
+    expect(framesOfType(first, "input").map((frame) => frame.data)).toEqual(["k", "\x1b[99;5u"]);
+    await vi.advanceTimersByTimeAsync(0);
+    term.type("after");
+    expect(framesOfType(first, "input"), "the key press covers its own bytes only").toHaveLength(2);
+  });
+
+  test("keys held through an outage of fast-failing redials are dropped, not typed later", async () => {
+    const { target, term, first } = await wokenTerminal();
+    term.type("late");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    let socket = TerminalSocket.all.at(-1)!;
+    expect(socket).not.toBe(first);
+    const outageEndsAt = Date.now() + WS_CONNECT_DEADLINE_MS + 20_000;
+    while (Date.now() < outageEndsAt) {
+      socket.failDial();
+      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+      socket = TerminalSocket.all.at(-1)!;
+    }
+    await attach(socket);
+    await tick();
+    expect(framesOfType(socket, "input")).toEqual([]);
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  test("an interrupt before the replacement's session frame cannot reach another session", async () => {
+    const { target, term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x03");
+    expect(framesOfType(replacement, "input"), "nothing before the session frame").toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-reaped", seq: 0, generation: 9, missed_bytes: 0, bytes_since_focus: 0 });
+    await tick();
+    expect(framesOfType(replacement, "input")).toEqual([]);
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  test("an interrupt before the replacement's session frame goes in order once it matches", async () => {
+    const { target, term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x03");
+    expect(framesOfType(replacement, "input")).toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x", "\x03"]);
+  });
+
+  test("a pong before the replacement's session frame releases nothing", async () => {
+    const { term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    // A second wake puts the open replacement under a probe of its own.
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(pings(replacement)).toBe(2);
+    await receive(replacement, { type: "pong" });
+    await receive(replacement, { type: "pong" });
+    expect(framesOfType(replacement, "input"), "it has not shown which session it reached").toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
+  test("on a slow link the hold waits for the probe's verdict past its own cap", async () => {
+    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    // A 3 s round trip: the probe's deadline is its 10 s maximum.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await receive(first, { type: "pong" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2_100);
+    term.type("x");
+    // A last frame late in the probe puts its verdict past the hold's cap.
+    await vi.advanceTimersByTimeAsync(7_000);
+    await output(first, "y");
+    await vi.advanceTimersByTimeAsync(4_500);
+    expect(framesOfType(first, "input"), "never into the socket about to be replaced").toEqual([]);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(framesOfType(first, "input")).toEqual([]);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
+  test("a recovery frame on a closing socket leaves held input for the replacement", async () => {
+    const { term, first } = await wokenTerminal();
+    first.holdClose = true;
+    first.close();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    await receive(first, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(first, "input")).toEqual([]);
+    first.finishClose();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
+  test("a socket's first session frame during a probe does not prove it", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = TerminalSocket.all.at(-1)!;
+    const term = xterm.terminals.at(-1)!;
+    socket.onopen?.();
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    term.type("x");
+    await receive(socket, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(socket, "input"), "the session frame may predate the wake").toEqual([]);
+    for (let answered = 0; answered < pings(socket); answered += 1) await receive(socket, { type: "pong" });
+    expect(framesOfType(socket, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
+  test("a terminal of the desktop's embedded server does no wake probe", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+    const { term, first } = await wokenTerminal();
+    expect(pings(first), "no ping beyond the one at open").toBe(1);
+    term.type("x");
+    expect(framesOfType(first, "input").map((frame) => frame.data), "nothing is held").toEqual(["x"]);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 4);
+    expect(TerminalSocket.all.at(-1)).toBe(first);
+    expect(first.readyState).toBe(TerminalSocket.OPEN);
+  });
+
+  test("a queued frame cancels an expired deadline's close on the desktop's embedded server", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    expect(first.readyState, "the close waits for a queued frame").toBe(TerminalSocket.OPEN);
+    await output(first, "queued behind a stall");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(first.readyState).toBe(TerminalSocket.OPEN);
+    expect(TerminalSocket.all.at(-1)).toBe(first);
   });
 
   test("holds the reconnect warning under the cover then announces it once", async () => {
@@ -242,12 +527,18 @@ describe("terminal connection in the tab", () => {
   });
 
   test("keys refused while a read deadline's close is held warn on the next socket", async () => {
+    // The desktop's embedded server takes no wake probe, so its read deadline
+    // still closes the socket.
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     first.holdClose = true;
     await attach(first);
     await receive(first, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + 1_000);
     await tick();
     expect(first.readyState).toBe(2);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();

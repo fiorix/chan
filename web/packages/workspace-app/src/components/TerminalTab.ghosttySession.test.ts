@@ -363,6 +363,22 @@ describe("acknowledging parsed output on Ghostty", () => {
     expect(acks(socket).at(-1)).toEqual({ type: "ack", generation: 3, seq: 103 });
   });
 
+  test("acknowledgements keep flowing while a wake's probe holds the user's input", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 0, generation: 1, missed_bytes: 0, replay_bytes: 0, ack_window: 8,
+    });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2_100);
+    term.input("x", true);
+    expect(sentFrames(socket).filter((frame) => frame.type === "input"), "the key waits").toEqual([]);
+    await output(socket, "ABCDEFGH");
+    expect(acks(socket).at(-1)).toEqual({ type: "ack", generation: 1, seq: 8 });
+    expect(sentFrames(socket).filter((frame) => frame.type === "input"), "the key still waits").toEqual([]);
+  });
+
   test("after a reported loss the position is the server's and a redial repeats nothing", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const { socket, term } = await openGhostty(tab!);
