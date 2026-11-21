@@ -1667,6 +1667,69 @@ async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
     send(&mut old, json!({"type": "input", "data": "\n"})).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_larger_than_the_window_waits_for_acknowledgements() {
+    const RING: usize = 64 * 1024;
+    let _gate = pty_test_lock();
+    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
+    rig.output(&vec![b'x'; RING - 1024]);
+    let mut client = bounded(
+        "attach terminal socket",
+        dial_terminal_with_small_buffer(
+            rig.address,
+            &format!("session={}&since=0&cols=80&rows=24&ack=1", rig.handle.id()),
+        ),
+    )
+    .await;
+    let session = loop {
+        if let ClientMessage::Text(text) = next(&mut client).await {
+            let frame: Value = serde_json::from_str(&text).expect("control JSON");
+            if frame["type"] == "session" {
+                break frame;
+            }
+        }
+    };
+    let window = number(&session, "ack_window") as usize;
+    let replay = number(&session, "replay_bytes") as usize;
+    assert!(replay > window, "the fixture's replay exceeds the window");
+    let start = number(&session, "seq") - replay as u64;
+    let mut received = 0;
+    while let Ok(frame) =
+        tokio::time::timeout(std::time::Duration::from_millis(400), next(&mut client)).await
+    {
+        match frame {
+            ClientMessage::Binary(bytes) => received += bytes.len(),
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "ready", "the replay stopped at the window");
+            }
+            other => panic!("socket ended in replay: {other:?}"),
+        }
+    }
+    assert_eq!(
+        received, window,
+        "a replay stops at the unacknowledged window"
+    );
+    let generation = number(&session, "generation");
+    ack(&mut client, generation, start + received as u64).await;
+    loop {
+        match next(&mut client).await {
+            ClientMessage::Binary(bytes) => {
+                received += bytes.len();
+                ack(&mut client, generation, start + received.min(replay) as u64).await;
+            }
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                if frame["type"] == "ready" {
+                    break;
+                }
+            }
+            other => panic!("socket ended in replay: {other:?}"),
+        }
+    }
+    assert_eq!(received, replay, "the rest of the replay follows the ack");
+}
+
 /// A tmux pane's producer cannot be held, so its view gets the bound and the
 /// count: the socket stops at the window and resumes from the ring.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
