@@ -219,7 +219,7 @@ async function freePort() {
 }
 
 /// A direct devserver with one of its terminal windows open on the desktop.
-async function openDevserverWindow(logs) {
+async function openDevserverWindow(logs, started) {
   const devHome = path.join(work, "devserver-home");
   fs.mkdirSync(devHome);
   const port = await freePort();
@@ -227,6 +227,7 @@ async function openDevserverWindow(logs) {
   const server = spawn(chan, ["devserver", "run", "--service=none", "--bind=127.0.0.1", `--port=${port}`], {
     env: { ...process.env, CHAN_HOME: devHome, CHAN_WINDOW_ID: "", CHAN_CONTROL_SOCKET: "" }, stdio: ["ignore", "pipe", "pipe"],
   });
+  started(server);
   server.stdout.on("data", (data) => logs.push(data.toString()));
   server.stderr.on("data", (data) => logs.push(data.toString()));
   await until("the devserver started", async () => {
@@ -255,35 +256,37 @@ async function openDevserverWindow(logs) {
   await until("the devserver's window opened", () => inPage(windowId, "document.readyState"), (state) => state === "complete", 60_000);
   const lib = await inPage(windowId, "new URLSearchParams(location.search).get('lib')");
   if (!lib || lib === "local") throw new Inconclusive(`the devserver's window reads library ${lib}`);
-  const sockets = fs.readdirSync(process.env.XDG_RUNTIME_DIR).filter((entry) => entry.startsWith(`chan-control-${server.pid}-`));
-  let control = null;
-  for (const entry of sockets) {
-    const candidate = path.join(process.env.XDG_RUNTIME_DIR, entry);
-    try {
-      await run(chan, ["shell", "pane", "list", "--window", windowId, "--json"],
-        { env: { ...cliEnv, CHAN_CONTROL_SOCKET: candidate, CHAN_WINDOW_ID: windowId }, timeout: 15_000 });
-      control = candidate;
-      break;
-    } catch { /* another tenant's socket */ }
-  }
-  if (!control) throw new Inconclusive("no control socket of the devserver reaches its window");
-  return { server, windowId, env: { ...cliEnv, CHAN_CONTROL_SOCKET: control, CHAN_WINDOW_ID: windowId } };
+  // A devserver's socket is named for its home, not its pid, and the window
+  // answers on it only once its page has registered.
+  const control = await until("a control socket reaches the devserver's window", async () => {
+    for (const entry of fs.readdirSync(process.env.XDG_RUNTIME_DIR)) {
+      if (!entry.startsWith("chan-control-")) continue;
+      const candidate = path.join(process.env.XDG_RUNTIME_DIR, entry);
+      try {
+        await run(chan, ["shell", "pane", "list", "--window", windowId, "--json"],
+          { env: { ...cliEnv, CHAN_CONTROL_SOCKET: candidate, CHAN_WINDOW_ID: windowId }, timeout: 15_000 });
+        return candidate;
+      } catch { /* another tenant's socket, or the window is not live yet */ }
+    }
+    return null;
+  }, Boolean, 60_000);
+  return { windowId, env: { ...cliEnv, CHAN_CONTROL_SOCKET: control, CHAN_WINDOW_ID: windowId } };
 }
 
 async function main() {
   const logs = [];
   const readings = [];
-  let devserver = null;
+  let server = null;
   try {
     readings.push(await stallArm({
       label: "Local", windowId: process.env.CHAN_WINDOW_ID, env: { ...process.env }, stallMs: LOCAL_STALL_MS, probed: false,
     }));
-    devserver = await openDevserverWindow(logs);
+    const devserver = await openDevserverWindow(logs, (child) => { server = child; });
     readings.push(await stallArm({
       label: "Devserver", windowId: devserver.windowId, env: devserver.env, stallMs: DEVSERVER_STALL_MS, probed: true,
     }));
   } finally {
-    devserver?.server.kill();
+    server?.kill();
     fs.writeFileSync(path.join(output, "devserver.log"), mask(logs.join("")));
     fs.writeFileSync(path.join(output, "results.json"), `${mask(JSON.stringify(readings, null, 2))}\n`);
   }
