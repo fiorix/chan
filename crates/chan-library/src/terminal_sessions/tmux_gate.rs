@@ -214,7 +214,6 @@ impl TmuxGate {
     }
 
     /// Whether the stream is inside control mode.
-    #[cfg(test)]
     pub(super) fn in_control_mode(&self) -> bool {
         self.client.in_control_mode()
     }

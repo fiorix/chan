@@ -508,17 +508,33 @@ async fn output_lag_keeps_the_latest_status_without_a_further_report() {
     tokio::time::advance(Duration::from_millis(150)).await;
     let frames = fence(&rig, &mut client).await;
     assert!(
-        frames.iter().any(|frame| frame["type"] == "error"
-            && frame["message"]
-                .as_str()
-                .is_some_and(|s| s.contains("lagged"))),
-        "fixture must force broadcast lag"
+        !frames.iter().any(|frame| frame["type"] == "error"),
+        "output lag recovers without an error frame: {frames:?}"
     );
+    let recovered: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["type"] == "session")
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "the enrolled receiver's forced lag produces one recovery: {frames:?}"
+    );
+    let recovered = recovered[0];
+    assert_eq!(recovered["id"], initial["id"]);
+    assert_eq!(recovered["generation"], initial["generation"]);
+    assert_eq!(recovered["missed_bytes"], 0);
     let updates = statuses(&frames);
     assert_eq!(updates.len(), 1, "watch update survives output lag");
     assert_eq!(
         updates[0]["program_status"]["records"][0]["state"],
         "blocked"
+    );
+    assert_eq!(updates[0]["id"], initial["id"]);
+    assert_eq!(updates[0]["generation"], initial["generation"]);
+    assert_eq!(
+        recovered["program_status"], updates[0]["program_status"],
+        "recovery and the watch retain the same latest value without another report"
     );
 }
 
@@ -1464,7 +1480,7 @@ async fn an_exit_of_a_replaced_incarnation_leaves_the_restarted_one_registered()
                     )
                     .expect("restart the exited child"));
                 let handle = registry
-                    .attach_for_ws(&id, None)
+                    .attach_for_ws(&id, None, None)
                     .expect("the restarted incarnation is registered");
                 assert_ne!(handle.generation, old_generation);
                 *kept.lock().expect("replacement") = Some(handle);
@@ -1482,7 +1498,7 @@ async fn an_exit_of_a_replaced_incarnation_leaves_the_restarted_one_registered()
     let registered = rig
         .state
         .terminal_sessions
-        .attach_for_ws(rig.handle.id(), None)
+        .attach_for_ws(rig.handle.id(), None, None)
         .map(|handle| handle.generation);
     let (mut live, _) = bounded(tokio_tungstenite::connect_async(format!(
         "ws://{}/api/terminal/ws?session={}",

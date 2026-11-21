@@ -147,6 +147,7 @@
     terminalMessageBytes,
     terminalMouseReport,
   } from "../terminal/connection";
+  import { StreamAck } from "../terminal/streamAck";
   import {
     controlSlashBytes,
     copyTerminalKeyboardProtocolState,
@@ -297,6 +298,9 @@
         missed_bytes?: number;
         /// Ring bytes before the alternate-screen and mode preludes; absent on older servers.
         replay_bytes?: number;
+        /// Unacknowledged output the server allows this socket. Present only
+        /// when this client dialed with `ack` and the server supports it.
+        ack_window?: number;
         bytes_since_focus?: number;
         /// MESSAGE depth of the shared write queue at attach time, so every
         /// (re)attach re-syncs the badge (the tab field is never persisted).
@@ -441,6 +445,9 @@
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
   let receivedSeq = 0;
+  // Reports what the ghostty core has parsed; xterm.js queues its writes, so
+  // that backend never dials with `ack` and never paces the program.
+  const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
   // Publication needs a fit since the last visibility change or relocation.
@@ -1736,6 +1743,7 @@
         // shell the live PTY is already running, and the server ignores the
         // param on that path.
         profile: reattaching ? undefined : tab.profile,
+        ack: backend === "ghostty",
       }),
     );
     sentGrid = null;
@@ -1784,6 +1792,7 @@
           }
         }
         writePtyOutput(bytes, attachPtyWriteOrigin());
+        streamAck.parsed(bytes.length, attachReplayActive);
         // Advance the server byte cursor only for LIVE output: replay chunks
         // (between the `session` and `ready` frames) reconstruct history up to
         // the prelude `seq` we already adopted, so counting them would double.
@@ -1821,7 +1830,14 @@
         // frame.id that differs is a fresh shell replacing the reaped session,
         // not a same-id live resume.
         const priorId = tab.terminalSessionId;
-        const duplicateReplay = reattaching && !dialSawSession;
+        // A recovery on the live socket replays what the terminal never
+        // parsed, like a redial's first frame: generated replies to the
+        // replay stay local in both cases. A restart on the live socket has
+        // a new generation: its replay is the new shell's first output, and
+        // the queries in it are waiting for an answer.
+        const duplicateReplay =
+          (reattaching && !dialSawSession) ||
+          (dialSawSession && frame.id === priorId && frame.generation === serverGeneration);
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
@@ -1851,6 +1867,7 @@
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
+        streamAck.adopt(frame);
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
@@ -2045,6 +2062,7 @@
     };
     ws.onclose = () => {
       clearLiveness();
+      streamAck.stop();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
       // delivery -- fail it (bubble unlocks, keeps text, labels honestly;
@@ -2648,6 +2666,7 @@
     if (attachReplayActive) replayCut = true;
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
+    streamAck.stop();
     clearTerminalMetadataSink();
     // Intentional teardown: stop the heartbeat and any scheduled redial (the
     // handlers are detached below, so no onclose will re-arm them).

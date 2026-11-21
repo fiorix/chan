@@ -31,10 +31,14 @@ export type TerminalWsPathOpts = {
   /// cwd/command/env: reattaching cannot change the shell a live PTY is
   /// already running, and the server ignores it on that path.
   profile?: string | null;
+  /// This view reports the output it has parsed. A server without the
+  /// feature ignores the key and advertises no window.
+  ack?: boolean;
 };
 
 export function terminalWsPath(opts: TerminalWsPathOpts): string {
   const params = new URLSearchParams();
+  if (opts.ack) params.set("ack", "1");
   if (opts.cols !== undefined && opts.rows !== undefined) {
     params.set("cols", String(opts.cols));
     params.set("rows", String(opts.rows));
