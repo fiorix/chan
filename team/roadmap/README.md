@@ -27,6 +27,9 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [termlinks]: v0.133.0/a-link-in-a-ghostty-terminal-underlines-on-hover-and-a-click-does-nothing.md
 [musebatch]: v0.133.0/messages-queued-for-a-muse-agent-arrive-one-per-turn.md
 [musecopy]: v0.133.0/a-command-a-muse-agent-prints-across-rows-copies-with-a-line-break-at-each-row.md
+[keybar]: v0.133.0/the-computers-keys-move-to-a-bar-at-the-bottom.md
+[cardkeys]: v0.133.0/a-row-letter-does-nothing-while-the-card-itself-is-selected.md
+[touchopen]: v0.133.0/a-tap-on-a-touch-screen-cannot-open-a-file-and-landscape-runs-under-the-notch.md
 [ghosttyng]: v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.134.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [streamlag]: v0.134.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
@@ -49,7 +52,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.133.0
 
-Six rows the owner raised on 2026-11-20, each built that day, reviewed with end-to-end checks red at the base and green at the tip, and merged into the integration branch, with no release yet: a tour part the pointer crossed stays lit ([tourrest]), a tmux connection's card lists its control terminal ([tmuxcard]), the Computers badge graph sits off centre and moves in steps ([badgescroll]), a click on a ghostty terminal's link does nothing ([termlinks]), messages queued for a Muse agent arrive one per turn ([musebatch]) and a command a Muse agent prints across rows copies with a break at each row ([musecopy]). The same day the owner made them the base of v0.133.0 and moved every row the version held before them to v0.134.0. A merged row whose acceptance is all read reads `closed`; one with a reading or a question left for the owner reads `owner`.
+Six rows the owner raised on 2026-11-20, each built that day, reviewed with end-to-end checks red at the base and green at the tip, and merged into the integration branch, with no release yet: a tour part the pointer crossed stays lit ([tourrest]), a tmux connection's card lists its control terminal ([tmuxcard]), the Computers badge graph sits off centre and moves in steps ([badgescroll]), a click on a ghostty terminal's link does nothing ([termlinks]), messages queued for a Muse agent arrive one per turn ([musebatch]) and a command a Muse agent prints across rows copies with a break at each row ([musecopy]). The same day the owner made them the base of v0.133.0 and moved every row the version held before them to v0.134.0. On 2026-11-21 the owner added three more, built and merged the same way: the Computers keys move to a bar at the bottom ([keybar]), a row letter acts from the selected card ([cardkeys]), and a tap opens a file on a touch screen with the window inside its safe areas ([touchopen], GitHub issue #9). A merged row whose acceptance is all read reads `closed`; one with a reading or a question left for the owner reads `owner`.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -59,6 +62,9 @@ Six rows the owner raised on 2026-11-20, each built that day, reviewed with end-
 | [a ghostty link click does nothing][termlinks] | merged | owner |
 | [Muse messages arrive one per turn][musebatch] | merged | closed |
 | [a Muse command copies with breaks][musecopy] | merged | closed |
+| [the Computers keys in a bottom bar][keybar] | merged | closed |
+| [a row letter from the selected card][cardkeys] | merged | owner |
+| [a tap cannot open a file on touch][touchopen] | merged | owner |
 
 ### v0.134.0
 
