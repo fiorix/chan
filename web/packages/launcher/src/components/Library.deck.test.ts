@@ -663,6 +663,31 @@ describe("the Computers deck's letter actions", () => {
     expect(toggle).toHaveBeenCalledOnce();
   });
 
+  it("acts from the card only while the card itself holds focus", () => {
+    mountDeck();
+    decks.computers.activeKey = "ds-1";
+    flushSync();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="ds-1"]')!;
+    const header = slot.querySelector<HTMLElement>(".machine-header")!;
+    const connection = watchClick(header.querySelector<HTMLButtonElement>('[aria-label^="Disconnect"]')!);
+    const terminal = watchClick(header.querySelector<HTMLButtonElement>('[aria-label^="New terminal"]')!);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    for (const on of [document.body, document.documentElement]) {
+      expect(key("o", on).defaultPrevented).toBe(false);
+      expect(key("t", on).defaultPrevented).toBe(false);
+    }
+    const next = target!.querySelector<HTMLButtonElement>('button[aria-label="Next card"]')!;
+    next.focus();
+    expect(document.activeElement).toBe(next);
+    expect(key("o", next).defaultPrevented).toBe(false);
+    expect(connection).not.toHaveBeenCalled();
+    expect(terminal).not.toHaveBeenCalled();
+    slot.focus();
+    key("o", slot);
+    expect(connection).toHaveBeenCalledOnce();
+  });
+
   it("leaves fields, modifiers, inactive cards, disabled buttons and repeats alone", async () => {
     mountDeck();
     decks.computers.activeKey = "local";

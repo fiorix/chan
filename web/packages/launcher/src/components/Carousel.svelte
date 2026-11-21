@@ -127,24 +127,20 @@
       .filter((row) => !row.parentElement?.closest("[data-deck-row]") && rowControls(row).length > 0);
   }
 
-  // Focus on the card itself, or on no element at all, is focus on the card.
-  function isAtCard(target: EventTarget | null, slot: HTMLElement): boolean {
-    return target === document.body || target === document.documentElement || target === slot;
-  }
-
-  // The row the card itself stands for while no row is focused: Enter and the
-  // row letters act on it from the card. That is the header of a machine or
-  // gateway card; All windows has no header row, so it is the first window.
-  function cardRow(slot: HTMLElement): HTMLElement | undefined {
-    return deckRows(slot)[0];
+  // The row a card stands for: Enter and the row letters act on it from the
+  // card. That is the header of a machine or gateway card; All windows has no
+  // header row, so it is the first window.
+  function cardRow(rows: HTMLElement[]): HTMLElement | undefined {
+    return rows[0];
   }
 
   function navigateRows(e: KeyboardEvent, slot: HTMLElement): boolean {
     const rows = deckRows(slot);
-    if (!rows.length) return false;
+    const fallback = cardRow(rows);
+    if (!fallback) return false;
     const target = e.target;
     const index = rows.findIndex((row) => target instanceof Node && row.contains(target));
-    const atCard = isAtCard(target, slot);
+    const atCard = target === document.body || target === document.documentElement || target === slot;
     if (index < 0 && !atCard) return false;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const next = index < 0
@@ -153,7 +149,7 @@
       focusRowTarget(rows[next]);
       return true;
     }
-    const row = index < 0 ? cardRow(slot)! : rows[index];
+    const row = index < 0 ? fallback : rows[index];
     const controls = rowControls(row);
     if (e.key === "Enter") {
       // Buttons and checkboxes retain native activation; Enter on the row
@@ -191,7 +187,10 @@
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
     if (rowKey) {
       if (ownsArrows(target) || !(target instanceof Element) || target.closest("form, [role=dialog]")) return;
-      const row = isAtCard(target, slot) ? cardRow(slot) : target.closest<HTMLElement>("[data-deck-row]");
+      // Only the slot holding focus is the card selection, the state its ring
+      // draws. With focus on the page nothing is selected, and a letter must
+      // not connect or disconnect a machine with no ring on the screen.
+      const row = target === slot ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
       if (!row || !slot.contains(row)) return;
       const button = rowControls(row).find((control) =>
         control instanceof HTMLButtonElement && control.dataset.deckKey === letter);

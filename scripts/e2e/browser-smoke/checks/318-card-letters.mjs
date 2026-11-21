@@ -1,7 +1,8 @@
-// A row letter pressed on a Computers card selected as a whole acts on the
-// row Enter takes from the card, which on a devserver's card is its header:
-// `t` asks for a terminal on that devserver and `o` disconnects or connects
-// it. The built launcher runs on the desktop surface against this check's own
+// A row letter pressed on a Computers card selected as a whole, the card
+// itself holding focus, acts on the row Enter takes from the card, which on a
+// devserver's card is its header: `t` asks for a terminal on that devserver
+// and `o` disconnects or connects it. With nothing selected it does nothing.
+// The built launcher runs on the desktop surface against this check's own
 // backend, which serves one connected devserver with one running workspace
 // and answers the devserver's terminal, connect and disconnect routes and the
 // workspace's open and power routes. The launcher's requests are read in the
@@ -13,12 +14,15 @@
 //      has w, and the card asks for nothing;
 //   3. card o: o disconnects the devserver, o again connects it, and focus
 //      stays on the card;
-//   4. header row: t and o with the header row focused act as before;
-//   5. outside the deck: t and o with a top bar button focused ask for
+//   4. nothing focused: with focus on the page, no dialog and the surface
+//      not inert, t and o ask for nothing;
+//   5. header row: t and o with the header row focused act as before;
+//   6. outside the deck: t and o with a top bar button focused ask for
 //      nothing;
-//   6. dialog: with the devserver's edit dialog open and focus on the page,
-//      the deck's stand-in for the card, t and o ask for nothing;
-//   7. workspace row: t and o with the workspace row focused act on the
+//   7. dialog: with the devserver's edit dialog open the surface is inert
+//      and cannot hold focus on the card, so the letters are pressed with
+//      focus on the page, and ask for nothing;
+//   8. workspace row: t and o with the workspace row focused act on the
 //      workspace, not on the devserver.
 // A leg's precondition failing is reported as a precondition, apart from
 // the leg's own red.
@@ -41,8 +45,8 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-const DS_ID = "ds-cardkeys";
-const DS_LABEL = "cardkeys-lab";
+const DS_ID = "ds-letters";
+const DS_LABEL = "letters-lab";
 const WS_LABEL = "proj";
 const WS_PATH = "/srv/proj";
 const ROUTE = `/api/library/devservers/${DS_ID}`;
@@ -65,13 +69,13 @@ function cardBackend(distRoot) {
   const initial = () => ({
     devserver: {
       id: DS_ID,
-      url: "http://cardkeys.invalid:8443",
-      host: "cardkeys.invalid",
+      url: "http://letters.invalid:8443",
+      host: "letters.invalid",
       port: 8443,
       label: DS_LABEL,
       script: "",
       has_token: false,
-      library_id: "lib-cardkeys",
+      library_id: "lib-letters",
       status: "connected",
       pending_signin: false,
       auto_hide_control: false,
@@ -85,12 +89,12 @@ function cardBackend(distRoot) {
       connection_health: null,
     },
     workspace: {
-      workspace_id: "ws-cardkeys-proj",
+      workspace_id: "ws-letters-proj",
       path: WS_PATH,
       label: WS_LABEL,
       on: true,
       status: "running",
-      library_id: "lib-cardkeys",
+      library_id: "lib-letters",
       devserver_id: DS_ID,
       prefix: WS_LABEL,
     },
@@ -300,6 +304,22 @@ export default {
         await page.waitForSelector(DISCONNECT, { timeout: 15_000 });
         r.focusAfterOn = await focusAt(page);
         check(r.focusAfterOn.at === "card", `focus left the card after the connect: ${JSON.stringify(r.focusAfterOn)}`);
+      });
+
+      await leg("nothingFocused", async (r) => {
+        await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+        r.state = await page.evaluate(() => ({
+          activeIsBody: document.activeElement === document.body,
+          surface: Boolean(document.querySelector(".launcher-surface")),
+          surfaceInert: Boolean(document.querySelector(".launcher-surface")?.closest("[inert]")),
+          dialog: Boolean(document.querySelector('[role="dialog"]')),
+        }));
+        precondition(r.state.activeIsBody && r.state.surface && !r.state.surfaceInert && !r.state.dialog, `the page is not at rest with nothing focused: ${JSON.stringify(r.state)}`);
+        r.asks.t = await press(page, "t");
+        r.asks.o = await press(page, "o");
+        r.stillConnected = Boolean(await page.$(DISCONNECT));
+        check(r.asks.t.length === 0 && r.asks.o.length === 0, `t and o with nothing focused asked for ${JSON.stringify(r.asks)}`);
+        check(r.stillConnected, "the devserver is not shown connected after o with nothing focused");
       });
 
       await leg("headerRow", async (r) => {
