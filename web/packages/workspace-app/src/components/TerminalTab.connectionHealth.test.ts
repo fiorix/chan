@@ -361,6 +361,23 @@ describe("terminal connection in the tab", () => {
     expect(first.readyState).toBe(TerminalSocket.OPEN);
   });
 
+  test("a queued frame cancels an expired deadline's close on the desktop's embedded server", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    expect(first.readyState, "the close waits for a queued frame").toBe(TerminalSocket.OPEN);
+    await output(first, "queued behind a stall");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(first.readyState).toBe(TerminalSocket.OPEN);
+    expect(TerminalSocket.all.at(-1)).toBe(first);
+  });
+
   test("holds the reconnect warning under the cover then announces it once", async () => {
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
