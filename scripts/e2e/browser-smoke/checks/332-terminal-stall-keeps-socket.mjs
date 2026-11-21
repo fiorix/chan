@@ -477,8 +477,10 @@ async function interruptLeg(page, fixture, relay, name, selector) {
 }
 
 /// A stall long enough to fill the acknowledgement window, then a wake. The
-/// relay paces the drain, so the probe's pong waits behind the window while
-/// acknowledgements keep leaving and a typed key waits for the pong.
+/// relay paces the drain while acknowledgements keep leaving, the socket is
+/// kept, and a key typed after the stall goes out once and never ahead of the
+/// first pong. Whether the key meets the hold depends on when that pong lands,
+/// so the hold itself is pinned by the mounted tests.
 async function fullWindowLeg(page, fixture, relay, name, selector) {
   await queryParsed(fixture, 20_000);
   await page.click(`${selector} .terminal-host`);
@@ -522,8 +524,8 @@ async function fullWindowLeg(page, fixture, relay, name, selector) {
       queuedBytes: recovery ? recovery.bytesBefore - bytesAtStall : null,
       missed: socket.sessions.slice(sessionsBefore).map((session) => session.missed),
       queuedAtKey,
-      keyHeldMs: key && firstPong ? key.at - firstPong : null,
-      acksBeforePong: firstPong ? socket.acks.filter((at) => at >= stall.end && at < firstPong).length : null,
+      keyAfterPongMs: key && firstPong ? key.at - firstPong : null,
+      acksAfterStall: socket.acks.filter((at) => at >= stall.end).length,
       copies: keysOf(fixture).slice(keysBefore).split("w").length - 1,
       receivedLength: digest.length, expectedLength, whole: digest.sha256 === expected.digest("hex"),
     };
@@ -532,8 +534,8 @@ async function fullWindowLeg(page, fixture, relay, name, selector) {
     assert.ok(observed.queuedBytes >= recovery.window / 2, `the window was not full: ${JSON.stringify(observed)}`);
     assert.ok(observed.missed.every((count) => count === 0), `bytes were missed: ${JSON.stringify(observed)}`);
     assert.ok(queuedAtKey > 0, `the backlog had drained before the key: ${JSON.stringify(observed)}`);
-    assert.ok(observed.keyHeldMs !== null && observed.keyHeldMs >= 0, `the key did not wait for the pong: ${JSON.stringify(observed)}`);
-    assert.ok(observed.acksBeforePong > 0, `no acknowledgement left during the hold: ${JSON.stringify(observed)}`);
+    assert.ok(observed.keyAfterPongMs !== null && observed.keyAfterPongMs >= 0, `the key went out before the pong: ${JSON.stringify(observed)}`);
+    assert.ok(observed.acksAfterStall > 0, `no acknowledgement left after the stall: ${JSON.stringify(observed)}`);
     assert.equal(observed.copies, 1, `the held key arrived ${observed.copies} times: ${JSON.stringify(observed)}`);
     assert.ok(observed.whole, `the stream is not whole and in order: ${JSON.stringify(observed)}`);
     return observed;

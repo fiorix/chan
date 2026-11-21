@@ -126,8 +126,9 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
       if (!overflowing && (queue.length > TERMINAL_HOLD_MAX_FRAMES || chars > TERMINAL_HOLD_MAX_CHARS)) {
         overflowing = true;
         // After the caller's turn: a submit records its message as pending
-        // only once the send has returned.
-        queueMicrotask(release);
+        // only once the send has returned. A replacement that has not proven
+        // its session may be another shell, so the queue does not go to it.
+        queueMicrotask(() => (replacing ? abandon() : release()));
       }
       return true;
     },

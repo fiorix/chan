@@ -164,6 +164,18 @@ describe("the terminal input hold", () => {
     expect(state.dropped).toBe(1);
   });
 
+  test("an overflow during a replacement's window drops the queue instead of sending it", async () => {
+    const { hold, state } = holdWith();
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    hold.awaitReplacement(CAP_MS);
+    hold.offer(entry("x".repeat(TERMINAL_HOLD_MAX_CHARS + 1)));
+    await Promise.resolve();
+    expect(state.sent).toEqual([]);
+    expect(state.dropped).toBe(1);
+    expect(hold.active).toBe(false);
+  });
+
   test("once a replacement has proven its session, an interrupt goes at once", () => {
     const { hold, state } = holdWith();
     hold.begin(CAP_MS);
