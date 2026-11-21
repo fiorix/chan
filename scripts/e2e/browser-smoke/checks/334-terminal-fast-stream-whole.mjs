@@ -1,17 +1,19 @@
-// Fast numbered streams through a ghostty terminal that falls behind arrive
-// whole, in headless Chrome.
+// Fast numbered streams through a ghostty terminal arrive whole, in headless
+// Chrome.
 //
-//   short:   `seq 1 400000`, about 3.1 MB, with the page's CPU throttled 20
-//            times. An unpaced server's broadcast and socket buffers absorb
-//            this much, so this leg passes without pacing too.
+//   short:   `seq 1 400000`, about 3.1 MB. An unpaced server's broadcast and
+//            socket buffers absorb this much, so this leg passes without
+//            pacing too.
 //   stalled: `seq 1 4000000`, about 35 MB, with the page's main thread stopped
 //            for 3 s partway through, inside the 5 s bound. This is the leg
 //            an unpaced server fails, with its lag line.
 //
 // Each leg reads every byte the page's socket handed to the app, in order,
 // then what the terminal itself retains: consecutive numbers ending at the
-// last one, no lag line and no missed-bytes line. It says nothing about
-// WebKit or the xterm.js engine.
+// last one, no lag line and no missed-bytes line. A 3 s stall cannot trip the
+// page's wake detector, which replaces the socket when its 2 s probes land
+// more than 6 s apart. A page slowed until they do is not covered here. It
+// says nothing about WebKit or the xterm.js engine.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -22,8 +24,8 @@ import {
 
 const NAME = "FastStream334";
 const LEGS = [
-  { key: "short", count: 400_000, throttle: 20, stallAfterLines: null },
-  { key: "stalled", count: 4_000_000, throttle: null, stallAfterLines: 500_000 },
+  { key: "short", count: 400_000, stallAfterLines: null },
+  { key: "stalled", count: 4_000_000, stallAfterLines: 500_000 },
 ].map((leg) => ({ ...leg, begin: `__${leg.key}334_BEGIN__`, end: `__${leg.key}334_END__` }));
 const STALL_MS = 3_000;
 
@@ -56,7 +58,6 @@ export default {
       await until("the terminal socket is ready", read, (state) => state?.ready);
       const legs = {};
       for (const leg of LEGS) {
-        await page.emulateCPUThrottling(leg.throttle);
         await page.evaluate((name, { begin, end, count }) => {
           __streamProbe.verifySeq(name, begin, count, end);
           __streamProbe.input(name, "\r");
@@ -69,7 +70,6 @@ export default {
         }
         const finished = await until(`the ${leg.key} stream reaches its end marker`, read,
           (state) => state.verifier.done || state.verifier.mismatch || state.allErrors.length > 0, 240_000);
-        await page.emulateCPUThrottling(null);
         assert.deepEqual(finished.allErrors, [], `${leg.key}: the terminal prints no lag line`);
         if (finished.verifier.mismatch) {
           const sockets = await page.evaluate((name) => __streamProbe.readAll(name), NAME);
@@ -99,7 +99,6 @@ export default {
       await ctx.shot("334-whole-stream");
       return { legs };
     } finally {
-      await page.emulateCPUThrottling(null).catch(() => {});
       await cs(["close", "--tab-name", NAME]).catch(() => {});
       await restoreTerminalPrefs(ctx, page, token, original);
     }
