@@ -347,6 +347,36 @@ describe("terminal connection in the tab", () => {
     expect(framesOfType(first, "input"), "the key press covers its own bytes only").toHaveLength(2);
   });
 
+  test("a recovery frame on a closing socket leaves held input for the replacement", async () => {
+    const { term, first } = await wokenTerminal();
+    first.holdClose = true;
+    first.close();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    await receive(first, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(first, "input")).toEqual([]);
+    first.finishClose();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
+  test("a socket's first session frame during a probe does not prove it", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = TerminalSocket.all.at(-1)!;
+    const term = xterm.terminals.at(-1)!;
+    socket.onopen?.();
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    term.type("x");
+    await receive(socket, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(socket, "input"), "the session frame may predate the wake").toEqual([]);
+    for (let answered = 0; answered < pings(socket); answered += 1) await receive(socket, { type: "pong" });
+    expect(framesOfType(socket, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
   test("a terminal of the desktop's embedded server does no wake probe", async () => {
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     onTestFinished(() => {
