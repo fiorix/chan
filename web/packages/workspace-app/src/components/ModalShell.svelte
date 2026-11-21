@@ -7,7 +7,7 @@
   import { onMount, type Snippet } from "svelte";
   import { deckPendingReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
-  import { registerModalShell } from "./modalStack";
+  import { focusInDialog, registerModalShell } from "./modalStack";
   import { mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
   import { appInputBlocked } from "../state/store.svelte";
 
@@ -44,7 +44,10 @@
   const opener = deckPendingReturnFocus() ??
     (active instanceof HTMLElement && active !== document.body ? active : null);
 
+  // The shell gives the panel its opening focus itself, through the keyboard's
+  // owner, so a dialog that opens under a cover leaves the keyboard there.
   const focus = createModalFocus({
+    initialFocus: false,
     restoreFocus: false,
     onClose: () => onClose(),
     onKeydown: (event) => {
@@ -55,6 +58,7 @@
   onMount(() => {
     registration = registerModalShell({ layer: layer!, panel: panel!, opener, onKeydown: focus.onKeydown });
     const cleanup = focus.mount(panel!);
+    focusInDialog(panel);
     return () => { cleanup(); registration?.destroy(); };
   });
 

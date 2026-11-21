@@ -5,9 +5,11 @@
 // Styles are applied inline so the helper is self-contained: no dependency
 // on a :global() block that could disappear during a refactor.
 
+import { coverPaintsOver } from "./paintLevel";
 import { consumeKey } from "./shortcuts";
+import { VIEWER_LAYER } from "./viewerLayer.svelte";
 
-const BACKDROP_STYLE = "position:fixed;inset:0;z-index:40000;" + "background:rgba(0,0,0,0.92);";
+const BACKDROP_STYLE = `position:fixed;inset:0;z-index:${VIEWER_LAYER};` + "background:rgba(0,0,0,0.92);";
 
 const CLOSE_STYLE =
   "position:absolute;top:1rem;right:1rem;z-index:1;" +
@@ -63,6 +65,7 @@ export function openViewerOverlay(options: ViewerOverlayOptions): void {
     backdrop.remove();
   };
   const onKey = (e: KeyboardEvent): void => {
+    if (coverPaintsOver(backdrop)) return;
     if (e.key !== "Escape" || e.ctrlKey || e.metaKey || e.altKey) return;
     consumeKey(e);
     dismiss();

@@ -120,6 +120,21 @@ describe("the document listeners belong to their view", () => {
     expect(a.state.selection.main.head).toBe(before);
     expect(wrap.dataset.selected).toBe("true");
   });
+  test("a key with the keyboard at large never acts on a ring under a cover over the window", () => {
+    const a = mount();
+    const wrap = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrap.dataset.selected = "true";
+    const before = a.state.selection.main.head;
+    const cover = document.body.appendChild(document.createElement("div"));
+    cover.setAttribute("data-cover", "screensaver");
+    cover.style.zIndex = "39000";
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(a.state.selection.main.head, "the caret stays under the cover").toBe(before);
+    expect(wrap.dataset.selected, "the ring stays under the cover").toBe("true");
+    cover.remove();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(a.state.selection.main.head, "the same key acts once the cover lifts").not.toBe(before);
+  });
   test("a key typed outside every editor never acts on a ring", () => {
     const a = mount();
     const wrap = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;

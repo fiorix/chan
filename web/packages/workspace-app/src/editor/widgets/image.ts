@@ -63,6 +63,7 @@ import {
 import { isWidgetWritable } from "./writable";
 import { selectionForReveal } from "../decorations/selection";
 import { notify } from "../../state/notify.svelte";
+import { coverPaintsOver } from "../../state/paintLevel";
 
 const MIN_IMG_WIDTH = 40;
 const USER_SCROLL_QUIET_MS = 900;
@@ -1037,6 +1038,9 @@ const imageSelectionListeners = ViewPlugin.fromClass(
     /// whose Enter would otherwise move this view's caret into an image
     /// URL and take the focus out of the field being typed in.
     private ownsKey(e: KeyboardEvent): boolean {
+      // A cover over the window holds every key, and its running PIN check
+      // leaves the keyboard at large, where the test below would accept it.
+      if (coverPaintsOver(this.view.dom)) return false;
       const target = e.target;
       if (!(target instanceof Element)) return true;
       if (this.view.dom.contains(target)) return true;
