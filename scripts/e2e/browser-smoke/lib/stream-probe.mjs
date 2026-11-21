@@ -67,6 +67,8 @@ export function installStreamProbe() {
   const find = (name) => sockets.findLast((entry) => entry.name === name);
   globalThis.__streamProbe = {
     read: (name) => { const entry = find(name); return entry ? view(entry) : null; },
+    /// Every socket this terminal has had, oldest first: a redial adds one.
+    readAll: (name) => sockets.filter((entry) => entry.name === name).map(view),
     input: (name, data) => find(name).peer.send(JSON.stringify({ type: "input", data })),
     /// Check the numbered stream `seq 1 count` prints between two markers.
     verifySeq(name, begin, count, end) {

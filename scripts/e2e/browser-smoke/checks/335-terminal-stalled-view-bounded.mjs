@@ -4,7 +4,8 @@
 // inside the 5 s bound: the view catches up with no recovery and no loss. A
 // 30 s stall is past it: the program goes on, what the page had queued when
 // it came back is at most the advertised window, and the view resumes from
-// the ring with a count of what it missed and no lag line.
+// the ring, on its socket or a redial, with a count of what it missed and no
+// lag line.
 //
 // A second view of the session runs here in Node on the terminal socket's own
 // protocol, so a stall of the page cannot stop it. It acknowledges what it
@@ -156,16 +157,26 @@ export default {
       const during = second.bytes - before;
       const maxHoldMs = second.maxGapMs;
       second.gapFrom = null;
-      const resumed = await until("the stalled view resumes", read,
-        (state) => state.stalls[1]?.ended && (state.sessions.length > 1 || state.errors.length > 0), 90_000);
-      assert.deepEqual(resumed.errors, [], "the lag line is gone");
-      const recovery = resumed.sessions[1];
+      // The view comes back on its socket or, when the page takes the long
+      // timer gap for a sleep, on a redial. Each carries the count.
+      const views = await until("the stalled view resumes", async () => {
+        try { return await page.evaluate((name) => __streamProbe.readAll(name), NAME); } catch { return null; }
+      }, (all) => {
+        const at = all?.findIndex((entry) => entry.stalls[1]) ?? -1;
+        if (at < 0 || !all[at].stalls[1].ended) return false;
+        return all[at].sessions.length > 1 || all[at].errors.length > 0 || (at < all.length - 1 && all.at(-1).ready);
+      }, 90_000);
+      const held = views.find((entry) => entry.stalls[1]);
+      const latest = views.at(-1);
+      const sameSocket = held.sessions.length > 1;
+      assert.deepEqual([...held.errors, ...(sameSocket ? [] : latest.errors)], [], "the lag line is gone");
+      const recovery = sameSocket ? held.sessions[1] : latest.sessions[0];
       assert.ok(recovery.window > 0, "the server advertised a window");
-      const queued = recovery.handledBefore - resumed.stalls[1].handled;
+      const queued = (sameSocket ? recovery.handledBefore : held.handled) - held.stalls[1].handled;
       assert.ok(queued <= recovery.window,
         `the page queued ${queued} bytes during the stall, past the ${recovery.window} byte window`);
       assert.ok(recovery.missed > 0, "a 30 s flood outruns the ring, and the loss is counted");
-      assert.ok(resumed.acks > 0, "the view acknowledged what it parsed");
+      assert.ok(held.acks > 0, "the view acknowledged what it parsed");
 
       assert.ok(maxHoldMs <= MAX_HOLD_MS, `the second view waited ${maxHoldMs} ms`);
       assert.ok(during > 4 * 1024 * 1024, `the second view kept receiving: ${during} bytes in the stall`);
@@ -192,6 +203,7 @@ export default {
       assert.ok(retained.text.includes(PROMPT), "the shell's prompt came back after Ctrl+C");
       await ctx.shot("335-after-stall");
       return {
+        resumedBy: sameSocket ? "socket" : "redial", sockets: views.length,
         queued, window: recovery.window, missed: recovery.missed, secondViewMaxHoldMs: maxHoldMs,
         secondViewBytesDuringStall: during, secondViewChecked: second.checked, cursor: final.cursor, acks: final.acks,
       };
