@@ -46,6 +46,7 @@
     Command as CommandIcon,
     Copy,
     Download,
+    Ellipsis,
     Eye,
     FilePlus,
     FileText,
@@ -1264,7 +1265,7 @@
     // empty gutter and inter-row space start a band.
     if (e.button !== 0) return;
     const t = e.target as HTMLElement | null;
-    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl")) return;
+    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl, .row-menu")) return;
     // Don't start a band from a modifier-less click that is really a row
     // background click; we still allow it (it becomes a clear on mouseup
     // if no drag happens).
@@ -1498,6 +1499,7 @@
           tabindex="-1"
         >{node.name}</span>
         {@render metadata(node)}
+        {@render rowMenuButton(node)}
       </div>
       {#if view === "tree" && expanded[node.path]}
         <ul class="children" role="group" id={`${rowId(node.path)}-children`}>
@@ -1584,6 +1586,7 @@
         {#if editorDirty.has(node.path)}
           <span class="dirty-dot unsaved" title="unsaved changes" aria-label="unsaved">●</span>
         {/if}
+        {@render rowMenuButton(node)}
       </div>
     {/if}
   </li>
@@ -1596,6 +1599,17 @@
     <span class="entry-size">{node.kind === "dir" ? "" : formatSize(entry?.size ?? 0)}</span>
     <span class="entry-modified">{entry?.mtime ? formatMtime(entry.mtime) : ""}</span>
   {/if}
+{/snippet}
+
+<!-- The row's menu for a touch screen, which has no right click and whose
+     long press does not reliably send `contextmenu`. Hidden for a mouse. -->
+{#snippet rowMenuButton(node: Node)}
+  <button
+    class="row-menu"
+    tabindex="-1"
+    aria-label={`Actions for ${node.name}`}
+    onclick={(e) => showMenu(e, node.path, node.kind === "dir")}
+  ><Ellipsis size={18} strokeWidth={1.75} aria-hidden="true" /></button>
 {/snippet}
 
 {#if menu}
@@ -1683,7 +1697,7 @@
 
 <style>
   .tree.directory-list { padding: 4px 8px; }
-  .directory-list .row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 82px 80px 136px; gap: 10px; padding: 0 10px !important; min-height: 34px; border-radius: 5px; }
+  .directory-list .row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 82px 80px 136px var(--row-menu-column,); gap: 10px; padding: 0 10px !important; min-height: 34px; border-radius: 5px; }
   .directory-list .name { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; text-align: left; }
   .entry-kind, .entry-size, .entry-modified { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .entry-size { text-align: right; font-variant-numeric: tabular-nums; }
@@ -1694,7 +1708,27 @@
   .tree .row:hover { background: var(--hover-bg); }
   .tree:focus-visible .row.active-cursor { outline: 2px solid var(--focus-color, var(--link)); outline-offset: -2px; }
   .tree .row.active-cursor:not(.selected) { background: transparent; }
-  @container (max-width: 700px) { .directory-list .row { grid-template-columns: 18px minmax(100px, 1fr) 80px; } .entry-kind, .entry-modified { display: none; } }
+  @container (max-width: 700px) { .directory-list .row { grid-template-columns: 18px minmax(100px, 1fr) 80px var(--row-menu-column,); } .entry-kind, .entry-modified { display: none; } }
+  .row-menu { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    .tree { --row-menu-column: 44px; }
+    .tree .row { min-height: 44px; }
+    .row-menu {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      align-self: stretch;
+      grid-column: -2;
+      grid-row: 1;
+      width: 44px;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+  }
 
   .tree, .children {
     list-style: none;
