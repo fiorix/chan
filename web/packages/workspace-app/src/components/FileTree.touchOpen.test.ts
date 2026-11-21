@@ -15,6 +15,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
+import { browserSelection } from "../state/store.svelte";
 import { layout, openBrowserInActivePane, type LeafNode } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -100,6 +101,7 @@ describe("a tap on a Files row", () => {
   test("with a modifier only adds to the selection", async () => {
     await press(row("a.md")!.querySelector<HTMLElement>(".name")!, "mouse");
     await press(row("b.md")!.querySelector<HTMLElement>(".name")!, "touch", { metaKey: true });
+    expect([...browserSelection.paths].sort()).toEqual(["a.md", "b.md"]);
     expect(openFileTabs()).toEqual([]);
   });
 });

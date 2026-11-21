@@ -1738,6 +1738,16 @@
       color: var(--text-secondary);
       cursor: pointer;
     }
+    /* A phone in landscape is shorter than the menu, which scrolls there.
+       Only here: a mouse's hovered row scales past the menu's box, and a
+       scroller would show a bar for it. */
+    .ctx {
+      max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+      max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .ctx > * { flex: none; }
   }
 
   .tree, .children {
@@ -1992,18 +2002,12 @@
     display: flex;
     flex-direction: column;
     min-width: 180px;
-    /* A phone in landscape is shorter than the menu, which scrolls there. */
-    max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    box-sizing: border-box;
-    overflow-y: auto;
     /* easeOutBack bubble-pop matching the rest of the chrome
        (HamburgerMenu, tab-menu bubbles). */
     transform-origin: top left;
     animation: ctx-pop 260ms var(--ease-pop);
     transition: transform 200ms var(--ease-pop);
   }
-  .ctx > * { flex: none; }
   .ctx:hover {
     transform: scale(1.015);
   }
