@@ -304,6 +304,15 @@ describe("the Computers deck", () => {
     expect(document.activeElement).toBe(slots()[1]);
   });
 
+  it("selects the card a dot brings forward", async () => {
+    mountDeck();
+    target!.querySelectorAll<HTMLButtonElement>(".dots .dot")[1].click();
+    flushSync();
+    await tick();
+    expect(front()).toBe("This machine, 2 of 4");
+    expect(document.activeElement).toBe(slots()[1]);
+  });
+
   it("keeps the card in front across a remount", () => {
     mountDeck();
     press("ArrowRight");
