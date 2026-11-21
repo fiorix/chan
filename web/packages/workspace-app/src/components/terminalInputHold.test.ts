@@ -125,6 +125,78 @@ describe("the terminal input hold", () => {
     expect(state.sent).toEqual(["a"]);
   });
 
+  test("failed redials do not move the replacement's window", () => {
+    const { hold, state } = holdWith(false);
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    hold.awaitReplacement(CAP_MS);
+    for (let i = 0; i < 9; i += 1) {
+      vi.advanceTimersByTime(1_000);
+      hold.awaitReplacement(CAP_MS);
+    }
+    vi.advanceTimersByTime(1_000);
+    expect(state.dropped).toBe(1);
+    expect(hold.active).toBe(false);
+    state.open = true;
+    hold.release();
+    expect(state.sent).toEqual([]);
+  });
+
+  test("a replacement that reads open has proven nothing until its session", () => {
+    const { hold, state } = holdWith();
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    hold.awaitReplacement(CAP_MS);
+
+    hold.interrupt(entry("^C"));
+    expect(state.sent, "the interrupt keeps its place").toEqual([]);
+    hold.release();
+    expect(state.sent).toEqual(["a", "^C"]);
+  });
+
+  test("a replacement's window ends in a drop even on an open socket", () => {
+    const { hold, state } = holdWith();
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    hold.awaitReplacement(CAP_MS);
+    vi.advanceTimersByTime(CAP_MS);
+    expect(state.sent).toEqual([]);
+    expect(state.dropped).toBe(1);
+  });
+
+  test("once a replacement has proven its session, an interrupt goes at once", () => {
+    const { hold, state } = holdWith();
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    hold.awaitReplacement(CAP_MS);
+    hold.replacementProven();
+    hold.interrupt(entry("^C"));
+    expect(state.sent).toEqual(["a", "^C"]);
+    expect(hold.active).toBe(true);
+  });
+
+  test("the cap waits for a probe that is counting down to its verdict", () => {
+    const pending = { value: true };
+    const sent: string[] = [];
+    const hold = createTerminalInputHold({
+      canSend: () => true,
+      deliver: (item) => { sent.push(item.frame.data as string); },
+      onDropped: () => {},
+      verdictPending: () => pending.value,
+    });
+    hold.begin(CAP_MS);
+    hold.offer(entry("a"));
+    vi.advanceTimersByTime(CAP_MS + 2_000);
+    expect(sent, "the verdict decides where the key goes").toEqual([]);
+    expect(hold.active).toBe(true);
+
+    // Frames came back: the socket is delivering and the cap applies.
+    pending.value = false;
+    vi.advanceTimersByTime(1_000);
+    expect(sent).toEqual(["a"]);
+    expect(hold.active).toBe(false);
+  });
+
   test.each([
     ["frames", () => Array.from({ length: TERMINAL_HOLD_MAX_FRAMES + 1 }, () => entry("x"))],
     ["characters", () => [entry("x".repeat(TERMINAL_HOLD_MAX_CHARS + 1))]],

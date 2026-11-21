@@ -9,7 +9,7 @@
 // the host smoke + the gateway rig.
 
 import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
@@ -25,6 +25,7 @@ import { acquireDocSession, resetDocSyncForTests } from "../state/docSync.svelte
 import { acquireSceneSession, resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { ui } from "../state/store.svelte";
 import { WAKE_PROBE_MS } from "../wakeGap";
+import { TERMINAL_WAKE_TICK_MS } from "./terminalWakeProbe";
 import {
   bumpTabFocusPulse,
   type FileTab,
@@ -32,6 +33,7 @@ import {
 import {
   installTerminalDom,
   mountTerminal,
+  output,
   resetTerminals,
   TerminalSocket,
   terminalTab,
@@ -126,7 +128,10 @@ describe("terminal heartbeat", () => {
 
     // No inbound frames at all: pings go out unanswered, and at the deadline
     // the socket gets one last probe before it is replaced.
-    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
+    await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS - 1);
+    const pingsBeforeDeadline = pings(socket);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pings(socket), "the deadline sends the probe's ping").toBe(pingsBeforeDeadline + 1);
     expect(socket.readyState).toBe(TerminalSocket.OPEN);
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     expect(socket.readyState).toBe(3);
@@ -297,6 +302,43 @@ describe("wake recycle", () => {
     expect(socket.readyState).toBe(TerminalSocket.OPEN);
   });
 
+  test("output during a probe extends the wait from its last frame", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-busy");
+    await pong(socket);
+
+    await wake();
+    for (let second = 0; second < 6; second += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await output(socket, "x");
+    }
+    expect(TerminalSocket.all, "frames keep the socket").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS - TERMINAL_WAKE_TICK_MS);
+    expect(TerminalSocket.all, "inside the bound of the last frame").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(TERMINAL_WAKE_TICK_MS);
+    expect(TerminalSocket.all, "replaced at the bound of the last frame").toHaveLength(2);
+  });
+
+  test("a desktop window of a remote library is probed", async () => {
+    const url = window.location.href;
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    window.history.replaceState(null, "", "?lib=lib-remote");
+    onTestFinished(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      window.history.replaceState(null, "", url);
+    });
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-remote");
+    await pong(socket);
+
+    await wake();
+    expect(pings(socket), "the wake pings it").toBe(2);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all, "and replaces it when it stays silent").toHaveLength(2);
+  });
+
   test("a pong of a ping sent before the wake does not settle the probe", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
@@ -340,8 +382,10 @@ describe("wake recycle", () => {
     // The deadline's timer is the first thing to run after the stall, and
     // only just late, so nothing but the socket's answer can clear it.
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS - 1);
+    const pingsBeforeDeadline = pings(socket);
     vi.setSystemTime(Date.now() + 100);
     await vi.advanceTimersByTimeAsync(1);
+    expect(pings(socket), "the deadline sends the probe's ping").toBe(pingsBeforeDeadline + 1);
     expect(socket.readyState, "the deadline leaves the socket open").toBe(TerminalSocket.OPEN);
 
     await answerPings();

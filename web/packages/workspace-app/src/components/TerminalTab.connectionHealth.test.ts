@@ -4,7 +4,14 @@ import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
-import { WS_PING_MS, WS_PROBE_DEADLINE_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import {
+  WS_CONNECT_DEADLINE_MS,
+  WS_PING_MS,
+  WS_PROBE_DEADLINE_MS,
+  WS_READ_DEADLINE_MS,
+  WS_RECONNECT_BACKOFF_MAX_MS,
+  WS_RECONNECT_BACKOFF_MIN_MS,
+} from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
@@ -345,6 +352,79 @@ describe("terminal connection in the tab", () => {
     await vi.advanceTimersByTimeAsync(0);
     term.type("after");
     expect(framesOfType(first, "input"), "the key press covers its own bytes only").toHaveLength(2);
+  });
+
+  test("keys held through an outage of fast-failing redials are dropped, not typed later", async () => {
+    const { target, term, first } = await wokenTerminal();
+    term.type("late");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    let socket = TerminalSocket.all.at(-1)!;
+    expect(socket).not.toBe(first);
+    const outageEndsAt = Date.now() + WS_CONNECT_DEADLINE_MS + 20_000;
+    while (Date.now() < outageEndsAt) {
+      socket.failDial();
+      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+      socket = TerminalSocket.all.at(-1)!;
+    }
+    await attach(socket);
+    await tick();
+    expect(framesOfType(socket, "input")).toEqual([]);
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  test("an interrupt before the replacement's session frame cannot reach another session", async () => {
+    const { target, term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x03");
+    expect(framesOfType(replacement, "input"), "nothing before the session frame").toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-reaped", seq: 0, generation: 9, missed_bytes: 0, bytes_since_focus: 0 });
+    await tick();
+    expect(framesOfType(replacement, "input")).toEqual([]);
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
+  });
+
+  test("an interrupt before the replacement's session frame goes in order once it matches", async () => {
+    const { target, term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x03");
+    expect(framesOfType(replacement, "input")).toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x", "\x03"]);
+  });
+
+  test("on a slow link the hold waits for the probe's verdict past its own cap", async () => {
+    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    // A 3 s round trip: the probe's deadline is its 10 s maximum.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await receive(first, { type: "pong" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2_100);
+    term.type("x");
+    // A last frame late in the probe puts its verdict past the hold's cap.
+    await vi.advanceTimersByTimeAsync(7_000);
+    await output(first, "y");
+    await vi.advanceTimersByTimeAsync(4_500);
+    expect(framesOfType(first, "input"), "never into the socket about to be replaced").toEqual([]);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(framesOfType(first, "input")).toEqual([]);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
   });
 
   test("a recovery frame on a closing socket leaves held input for the replacement", async () => {

@@ -117,6 +117,25 @@ describe("the terminal wake probe", () => {
     expect(state.silent).toBe(1);
   });
 
+  test("a page hidden only by the tick after a stall gets no one-tick verdict", () => {
+    const { probe, state } = probeWith(false);
+    probe.begin(LIMIT_MS);
+    state.hidden = true;
+    vi.setSystemTime(Date.now() + 60_000);
+    vi.advanceTimersByTime(TERMINAL_WAKE_TICK_MS);
+    expect(state.silent, "the stall began on a shown page").toBe(0);
+    expect(probe.active).toBe(true);
+  });
+
+  test("a page shown again after being hidden does not credit the hidden gap", () => {
+    const { probe, state } = probeWith(true);
+    probe.begin(LIMIT_MS);
+    state.hidden = false;
+    vi.setSystemTime(Date.now() + 60_000);
+    vi.advanceTimersByTime(TERMINAL_WAKE_TICK_MS);
+    expect(state.silent).toBe(0);
+  });
+
   test("a hidden page's throttled ticks count in full across repeated wakes", () => {
     const { probe, state } = probeWith(true);
     probe.begin(LIMIT_MS);

@@ -21,13 +21,16 @@ export interface TerminalWakeProbeOptions {
   /// Clock, in milliseconds. Defaults to `Date.now`.
   now?: () => number;
   /// Whether the page is hidden. A hidden page's timers are throttled while
-  /// its socket events still run, so its ticks count in full.
+  /// its socket events still run, so a gap it was hidden for from one tick to
+  /// the next counts in full. A page shown at either end may have stalled.
   hidden?: () => boolean;
 }
 
 export interface TerminalWakeProbe {
   /// Whether a probe is waiting for its answer.
   readonly active: boolean;
+  /// Whether a running probe has gone quiet, so its verdict is what comes next.
+  readonly settling: boolean;
   /// Start a probe, or move a running one onto a new ping after another wake.
   /// `quietLimitMs` is the quiet time, with the page running, after which the
   /// socket is given up on. Call just before sending the ping: a socket may
@@ -46,6 +49,7 @@ export function createTerminalWakeProbe(options: TerminalWakeProbeOptions): Term
   let limitMs = 0;
   let quietMs = 0;
   let lastTickAt = 0;
+  let hiddenAtLastTick = false;
   // A late tick reached the limit: the next one decides, after the frames the
   // stall held back have had their turn.
   let confirming = false;
@@ -61,9 +65,11 @@ export function createTerminalWakeProbe(options: TerminalWakeProbeOptions): Term
     const elapsed = Math.max(0, at - lastTickAt);
     lastTickAt = at;
     const pageHidden = hidden();
-    quietMs += pageHidden ? elapsed : Math.min(elapsed, TERMINAL_WAKE_TICK_CREDIT_MS);
+    const hiddenThroughout = pageHidden && hiddenAtLastTick;
+    hiddenAtLastTick = pageHidden;
+    quietMs += hiddenThroughout ? elapsed : Math.min(elapsed, TERMINAL_WAKE_TICK_CREDIT_MS);
     if (quietMs < limitMs) return;
-    if (!pageHidden && elapsed > TERMINAL_WAKE_TICK_CREDIT_MS && !confirming) {
+    if (!hiddenThroughout && elapsed > TERMINAL_WAKE_TICK_CREDIT_MS && !confirming) {
       confirming = true;
       return;
     }
@@ -75,11 +81,15 @@ export function createTerminalWakeProbe(options: TerminalWakeProbeOptions): Term
     get active() {
       return timer !== null;
     },
+    get settling() {
+      return timer !== null && quietMs >= TERMINAL_WAKE_TICK_CREDIT_MS;
+    },
     begin(quietLimitMs) {
       limitMs = quietLimitMs;
       if (timer === null) {
         quietMs = 0;
         lastTickAt = now();
+        hiddenAtLastTick = hidden();
         timer = setInterval(tick, TERMINAL_WAKE_TICK_MS);
       } else if (!hidden()) {
         // A hidden page's throttled timers can report a gap on every tick,

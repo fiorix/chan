@@ -445,6 +445,9 @@
   // deadline waits before closing: its timer can run ahead of frames a stall
   // left queued, and any of them cancels the close.
   const READ_DEADLINE_GRACE_MS = 1_000;
+  // The hold's cap while a probe runs: past the longest deadline a probe can
+  // have, so the probe's verdict is what normally ends the hold.
+  const INPUT_HOLD_BACKSTOP_MS = WS_PROBE_DEADLINE_MAX_MS + 1_000;
   const wakeProbe = createTerminalWakeProbe({
     onSilent: () => {
       if (ws?.readyState !== WebSocket.OPEN) return;
@@ -466,6 +469,7 @@
     onDropped: () => {
       if (status !== "exited") terminalConnection.inputDropped();
     },
+    verdictPending: () => wakeProbe.settling,
   });
   // The session a running hold's input was typed for. A redial that lands on
   // another one must not type it into a program the user never saw.
@@ -1155,7 +1159,7 @@
     terminalConnection.forgetPingTimings();
     wakeProbe.begin(probeDeadlineMs(terminalConnection.rttMs));
     if (!inputHold.active) heldFor = { id: tab.terminalSessionId, generation: serverGeneration };
-    inputHold.begin(WS_PROBE_DEADLINE_MAX_MS);
+    inputHold.begin(INPUT_HOLD_BACKSTOP_MS);
     sendPing();
   }
 
@@ -1880,7 +1884,9 @@
       if (frame.type === "pong") {
         if (terminalConnection.pongArrived() && wakeProbe.active) {
           wakeProbe.answered();
-          inputHold.release();
+          // Before its session frame a socket has not shown which session it
+          // reached; that frame releases the hold instead.
+          if (dialSawSession) inputHold.release();
         }
         return;
       }
@@ -2025,10 +2031,14 @@
           writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
         // A replacement socket has attached to the same session: what waited
-        // for it goes now. The server reads it after the replay it is sending.
-        // A later session frame is a recovery on this socket, which proves
+        // for it goes now, unless a wake since its dial has it under a probe
+        // of its own. The server reads it after the replay it is sending. A
+        // later session frame is a recovery on this socket, which proves
         // nothing about a wake.
-        if (firstOnDial && !wakeProbe.active) inputHold.release();
+        if (firstOnDial) {
+          if (wakeProbe.active) inputHold.replacementProven();
+          else inputHold.release();
+        }
       } else if (frame.type === "renamed") {
         if (tab.terminalSessionId) {
           resolveTerminalMetadataRename(

@@ -9,6 +9,8 @@
 /// the Reconnected note then covers.
 export const TERMINAL_HOLD_MAX_FRAMES = 4096;
 export const TERMINAL_HOLD_MAX_CHARS = 256 * 1024;
+/// How often an expired cap looks again while a probe's verdict is due.
+const VERDICT_RECHECK_MS = 250;
 
 export interface HeldInput {
   /// The wire frame, as `send` takes it.
@@ -27,6 +29,9 @@ export interface TerminalInputHoldOptions {
   deliver: (entry: HeldInput) => void;
   /// Typed input was given up on, so the next open socket owes the note.
   onDropped: () => void;
+  /// A probe has gone quiet and is about to decide this socket. The cap waits
+  /// for that rather than hand the queue to a socket it may declare dead.
+  verdictPending?: () => boolean;
 }
 
 export interface TerminalInputHold {
@@ -41,8 +46,13 @@ export interface TerminalInputHold {
   interrupt(entry: HeldInput): boolean;
   /// The socket was proven or replaced: deliver the queue and stop holding.
   release(): void;
-  /// The socket is being replaced, which gets its own `capMs` to connect.
+  /// The socket is being replaced. The first call of a hold gives it `capMs`
+  /// to attach, however many dials fail; past that the queue is dropped. Until
+  /// `replacementProven` or `release`, nothing goes out, interrupts included.
   awaitReplacement(capMs: number): void;
+  /// The replacement reached the held session while a new probe runs on it,
+  /// so it is the socket an interrupt goes to.
+  replacementProven(): void;
   /// Nothing may be delivered: drop the queue and stop holding.
   abandon(): void;
   /// Take back a held Rich Prompt message. True when it had not been sent.
@@ -55,6 +65,8 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
   let chars = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let overflowing = false;
+  let replacing = false;
+  let replacementArmed = false;
 
   const clearTimer = () => {
     if (timer !== null) clearTimeout(timer);
@@ -62,11 +74,14 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
   };
   const arm = (capMs: number) => {
     clearTimer();
-    timer = setTimeout(() => {
-      timer = null;
-      if (options.canSend()) release();
-      else abandon();
-    }, capMs);
+    timer = setTimeout(expire, capMs);
+  };
+  const expire = () => {
+    timer = null;
+    if (replacing) abandon();
+    else if (options.verdictPending?.()) timer = setTimeout(expire, VERDICT_RECHECK_MS);
+    else if (options.canSend()) release();
+    else abandon();
   };
   const flush = () => {
     const entries = queue;
@@ -77,6 +92,8 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
   const stop = () => {
     active = false;
     overflowing = false;
+    replacing = false;
+    replacementArmed = false;
     clearTimer();
   };
   const release = () => {
@@ -116,7 +133,7 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
     },
     interrupt(entry) {
       if (!active) return false;
-      if (!options.canSend()) {
+      if (replacing || !options.canSend()) {
         queue.push(entry);
         chars += entry.size;
         return true;
@@ -127,7 +144,14 @@ export function createTerminalInputHold(options: TerminalInputHoldOptions): Term
     },
     release,
     awaitReplacement(capMs) {
-      if (active) arm(capMs);
+      if (!active) return;
+      replacing = true;
+      if (replacementArmed) return;
+      replacementArmed = true;
+      arm(capMs);
+    },
+    replacementProven() {
+      replacing = false;
     },
     abandon,
     remove(promptId) {
