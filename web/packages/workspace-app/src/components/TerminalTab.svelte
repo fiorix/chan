@@ -1773,7 +1773,11 @@
         // frame.id that differs is a fresh shell replacing the reaped session,
         // not a same-id live resume.
         const priorId = tab.terminalSessionId;
-        const duplicateReplay = reattaching && !dialSawSession;
+        // A recovery on the live socket replays what the terminal never
+        // parsed, like a redial's first frame: generated replies to the
+        // replay stay local in both cases.
+        const duplicateReplay =
+          (reattaching && !dialSawSession) || (dialSawSession && frame.id === priorId);
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
