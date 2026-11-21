@@ -26,6 +26,11 @@ const DEADLINE_EDGES_MS = [150, 800];
 const SLOW_PONG_MS = 2_800;
 const QUIET_STALL_AFTER_MS = 2_600;
 const QUIET_STALL_MS = 2_000;
+// Each way, for a round trip past the old flat 3 s bound. The delay is on real
+// TCP flows in the check's private network namespace.
+const SLOW_LINK_ONE_WAY_MS = 1_600;
+// Slow enough that a backlog is still queued when the keys are pressed.
+const PACE_BYTES_PER_SECOND = 100 * 1024;
 // The wake detector's 2 s probe, the 3 s quiet bound and a margin for ticks.
 const REPLACE_BOUND_MS = 7_000;
 // Over the 2 MiB replay ring, under what the server's broadcast holds for a
@@ -60,21 +65,54 @@ async function startRelay(targetPort) {
   const flows = [];
   const server = createServer((client) => {
     const upstream = connect({ host: "127.0.0.1", port: targetPort });
-    const flow = { client, upstream, dead: false, toClient: 0, delayMs: 0 };
+    const flow = {
+      client, upstream, dead: false, toClient: 0, delayMs: 0, uplinkDelayMs: 0, paced: [], pacedBytes: 0, pacer: null,
+      /// Forward the server's bytes at this rate, queued in order; 0 lets the
+      /// queue go and stops pacing.
+      pace(bytesPerSecond) {
+        clearInterval(flow.pacer);
+        flow.pacer = null;
+        if (bytesPerSecond > 0) {
+          const slice = Math.ceil(bytesPerSecond / 20);
+          flow.pacer = setInterval(() => {
+            let budget = slice;
+            while (budget > 0 && flow.paced.length) {
+              const head = flow.paced[0];
+              const part = head.subarray(0, budget);
+              if (part.length === head.length) flow.paced.shift();
+              else flow.paced[0] = head.subarray(part.length);
+              flow.pacedBytes -= part.length;
+              budget -= part.length;
+              writeToClient(part);
+            }
+          }, 50);
+          return;
+        }
+        for (const chunk of flow.paced.splice(0)) writeToClient(chunk);
+        flow.pacedBytes = 0;
+      },
+    };
+    const writeToClient = (chunk) => {
+      if (flow.dead || client.destroyed) return;
+      flow.toClient += chunk.length;
+      client.write(chunk);
+    };
     flows.push(flow);
-    client.on("data", (chunk) => { if (!flow.dead) upstream.write(chunk); });
-    upstream.on("data", (chunk) => {
-      const forward = () => {
-        if (flow.dead || client.destroyed) return;
-        flow.toClient += chunk.length;
-        client.write(chunk);
-      };
-      if (flow.delayMs > 0) setTimeout(forward, flow.delayMs);
+    client.on("data", (chunk) => {
+      const forward = () => { if (!flow.dead && !upstream.destroyed) upstream.write(chunk); };
+      if (flow.uplinkDelayMs > 0) setTimeout(forward, flow.uplinkDelayMs);
       else forward();
+    });
+    upstream.on("data", (chunk) => {
+      if (flow.pacer) {
+        flow.paced.push(chunk);
+        flow.pacedBytes += chunk.length;
+      } else if (flow.delayMs > 0) setTimeout(() => writeToClient(chunk), flow.delayMs);
+      else writeToClient(chunk);
     });
     client.on("error", () => upstream.destroy());
     upstream.on("error", () => client.destroy());
-    client.on("close", () => upstream.destroy());
+    client.on("close", () => { clearInterval(flow.pacer); upstream.destroy(); });
     upstream.on("close", () => { if (!flow.dead) client.destroy(); });
   });
   await new Promise((resolve, reject) => {
@@ -86,7 +124,7 @@ async function startRelay(targetPort) {
     flows,
     kill(flow) { flow.dead = true; },
     async close() {
-      for (const flow of flows) { flow.client.destroy(); flow.upstream.destroy(); }
+      for (const flow of flows) { clearInterval(flow.pacer); flow.client.destroy(); flow.upstream.destroy(); }
       await new Promise((resolve) => server.close(resolve));
     },
   };
@@ -345,8 +383,98 @@ async function quietProbeLeg(page, fixture, relay, name) {
   }
 }
 
+/// A healthy link with a round trip past the 3 s floor keeps its socket across
+/// a wake: the probe's limit follows the round trip the socket measured.
+async function slowLinkLeg(page, fixture, relay, name, selector) {
+  await queryParsed(fixture, 20_000);
+  await page.click(`${selector} .terminal-host`);
+  const flow = relay.flows.at(-1);
+  const before = (await read(page, name)).sockets.length;
+  flow.delayMs = SLOW_LINK_ONE_WAY_MS;
+  flow.uplinkDelayMs = SLOW_LINK_ONE_WAY_MS;
+  try {
+    // A typed key's ping, 1 s later, measures the slow round trip.
+    await page.keyboard.type("r");
+    await fixture.waitFor((record) => record.type === "keys" && Buffer.from(record.base64, "base64").includes("r"));
+    await sleep(1_000 + 2 * SLOW_LINK_ONE_WAY_MS + 500);
+    await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+    await sleep(200);
+    const stall = await stallEnded(page, SHORT_STALL_MS + 30_000);
+    await sleep(2 * SLOW_LINK_ONE_WAY_MS + REPLACE_BOUND_MS);
+    const seen = await read(page, name);
+    const observed = {
+      roundTripMs: 2 * SLOW_LINK_ONE_WAY_MS, stallMs: stall.end - stall.start,
+      socketsBefore: before, socketsAfter: seen.sockets.length,
+    };
+    assert.equal(observed.socketsAfter, before, `a healthy slow link lost its socket at a wake: ${JSON.stringify(observed)}`);
+    return observed;
+  } finally {
+    flow.delayMs = 0;
+    flow.uplinkDelayMs = 0;
+    await sleep(2 * SLOW_LINK_ONE_WAY_MS);
+  }
+}
+
+/// An interrupt during a backlog goes at once, with the keys held ahead of it
+/// in order, while the socket is still unproven. The relay paces the server's
+/// bytes so the pong stays queued behind the backlog.
+async function interruptLeg(page, fixture, relay, name, selector, kitty) {
+  await queryParsed(fixture, 20_000);
+  const b64 = (text) => Buffer.from(text).toString("base64");
+  if (kitty) {
+    await fixture.send("bytes", { base64: b64("\x1b[>1u") });
+    await queryParsed(fixture, 20_000);
+  }
+  await page.click(`${selector} .terminal-host`);
+  const flow = relay.flows.at(-1);
+  const socketsBefore = (await read(page, name)).sockets.length;
+  const keysBefore = keysOf(fixture).length;
+  const typedSince = () => keysOf(fixture).slice(keysBefore).replace(/\x1b\[\d+;\d+R/g, "");
+  const interrupt = kitty ? /\x1b\[99;5(:1)?u/ : /\x03/;
+  flow.pace(PACE_BYTES_PER_SECOND);
+  try {
+    await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+    await sleep(400);
+    for (const block of streamBlocks(kitty ? "KITTY332" : "INTR332", 2, BLOCK_BYTES)) {
+      await fixture.send("bytes", { base64: block.toString("base64") });
+    }
+    await stallEnded(page, SHORT_STALL_MS + 30_000);
+    // The wake detector's first tick after the stall starts the hold.
+    await sleep(500);
+    await page.keyboard.type("k");
+    await sleep(400);
+    const heldWhileUnproven = !typedSince().includes("k");
+    const pressedAt = Date.now();
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyC");
+    await page.keyboard.up("Control");
+    await until("the interrupt reached the PTY", async () => typedSince(), (text) => interrupt.test(text), 5_000);
+    const reachedMs = Date.now() - pressedAt;
+    const backlogLeft = flow.pacedBytes;
+    flow.pace(0);
+    await queryParsed(fixture, 60_000);
+    const typed = typedSince();
+    const seen = await read(page, name);
+    const observed = {
+      kitty, heldWhileUnproven, reachedMs, backlogLeft,
+      typed: JSON.stringify(typed), newSockets: seen.sockets.length - socketsBefore,
+    };
+    assert.ok(heldWhileUnproven, `a key was not held while the socket was unproven: ${JSON.stringify(observed)}`);
+    assert.ok(backlogLeft > 0, `the backlog had drained before the interrupt: ${JSON.stringify(observed)}`);
+    assert.ok(reachedMs < 2_000, `the interrupt waited: ${JSON.stringify(observed)}`);
+    assert.equal(typed.split("k").length - 1, 1, `the held key did not arrive exactly once: ${JSON.stringify(observed)}`);
+    assert.ok(typed.indexOf("k") < typed.search(interrupt), `the interrupt passed the key held ahead of it: ${JSON.stringify(observed)}`);
+    assert.equal(observed.newSockets, 0, `the socket was replaced: ${JSON.stringify(observed)}`);
+    return observed;
+  } finally {
+    flow.pace(0);
+    if (kitty) await fixture.send("bytes", { base64: b64("\x1b[<u") }).catch(() => {});
+  }
+}
+
 /// A peer lost across a wake: the socket is replaced within the bound, a key
-/// typed into it before then is reported, and the terminal works afterward.
+/// typed during the probe arrives exactly once on the replacement, and the
+/// terminal works afterward.
 async function halfOpenLeg(page, fixture, relay, name, selector) {
   await queryParsed(fixture, 20_000);
   await page.click(`${selector} .terminal-host`);
@@ -355,16 +483,23 @@ async function halfOpenLeg(page, fixture, relay, name, selector) {
   relay.kill(flow);
   await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
   const stall = await stallEnded(page, SHORT_STALL_MS + 30_000);
+  // After the wake detector's first tick, so the key meets the probe.
+  await sleep(500);
+  const keysBefore = keysOf(fixture).length;
   await page.keyboard.type("q");
   const replaced = await until("the dead socket is replaced", () => read(page, name),
     (seen) => seen.sockets.length > before && seen.sockets.at(-1).ready, 30_000);
   const replacement = replaced.sockets.at(-1);
   const replaceMs = replacement.createdAt - stall.end;
   assert.ok(replaceMs <= REPLACE_BOUND_MS, `replaced ${replaceMs} ms after the stall, past the ${REPLACE_BOUND_MS} ms bound`);
-  const delivered = keysOf(fixture).includes("q");
-  const notice = await until("the lost key is reported", () => page.evaluate((text) => document.body.innerText.includes(text), NOTICE),
-    (shown) => shown || delivered, 5_000);
-  assert.ok(delivered || notice, "a key lost to the dead socket was neither delivered nor reported");
+  const copies = () => keysOf(fixture).slice(keysBefore).split("q").length - 1;
+  const arrived = await until("the key typed during the probe arrives", async () => copies(), (count) => count > 0, 5_000)
+    .catch(() => 0);
+  await sleep(1_000);
+  const delivered = copies();
+  const notice = await page.evaluate((text) => document.body.innerText.includes(text), NOTICE);
+  assert.equal(delivered, 1, `the key typed during the probe arrived ${delivered} times (first read ${arrived}, note ${notice})`);
+  assert.equal(notice, false, "a key delivered to the replacement still showed the Reconnected note");
   await page.keyboard.type("Z");
   await fixture.waitFor((record) => record.type === "keys" && Buffer.from(record.base64, "base64").includes("Z"));
   await queryParsed(fixture, 20_000);
@@ -464,6 +599,9 @@ export default {
       const row = await openTab(ctx, page, cs, windowId, dead, deadFixture);
       const selector = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
       await leg("quietProbe", () => quietProbeLeg(page, deadFixture, relay, dead));
+      await leg("slowLink", () => slowLinkLeg(page, deadFixture, relay, dead, selector));
+      await leg("interrupt", () => interruptLeg(page, deadFixture, relay, dead, selector, false));
+      await leg("interruptKitty", () => interruptLeg(page, deadFixture, relay, dead, selector, true));
       await leg("halfOpen", () => halfOpenLeg(page, deadFixture, relay, dead, selector));
       await leg("backlog", () => backlogLeg(page, deadFixture, relay, dead));
       await cs(["close", "--tab-name", dead]);
