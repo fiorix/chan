@@ -18,6 +18,14 @@ const WAKE_STALL_MS = 30_000;
 // Past the 45 s read deadline, whose timer is due while the page is stalled.
 const LONG_STALL_MS = 50_000;
 const SHORT_STALL_MS = 8_000;
+// The read deadline, and how long after it a stall that spans it ends.
+const READ_DEADLINE_MS = 45_000;
+const DEADLINE_EDGES_MS = [150, 800];
+// A healthy link whose pong takes this long, inside the 3 s quiet bound, and
+// a stall under the wake threshold that the pong lands in.
+const SLOW_PONG_MS = 2_800;
+const QUIET_STALL_AFTER_MS = 2_600;
+const QUIET_STALL_MS = 2_000;
 // The wake detector's 2 s probe, the 3 s quiet bound and a margin for ticks.
 const REPLACE_BOUND_MS = 7_000;
 // Over the 2 MiB replay ring, under what the server's broadcast holds for a
@@ -52,13 +60,17 @@ async function startRelay(targetPort) {
   const flows = [];
   const server = createServer((client) => {
     const upstream = connect({ host: "127.0.0.1", port: targetPort });
-    const flow = { client, upstream, dead: false, toClient: 0 };
+    const flow = { client, upstream, dead: false, toClient: 0, delayMs: 0 };
     flows.push(flow);
     client.on("data", (chunk) => { if (!flow.dead) upstream.write(chunk); });
     upstream.on("data", (chunk) => {
-      if (flow.dead) return;
-      flow.toClient += chunk.length;
-      client.write(chunk);
+      const forward = () => {
+        if (flow.dead || client.destroyed) return;
+        flow.toClient += chunk.length;
+        client.write(chunk);
+      };
+      if (flow.delayMs > 0) setTimeout(forward, flow.delayMs);
+      else forward();
     });
     client.on("error", () => upstream.destroy());
     upstream.on("error", () => client.destroy());
@@ -93,8 +105,32 @@ function installTrace() {
       const socket = Reflect.construct(target, [url.href, ...args.slice(1)]);
       const record = { name, socket, createdAt: Date.now(), ready: false, sessions: [], bytes: 0, chunks: [], lastFrameAt: null, framesAfterStall: 0 };
       trace.sockets.push(record);
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        if (data === '{"type":"ping"}' && trace.afterPing && trace.stall?.end) {
+          const { afterMs, stallMs } = trace.afterPing;
+          trace.afterPing = null;
+          setTimeout(() => {
+            const start = Date.now();
+            while (Date.now() < start + stallMs) { /* hold the main thread */ }
+            trace.secondStall = { start, end: Date.now() };
+          }, afterMs);
+        }
+        return send(data);
+      };
       socket.addEventListener("message", (event) => {
         record.lastFrameAt = Date.now();
+        if (trace.afterFrame?.name === name) {
+          // Runs after this frame's handlers, so the read deadline is armed.
+          const until = record.lastFrameAt + trace.afterFrame.spanMs;
+          trace.afterFrame = null;
+          trace.stall = { requested: until - record.lastFrameAt, start: null, end: null, frameAt: record.lastFrameAt };
+          setTimeout(() => {
+            trace.stall.start = Date.now();
+            while (Date.now() < until) { /* hold the main thread */ }
+            trace.stall.end = Date.now();
+          }, 0);
+        }
         if (trace.stall?.end && record.lastFrameAt >= trace.stall.end) record.framesAfterStall += 1;
         if (typeof event.data !== "string") {
           const bytes = new Uint8Array(event.data);
@@ -192,6 +228,9 @@ async function streamLeg(page, fixture, name, stallMs, prefix) {
   expected.update(query);
   const expectedLength = blocks.reduce((sum, block) => sum + block.length, query.length);
   const reportsBefore = cursorReports(fixture);
+  const start = await read(page, name);
+  const socketsBefore = start.sockets.length;
+  const sessionsBefore = start.sockets.flatMap((socket) => socket.sessions).length;
   await page.evaluate((ms) => { window.__stall332.capture(); window.__stall332.startStall(ms); }, stallMs);
   await sleep(400);
   for (const block of blocks) await fixture.send("bytes", { base64: block.toString("base64") });
@@ -208,16 +247,15 @@ async function streamLeg(page, fixture, name, stallMs, prefix) {
   const observed = {
     stallMs: stall.end - stall.start,
     answered,
-    sockets: seen.sockets.length,
-    sessionFrames: seen.sockets.flatMap((socket) => socket.sessions).length,
-    missed: seen.sockets.flatMap((socket) => socket.sessions).map((session) => session.missed),
+    newSockets: seen.sockets.length - socketsBefore,
+    newSessionFrames: seen.sockets.flatMap((socket) => socket.sessions).length - sessionsBefore,
+    missed: seen.sockets.flatMap((socket) => socket.sessions).slice(sessionsBefore).map((session) => session.missed),
     expectedLength,
     receivedLength: digest.length,
     whole: digest.sha256 === expected.digest("hex"),
   };
-  assert.equal(observed.sockets, 1, `the healthy socket was replaced: ${JSON.stringify(observed)}`);
-  assert.equal(observed.sessionFrames, 1, `the socket was reattached: ${JSON.stringify(observed)}`);
-  assert.deepEqual(observed.missed, [0], `bytes were reported missed: ${JSON.stringify(observed)}`);
+  assert.equal(observed.newSockets, 0, `the healthy socket was replaced: ${JSON.stringify(observed)}`);
+  assert.equal(observed.newSessionFrames, 0, `the socket was reattached: ${JSON.stringify(observed)}`);
   assert.ok(observed.answered, `the parser never reached the end of the stream: ${JSON.stringify(observed)}`);
   assert.equal(observed.receivedLength, expectedLength, `stream length: ${JSON.stringify(observed)}`);
   assert.ok(observed.whole, `the stream is not whole and in order: ${JSON.stringify(observed)}`);
@@ -246,6 +284,65 @@ async function idleLeg(page, fixture, name) {
   assert.equal(observed.notice, false, "an idle terminal shows the Reconnected note");
   await queryParsed(fixture, 20_000);
   return observed;
+}
+
+/// A stall that starts on a frame and ends just after that frame's read
+/// deadline, the one ordering in which the deadline's timer is due with no
+/// time to spare. The socket is healthy throughout, so it must be kept.
+async function deadlineEdgeLeg(page, fixture, name, edgeMs) {
+  await queryParsed(fixture, 20_000);
+  const before = (await read(page, name)).sockets.length;
+  await page.evaluate((tab, spanMs) => {
+    window.__stall332.stall = null;
+    window.__stall332.afterFrame = { name: tab, spanMs };
+  }, name, READ_DEADLINE_MS + edgeMs);
+  await fixture.send("bytes", { base64: Buffer.from("\x1b[6n").toString("base64") });
+  const stall = await stallEnded(page, READ_DEADLINE_MS + 30_000);
+  await sleep(REPLACE_BOUND_MS);
+  const seen = await read(page, name);
+  const observed = {
+    edgeMs, endedAfterDeadlineMs: stall.end - (stall.frameAt + READ_DEADLINE_MS), stallMs: stall.end - stall.start,
+    socketsBefore: before, socketsAfter: seen.sockets.length, states: seen.sockets.map((socket) => socket.state),
+  };
+  assert.equal(observed.socketsAfter, before, `a stall ending at the read deadline replaced a healthy socket: ${JSON.stringify(observed)}`);
+  await queryParsed(fixture, 20_000);
+  return observed;
+}
+
+/// A healthy link whose pong takes most of the quiet bound, with a stall under
+/// the wake threshold that the pong lands in: the time the stall skips must
+/// not settle the probe ahead of the frame it held back. The control is the
+/// same link with no second stall.
+async function quietProbeLeg(page, fixture, relay, name) {
+  await queryParsed(fixture, 20_000);
+  const flow = relay.flows.at(-1);
+  const before = (await read(page, name)).sockets.length;
+  flow.delayMs = SLOW_PONG_MS;
+  try {
+    await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
+    await sleep(200);
+    await stallEnded(page, SHORT_STALL_MS + 30_000);
+    await sleep(REPLACE_BOUND_MS);
+    const control = (await read(page, name)).sockets.length;
+    assert.equal(control, before, "control: a pong inside the bound kept the socket");
+    await page.evaluate((afterMs, stallMs, ms) => {
+      window.__stall332.secondStall = null;
+      window.__stall332.startStall(ms);
+      window.__stall332.afterPing = { afterMs, stallMs };
+    }, QUIET_STALL_AFTER_MS, QUIET_STALL_MS, SHORT_STALL_MS);
+    await sleep(200);
+    await stallEnded(page, SHORT_STALL_MS + 30_000);
+    const second = await until("the second stall ran", () => page.evaluate(() => window.__stall332.secondStall),
+      (value) => value?.end, 20_000);
+    await sleep(REPLACE_BOUND_MS);
+    const seen = await read(page, name);
+    const observed = { control, socketsBefore: before, socketsAfter: seen.sockets.length, secondStallMs: second.end - second.start };
+    assert.equal(observed.socketsAfter, before, `a short stall inside the probe replaced a healthy socket: ${JSON.stringify(observed)}`);
+    return observed;
+  } finally {
+    flow.delayMs = 0;
+    await sleep(SLOW_PONG_MS);
+  }
 }
 
 /// A peer lost across a wake: the socket is replaced within the bound, a key
@@ -322,6 +419,16 @@ export default {
     const pageErrors = [];
     const onError = (error) => pageErrors.push(String(error));
     page.on("pageerror", onError);
+    const failures = [];
+    // Every leg runs and reports, so one red does not hide the next.
+    const leg = async (label, body) => {
+      try {
+        result[label] = await body();
+      } catch (error) {
+        result[label] = { failed: String(error.message) };
+        failures.push(`${label}: ${error.message}`);
+      }
+    };
     const fixtures = [];
     const openTabs = new Set();
     let relay;
@@ -340,9 +447,12 @@ export default {
       const healthyFixture = await openFixture("healthy");
       openTabs.add(healthy);
       await openTab(ctx, page, cs, windowId, healthy, healthyFixture);
-      result.idle = await idleLeg(page, healthyFixture, healthy);
-      result.stream = await streamLeg(page, healthyFixture, healthy, WAKE_STALL_MS, "STALL332");
-      result.longStream = await streamLeg(page, healthyFixture, healthy, LONG_STALL_MS, "LONG332");
+      await leg("idle", () => idleLeg(page, healthyFixture, healthy));
+      await leg("stream", () => streamLeg(page, healthyFixture, healthy, WAKE_STALL_MS, "STALL332"));
+      await leg("longStream", () => streamLeg(page, healthyFixture, healthy, LONG_STALL_MS, "LONG332"));
+      for (const edgeMs of DEADLINE_EDGES_MS) {
+        await leg(`deadlineEdge${edgeMs}`, () => deadlineEdgeLeg(page, healthyFixture, healthy, edgeMs));
+      }
       await cs(["close", "--tab-name", healthy]);
       openTabs.delete(healthy);
 
@@ -353,11 +463,13 @@ export default {
       openTabs.add(dead);
       const row = await openTab(ctx, page, cs, windowId, dead, deadFixture);
       const selector = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-      result.halfOpen = await halfOpenLeg(page, deadFixture, relay, dead, selector);
-      result.backlog = await backlogLeg(page, deadFixture, relay, dead);
+      await leg("quietProbe", () => quietProbeLeg(page, deadFixture, relay, dead));
+      await leg("halfOpen", () => halfOpenLeg(page, deadFixture, relay, dead, selector));
+      await leg("backlog", () => backlogLeg(page, deadFixture, relay, dead));
       await cs(["close", "--tab-name", dead]);
       openTabs.delete(dead);
       assert.deepEqual(pageErrors, []);
+      if (failures.length) throw new Error(failures.join("\n"));
     } finally {
       writeFileSync(join(ctx.outDir, "332-result.json"), `${JSON.stringify({ result, pageErrors }, null, 2)}\n`);
       page.off("pageerror", onError);
