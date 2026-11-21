@@ -131,6 +131,18 @@ export async function trackGhosttyTerminals(page) {
         globalThis.__ghosttyTerminals.push(this);
         return open.apply(this, args);
       };
+      // A flood scrolls chan's own lines out of the history within a second,
+      // so they are read as the app writes them. Those writes are short.
+      globalThis.__terminalNotices = [];
+      const write = Terminal.prototype.write;
+      const decoder = new TextDecoder();
+      Terminal.prototype.write = function (data, ...rest) {
+        const text = typeof data === "string" ? data : data.length < 256 ? decoder.decode(data) : "";
+        for (const match of text.matchAll(/terminal (?:replay missed \d+ bytes|error: [^\r\n]*)/g)) {
+          globalThis.__terminalNotices.push(match[0]);
+        }
+        return write.call(this, data, ...rest);
+      };
       return true;
     }
     return false;

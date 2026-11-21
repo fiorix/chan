@@ -197,13 +197,14 @@ export default {
       const final = await until("both views reach one position", read,
         (state) => state.ready && state.cursor === second.position, 30_000);
       const retained = await readGhosttyText(page);
-      assert.ok(retained.text.includes(`terminal replay missed ${recovery.missed} bytes`),
-        "the terminal says how many bytes it missed");
+      const notices = await page.evaluate(() => __terminalNotices);
+      assert.deepEqual(notices, [`terminal replay missed ${recovery.missed} bytes`],
+        "the terminal says once how many bytes it missed, and prints no error");
       assert.ok(!retained.text.includes("terminal output lagged"), "no lag line in the buffer");
       assert.ok(retained.text.includes(PROMPT), "the shell's prompt came back after Ctrl+C");
       await ctx.shot("335-after-stall");
       return {
-        resumedBy: sameSocket ? "socket" : "redial", sockets: views.length,
+        resumedBy: sameSocket ? "socket" : "redial", sockets: views.length, notices,
         queued, window: recovery.window, missed: recovery.missed, secondViewMaxHoldMs: maxHoldMs,
         secondViewBytesDuringStall: during, secondViewChecked: second.checked, cursor: final.cursor, acks: final.acks,
       };
