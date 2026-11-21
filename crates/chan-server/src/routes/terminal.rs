@@ -1446,6 +1446,9 @@ async fn terminal_ws(
             .output_progress()
             .expect("terminal socket has output progress");
         let behind = recover || progress.needs_replay();
+        // The reader can release this view after the recovery check above.
+        // A drained client sends no further ack, so nothing would wake the
+        // select below to run the recovery.
         if behind && progress.drained() {
             continue;
         }
