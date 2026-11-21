@@ -23,19 +23,24 @@
 //   6. pointer row: a mouse click on an empty point of the workspace row
 //      selects it and paints its one ring, and t acts on that row;
 //   7. All windows row: a click on the row nested in its list item paints
-//      one ring, on the row holding focus, before and after a key, and a
-//      focused control inside it lights no row's ring;
-//   8. mouse turn: the side buttons, pressed with the mouse, leave the new
-//      front card selected with its ring, and a letter acts on that card and
-//      not on the one that was in front; Enter on a side button turns the
-//      deck and keeps focus on the button;
+//      one ring, on the row holding focus, before and after a key; a control
+//      reached by the keyboard shows its own ring and lights no row, and a
+//      control focused by the mouse lights the nested row alone;
+//   8. mouse turn: the side buttons and a dot, pressed with the mouse, leave
+//      the new front card selected with its ring, and a letter acts on that
+//      card and not on the one that was in front; Enter on a side button
+//      turns the deck and keeps focus on the button;
 //   9. header row: t and o with the header row focused act as before;
 //  10. outside the deck: t and o with a top bar button focused ask for
 //      nothing;
-//  11. dialog: with the devserver's edit dialog open the surface is inert
-//      and cannot hold focus on the card, so the letters are pressed with
-//      focus on the page, and ask for nothing;
-//  12. workspace row: t and o with the workspace row focused act on the
+//  11. dialog: t and o pressed inside the open edit dialog, on its panel
+//      where it opens and on its first control, ask for nothing. The dialog
+//      renders outside the deck, so this proves a letter there does not
+//      reach a row, whichever of the deck's guards stops it;
+//  12. dialog return: the edit dialog opened and closed with the mouse
+//      returns focus to its button with no ring of its own, the header row
+//      paints the one ring, and o acts on that row;
+//  13. workspace row: t and o with the workspace row focused act on the
 //      workspace, not on the devserver.
 // The keyboard legs reach the card and its rows as the owner does: an arrow
 // turns the deck away and back, which focuses the card, and Down walks to a
@@ -304,6 +309,17 @@ function readRows() {
   };
 }
 
+/// Whether the element holds focus, and whether it draws its own focus ring.
+function readControl(selector) {
+  const element = document.querySelector(selector);
+  return {
+    focused: Boolean(element) && document.activeElement === element,
+    focusVisible: Boolean(element?.matches(":focus-visible")),
+  };
+}
+
+const frames = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
 /// A point inside a row that is not inside one of its controls.
 function emptyRowPoint(selector) {
   const row = document.querySelector(selector);
@@ -515,9 +531,35 @@ export default {
         await page.keyboard.press("x");
         r.afterKey = await page.evaluate(readRows);
         check(single(r.afterKey), `the All windows row does not paint one ring after a key: ${JSON.stringify(r.afterKey)}`);
-        await page.$eval(`${ALL_WINDOWS_ROW} button[aria-label="Hide window"]`, (button) => button.focus());
-        r.onControl = await page.evaluate(readRows);
-        check(r.onControl.rings.length === 0, `a focused control lights a row's ring: ${JSON.stringify(r.onControl)}`);
+        await page.keyboard.press("ArrowRight");
+        r.keyControl = await page.evaluate((row) => {
+          const active = document.activeElement;
+          return {
+            inRow: active instanceof HTMLButtonElement && Boolean(active.closest(row)),
+            focusVisible: Boolean(active?.matches(":focus-visible")),
+          };
+        }, ALL_WINDOWS_ROW);
+        precondition(r.keyControl.inRow && r.keyControl.focusVisible, `ArrowRight did not reach a control of the row with its own ring: ${JSON.stringify(r.keyControl)}`);
+        r.onKeyControl = await page.evaluate(readRows);
+        check(r.onKeyControl.rings.length === 0 && r.onKeyControl.cardsWithRing === 0, `a control with its own ring lights a row's ring: ${JSON.stringify(r.onKeyControl)}`);
+        // A press that ends off the control focuses it and runs nothing.
+        const hide = `${ALL_WINDOWS_ROW} button[aria-label="Hide window"]`;
+        r.hideBox = await page.$eval(hide, (button) => {
+          const box = button.getBoundingClientRect();
+          return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+        });
+        const askedBefore = (await asked(page)).length;
+        await page.mouse.move(r.hideBox.x, r.hideBox.y);
+        await page.mouse.down();
+        await page.mouse.move(r.point.x, r.point.y);
+        await page.mouse.up();
+        r.mouseControl = await page.evaluate(readControl, hide);
+        precondition(r.mouseControl.focused && !r.mouseControl.focusVisible, `the mouse did not focus the control without its own ring: ${JSON.stringify(r.mouseControl)}`);
+        r.onMouseControl = await page.evaluate(readRows);
+        check(r.onMouseControl.rings.length === 1 && r.onMouseControl.rings[0].startsWith("div.row") && r.onMouseControl.width === "1px" && r.onMouseControl.cardsWithRing === 0, `a control focused by the mouse does not light its nested row alone: ${JSON.stringify(r.onMouseControl)}`);
+        await frames(page);
+        r.asks.press = (await asked(page)).slice(askedBefore);
+        check(r.asks.press.length === 0, `the press that ended off the control asked for ${JSON.stringify(r.asks.press)}`);
       });
 
       await leg("mouseTurn", async (r) => {
@@ -537,6 +579,12 @@ export default {
         await waitFront(page, `document.querySelector('.slot[aria-current="true"]')?.dataset.key !== ${JSON.stringify(r.own)}`, "from Enter on the Next card button");
         r.afterEnter = await page.evaluate((selector) => ({ onButton: document.activeElement === document.querySelector(selector) }), NEXT);
         check(r.afterEnter.onButton, "Enter on the Next card button took focus off the button");
+        r.dot = await page.evaluate((key) => [...document.querySelectorAll(".slot")].findIndex((slot) => slot.dataset.key === key) + 1, r.own);
+        precondition(r.dot > 0, "the devserver's card has no place in the deck");
+        await page.click(`.dots .dot:nth-child(${r.dot})`);
+        await waitFront(page, `document.querySelector('.slot[aria-current="true"]')?.dataset.key === ${JSON.stringify(r.own)}`, "from a dot");
+        r.afterDot = await page.evaluate(readFront);
+        check(r.afterDot.focused && oneRing(r.afterDot), `the dot did not select the devserver's card with its ring: ${JSON.stringify(r.afterDot)}`);
       });
 
       await leg("headerRow", async (r) => {
@@ -566,17 +614,42 @@ export default {
         await focusOn(page, "card");
         await page.$eval(EDIT, (button) => button.click());
         await page.waitForSelector('[role="dialog"]', { timeout: 10_000 });
-        await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
-        r.focus = await focusAt(page);
-        precondition(r.focus.at === "page", `focus is not on the page under the dialog: ${JSON.stringify(r.focus)}`);
-        r.asks.t = await press(page, "t");
-        r.asks.o = await press(page, "o");
+        const inDialog = () => {
+          const active = document.activeElement;
+          return { onPanel: active?.matches('[role="dialog"]') ?? false, onControl: active instanceof HTMLButtonElement && Boolean(active.closest('[role="dialog"]')) };
+        };
+        r.atOpen = await page.evaluate(inDialog);
+        precondition(r.atOpen.onPanel, `the dialog did not open with focus on its panel: ${JSON.stringify(r.atOpen)}`);
+        r.asks.panelT = await press(page, "t");
+        r.asks.panelO = await press(page, "o");
+        await page.keyboard.press("Tab");
+        r.afterTab = await page.evaluate(inDialog);
+        precondition(r.afterTab.onControl, `Tab did not reach the dialog's first control: ${JSON.stringify(r.afterTab)}`);
+        r.asks.controlT = await press(page, "t");
+        r.asks.controlO = await press(page, "o");
         r.dialogOpen = Boolean(await page.$('[role="dialog"]'));
         await ctx.shot("318-dialog", page);
         await page.$eval('[role="dialog"] .modal-close', (button) => button.click());
         await page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 10_000 });
-        check(r.asks.t.length === 0 && r.asks.o.length === 0, `t and o with the dialog open asked for ${JSON.stringify(r.asks)}`);
+        check(Object.values(r.asks).every((asks) => asks.length === 0), `t and o inside the dialog asked for ${JSON.stringify(r.asks)}`);
         check(r.dialogOpen, "the dialog closed under the letters");
+      });
+
+      await leg("dialogReturn", async (r) => {
+        await page.click(EDIT);
+        await page.waitForSelector('[role="dialog"]', { timeout: 10_000 });
+        await page.click('[role="dialog"] .modal-close');
+        await page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 10_000 });
+        await frames(page);
+        r.returned = await page.evaluate(readControl, EDIT);
+        check(r.returned.focused, `closing the dialog did not return focus to its button: ${JSON.stringify(r.returned)}`);
+        check(!r.returned.focusVisible, `the button matches :focus-visible after the mouse closed its dialog: ${JSON.stringify(r.returned)}`);
+        r.rows = await page.evaluate(readRows);
+        check(r.rows.rings.length === 1 && r.rows.rings[0].includes("machine-header") && r.rows.width === "1px" && r.rows.cardsWithRing === 0, `the header row does not paint the one ring around the returned focus: ${JSON.stringify(r.rows)}`);
+        r.asks.o = await press(page, "o");
+        check(JSON.stringify(r.asks.o) === JSON.stringify([ASK_DISCONNECT]), `o on the returned button asked for ${JSON.stringify(r.asks.o)}, not a disconnect`);
+        await page.waitForSelector(CONNECT, { timeout: 15_000 });
+        await connected(page, backend);
       });
 
       await leg("workspaceRow", async (r) => {
