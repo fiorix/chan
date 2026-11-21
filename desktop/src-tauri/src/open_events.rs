@@ -446,11 +446,12 @@ mod tests {
     /// The bundle imports the Markdown type its document type names, so a
     /// Mac where nothing declares it still maps `.md` and `.markdown` to it:
     /// a plain-text type, imported rather than exported, so a declaration by
-    /// macOS or another app wins. tauri-cli merges `Info.plist` into the
-    /// bundle's on macOS alone, so the file is pinned here whole, its
-    /// comment and layout aside.
+    /// macOS or another app wins. It also declares microphone use for the
+    /// extension bridge. tauri-cli merges `Info.plist` into the bundle's on
+    /// macOS alone, so the file is pinned here whole, its comment and layout
+    /// aside.
     #[test]
-    fn the_macos_bundle_imports_the_markdown_type_it_names() {
+    fn the_macos_bundle_imports_markdown_and_declares_microphone_use() {
         let source = manifest_file("Info.plist");
         let body = source
             .split_once("-->")
@@ -465,7 +466,9 @@ mod tests {
              <key>UTTypeTagSpecification</key><dict>\
              <key>public.filename-extension</key><array><string>md</string><string>markdown</string></array>\
              <key>public.mime-type</key><array><string>text/markdown</string></array>\
-             </dict></dict></array></dict></plist>"
+             </dict></dict></array>\
+             <key>NSMicrophoneUsageDescription</key><string>Chanrecordsthemicrophoneonlywhenanextensionwiththemicrophonecapabilityrequestsatake.</string>\
+             </dict></plist>"
         );
         assert_eq!(compact, expected);
         assert!(
