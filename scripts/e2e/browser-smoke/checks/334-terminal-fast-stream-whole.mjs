@@ -54,7 +54,15 @@ export default {
         (state) => state.verifier.done || state.verifier.mismatch || state.allErrors.length > 0, 240_000);
       await page.emulateCPUThrottling(null);
       assert.deepEqual(finished.allErrors, [], "the terminal prints no lag line");
-      assert.equal(finished.verifier.mismatch, null, "every number arrives once and in order");
+      if (finished.verifier.mismatch) {
+        const sockets = await page.evaluate((name) => __streamProbe.readAll(name), NAME);
+        throw new Error(`a number arrived out of order: ${JSON.stringify({
+          mismatch: finished.verifier.mismatch,
+          sockets: sockets.map(({ handled, frames, acks, lastAck, cursor, ready, sessions }) => ({
+            handled, frames, acks, lastAck, cursor, ready, sessions,
+          })),
+        })}`);
+      }
       assert.equal(finished.verifier.lines, COUNT, "the page handled the whole sequence");
       assert.equal(finished.socketCount, 1, "the view kept its socket");
       assert.equal(finished.sessions.length, 1, "no recovery was needed");

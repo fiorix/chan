@@ -49,7 +49,9 @@ export function installStreamProbe() {
               entry.handled += event.data.byteLength;
               entry.frames += 1;
               if (entry.ready) entry.cursor += event.data.byteLength;
-              verifiers.get(entry.name)?.push(new Uint8Array(event.data));
+              verifiers.get(entry.name)?.push(new Uint8Array(event.data), {
+                socket: sockets.indexOf(entry), frame: entry.frames, ready: entry.ready, session: entry.sessions.length,
+              });
             } else if (typeof event.data === "string") {
               let frame = null;
               try { frame = JSON.parse(event.data); } catch { /* not a control frame */ }
@@ -81,11 +83,13 @@ export function installStreamProbe() {
       const state = { phase: "before", next: 1, lines: 0, mismatch: null, done: false };
       const head = encoder.encode(`${begin}\r\n`);
       const tail = encoder.encode(end);
-      let want = head, at = 0;
+      let want = head, at = 0, previous = new Uint8Array(0);
+      const printable = (bytes) => Array.from(bytes, (byte) => (
+        byte >= 32 && byte < 127 ? String.fromCharCode(byte) : `<${byte.toString(16)}>`)).join("");
       const line = () => encoder.encode(`${state.next}\r\n`);
       verifiers.set(name, {
         state,
-        push(bytes) {
+        push(bytes, where) {
           for (let index = 0; index < bytes.length && !state.done && !state.mismatch; index += 1) {
             const byte = bytes[index];
             if (byte === want[at]) {
@@ -103,9 +107,16 @@ export function installStreamProbe() {
             } else if (state.phase === "before") {
               at = byte === want[0] ? 1 : 0;
             } else {
-              state.mismatch = { afterLine: state.lines, wanted: state.next, byte, offsetInLine: at };
+              const before = index >= 48 ? bytes.subarray(index - 48, index)
+                : new Uint8Array([...previous.subarray(Math.max(0, previous.length - 48 + index)), ...bytes.subarray(0, index)]);
+              state.mismatch = {
+                afterLine: state.lines, wanted: state.next, byte, offsetInLine: at, ...where,
+                indexInFrame: index, frameBytes: bytes.length,
+                before: printable(before), after: printable(bytes.subarray(index, index + 48)),
+              };
             }
           }
+          previous = bytes;
         },
       });
     },
