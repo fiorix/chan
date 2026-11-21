@@ -107,6 +107,16 @@ describe("the terminal wake probe", () => {
     expect(state.silent).toBe(1);
   });
 
+  test("a page whose every tick runs late still reaches a verdict", () => {
+    const { probe, state } = probeWith();
+    probe.begin(LIMIT_MS);
+    for (let i = 0; i < 20 && state.silent === 0; i += 1) {
+      vi.setSystemTime(Date.now() + 2_000);
+      vi.advanceTimersByTime(TERMINAL_WAKE_TICK_MS);
+    }
+    expect(state.silent).toBe(1);
+  });
+
   test("a hidden page's throttled ticks count in full across repeated wakes", () => {
     const { probe, state } = probeWith(true);
     probe.begin(LIMIT_MS);
