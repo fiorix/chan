@@ -135,9 +135,11 @@ const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 // Each session has a bounded logical FIFO. When the agent is IDLE (it has
 // stopped printing), the drainer delivers the largest safe batch at the head
 // and awaits the agent's generation-START before the next drain. The signal is
-// purely the quiescence of VISIBLE output (`last_output_at`): a TUI that
-// repaints an unchanged screen writes colour resets and cursor moves with no
-// text, and counting those would hold its queue for as long as it runs.
+// the quiescence of VISIBLE output (`last_output_at`): a TUI that repaints an
+// unchanged screen writes colour resets and cursor moves with no text, and
+// counting those would hold its queue for as long as it runs. A reader waiting
+// for a view's credit has the program blocked mid-output, so no delivery
+// happens during that wait and the quiet period counts from its end.
 const WRITE_QUEUE_CAP: usize = 100;
 /// Output-idle threshold: the agent is considered done generating when no
 /// visible output has arrived for this long. Conservative to ride over brief
@@ -6363,6 +6365,11 @@ impl Session {
             self.awaiting_gen.store(false, Ordering::Relaxed);
             return;
         }
+        // Checked before the generation gate too, so its cap cannot expire on
+        // a program that was blocked from starting to print.
+        let Some(credit_wait_ended_at) = self.pacing.credit_wait_ended_at() else {
+            return;
+        };
         let last_output = self.last_output_at.load(Ordering::Relaxed);
         // After a deliver, hold the next message until the agent's generation
         // has STARTED (output advanced past the delivery) or the cap elapses
@@ -6380,7 +6387,7 @@ impl Session {
         }
         // Deliver only once the agent is idle (the previous turn, if any, has
         // quiesced).
-        if now_ms - last_output < WRITE_QUEUE_QUIET_MS {
+        if now_ms - last_output.max(credit_wait_ended_at) < WRITE_QUEUE_QUIET_MS {
             return;
         }
         // Select and pop under the queue mutex; frame and encode outside it.
@@ -8645,7 +8652,7 @@ mod tests {
         assert_eq!(sleeps, vec![gap, gap]);
     }
 
-    fn test_config(ring_bytes: usize, cap: usize, idle: u64) -> RegistryConfig {
+    pub(super) fn test_config(ring_bytes: usize, cap: usize, idle: u64) -> RegistryConfig {
         let tmp = tempfile::tempdir().unwrap();
         let workspace_root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
@@ -11449,7 +11456,7 @@ mod tests {
         }
     }
 
-    fn opts_with_command(command: &str) -> CreateOptions {
+    pub(super) fn opts_with_command(command: &str) -> CreateOptions {
         CreateOptions {
             size: test_size(),
             tab_name: None,

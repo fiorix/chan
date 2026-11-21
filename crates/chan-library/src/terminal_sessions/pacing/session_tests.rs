@@ -1,4 +1,6 @@
 use super::super::tests::test_session_with_ring;
+#[cfg(unix)]
+use super::super::tests::{opts_with_command, test_config};
 use super::super::*;
 
 #[test]
@@ -591,4 +593,152 @@ fn fdstore_detach_wakes_a_pacing_wait() {
         Session::detach_for_fdstore_restart,
         SessionLifecycle::Closed(CloseReason::Parked),
     );
+}
+
+/// How a test ends the hold a view has on a real program.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldEnd {
+    ViewGone,
+    Bound,
+    Exit,
+}
+
+/// A message queued while a view holds a real program mid-output is not
+/// delivered during the hold, and is delivered one quiet period after it.
+#[cfg(unix)]
+fn queued_message_waits_out_a_hold(end: HoldEnd, awaiting_generation: bool) {
+    const RING: usize = 64 * 1024;
+    let registry = Registry::new(test_config(RING, 8, 60));
+    // Visible text up to just short of the window, then whitespace, so the
+    // bytes read after the hold cannot move the visible-output clock.
+    let visible = RING / 2 - 256;
+    let script = format!(
+        "read _; head -c {visible} /dev/zero | tr '\\0' x; \
+         head -c {RING} /dev/zero | tr '\\0' ' '; exec sleep 60"
+    );
+    let handle = registry
+        .create(opts_with_command(&script))
+        .expect("spawn the writer");
+    let session = handle.session.clone();
+    let attached = session
+        .clone()
+        .attach(None)
+        .with_output_progress(OutputFlow::Acknowledged);
+    drop(handle);
+    let progress = attached.output_progress().expect("lease");
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting_tx.send(());
+        },
+    );
+    attached.send_input(b"\n");
+    waiting_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the program fills the window and the reader waits");
+
+    let queued = |session: &Session| session.write_queue.lock().expect("queue").len();
+    session
+        .enqueue_cs_write("queued while held".into(), None)
+        .expect("queued");
+    if awaiting_generation {
+        let long_ago = now_unix_millis() - 2 * WRITE_QUEUE_GEN_START_CAP_MS;
+        session.last_deliver_at.store(long_ago, Ordering::Relaxed);
+        session.awaiting_gen.store(true, Ordering::Relaxed);
+    }
+    // Past every quiet period and generation cap the clocks can name.
+    session.try_drain_batch(now_unix_millis() + 10 * WRITE_QUEUE_GEN_START_CAP_MS);
+    assert_eq!(
+        queued(&session),
+        1,
+        "a program blocked on the PTY is mid-output, not idle"
+    );
+
+    // The hold outlasts a quiet period, so a clock that kept running through
+    // it would deliver the moment the hold ends.
+    let ended = match end {
+        HoldEnd::ViewGone => {
+            std::thread::sleep(Duration::from_millis((WRITE_QUEUE_QUIET_MS + 200) as u64));
+            let ended = now_unix_millis();
+            drop(progress);
+            drop(attached);
+            ended
+        }
+        HoldEnd::Exit => {
+            std::thread::sleep(Duration::from_millis((WRITE_QUEUE_QUIET_MS + 200) as u64));
+            let ended = now_unix_millis();
+            session.command_tx.send(PtyCommand::Kill);
+            drop(progress);
+            drop(attached);
+            ended
+        }
+        HoldEnd::Bound => {
+            // The last reading that still saw the hold: the release came
+            // after it, so the quiet period is measured from no later a time.
+            let bound = std::time::Instant::now() + Duration::from_secs(20);
+            let mut ended = now_unix_millis();
+            loop {
+                let sampled = now_unix_millis();
+                if progress.needs_replay() {
+                    break;
+                }
+                ended = sampled;
+                assert!(
+                    std::time::Instant::now() < bound,
+                    "the five-second bound releases the view"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(progress);
+            drop(attached);
+            ended
+        }
+    };
+
+    let bound = std::time::Instant::now() + Duration::from_secs(20);
+    let delivered_at = loop {
+        let now = now_unix_millis();
+        session.try_drain_batch(now);
+        if queued(&session) == 0 {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < bound,
+            "a queued message is never stuck behind a finished hold"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    registry.close_all(CloseReason::Shutdown);
+    assert!(
+        delivered_at - ended >= WRITE_QUEUE_QUIET_MS,
+        "delivered {} ms after the hold ended, inside the {WRITE_QUEUE_QUIET_MS} ms quiet period",
+        delivered_at - ended
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_queued_message_waits_out_a_hold_that_ends_when_the_view_goes_away() {
+    queued_message_waits_out_a_hold(HoldEnd::ViewGone, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_queued_message_waits_out_a_hold_released_at_the_bound() {
+    queued_message_waits_out_a_hold(HoldEnd::Bound, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_queued_message_waits_out_a_hold_that_ends_at_exit() {
+    queued_message_waits_out_a_hold(HoldEnd::Exit, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_generation_cap_does_not_expire_a_delivery_gate_during_a_hold() {
+    queued_message_waits_out_a_hold(HoldEnd::ViewGone, true);
 }

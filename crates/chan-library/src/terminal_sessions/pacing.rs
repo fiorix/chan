@@ -29,6 +29,10 @@ struct State {
     events: u64,
     bypass: bool,
     views: HashMap<u64, View>,
+    /// The reader is waiting for credit, with the program blocked behind it.
+    reader_waiting: bool,
+    /// When the reader last stopped waiting for credit, in Unix milliseconds.
+    wait_ended_at: i64,
 }
 
 #[derive(Debug)]
@@ -133,8 +137,14 @@ impl Pacing {
         let mut state = self.state.lock().expect("terminal pacing poisoned");
         loop {
             match self.admit(&mut state, maximum, Instant::now()) {
-                Admission::Read(bytes) => return bytes,
+                Admission::Read(bytes) => {
+                    if std::mem::take(&mut state.reader_waiting) {
+                        state.wait_ended_at = super::now_unix_millis();
+                    }
+                    return bytes;
+                }
                 Admission::Wait(deadline) => {
+                    state.reader_waiting = true;
                     on_wait();
                     let wait = deadline.saturating_duration_since(Instant::now());
                     (state, _) = self
@@ -177,6 +187,15 @@ impl Pacing {
             Some(deadline) => Admission::Wait(deadline),
             None => Admission::Read(credit),
         }
+    }
+
+    /// When the reader last stopped waiting for credit, in Unix milliseconds
+    /// (0 if it never waited), or `None` while it waits. A program blocked on
+    /// a full PTY prints nothing, so its silence during a wait says nothing
+    /// about whether it is idle.
+    pub(super) fn credit_wait_ended_at(&self) -> Option<i64> {
+        let state = self.state.lock().expect("terminal pacing poisoned");
+        (!state.reader_waiting).then_some(state.wait_ended_at)
     }
 
     pub(super) fn bypass(&self) {
