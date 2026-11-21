@@ -13,6 +13,9 @@
 // - devserver: a window of a direct devserver, whose socket is probed at the
 //   wake and must be kept, with the pong queued behind the backlog.
 //
+// A stream far past the ring is not whole on a paced server, by design: the
+// view resumes with a count of what it missed.
+//
 // In each, the terminal runs `seq` once the page is stalled, then asks for the
 // cursor position, which it can only answer after parsing everything ahead of
 // the query. The page's socket handler checks each line against the next
@@ -32,7 +35,10 @@ const [inspector, work, chan, output] = process.argv.slice(2);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_STALL_MS = Number(process.env.STALL_LOCAL_MS ?? 50_000);
 const DEVSERVER_STALL_MS = Number(process.env.STALL_MS ?? 30_000);
-const LINES = Number(process.env.STALL_LINES ?? 15_000_000);
+// About 2.6 MB: past the 2 MiB ring, so a socket replaced at the wake loses
+// bytes, and inside the window plus the ring, so a paced server that stops
+// waiting for the stalled view can still resume it whole on its socket.
+const LINES = Number(process.env.STALL_LINES ?? 340_000);
 // How long after the stall a socket has to show a replacement.
 const SETTLE_MS = 12_000;
 const DRAIN_TIMEOUT_MS = Number(process.env.STALL_DRAIN_TIMEOUT_MS ?? 300_000);

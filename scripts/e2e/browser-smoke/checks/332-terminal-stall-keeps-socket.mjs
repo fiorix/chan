@@ -179,7 +179,7 @@ function installTrace() {
         let frame;
         try { frame = JSON.parse(event.data); } catch { return; }
         if (frame.type === "ready") record.ready = true;
-        if (frame.type === "session") record.sessions.push({ missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0 });
+        if (frame.type === "session") record.sessions.push({ missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0, window: frame.ack_window ?? null });
       });
       return socket;
     },
@@ -286,14 +286,16 @@ async function streamLeg(page, fixture, name, stallMs, prefix) {
     stallMs: stall.end - stall.start,
     answered,
     newSockets: seen.sockets.length - socketsBefore,
-    newSessionFrames: seen.sockets.flatMap((socket) => socket.sessions).length - sessionsBefore,
-    missed: seen.sockets.flatMap((socket) => socket.sessions).slice(sessionsBefore).map((session) => session.missed),
+    recoveries: seen.sockets.flatMap((socket) => socket.sessions).slice(sessionsBefore),
     expectedLength,
     receivedLength: digest.length,
     whole: digest.sha256 === expected.digest("hex"),
   };
   assert.equal(observed.newSockets, 0, `the healthy socket was replaced: ${JSON.stringify(observed)}`);
-  assert.equal(observed.newSessionFrames, 0, `the socket was reattached: ${JSON.stringify(observed)}`);
+  // A paced server that stopped waiting for the stalled view resumes it on
+  // this socket from the ring, which must hold everything the view lacks.
+  assert.ok(observed.recoveries.every((session) => session.window > 0 && session.missed === 0),
+    `the socket lost bytes in a recovery: ${JSON.stringify(observed)}`);
   assert.ok(observed.answered, `the parser never reached the end of the stream: ${JSON.stringify(observed)}`);
   assert.equal(observed.receivedLength, expectedLength, `stream length: ${JSON.stringify(observed)}`);
   assert.ok(observed.whole, `the stream is not whole and in order: ${JSON.stringify(observed)}`);
