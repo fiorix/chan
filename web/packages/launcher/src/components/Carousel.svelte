@@ -409,10 +409,16 @@
     outline-offset: 2px;
   }
 
-  .slot :global([data-deck-row]:focus-visible) {
+  .slot :global([data-deck-row]:focus) {
     outline: 1px solid var(--launcher-focus-color, var(--brand));
     outline-offset: -1px;
     border-radius: 8px;
+  }
+
+  /* All windows nests the shared row in its list item, whose ring is the one
+     that shows while either of them holds focus. */
+  .slot :global([data-deck-row]) :global([data-deck-row]:focus) {
+    outline: none;
   }
 
   .nav {

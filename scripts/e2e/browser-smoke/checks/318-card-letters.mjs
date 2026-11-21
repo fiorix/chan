@@ -1,7 +1,8 @@
 // A row letter pressed on a Computers card selected as a whole, the card
-// itself holding focus and its ring painted, acts on the row Enter takes from the card, which on a
-// devserver's card is its header: `t` asks for a terminal on that devserver
-// and `o` disconnects or connects it. With nothing selected it does nothing.
+// itself holding focus and its ring painted, acts on the row Enter takes from
+// the card, which on a devserver's card is its header: `t` asks for a
+// terminal on that devserver and `o` disconnects or connects it. A clicked
+// row is selected the same way. With nothing selected a letter does nothing.
 // The built launcher runs on the desktop surface against this check's own
 // backend, which serves one connected devserver with one running workspace
 // and answers the devserver's terminal, connect and disconnect routes and the
@@ -19,17 +20,21 @@
 //   5. pointer: a mouse click on the card's empty body selects it and paints
 //      its one ring before any key, then t asks for the terminal and o for
 //      the disconnect, and focus stays on the card;
-//   6. mouse turn: the side buttons, pressed with the mouse, leave the new
+//   6. pointer row: a mouse click on an empty point of the workspace row
+//      selects it and paints its one ring, and t acts on that row;
+//   7. All windows row: a click on the row nested in its list item paints
+//      one ring, the list item's, before and after a key;
+//   8. mouse turn: the side buttons, pressed with the mouse, leave the new
 //      front card selected with its ring, and a letter acts on that card and
 //      not on the one that was in front; Enter on a side button turns the
 //      deck and keeps focus on the button;
-//   7. header row: t and o with the header row focused act as before;
-//   8. outside the deck: t and o with a top bar button focused ask for
+//   9. header row: t and o with the header row focused act as before;
+//  10. outside the deck: t and o with a top bar button focused ask for
 //      nothing;
-//   9. dialog: with the devserver's edit dialog open the surface is inert
+//  11. dialog: with the devserver's edit dialog open the surface is inert
 //      and cannot hold focus on the card, so the letters are pressed with
 //      focus on the page, and ask for nothing;
-//  10. workspace row: t and o with the workspace row focused act on the
+//  12. workspace row: t and o with the workspace row focused act on the
 //      workspace, not on the devserver.
 // The keyboard legs reach the card and its rows as the owner does: an arrow
 // turns the deck away and back, which focuses the card, and Down walks to a
@@ -70,10 +75,29 @@ const DISCONNECT = `button[aria-label="Disconnect ${DS_LABEL}"]`;
 const CONNECT = `button[aria-label="Connect ${DS_LABEL}"]`;
 const EDIT = `button[aria-label="Edit config for ${DS_LABEL}"]`;
 const WS_WINDOW = `button[aria-label="New window of ${WS_LABEL}"]`;
+const WS_TERMINAL = `button[aria-label="New terminal window of ${WS_LABEL}"]`;
 const WS_POWER = `button[aria-label="Turn off ${WS_LABEL} (o)"]`;
+const WINDOW_ID = "win-letters";
+const ALL_WINDOWS_ROW = `.all-windows [data-window-id="${WINDOW_ID}"]`;
 const OUTSIDE = 'header.topbar button[aria-label="Select"]';
 const NEXT = 'button[aria-label="Next card"]';
 const PREVIOUS = 'button[aria-label="Previous card"]';
+
+/// One window of the local machine, so All windows has a row to click.
+const LOCAL_WINDOW = {
+  window_id: WINDOW_ID,
+  library_id: "local",
+  kind: "terminal",
+  title: "letters window",
+  ordinal: 1,
+  workspace_path: null,
+  prefix: "",
+  token: "",
+  persisted: false,
+  connected: true,
+  active_transfer: false,
+  hidden: false,
+};
 
 /// The registry the launcher reads, and the routes its letters reach.
 function cardBackend(distRoot) {
@@ -128,7 +152,8 @@ function cardBackend(distRoot) {
         if (req.method === "GET") {
           if (pathname === "/api/library/workspaces") return json(res, [{ ...state.workspace }]);
           if (pathname === "/api/library/devservers") return json(res, [{ ...state.devserver }]);
-          if (pathname === "/api/library/gateways" || pathname === "/api/library/windows") return json(res, []);
+          if (pathname === "/api/library/gateways") return json(res, []);
+          if (pathname === "/api/library/windows") return json(res, [{ ...LOCAL_WINDOW }]);
           if (pathname === "/api/library/local-theme") return json(res, { theme: null });
         } else if (pathname.startsWith(`${ROUTE}/`)) {
           events.push(`${req.method} ${pathname}${body ? ` ${body}` : ""}`);
@@ -255,6 +280,33 @@ async function waitFront(page, matches, label) {
     throw new Precondition(`the deck did not turn ${label}: ${error.message}`);
   }
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+/// The rows that draw a ring, and how many cards do.
+function readRows() {
+  const name = (el) => `${el.tagName.toLowerCase()}.${el.getAttribute("class") ?? ""}`;
+  const rings = [...document.querySelectorAll(".slot [data-deck-row]")].filter((row) => getComputedStyle(row).outlineStyle !== "none");
+  return {
+    active: document.activeElement ? name(document.activeElement) : null,
+    rings: rings.map(name),
+    width: rings[0] ? getComputedStyle(rings[0]).outlineWidth : null,
+    cardsWithRing: [...document.querySelectorAll(".slot section.card")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+  };
+}
+
+/// A point inside a row that is not inside one of its controls.
+function emptyRowPoint(selector) {
+  const row = document.querySelector(selector);
+  if (!row) return null;
+  const box = row.getBoundingClientRect();
+  const y = box.top + box.height / 2;
+  for (let x = box.left + 3; x < box.right - 3; x += 4) {
+    const element = document.elementFromPoint(x, y);
+    if (element && row.contains(element) && !element.closest("button, a, input, select, textarea, label")) {
+      return { x, y, element: `${element.tagName.toLowerCase()}.${element.getAttribute("class") ?? ""}` };
+    }
+  }
+  return null;
 }
 
 /// A point on the front card's body that is neither a row nor a control.
@@ -420,6 +472,39 @@ export default {
         await page.waitForSelector(CONNECT, { timeout: 15_000 });
         r.focusAfter = await focusAt(page);
         check(r.focusAfter.at === "card", `focus left the clicked card: ${JSON.stringify(r.focusAfter)}`);
+      });
+
+      await leg("pointerRow", async (r) => {
+        r.hasT = await page.$eval(WS_TERMINAL, (button) => button.dataset.deckKey === "t" && !button.disabled);
+        precondition(r.hasT, "the workspace row's New terminal window is not an enabled t button");
+        await blur(page);
+        r.point = await page.evaluate(emptyRowPoint, '.slot[aria-current="true"] .ws-head');
+        precondition(r.point, "the workspace row has no point outside its controls");
+        await page.mouse.click(r.point.x, r.point.y);
+        r.focus = await focusAt(page);
+        r.rows = await page.evaluate(readRows);
+        check(r.focus.at === "workspace", `the click on ${r.point.element} did not select the workspace row: ${JSON.stringify(r.focus)}`);
+        check(r.rows.rings.length === 1 && r.rows.rings[0].includes("ws-head") && r.rows.width === "1px" && r.rows.cardsWithRing === 0, `the clicked row does not paint one ring: ${JSON.stringify(r.rows)}`);
+        r.asks.t = await press(page, "t");
+        check(JSON.stringify(r.asks.t) === JSON.stringify([ASK_WS_TERMINAL]), `t on the clicked row asked for ${JSON.stringify(r.asks.t)}, not its terminal window`);
+        r.focusAfter = await focusAt(page);
+        check(r.focusAfter.at === "workspace", `focus left the clicked row: ${JSON.stringify(r.focusAfter)}`);
+      });
+
+      await leg("allWindowsRow", async (r) => {
+        await showCarouselCard(page, `${ALL_WINDOWS_ROW} button[aria-label="Hide window"]`, 15_000);
+        await blur(page);
+        r.point = await page.evaluate(emptyRowPoint, ALL_WINDOWS_ROW);
+        precondition(r.point, "the All windows row has no point outside its controls");
+        await page.mouse.click(r.point.x, r.point.y);
+        r.clicked = await page.evaluate(readRows);
+        const single = (reading) => reading.rings.length === 1 && reading.rings[0].startsWith("li.") && reading.width === "1px" && reading.cardsWithRing === 0;
+        check(single(r.clicked), `the clicked All windows row does not paint one ring: ${JSON.stringify(r.clicked)}`);
+        // A key turns :focus-visible on for whatever holds focus, which is
+        // the row nested in the list item after a click on it.
+        await page.keyboard.press("x");
+        r.afterKey = await page.evaluate(readRows);
+        check(single(r.afterKey), `the All windows row does not paint one ring after a key: ${JSON.stringify(r.afterKey)}`);
       });
 
       await leg("mouseTurn", async (r) => {
