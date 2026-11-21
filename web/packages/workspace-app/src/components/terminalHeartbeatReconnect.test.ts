@@ -297,6 +297,36 @@ describe("wake recycle", () => {
     expect(socket.readyState).toBe(TerminalSocket.OPEN);
   });
 
+  test("a pong of a ping sent before the wake does not settle the probe", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-stale");
+    // The ping sent at open is still in flight across the wake.
+    await wake();
+    expect(pings(socket)).toBe(2);
+    await pong(socket);
+
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    expect(TerminalSocket.all, "the wake's own ping went unanswered").toHaveLength(2);
+  });
+
+  test("the probe's deadline follows the socket's round trip", async () => {
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const socket = lastSocket();
+    await attach(socket, "sess-slow");
+    // The ping sent at open takes 2 s to answer: a deadline of 8 s.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pong(socket);
+
+    await wake();
+    await vi.advanceTimersByTimeAsync(8_000 - 500);
+    expect(TerminalSocket.all, "inside four round trips").toHaveLength(1);
+    await pong(socket);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 4);
+    expect(TerminalSocket.all, "answered in time").toHaveLength(1);
+    expect(socket.readyState).toBe(TerminalSocket.OPEN);
+  });
+
   test("a read deadline that fires after a stall probes instead of closing", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
