@@ -1,11 +1,18 @@
 // A ghostty view whose page stops under an endless `yes`, in headless Chrome.
 //
-// The page's main thread is stopped twice by a busy loop. A 3 s stall is
-// inside the 5 s bound: the view catches up with no recovery and no loss. A
-// 30 s stall is past it: the program goes on, what the page had queued when
-// it came back is at most the advertised window, and the view resumes from
-// the ring, on its socket or a redial, with a count of what it missed and no
-// lag line.
+// The page's main thread is stopped three times by a busy loop:
+//
+//   4.8 s, inside the 5 s bound: the view catches up with no recovery and no
+//   loss.
+//   5.5 s, just past it: the view resumes on its own socket. What the page had
+//   queued is at most the advertised window.
+//   30 s: the program goes on, and the view resumes from the ring, on its
+//   socket or on a redial, with a count of what it missed and no lag line.
+//
+// The page takes a long gap between its 2 s wake probes for a machine sleep
+// and replaces the socket, so the two short stalls start on a probe's tick,
+// which keeps that gap to the stall alone. A stall that starts later between
+// two ticks can trip it from about 4 s; this check does not cover that case.
 //
 // A second view of the session runs here in Node on the terminal socket's own
 // protocol, so a stall of the page cannot stop it. It acknowledges what it
@@ -28,7 +35,8 @@ const NAME = "StalledView335";
 const PROMPT = "__P335__";
 const MARK = "__FLOOD335__\r\n";
 const LINE = Buffer.from("the quick brown fox\r\n");
-const SHORT_STALL_MS = 3_000;
+const INSIDE_BOUND_MS = 4_800;
+const PAST_BOUND_MS = 5_500;
 const LONG_STALL_MS = 30_000;
 /// The 5 s bound, plus room for a loaded four-CPU guest to schedule the wake.
 const MAX_HOLD_MS = 8_000;
@@ -138,17 +146,38 @@ export default {
       ), NAME);
       await until("the flood reaches both views", read, (state) => state.handled > 1 << 18 && second.checked > 1 << 18);
 
+      assert.equal(await page.evaluate(() => __streamProbe.wakeProbeCount()), 1,
+        "the probe sees exactly the terminal's wake detector");
+      const stallOnTick = async (ms, index) => {
+        await page.evaluate((name, stallMs) => __streamProbe.stallAtWakeProbe(name, stallMs), NAME, ms);
+        return until(`stall ${index} ran`, async () => {
+          try { return await read(); } catch { return null; }
+        }, (state) => state?.stalls[index]?.ended, 30_000);
+      };
+
       // Inside the bound: nothing is lost and nothing recovers.
-      await page.evaluate((name, ms) => __streamProbe.stall(name, ms), NAME, SHORT_STALL_MS);
-      await sleep(SHORT_STALL_MS + 500);
-      const afterShort = await until("the page runs after the short stall", read, (state) => state.stalls[0]?.ended);
+      const inside = await stallOnTick(INSIDE_BOUND_MS, 0);
       await sleep(1_000);
       const settled = await read();
-      assert.deepEqual(settled.errors, [], "no lag line after a stall inside the bound");
+      assert.deepEqual(settled.allErrors, [], "no lag line after a stall inside the bound");
+      assert.equal(settled.socketCount, 1, "a stall inside the bound keeps its socket");
       assert.equal(settled.sessions.length, 1, "a stall inside the bound needs no recovery");
-      assert.ok(settled.handled > afterShort.stalls[0].handled, "the view caught up and goes on");
+      assert.ok(settled.handled > inside.stalls[0].handled, "the view caught up and goes on");
 
-      // Past the bound.
+      // Just past the bound, on the same socket: the queue is the window.
+      await stallOnTick(PAST_BOUND_MS, 1);
+      const past = await until("the view recovers on its socket", read,
+        (state) => state.sessions.length > 1 || state.socketCount > 1 || state.allErrors.length > 0, 30_000);
+      assert.deepEqual(past.allErrors, [], "no lag line past the bound");
+      assert.equal(past.socketCount, 1, "a stall that starts on a wake probe keeps its socket");
+      const pastRecovery = past.sessions[1];
+      const pastQueued = pastRecovery.handledBefore - past.stalls[1].handled;
+      assert.ok(pastRecovery.window > 0, "the server advertised a window");
+      assert.ok(pastQueued <= pastRecovery.window,
+        `the page queued ${pastQueued} bytes in the stall, past the ${pastRecovery.window} byte window`);
+      await sleep(1_000);
+
+      // Far past the bound.
       const before = second.bytes;
       second.gapFrom = Date.now();
       second.maxGapMs = 0;
@@ -162,17 +191,18 @@ export default {
       const views = await until("the stalled view resumes", async () => {
         try { return await page.evaluate((name) => __streamProbe.readAll(name), NAME); } catch { return null; }
       }, (all) => {
-        const at = all?.findIndex((entry) => entry.stalls[1]) ?? -1;
-        if (at < 0 || !all[at].stalls[1].ended) return false;
-        return all[at].sessions.length > 1 || all[at].errors.length > 0 || (at < all.length - 1 && all.at(-1).ready);
+        const at = all?.findIndex((entry) => entry.stalls[2]) ?? -1;
+        if (at < 0 || !all[at].stalls[2].ended) return false;
+        return all[at].sessions.length > all[at].stalls[2].sessions || all[at].errors.length > 0
+          || (at < all.length - 1 && all.at(-1).ready);
       }, 90_000);
-      const held = views.find((entry) => entry.stalls[1]);
+      const held = views.find((entry) => entry.stalls[2]);
       const latest = views.at(-1);
-      const sameSocket = held.sessions.length > 1;
+      const sameSocket = held.sessions.length > held.stalls[2].sessions;
       assert.deepEqual([...held.errors, ...(sameSocket ? [] : latest.errors)], [], "the lag line is gone");
-      const recovery = sameSocket ? held.sessions[1] : latest.sessions[0];
+      const recovery = sameSocket ? held.sessions[held.stalls[2].sessions] : latest.sessions[0];
       assert.ok(recovery.window > 0, "the server advertised a window");
-      const queued = (sameSocket ? recovery.handledBefore : held.handled) - held.stalls[1].handled;
+      const queued = (sameSocket ? recovery.handledBefore : held.handled) - held.stalls[2].handled;
       assert.ok(queued <= recovery.window,
         `the page queued ${queued} bytes during the stall, past the ${recovery.window} byte window`);
       assert.ok(recovery.missed > 0, "a 30 s flood outruns the ring, and the loss is counted");
@@ -198,12 +228,14 @@ export default {
         (state) => state.ready && state.cursor === second.position, 30_000);
       const retained = await readGhosttyText(page);
       const notices = await page.evaluate(() => __terminalNotices);
-      assert.deepEqual(notices, [`terminal replay missed ${recovery.missed} bytes`],
-        "the terminal says once how many bytes it missed, and prints no error");
+      const expected = [pastRecovery, recovery].filter((row) => row.missed > 0)
+        .map((row) => `terminal replay missed ${row.missed} bytes`);
+      assert.deepEqual(notices, expected, "the terminal says how many bytes each loss was, and prints no error");
       assert.ok(!retained.text.includes("terminal output lagged"), "no lag line in the buffer");
       assert.ok(retained.text.includes(PROMPT), "the shell's prompt came back after Ctrl+C");
       await ctx.shot("335-after-stall");
       return {
+        pastBound: { queued: pastQueued, missed: pastRecovery.missed },
         resumedBy: sameSocket ? "socket" : "redial", sockets: views.length, notices,
         queued, window: recovery.window, missed: recovery.missed, secondViewMaxHoldMs: maxHoldMs,
         secondViewBytesDuringStall: during, secondViewChecked: second.checked, cursor: final.cursor, acks: final.acks,

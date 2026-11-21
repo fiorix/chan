@@ -72,6 +72,36 @@ export function installStreamProbe() {
     }
   };
   const find = (name) => sockets.findLast((entry) => entry.name === name);
+  // The page treats a long gap between its 2 s wake probes as a machine sleep
+  // and replaces the socket, so whether a stall trips it depends on where the
+  // stall falls between two ticks. A stall that starts on a tick is measured
+  // alone. Only intervals made after this probe are seen, which is the
+  // terminal's own detector when the terminal opens after it.
+  const nativeSetInterval = globalThis.setInterval;
+  const wakeProbes = [];
+  let afterWakeProbe = null;
+  globalThis.setInterval = function (handler, delay, ...rest) {
+    if (delay !== 2000 || typeof handler !== "function") return nativeSetInterval(handler, delay, ...rest);
+    const probe = { ticks: 0 };
+    wakeProbes.push(probe);
+    return nativeSetInterval(function (...args) {
+      const result = handler.apply(this, args);
+      probe.ticks += 1;
+      if (afterWakeProbe && probe === wakeProbes.at(-1)) {
+        const run = afterWakeProbe;
+        afterWakeProbe = null;
+        run();
+      }
+      return result;
+    }, delay, ...rest);
+  };
+  const runStall = (entry, ms, lead) => {
+    const record = { at: Date.now(), handled: entry.handled, sessions: entry.sessions.length, ms, lead };
+    entry.stalls.push(record);
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* the stall */ }
+    record.ended = Date.now();
+  };
   globalThis.__streamProbe = {
     read: (name) => { const entry = find(name); return entry ? view(entry) : null; },
     /// Every socket this terminal has had, oldest first: a redial adds one.
@@ -127,13 +157,17 @@ export function installStreamProbe() {
     /// Stop the page's main thread for `ms`, recording what it had handled.
     stall(name, ms) {
       const entry = find(name);
-      setTimeout(() => {
-        const record = { at: Date.now(), handled: entry.handled, sessions: entry.sessions.length };
-        entry.stalls.push(record);
-        const end = Date.now() + ms;
-        while (Date.now() < end) { /* the stall */ }
-        record.ended = Date.now();
-      }, 0);
+      setTimeout(() => runStall(entry, ms, null), 0);
+    },
+    wakeProbeCount: () => wakeProbes.length,
+    /// The same stall, `lead` ms after the next wake probe. With no lead the
+    /// probe sees a gap of `ms`; a lead adds to the gap it sees.
+    stallAtWakeProbe(name, ms, lead = 0) {
+      const entry = find(name);
+      afterWakeProbe = () => {
+        if (lead > 0) setTimeout(() => runStall(entry, ms, lead), lead);
+        else runStall(entry, ms, 0);
+      };
     },
   };
 }
