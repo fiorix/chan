@@ -210,6 +210,7 @@
     syncLiveFocusColorMenu,
   } from "./state/paneColor";
   import { installIdleTracker, setReadMode } from "./state/idle.svelte";
+  import { installLockMediaPause } from "./state/lockMedia.svelte";
   import {
     installScreensaverTracker,
     loadScreensaverState,
@@ -530,6 +531,7 @@
     // load doesn't need a re-install pass; the lock fires only when
     // `enabled=true`.
     stopTrackers.push(installScreensaverTracker());
+    stopTrackers.push(installLockMediaPause());
     // Hook pagehide BEFORE bootstrap so a fast reload during the
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
