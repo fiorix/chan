@@ -1,6 +1,6 @@
 # The Computers keys move to a bar at the bottom
 
-Status: Accepted for v0.133.0 by the owner on 2026-11-21 ("there's more changes i'd like to make in the computers screen, before we can proceed.. the change is: 1. we currently have navigation legend "↑ ↓ rows · ← → controls · Enter focuses · h show/hide" in the "All Windows" card, and we shouldn't 2. we also have navigation legend "g screens · o on/off · t terminal · w workspace window · h show/hide" between the cards and carrousel 3. i want to move these 2 legends to its own "status bar" at the very bottom, like we did with the command launcher (cmd+k on mac)").
+Status: Accepted for v0.133.0 by the owner on 2026-11-21 ("there's more changes i'd like to make in the computers screen, before we can proceed.. the change is: 1. we currently have navigation legend "↑ ↓ rows · ← → controls · Enter focuses · h show/hide" in the "All Windows" card, and we shouldn't 2. we also have navigation legend "g screens · o on/off · t terminal · w workspace window · h show/hide" between the cards and carrousel 3. i want to move these 2 legends to its own "status bar" at the very bottom, like we did with the command launcher (cmd+k on mac)"). Built and reviewed: check 317 red at the base and green at the tip in a Chrome guest, two mutants each red on its own assertion, one reader accepting with notes; a third mutant, on `aria-hidden`, is to be read at the merge.
 
 Record: the owner's words above, on the Computers window of Chan Desktop: the launcher's desktop surface, where both screens deal their cards as a carousel. The command launcher he names is the shared command deck, whose footer sets its keys as keycaps, each followed by what it does.
 
@@ -21,7 +21,7 @@ Read at `042430e89`, by reading; nothing run. Paths are under `web/packages/laun
 3. On the Computers screen the bar lists, once each and in the legends' words: Up, Down rows; Left, Right controls; Enter focuses; `g` screens; `o` on/off; `t` terminal; `w` workspace window; `h` show/hide.
 4. On the Gateways screen the bar lists, in this order: Up, Down rows; Left, Right controls; Enter activates; `g` screens; `o` on/off. The word is activates because Enter presses the row's first enabled control and a gateway has no window to focus.
 5. The bar shows where the legends showed: on the desktop surface only. The devserver and read-only surfaces show no bar.
-6. The bar is a passive legend: nothing in it is focusable and it takes no Tab stop, and it carries no role or label, as the deck's footer carries none.
+6. The bar is a passive legend: nothing in it is focusable and it takes no Tab stop, and it carries no role, label or `aria-hidden`, as the deck's footer carries none, so its keys stay in the accessibility tree.
 7. The bar covers neither the front card nor the dots at any window height the deck supports, and the page does not scroll. A window too narrow for one line clips the bar's end, as the deck's footer does, and the page does not scroll sideways.
 8. Nothing else changes: the cards, the deck and its dots, the arrows, the keys, focus and the accessibility tree of the cards.
 
@@ -33,13 +33,26 @@ Read at `042430e89`, by reading; nothing run. Paths are under `web/packages/laun
 
 ## Acceptance
 
-1. A browser check, `scripts/e2e/browser-smoke/checks/317-computers-key-bar.mjs`, over a devserver page whose surface is rewritten to the desktop's, reads the rendered page: no legend inside the All windows card and no text in the carousel outside its stage; one bar holding the Computers keys once each as `kbd` keycaps with their words; the bar's top edge at or below the dots' and the front card's bottom edges and its bottom edge at the window's; the bar painted and on top, the element at its centre inside it, its visibility visible and its opacity 1; nothing in the bar focusable; no page scroll at three window heights and none sideways at a phone width. It flips to the Gateways screen and reads the bar's five entries and the same layout and paint at the same window sizes, and reads no bar and no legend on the devserver surface and on a page rewritten to the read-only surface.
+1. A browser check, `scripts/e2e/browser-smoke/checks/317-computers-key-bar.mjs`, over a devserver page whose surface is rewritten to the desktop's, reads the rendered page: no legend inside the All windows card and no text in the carousel outside its stage; one bar holding the Computers keys once each as `kbd` keycaps with their words; the bar's top edge at or below the dots' and the front card's bottom edges and its bottom edge at the window's; the bar painted and on top, the element at its centre inside it, its visibility visible and its opacity 1; nothing in the bar focusable and no `aria-hidden` on it; no page scroll at three window heights and none sideways at a phone width. It flips to the Gateways screen and reads the bar's five entries and the same layout and paint at the same window sizes, and reads no bar and no legend on the devserver surface and on a page rewritten to the read-only surface.
 2. The check is red at `042430e89` on the moved legends and the missing bar, and green at the tip. A page that never loads its deck fails as a precondition, in words distinct from the red.
 3. No unit test: the browser check reaches every behaviour the row changes.
 
 ## Decided
 
-The owner, 2026-11-21 ("about the open questions: yes taking your recommendations"):
+The owner, 2026-11-21, each with the recommendation taken:
 
-1. The Gateways bar also lists the arrows and Enter, with Enter's word there being activates (contract 4).
-2. A window too narrow for one line keeps one clipped line, as the deck's footer does (contract 7).
+1. The Gateways bar also lists the arrows and Enter, with Enter's word there being activates (contract 4). Recorded at 07:53:38Z: "about the open questions: yes taking your recommendations".
+2. A window too narrow for one line keeps one clipped line, as the deck's footer does (contract 7). The same answer.
+3. The bulk-action bar covering the key bar in select mode: "Leave it covered (Recommended)", recorded at 08:46:52Z. Nothing changes: while select mode is on, the bulk bar docks over the key bar.
+
+## Built, 2026-11-21
+
+The two legends are gone from the All windows card and from between the deck and its dots. One key bar (`web/packages/launcher/src/components/KeyBar.svelte`) sits along the bottom of the window on the desktop surface, in the grid band under the deck, so the deck keeps its height. Each key is a `<kbd>` keycap followed by its word, in the values of the command deck's footer, set again in the launcher. The Computers screen lists Up, Down rows; Left, Right controls; Enter focuses; `g` screens; `o` on/off; `t` terminal; `w` workspace window; `h` show/hide. The Gateways screen lists Up, Down rows; Left, Right controls; Enter activates; `g` screens; `o` on/off. The bar takes no focus and carries no role, label or `aria-hidden`. The devserver and read-only surfaces show no bar. The marketing demo's allowance for the wrapped line is gone, and the launcher's design notes and the manual's Computers page describe the bar. Commits `68cb09b55`, `7746dcc49`, `93b95aa2e`, `a88e2677c`, `394908d58`.
+
+Evidence, in the development tree:
+
+- Check 317 at `a88e2677c`, in a Chrome guest: laid over the base `042430e89`, red with 15 findings, the moved legends and the missing bar on both screens, with no finding on the devserver and read-only legs; at the tip green alone, and green in one runner call of 15 checks, selected by the prefixes 317, 219, 195, 15 and 182. The window sizes it reads are 1280 wide at 800, 560 and 380 tall, and 390x844.
+- Two mutants of `a88e2677c`, each with the web bundle rebuilt: the bar at opacity 0 is red with 8 findings, one for each of the two screens at each of the four window sizes; the bar also rendered on the read-only surface is red with 1 finding, on that surface's leg.
+- To be read at the merge: `394908d58` adds the assertion that the bar carries no `aria-hidden`. The check at that commit, and its mutant, which adds `aria-hidden="true"` to the bar and is expected red with 2 findings, one per screen, have not run in a guest. That commit changes only the check, so the product code is the code `a88e2677c` proved.
+- The gates: `make web-check`, `make web-marketing-check` and `make e2e-check` green at `a88e2677c`, and `make e2e-check` green at `394908d58`.
+- One reader accepted the range to `a88e2677c` with notes.
