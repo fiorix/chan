@@ -1558,8 +1558,6 @@ pub enum AttachSeam {
     AttachBeforeRingLock,
     /// In `Session::attach`, just after it releases the ring lock.
     AttachAfterRingLock,
-    /// After a WebSocket's progress lease, replay and receiver are captured together.
-    AttachProgressAfterRingLock,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
     /// Before a report takes the lock shared with focus words.
@@ -1718,7 +1716,6 @@ pub struct AttachHandle {
     pub rx: broadcast::Receiver<SessionEvent>,
     /// Terminal outcome retained even if output evicts its broadcast event.
     pub lifecycle_rx: watch::Receiver<Option<SessionLifecycle>>,
-    resume: Resume,
     progress: Option<OutputProgress>,
     /// Status captured with the replay cursor and its subscription.
     pub initial_program_status: Arc<ProgramStatusSnapshot>,
@@ -1758,25 +1755,6 @@ impl AttachHandle {
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    /// Track this WebSocket's output under `flow`. Recapture the original
-    /// replay request and its subscription together before sending any prelude
-    /// bytes. Only an acknowledging client holds the PTY reader; ordinary
-    /// library and CLI attachments have no lease at all.
-    pub fn with_output_progress(self, flow: OutputFlow) -> Self {
-        if self.progress.is_some() {
-            return self;
-        }
-        let attached = self
-            .session
-            .clone()
-            .attach_resuming_with_progress(self.resume, Some(flow));
-        attached.focus_epoch.store(
-            self.focus_epoch.swap(0, Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        attached
     }
 
     /// The output lease, when this attachment is a tracked WebSocket.
@@ -2997,7 +2975,15 @@ impl Registry {
     /// Spawn a new session and attach to it. Reaps exited sessions first,
     /// refuses under fd pressure or at the session cap, and settles the tab
     /// name against the live ones.
-    pub fn create(&self, mut opts: CreateOptions) -> Result<AttachHandle, CreateError> {
+    pub fn create(&self, opts: CreateOptions) -> Result<AttachHandle, CreateError> {
+        self.create_with_flow(opts, None)
+    }
+
+    fn create_with_flow(
+        &self,
+        mut opts: CreateOptions,
+        flow: Option<OutputFlow>,
+    ) -> Result<AttachHandle, CreateError> {
         // Clear dead-process ghosts before minting: a killed session lingers in
         // the map (its controller thread records `exit` on exit but never
         // reaps the entry), so it would hold its tab name + occupy a
@@ -3090,7 +3076,7 @@ impl Registry {
         #[cfg(target_os = "linux")]
         self.park_if_windowed(&session);
         self.notify_roster_change();
-        Ok(session.attach(Some(0)))
+        Ok(session.attach_resuming_with_progress(Resume::Since(Some(0)), flow))
     }
 
     /// Add a session for one pane of a tmux connection, under the pane cap
@@ -3289,7 +3275,7 @@ impl Registry {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn attach(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
-        self.attach_for_ws(id, since)
+        self.attach_for_ws(id, since, None)
     }
 
     /// Feed `bytes` through a live session's output path as if its PTY had
@@ -3325,12 +3311,23 @@ impl Registry {
 
     /// Attach to live session `id`, replaying output after the `since` cursor
     /// (`None` replays the whole ring). `None` when the id is unknown or
-    /// closed.
-    pub fn attach_for_ws(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
-        self.attach_resuming(id, Resume::Since(since))
+    /// closed. `flow` is how a WebSocket's output is paced; `None` is an
+    /// attachment that takes no output lease.
+    pub fn attach_for_ws(
+        &self,
+        id: &str,
+        since: Option<u64>,
+        flow: Option<OutputFlow>,
+    ) -> Option<AttachHandle> {
+        self.attach_resuming(id, Resume::Since(since), flow)
     }
 
-    fn attach_resuming(&self, id: &str, resume: Resume) -> Option<AttachHandle> {
+    fn attach_resuming(
+        &self,
+        id: &str,
+        resume: Resume,
+        flow: Option<OutputFlow>,
+    ) -> Option<AttachHandle> {
         let session = self
             .sessions
             .lock()
@@ -3340,7 +3337,7 @@ impl Registry {
         if session.closed.load(Ordering::Relaxed) {
             return None;
         }
-        Some(session.attach_resuming(resume))
+        Some(session.attach_resuming_with_progress(resume, flow))
     }
 
     /// Where a client echoing `generation`, which is not live session `id`'s,
@@ -3376,7 +3373,7 @@ impl Registry {
         since: Option<u64>,
         opts: CreateOptions,
     ) -> Result<AttachHandle, CreateError> {
-        self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None)
+        self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None, None)
     }
 
     /// Reattach to session `id` when it is live, re-homing it to the attaching
@@ -3388,6 +3385,8 @@ impl Registry {
     /// ring's end also replays from the start, with a missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
+    /// The one attach this makes carries the WebSocket's `flow`, so its lease,
+    /// replay and subscription are captured together.
     pub fn get_or_create_for_ws(
         &self,
         id: Option<&str>,
@@ -3395,6 +3394,7 @@ impl Registry {
         opts: CreateOptions,
         placement: TerminalPlacement,
         client_generation: Option<u64>,
+        flow: Option<OutputFlow>,
     ) -> Result<AttachHandle, CreateError> {
         let TerminalPlacement {
             pane_id,
@@ -3417,7 +3417,7 @@ impl Registry {
                 // Not a resume attempt: pass `since` through unchanged.
                 None => Resume::Since(since),
             };
-            if let Some(handle) = self.attach_resuming(id, resume) {
+            if let Some(handle) = self.attach_resuming(id, resume, flow) {
                 // Move invariant: re-home the session to the attaching window.
                 // A cross-window terminal move re-binds it here, so a later
                 // `close_for_window(source)` reaps only sessions still bound to
@@ -3432,7 +3432,7 @@ impl Registry {
                 None => {}
             }
         }
-        let handle = self.create(opts)?;
+        let handle = self.create_with_flow(opts, flow)?;
         self.bind_session_layout(handle.id(), pane_id, side, tab_id);
         Ok(handle)
     }
@@ -6189,11 +6189,7 @@ impl Session {
     }
 
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
-        self.attach_resuming(Resume::Since(since))
-    }
-
-    fn attach_resuming(self: Arc<Self>, resume: Resume) -> AttachHandle {
-        self.attach_resuming_with_progress(resume, None)
+        self.attach_resuming_with_progress(Resume::Since(since), None)
     }
 
     fn attach_resuming_with_progress(
@@ -6281,10 +6277,6 @@ impl Session {
         self.request_program_refresh();
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
-        #[cfg(any(test, feature = "test-util"))]
-        if flow.is_some() {
-            fire_attach_seam(&self.id, AttachSeam::AttachProgressAfterRingLock);
-        }
         let generation = self.generation;
         let (initial_tmux_consent, tmux_consent_rx) = self
             .tmux
@@ -6297,7 +6289,6 @@ impl Session {
             focus_epoch: std::sync::atomic::AtomicU64::new(0),
             rx,
             lifecycle_rx,
-            resume,
             progress,
             initial_program_status,
             program_status_rx,
@@ -12278,6 +12269,7 @@ mod tests {
                     tab_id: Some("tab-3".to_string()),
                 },
                 None,
+                None,
             )
             .unwrap();
         let id = handle.id().to_string();
@@ -12299,6 +12291,7 @@ mod tests {
                     pane_id: Some("pane-9".to_string()),
                     ..TerminalPlacement::default()
                 },
+                None,
                 None,
             )
             .unwrap();
@@ -12655,7 +12648,7 @@ mod tests {
             "restart must broadcast Restarted on the old channel"
         );
         // The id still resolves to a live, relaunched session.
-        assert!(registry.attach_for_ws(&id, None).is_some());
+        assert!(registry.attach_for_ws(&id, None, None).is_some());
         registry.close_all(CloseReason::Shutdown);
     }
 
@@ -12715,6 +12708,7 @@ mod tests {
                 opts_with_window("win-gate"),
                 TerminalPlacement::default(),
                 Some(gen),
+                None,
             )
             .unwrap();
         // Mismatched generation: `since` ignored -> full ring replay. The full
@@ -12727,6 +12721,7 @@ mod tests {
                 opts_with_window("win-gate"),
                 TerminalPlacement::default(),
                 Some(gen + 1),
+                None,
             )
             .unwrap();
         assert!(
@@ -12754,6 +12749,7 @@ mod tests {
                 Some(0),
                 opts_with_window("win-b"),
                 TerminalPlacement::default(),
+                None,
                 None,
             )
             .expect("reattach");
@@ -12804,6 +12800,7 @@ mod tests {
                 Some(0),
                 opts_with_window("win-b"),
                 TerminalPlacement::default(),
+                None,
                 None,
             )
             .expect("the target attaches after the source window closed");
@@ -14990,6 +14987,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(handle.id(), id);
@@ -16473,6 +16471,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             let mut ring = early.clone();
@@ -16592,6 +16591,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             let mut ring = early.clone();
@@ -16647,6 +16647,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_ne!(
@@ -16702,6 +16703,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -16816,6 +16818,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_ne!(
@@ -16857,6 +16860,7 @@ mod tests {
                         opts(Some("w1"), None),
                         TerminalPlacement::default(),
                         Some(generation),
+                        None,
                     )
                     .unwrap()
             };

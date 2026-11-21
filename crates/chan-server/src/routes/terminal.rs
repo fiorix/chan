@@ -1233,6 +1233,7 @@ async fn terminal_ws(
             tab_id: opts.tab_id,
         },
         opts.generation,
+        Some(opts.flow),
     ) {
         Ok(session) => session,
         Err(CreateError::Capped) => {
@@ -1302,7 +1303,6 @@ async fn terminal_ws(
         }
     };
     let mut shutdown_rx = state.shutdown_rx.clone();
-    session = session.with_output_progress(opts.flow);
     let mut socket = TerminalSocket::new(
         socket,
         state.clone(),
@@ -1362,14 +1362,17 @@ async fn terminal_ws(
         // it was sent, so the replay never stacks on a stopped page's queue.
         if restarting || ((recover || progress.needs_replay()) && progress.drained()) {
             let next = if restarting {
-                let Some(next) = state.terminal_sessions.attach_for_ws(session.id(), None) else {
+                let Some(next) =
+                    state
+                        .terminal_sessions
+                        .attach_for_ws(session.id(), None, Some(opts.flow))
+                else {
                     break;
                 };
                 let focused = socket
                     .input
                     .focus
                     .is_some_and(|epoch| session.withdraw_focus(epoch));
-                let next = next.with_output_progress(opts.flow);
                 socket.input.cancel_cwd();
                 socket.input.focus = if focused {
                     next.set_focused(true)
@@ -3152,6 +3155,7 @@ mod tests {
                     profile: None,
                 },
                 TerminalPlacement::default(),
+                None,
                 None,
             )
             .unwrap();

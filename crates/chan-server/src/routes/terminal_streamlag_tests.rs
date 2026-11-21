@@ -1611,7 +1611,7 @@ async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
     let mut watcher = rig
         .state
         .terminal_sessions
-        .attach_for_ws(rig.handle.id(), None)
+        .attach_for_ws(rig.handle.id(), None, None)
         .expect("watch the session");
     rig.handle.send_input(b"\n");
     let mut tail = Vec::new();
@@ -1931,7 +1931,7 @@ async fn synthetic_recovery_bytes_do_not_skip_raw_output_in_a_second_recovery() 
     let (captured, observed) = oneshot::channel();
     arm_attach_seam(
         rig.handle.id(),
-        AttachSeam::AttachProgressAfterRingLock,
+        AttachSeam::AttachAfterRingLock,
         move || {
             assert!(registry.inject_output(&session_id, after_snapshot));
             bury_control_events(&publisher);

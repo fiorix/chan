@@ -3,6 +3,13 @@ use super::super::tests::test_session_with_ring;
 use super::super::tests::{opts_with_command, test_config};
 use super::super::*;
 
+/// A WebSocket's attach: its lease is captured with the replay it resumes.
+pub(super) fn attach_acked(session: &Arc<Session>, since: Option<u64>) -> AttachHandle {
+    session
+        .clone()
+        .attach_resuming_with_progress(Resume::Since(since), Some(OutputFlow::Acknowledged))
+}
+
 #[test]
 fn reader_caps_native_reads_at_the_holding_views_half_ring() {
     reader_caps_reads_at_the_holding_views_half_ring(false);
@@ -30,10 +37,7 @@ fn reader_caps_reads_at_the_holding_views_half_ring(imported: bool) {
     }
     {
         let session = test_session_with_ring(1024);
-        let _attached = session
-            .clone()
-            .attach(None)
-            .with_output_progress(OutputFlow::Acknowledged);
+        let _attached = attach_acked(&session, None);
         let mut probe = Probe { sizes: Vec::new() };
         let running = ReaderRunning::start(&session);
         session.read_output(&mut probe, running, imported, &Arc::new(Mutex::new(None)));
@@ -45,13 +49,12 @@ fn reader_caps_reads_at_the_holding_views_half_ring(imported: bool) {
 }
 
 #[test]
-fn progress_recaptures_original_resume_and_counts_only_sent_raw_bytes() {
+fn progress_starts_at_the_resume_cursor_and_counts_only_sent_raw_bytes() {
     let session = test_session_with_ring(1024);
     session.record_output(b"abcd");
-    let attached = session.clone().attach(Some(2));
+    let attached = attach_acked(&session, Some(2));
     session.record_output(b"ef");
-    let attached = attached.with_output_progress(OutputFlow::Acknowledged);
-    assert_eq!(attached.replay.concat(), b"cdef");
+    assert_eq!(attached.replay.concat(), b"cd");
     let progress = attached.output_progress().expect("WebSocket lease");
     assert_eq!(progress.seq(), 2, "snapshot end is not the sent cursor");
     progress.sent_output(2);
@@ -144,9 +147,12 @@ fn imported_progress_keeps_the_restored_nonzero_output_coordinates() {
     let report = registry.restore_fdstore_sessions(vec![import]);
     assert_eq!(report.restored, 1, "{:?}", report.skipped);
     let attached = registry
-        .attach("pacing-imported-origin", Some(7))
-        .expect("restored session")
-        .with_output_progress(OutputFlow::Acknowledged);
+        .attach_for_ws(
+            "pacing-imported-origin",
+            Some(7),
+            Some(OutputFlow::Acknowledged),
+        )
+        .expect("restored session");
     let progress = attached.output_progress().expect("WebSocket lease");
     let initial_cursor = progress.seq();
     progress.sent_output(5);
@@ -196,10 +202,7 @@ fn imported_progress_keeps_the_restored_nonzero_output_coordinates() {
 #[test]
 fn live_replay_keeps_alt_screen_deltas_and_exact_missed_count() {
     let session = test_session_with_ring(64);
-    let attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let attached = attach_acked(&session, None);
     session.record_output(b"\x1b[?1049hALT");
     assert!(
         session.clone().attach(None).replay.is_empty(),
@@ -236,17 +239,10 @@ fn live_replay_keeps_alt_screen_deltas_and_exact_missed_count() {
 }
 
 #[test]
-fn progress_upgrade_and_same_session_replay_transfer_focus_ownership() {
+fn same_session_replay_transfers_focus_ownership() {
     let session = test_session_with_ring(1024);
-    let attached = session.clone().attach(None);
+    let attached = attach_acked(&session, None);
     let epoch = attached.set_focused(true).expect("focus epoch");
-    let attached = attached.with_output_progress(OutputFlow::Acknowledged);
-    assert_eq!(attached.focus_epoch.load(Ordering::Relaxed), epoch);
-    assert_eq!(
-        session.focus_epoch.load(Ordering::Relaxed),
-        epoch,
-        "upgrade cannot withdraw focus"
-    );
     let recovered = attached.replay_from(0);
     drop(attached);
     assert_eq!(recovered.focus_epoch.load(Ordering::Relaxed), epoch);
@@ -267,10 +263,7 @@ fn retained_lifecycle_survives_broadcast_eviction_and_registry_independence() {
         SessionEvent::Restarted,
     ] {
         let session = test_session_with_ring(1024);
-        let mut attached = session
-            .clone()
-            .attach(None)
-            .with_output_progress(OutputFlow::Acknowledged);
+        let mut attached = attach_acked(&session, None);
         session.record_output(b"tail");
         session.broadcast(event.clone());
         for _ in 0..BROADCAST_CAP + 1 {
@@ -307,10 +300,7 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
     use super::super::tests::test_session_with_commands;
     let (mut session, commands) = test_session_with_commands(1024);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-input-exit".into();
-    let attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let attached = attach_acked(&session, None);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     arm_attach_seam(
@@ -379,10 +369,7 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
 fn reader_stop_wakes_a_pacing_wait_before_sealing_the_ring() {
     let mut session = test_session_with_ring(1024);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-reader-stop".into();
-    let _attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let _attached = attach_acked(&session, None);
     session.record_output(&[b'x'; 512]);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -415,10 +402,7 @@ fn tmux_control_protocol_reads_bypass_a_slow_control_view() {
     });
     session.record_output(b"\x1bP1000p%begin 1 1 0\r\n%end 1 1 0\r\n");
     assert!(session.tmux.lock().expect("tmux gate").in_control_mode());
-    let attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let attached = attach_acked(&session, None);
     let progress = attached.output_progress().expect("lease");
     session.record_plain_output(&[b'x'; 512]);
     struct EmptyProbe(usize);
@@ -445,10 +429,7 @@ fn tmux_control_protocol_reads_bypass_a_slow_control_view() {
 async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once() {
     let mut session = test_session_with_ring(128);
     Arc::get_mut(&mut session).expect("one owner").id = "pacing-many-reads".into();
-    let mut attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let mut attached = attach_acked(&session, None);
     let progress = attached.output_progress().expect("lease");
     let expected: Vec<u8> = (0..1200)
         .flat_map(|line| format!("{line:06}\n").into_bytes())
@@ -536,10 +517,7 @@ async fn paced_reader_delivers_over_a_broadcast_capacity_of_reads_exactly_once()
 
 fn assert_lifecycle_transition_wakes_credit(transition: fn(&Session), expected: SessionLifecycle) {
     let session = test_session_with_ring(1024);
-    let attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let attached = attach_acked(&session, None);
     session.record_output(&[b'x'; 512]);
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -621,10 +599,7 @@ fn queued_message_waits_out_a_hold(end: HoldEnd, awaiting_generation: bool) {
         .create(opts_with_command(&script))
         .expect("spawn the writer");
     let session = handle.session.clone();
-    let attached = session
-        .clone()
-        .attach(None)
-        .with_output_progress(OutputFlow::Acknowledged);
+    let attached = attach_acked(&session, None);
     drop(handle);
     let progress = attached.output_progress().expect("lease");
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();

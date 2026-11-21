@@ -249,7 +249,7 @@ async fn terminal_program_fanout_and_late_hidden_resumed_attaches() {
 async fn terminal_program_attach_snapshot_and_subscription_are_atomic() {
     for seam in [
         AttachSeam::AttachBeforeRingLock,
-        AttachSeam::AttachProgressAfterRingLock,
+        AttachSeam::AttachAfterRingLock,
     ] {
         let rig = Rig::new().await;
         rig.title("before");
@@ -261,7 +261,7 @@ async fn terminal_program_attach_snapshot_and_subscription_are_atomic() {
         let (mut client, session) = rig.attach("").await;
         match seam {
             AttachSeam::AttachBeforeRingLock => assert_eq!(session["program"]["title"], "after"),
-            AttachSeam::AttachProgressAfterRingLock => {
+            AttachSeam::AttachAfterRingLock => {
                 assert_eq!(session["program"]["title"], "before");
                 tokio::time::advance(Duration::from_millis(150)).await;
                 assert_eq!(
@@ -326,16 +326,12 @@ async fn terminal_program_watch_survives_output_lag() {
     let rig = Rig::new().await;
     let registry = rig.state.terminal_sessions.clone();
     let id = rig.handle.id().to_owned();
-    arm_attach_seam(
-        &id.clone(),
-        AttachSeam::AttachProgressAfterRingLock,
-        move || {
-            assert!(registry.inject_output(&id, b"\x1b]2;retained\x07"));
-            for _ in 0..1100 {
-                assert!(registry.inject_output(&id, b"x"));
-            }
-        },
-    );
+    arm_attach_seam(&id.clone(), AttachSeam::AttachAfterRingLock, move || {
+        assert!(registry.inject_output(&id, b"\x1b]2;retained\x07"));
+        for _ in 0..1100 {
+            assert!(registry.inject_output(&id, b"x"));
+        }
+    });
     let (mut client, initial) = rig.attach("").await;
     assert_eq!(initial["program"]["title"], Value::Null);
     let recovered = prelude(&mut client).await;
@@ -373,25 +369,17 @@ async fn terminal_program_recovery_rebases_the_last_sent_pair() {
     rig.title("steady");
     let registry = rig.state.terminal_sessions.clone();
     let id = rig.handle.id().to_owned();
-    arm_attach_seam(
-        &id.clone(),
-        AttachSeam::AttachProgressAfterRingLock,
-        move || {
-            assert!(registry.inject_output(&id, b"\x1b]2;temporary\x07"));
-            for _ in 0..1100 {
-                assert!(registry.inject_output(&id, b"x"));
-            }
-            // The recovery snapshot exposes the temporary pair before the
-            // watch returns to the pair the socket sent before recovery.
-            arm_attach_seam(
-                &id.clone(),
-                AttachSeam::AttachProgressAfterRingLock,
-                move || {
-                    assert!(registry.inject_output(&id, b"\x1b]2;steady\x07"));
-                },
-            );
-        },
-    );
+    arm_attach_seam(&id.clone(), AttachSeam::AttachAfterRingLock, move || {
+        assert!(registry.inject_output(&id, b"\x1b]2;temporary\x07"));
+        for _ in 0..1100 {
+            assert!(registry.inject_output(&id, b"x"));
+        }
+        // The recovery snapshot exposes the temporary pair before the
+        // watch returns to the pair the socket sent before recovery.
+        arm_attach_seam(&id.clone(), AttachSeam::AttachAfterRingLock, move || {
+            assert!(registry.inject_output(&id, b"\x1b]2;steady\x07"));
+        });
+    });
     let (mut client, initial) = rig.attach("").await;
     assert_eq!(initial["program"]["title"], "steady");
     let recovered = prelude(&mut client).await;

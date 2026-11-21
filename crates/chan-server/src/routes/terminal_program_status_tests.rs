@@ -393,7 +393,7 @@ async fn sockets_share_status_and_late_attach_gets_the_retained_value() {
 async fn attach_status_is_coherent_on_both_sides_of_the_output_lock() {
     for seam in [
         AttachSeam::AttachBeforeRingLock,
-        AttachSeam::AttachProgressAfterRingLock,
+        AttachSeam::AttachAfterRingLock,
     ] {
         let rig = Rig::new().await;
         rig.report("state=working");
@@ -406,7 +406,7 @@ async fn attach_status_is_coherent_on_both_sides_of_the_output_lock() {
             AttachSeam::AttachBeforeRingLock => {
                 assert_eq!(revision, 2, "report before snapshot belongs in attach")
             }
-            AttachSeam::AttachProgressAfterRingLock => {
+            AttachSeam::AttachAfterRingLock => {
                 assert_eq!(revision, 1, "snapshot and subscription share the ring lock");
                 tokio::time::advance(Duration::from_millis(150)).await;
                 let later = status_frame(&mut client).await;
@@ -493,7 +493,7 @@ async fn output_lag_keeps_the_latest_status_without_a_further_report() {
     let id = rig.handle.id().to_owned();
     arm_attach_seam(
         rig.handle.id(),
-        AttachSeam::AttachProgressAfterRingLock,
+        AttachSeam::AttachAfterRingLock,
         move || {
             assert!(state
                 .terminal_sessions
@@ -772,7 +772,7 @@ async fn an_attach_between_the_exit_record_and_its_broadcast_reports_one_exit() 
         .expect("the exit became readable");
     arm_attach_seam(
         rig.handle.id(),
-        AttachSeam::AttachProgressAfterRingLock,
+        AttachSeam::AttachAfterRingLock,
         move || {
             let _ = attached_tx.send(());
         },
@@ -1480,7 +1480,7 @@ async fn an_exit_of_a_replaced_incarnation_leaves_the_restarted_one_registered()
                     )
                     .expect("restart the exited child"));
                 let handle = registry
-                    .attach_for_ws(&id, None)
+                    .attach_for_ws(&id, None, None)
                     .expect("the restarted incarnation is registered");
                 assert_ne!(handle.generation, old_generation);
                 *kept.lock().expect("replacement") = Some(handle);
@@ -1498,7 +1498,7 @@ async fn an_exit_of_a_replaced_incarnation_leaves_the_restarted_one_registered()
     let registered = rig
         .state
         .terminal_sessions
-        .attach_for_ws(rig.handle.id(), None)
+        .attach_for_ws(rig.handle.id(), None, None)
         .map(|handle| handle.generation);
     let (mut live, _) = bounded(tokio_tungstenite::connect_async(format!(
         "ws://{}/api/terminal/ws?session={}",
