@@ -1637,10 +1637,16 @@ async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
         "a client that does not acknowledge never makes the reader wait"
     );
 
+    // PTY reads can be large enough for the broadcast to hold the whole stream,
+    // so events past its capacity are what make this stopped view lag.
+    const FLOOD_END: &[u8] = b"__FLOOD_DONE__";
+    rig.flood();
+    rig.output(FLOOD_END);
+
     // It then reads on and hears the loss as a count, never as a lag line.
     // An early recovery can still fit the ring, so the count is the sum.
     let (mut missed, mut recoveries, mut end) = (0, 0, Vec::new());
-    while !end.ends_with(DONE_MARKER) {
+    while !end.ends_with(FLOOD_END) {
         match next(&mut old).await {
             ClientMessage::Text(text) => {
                 let frame: Value = serde_json::from_str(&text).expect("control JSON");
@@ -1656,7 +1662,7 @@ async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
             }
             ClientMessage::Binary(bytes) => {
                 end.extend_from_slice(&bytes);
-                let keep = end.len().saturating_sub(DONE_MARKER.len());
+                let keep = end.len().saturating_sub(FLOOD_END.len());
                 end.drain(..keep);
             }
             other => panic!("old client ended: {other:?}"),
