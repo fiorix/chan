@@ -132,6 +132,19 @@ export function createTerminalConnectionHealth(
       noticePending = true;
       clearNotice();
     },
+    /// Held input was given up on. The socket it waited for may already be
+    /// open, and then no later open would show the note.
+    inputDropped() {
+      if (disposed || !hasOpened) return;
+      clearNotice();
+      if (!open) {
+        noticePending = true;
+        return;
+      }
+      noticeRemainingMs = TERMINAL_INPUT_NOTICE_MS;
+      state.notice = true;
+      runNotice();
+    },
     /// Pause the note's time while the cover or a hidden tab keeps it out of sight.
     setNoticeBlocked(blocked: boolean) {
       if (noticeBlocked === blocked) return;

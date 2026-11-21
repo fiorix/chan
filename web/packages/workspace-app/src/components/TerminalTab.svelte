@@ -460,7 +460,7 @@
       noteUserFrame(entry, send(entry.frame));
     },
     onDropped: () => {
-      if (status !== "exited") terminalConnection.inputRefused();
+      if (status !== "exited") terminalConnection.inputDropped();
     },
   });
   // The session a running hold's input was typed for. A redial that lands on
