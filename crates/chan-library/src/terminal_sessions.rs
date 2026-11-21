@@ -6356,8 +6356,8 @@ impl Session {
             self.awaiting_gen.store(false, Ordering::Relaxed);
             return;
         }
-        // Checked before the generation gate too, so its cap cannot expire on
-        // a program that was blocked from starting to print.
+        // A program blocked behind a view prints nothing, so neither the
+        // generation gate below nor the quiet period can read its silence.
         let Some(credit_wait_ended_at) = self.pacing.credit_wait_ended_at() else {
             return;
         };

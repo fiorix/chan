@@ -714,6 +714,6 @@ fn a_queued_message_waits_out_a_hold_that_ends_at_exit() {
 
 #[cfg(unix)]
 #[test]
-fn the_generation_cap_does_not_expire_a_delivery_gate_during_a_hold() {
+fn a_hold_keeps_a_queued_message_past_an_expired_generation_cap() {
     queued_message_waits_out_a_hold(HoldEnd::ViewGone, true);
 }
