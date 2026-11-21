@@ -256,10 +256,10 @@ describe("This workspace renders exactly the index", () => {
           current: true,
         },
         {
-          id: "bge-m3",
-          label: "BGE M3",
+          id: "bge-large",
+          label: "BGE large",
           dim: 1024,
-          size_label: "2.2 GB",
+          size_label: "1.3 GB",
           note: "",
           default: false,
           downloaded: false,

@@ -9,6 +9,24 @@ import { expect } from "vitest";
 
 export type Rgba = { r: number; g: number; b: number; a: number };
 
+/// The element's own size accessor, which converts the assigned value the
+/// way the product's size check reads it back.
+function sizeAccessor(name: "width" | "height"): {
+  get: (canvas: HTMLCanvasElement) => number;
+  set: (canvas: HTMLCanvasElement, value: number) => void;
+} {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, name);
+  if (typeof descriptor?.get !== "function" || typeof descriptor?.set !== "function") {
+    throw new Error(`software canvas needs the element's ${name} accessor`);
+  }
+  const get = descriptor.get as (this: HTMLCanvasElement) => number;
+  const set = descriptor.set as (this: HTMLCanvasElement, value: number) => void;
+  return {
+    get: (canvas: HTMLCanvasElement) => get.call(canvas),
+    set: (canvas: HTMLCanvasElement, value: number) => set.call(canvas, value),
+  };
+}
+
 /// The canvas source-over rule over straight alpha. The expected pixels come
 /// from the rule rather than from the adapter, so a change to the adapter
 /// cannot move the target it is measured against.
@@ -67,16 +85,84 @@ export class SoftwareCanvasContext {
   readonly #cellWidth: number;
 
   /// `cellWidth` is what measureText reports per character, so a renderer
-  /// measuring its font lands on the cell the test expects.
+  /// measuring its font lands on the cell the test expects. The double
+  /// observes every size assignment, even one that changes nothing: a
+  /// canvas element converts the assigned value as WebIDL unsigned long
+  /// and resets its drawing state, so the double delegates to the
+  /// element's own accessors and resets after each set. Reading back
+  /// through the element keeps fractional products visible the way the
+  /// product's size check sees them. Negative sizes are ignored here
+  /// rather than converted to the element's default; nothing assigns one.
   constructor(canvas: HTMLCanvasElement, cellWidth = 8) {
     this.#canvas = canvas;
     this.#cellWidth = cellWidth;
+    const widthAccess = sizeAccessor("width");
+    const heightAccess = sizeAccessor("height");
+    Object.defineProperties(canvas, {
+      width: {
+        configurable: true,
+        get: () => widthAccess.get(canvas),
+        set: (value: number) => {
+          if (value < 0) return;
+          widthAccess.set(canvas, value);
+          this.reset();
+        },
+      },
+      height: {
+        configurable: true,
+        get: () => heightAccess.get(canvas),
+        set: (value: number) => {
+          if (value < 0) return;
+          heightAccess.set(canvas, value);
+          this.reset();
+        },
+      },
+    });
+  }
+
+  /// Reset the drawing state the way assigning the canvas size does: a
+  /// transparent bitmap, the identity transform, an empty save stack and
+  /// the double's default styles.
+  reset(): void {
+    this.#width = this.#canvas.width;
+    this.#height = this.#canvas.height;
+    this.#pixels = new Float64Array(this.#width * this.#height * 4);
+    this.#scaleX = 1;
+    this.#scaleY = 1;
+    this.#saved = [];
+    this.fillStyle = "#000000";
+    this.strokeStyle = "#000000";
+    this.font = "";
+    this.globalAlpha = 1;
+    this.lineCap = "butt";
+    this.lineDashOffset = 0;
+    this.lineJoin = "miter";
+    this.lineWidth = 1;
+    this.textAlign = "left";
+    this.textBaseline = "alphabetic";
   }
 
   scale(x: number, y: number): void {
     this.#resync();
     this.#scaleX *= x;
     this.#scaleY *= y;
+  }
+
+  /// Set the transform absolutely. The double models scaling only: a shear
+  /// or translation is outside what the terminal paths use, so it fails
+  /// like an unsupported color instead of modelling the wrong picture.
+  setTransform(a: number, b: number, c: number, d: number, e: number, f: number): void {
+    this.#resync();
+    if (b !== 0 || c !== 0 || e !== 0 || f !== 0) {
+      throw new Error(`unsupported canvas transform: setTransform(${a}, ${b}, ${c}, ${d}, ${e}, ${f})`);
+    }
+    this.#scaleX = a;
+    this.#scaleY = d;
+  }
+
+  getTransform(): { a: number; b: number; c: number; d: number; e: number; f: number } {
+    this.#resync();
+    return { a: this.#scaleX, b: 0, c: 0, d: this.#scaleY, e: 0, f: 0 };
   }
 
   save(): void {
@@ -133,6 +219,19 @@ export class SoftwareCanvasContext {
     };
   }
 
+  /// Read a device pixel back without touching the transform: the space
+  /// the backing store is measured in.
+  pixelAtDevice(x: number, y: number): Rgba {
+    this.#resync();
+    const at = (Math.floor(y) * this.#width + Math.floor(x)) * 4;
+    return {
+      r: this.#pixels[at],
+      g: this.#pixels[at + 1],
+      b: this.#pixels[at + 2],
+      a: this.#pixels[at + 3],
+    };
+  }
+
   beginPath(): void {}
   clip(): void {}
   fillText(): void {}
@@ -144,9 +243,8 @@ export class SoftwareCanvasContext {
   stroke(): void {}
   strokeText(): void {}
 
-  // Assigning canvas.width or canvas.height reallocates the backing store and
-  // resets the context state, which is why the renderer can call ctx.scale
-  // after every resize without compounding its transform.
+  // Size assignments reset through the element accessors above; this only
+  // syncs a store changed behind them.
   #resync(): void {
     if (
       this.#canvas.width === this.#width &&
@@ -154,12 +252,7 @@ export class SoftwareCanvasContext {
     ) {
       return;
     }
-    this.#width = this.#canvas.width;
-    this.#height = this.#canvas.height;
-    this.#pixels = new Float64Array(this.#width * this.#height * 4);
-    this.#scaleX = 1;
-    this.#scaleY = 1;
-    this.#saved = [];
+    this.reset();
   }
 
   #composite(

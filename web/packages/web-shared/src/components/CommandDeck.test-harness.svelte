@@ -26,6 +26,7 @@
     onError = () => {},
     onFocusLost,
     mayTakeFocus,
+    ownerAbove,
     toggleChord,
     onClose,
     onBack = () => {},
@@ -43,7 +44,8 @@
     onSuccess?: (item: DeckItem) => void;
     onError?: (item: DeckItem, error: unknown) => void;
     onFocusLost?: () => void;
-    mayTakeFocus?: () => boolean;
+    mayTakeFocus?: (heir?: HTMLElement | null) => boolean;
+    ownerAbove?: () => boolean;
     toggleChord?: (event: KeyboardEvent) => boolean;
     onClose?: () => void;
     onBack?: () => void;
@@ -142,6 +144,7 @@
   {onSuccess}
   {onFocusLost}
   {mayTakeFocus}
+  {ownerAbove}
   {toggleChord}
   {...{ onError }}
   {onBack}

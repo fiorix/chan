@@ -31,7 +31,7 @@ vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }))
 
 import WindowTabBar from "./WindowTabBar.svelte";
 import { expectWords } from "../__tests__/menuWords";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 import {
   closePaneTree,
   PANE_TREE_ANCHOR_ATTR,

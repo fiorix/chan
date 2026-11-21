@@ -60,8 +60,9 @@ export interface WindowRecord {
   control?: boolean;
   /** A window of a tmux control-mode connection, omitted on a plain row: the
    * launcher groups the row under its connection's card instead of its
-   * library's machine. Minted with its tabs parked for its first socket, never
-   * saved. */
+   * library's machine, and the connection's control terminal under the card
+   * of the machine whose terminal ran it. Minted with its tabs parked for its
+   * first socket, never saved. */
   tmux?: TmuxWindowMark;
   /**
    * Server-persisted visibility. The window is buried/hidden on the
@@ -405,6 +406,55 @@ export interface DevserverEntry {
   shared: boolean;
   /** A shared roster row that needs explicit native-IPC consent before connect. */
   native_trust_required: boolean;
+  /**
+   * The desktop holds a connection to this devserver but lists none of its
+   * window, tmux or workspace rows, because its workspace poll finds the
+   * devserver not answering; the rows return when the poll is answered
+   * again. False for a row whose connection the desktop does not hold and
+   * on every surface with no desktop.
+   */
+  rows_hidden: boolean;
+  /**
+   * This devserver's connection health while the desktop holds a connection
+   * to it; null with no reading: a disconnected or connecting devserver, one
+   * whose feed answers no ping, and every row off the desktop.
+   */
+  connection_health: ConnectionHealth | null;
+}
+
+/**
+ * What a devserver's connection health reads: `unknown` before its first
+ * reply, `healthy`, `slow` or `stalled` from its replies, and `reconnecting`
+ * from the loss of its feed socket until a later one answers.
+ */
+export type ConnectionFace = "unknown" | "healthy" | "slow" | "stalled" | "reconnecting";
+
+/**
+ * A connected devserver's connection health, as the desktop reads it from
+ * the replies to the pings it sends on the devserver's window feed. Every
+ * time is Unix milliseconds on the desktop's clock, which is this page's.
+ */
+export interface ConnectionHealth {
+  face: ConnectionFace;
+  /** A slow face whose latest reply time was under the time that ends slow,
+   * with no wait served, when the desktop read it, shown as the mark alone;
+   * false for every other face. */
+  recovering: boolean;
+  /** When `face` took its value. */
+  since: number;
+  /** The latest reply time in milliseconds; null before the first. */
+  rtt_ms: number | null;
+  /** When the oldest ping still waiting for its reply left, once it has
+   * waited the second that makes a connection slow; null with none waiting
+   * that long or before the devserver's first reply. */
+  wait_since: number | null;
+  /** When the devserver's last frame on the feed arrived; null before the
+   * first. */
+  last_contact: number | null;
+  /** The reply times of the last finished pings in milliseconds, oldest
+   * first, at most 60; null for a ping its feed socket was lost before
+   * answering. */
+  samples: (number | null)[];
 }
 
 // ---- The gateway registry -------------------------------------------------

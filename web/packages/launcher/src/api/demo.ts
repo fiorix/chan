@@ -1,5 +1,6 @@
 import {
   ApiError,
+  type ConnectionHealth,
   type DevserverEntry,
   type DevserverInput,
   type GatewayEntry,
@@ -100,6 +101,8 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
+        connection_health: null,
       },
       {
         id: "ds-windows",
@@ -120,6 +123,8 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
+        connection_health: null,
       },
       {
         id: ATTENTION_DEVSERVER_ID,
@@ -142,6 +147,8 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
+        connection_health: null,
       },
     ],
     // One sample gateway so the Gateways screen has a badge to render in the
@@ -281,9 +288,27 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/** A healthy reading as of `now`: three minutes of quick replies at the
+ * desktop's focused cadence. */
+function demoConnectionHealth(now: number): ConnectionHealth {
+  const samples = Array.from({ length: 60 }, (_, i) => 18 + ((i * 7) % 11));
+  const latest = samples[samples.length - 1]!;
+  return {
+    face: "healthy",
+    recovering: false,
+    since: now - 180_000,
+    rtt_ms: latest,
+    wait_since: null,
+    last_contact: now - 3_000 + latest,
+    samples,
+  };
+}
+
 function publicDevserver(ds: DemoDevserver): DevserverEntry {
   const { token: _token, ...pub } = ds;
-  return { ...pub };
+  // A connected demo devserver reads healthy, as the desktop would measure it.
+  const connection_health = ds.status === "connected" ? demoConnectionHealth(Date.now()) : null;
+  return { ...pub, connection_health };
 }
 
 function tick<T>(value: T): Promise<T> {
@@ -418,6 +443,8 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
+        connection_health: null,
       };
       devservers.push(ds);
       notify();

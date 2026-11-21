@@ -31,10 +31,12 @@ export {
 /// CONNECTING until open() or failDial().
 export class TerminalSocket {
   static OPEN = 1;
+  static CLOSING = 2;
   static all: TerminalSocket[] = [];
   static connecting = false;
 
   readyState = TerminalSocket.connecting ? 0 : TerminalSocket.OPEN;
+  holdClose = false;
   binaryType = "blob";
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
@@ -49,6 +51,14 @@ export class TerminalSocket {
     this.sent.push(data);
   }
   close() {
+    if (this.holdClose) {
+      this.readyState = 2;
+      return;
+    }
+    this.finishClose();
+  }
+  /// Complete a close whose onclose callback the test held back.
+  finishClose() {
     this.readyState = 3;
     this.onclose?.();
   }
@@ -185,6 +195,17 @@ export async function attach(
   });
 }
 
+/// Whether the bytes written to a terminal clear this DEC private mode: some
+/// `CSI ? ... l` sequence names it exactly. A set sequence (`h`) never
+/// counts. Shared by the fresh-shell reset cases on both backends.
+export function resetClearsMode(written: string, mode: number): boolean {
+  return written.split("\x1b[?").slice(1).some((rest) => {
+    const end = rest.search(/[^0-9;]/);
+    if (end === -1 || rest[end] !== "l") return false;
+    return rest.slice(0, end).split(";").includes(String(mode));
+  });
+}
+
 /// Deliver PTY output on the socket, as an ArrayBuffer of this realm.
 export async function output(socket: TerminalSocket, text: string): Promise<void> {
   const bytes = new TextEncoder().encode(text);
@@ -244,8 +265,8 @@ export function resetTerminals(): void {
   xterm.fit.failure = null;
   xterm.fit.size = null;
   xterm.webgl.splice(0);
+  xterm.webLinks.splice(0);
   xterm.webglThrows = false;
-  xterm.linkHandlers.splice(0);
   xterm.textareaFocus = false;
   resizeObservers.splice(0);
   globalThis.requestAnimationFrame = immediateFrame;

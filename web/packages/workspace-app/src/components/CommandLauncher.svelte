@@ -59,6 +59,7 @@
   import {
     clearLauncherDraft,
     closeCommandLauncher,
+    commandDeckLayer,
     launcherDraft,
     openSettings,
     persistLauncherDraft,
@@ -84,10 +85,9 @@
   import {
     activePane,
     activeTabInPane,
-    activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { refocusRefused } from "../state/focusGuard";
+  import { mayFocus, owner, ownerAboveOverlays, ownerTag } from "../state/keyboardOwner.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -835,6 +835,9 @@
 </script>
 
 <CommandDeck
+  --deck-layer={commandDeckLayer()}
+  ownerTag={ownerTag("overlay", "launcher")}
+  ownerAbove={ownerAboveOverlays}
   open={launcherDraft.visible}
   bind:draft={deckDraft}
   items={visibleEntries}
@@ -852,6 +855,14 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
-  mayTakeFocus={() => !refocusRefused(activeTerminalTab()?.id ?? null)}
+  mayTakeFocus={(heir) =>
+    // The deck asks with no heir while it is open, to take the keyboard
+    // back into itself, which it does only while it owns the keyboard: not
+    // from an overlay opened over it, and not under the Computers launcher,
+    // where a focus change in the page would take the window's first
+    // responder back. A run's return and a dismissal ask once the deck is
+    // gone, with the element they would focus or none: the keyboard's
+    // owner answers.
+    heir === undefined ? owner()?.tag === ownerTag("overlay", "launcher") : mayFocus(heir)}
   {toggleChord}
 />

@@ -2,7 +2,7 @@
   // The desktop red-dot close prompt. When the OS close button is pressed on a
   // live workspace/terminal window, the host prevents the close and evals an
   // `app.window.confirmClose` into the webview; App.svelte opens this overlay
-  // (unless the window is empty or reconnecting, which close straight away).
+  // (unless the window is empty or covered with no open watcher, which closes straight away).
   //
   // Modelled on DisconnectOverlay's card, but this is a DECISION, not a live
   // wait: no spinner, three actions, and it stacks above both the reconnect
@@ -21,10 +21,14 @@
     flushAndHideWindow,
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
-  import { discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
+  import { appInputBlocked, discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
   import { tmuxPaneTabs } from "../state/tabs.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
+  import { connectionHealth } from "../state/connectionHealth.svelte";
+  import { handKeyboardToTopCover, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { canTakeFocus } from "@chan/web-shared/modal-focus";
+  import { untrack } from "svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -38,18 +42,19 @@
   // stays. Read when the prompt opens; the tabs do not change under it.
   const tmuxWindow = $derived(open && tmuxPaneTabs().length > 0);
 
-  // A connection transition invalidates the native close request that opened
-  // this prompt. Cancel immediately on both drop and recovery, before another
-  // native window can leave this decision occluded. A prompt opened after the
-  // socket is already down is cancelled by the second condition as well.
-  let previousWs = ui.ws;
+  // A pending decision belongs to the connection it opened under. Redial
+  // status changes within one outage do not invalidate a later prompt.
+  let observedCover = ui.disconnectBlocking;
   $effect(() => {
-    const ws = ui.ws;
-    const connectionChanged = ws !== previousWs;
-    previousWs = ws;
-    if (connectionChanged || (open && ws !== "open")) {
+    const covered = ui.disconnectBlocking;
+    if (
+      open &&
+      (connectionHealth.outageEpoch !== closeConfirmState.outageEpochAtOpen ||
+        (covered && !observedCover && !closeConfirmState.coveredAtOpen))
+    ) {
       cancelCloseConfirmForConnectionChange();
     }
+    observedCover = covered;
   });
 
   const refusal = $derived(closeConfirmState.refusal);
@@ -110,10 +115,40 @@
   // Steal focus onto Cancel when the overlay appears: the backdrop stops clicks
   // but keystrokes still flow to whatever was focused (a terminal / editor), so
   // park focus on the safe default and trap Tab over the three buttons below.
+  // It takes the keyboard once per showing, where the keyboard's owner lets
+  // it (not under the Computers launcher, a cover or an owner painted above
+  // it); asking reads the owners' state, so this runs again when one lets go,
+  // and a hand-back to it lands on Cancel too.
+  let tookKeyboard = false;
   $effect(() => {
-    if (!open) return;
+    if (!open) {
+      tookKeyboard = false;
+      return;
+    }
+    if (tookKeyboard || !mayFocus(overlayEl)) return;
+    tookKeyboard = true;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => (cancelBtn ?? overlayEl)?.focus());
+  });
+  $effect(() => {
+    if (!overlayEl) return;
+    return registerKeyboardTaker(overlayEl, () => (cancelBtn ?? overlayEl)?.focus());
+  });
+
+  // Closing over a cover leaves the keyboard at large, the prompt's buttons
+  // gone with it: the cover on top takes it, as its surface does.
+  let showing = false;
+  $effect(() => {
+    if (open) {
+      showing = true;
+      return;
+    }
+    if (!showing) return;
+    showing = false;
+    if (!untrack(() => appInputBlocked())) return;
+    queueMicrotask(() => {
+      if (!canTakeFocus(document.activeElement)) handKeyboardToTopCover();
+    });
   });
 
   // Escape cancels; Tab/Shift+Tab cycle the three buttons and never leak focus
@@ -150,6 +185,7 @@
     role="alertdialog"
     aria-modal="true"
     aria-label="Close this window?"
+    data-keyboard-owner={ownerTag("modal")}
     tabindex="-1"
     bind:this={overlayEl}
     onkeydown={onKeydown}

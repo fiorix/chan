@@ -41,7 +41,10 @@ pub use config::{
     TERMINAL_FONT_SIZE_MIN, TERMINAL_PROFILE_MAX, TERMINAL_SCROLLBACK_MB_MAX,
     TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
 };
-pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus};
+pub use devserver_registry::{
+    ConnectionFace, ConnectionHealth, DevserverEntry, DevserverInput, DevserverRegistry,
+    DevserverStatus, CONNECTION_SAMPLE_CAP,
+};
 pub use error::Error;
 pub use gateway_registry::{
     GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, WireguardIngressStatus,
@@ -65,9 +68,9 @@ pub use prefix::{
 pub use root_locks::{KeyedLockGuard, KeyedLocks};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
-    terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles,
-    StandaloneOpenFrame, TenantArtifacts, TenantBuilder, TenantTaskOwner, TerminalTenantOptions,
-    UnserveMode, UnserveScope, WorkspaceCellHandle,
+    terminal_tenant_root, BrowserWindowTarget, HostControl, MissingPath, OpenOutsideAck,
+    StandaloneFiles, StandaloneOpenFrame, TenantArtifacts, TenantBuilder, TenantTaskOwner,
+    TerminalTenantOptions, UnserveMode, UnserveScope, WorkspaceCellHandle,
 };
 pub use terminal_sessions::shell_profiles::{ProfileSource, ShellKind, ShellProfile};
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.

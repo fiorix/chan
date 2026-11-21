@@ -97,6 +97,7 @@ const ghostty = vi.hoisted(() => {
       this.resizeHandlers.push(handler);
       return { dispose() {} };
     }
+    onLinkActivate() { return { dispose() {} }; }
     hasMouseTracking() {
       return false;
     }
@@ -617,6 +618,20 @@ describe("output and scrolling", () => {
     term.applicationCursorKeys = true;
     term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
     expect(arrows(socket)).toEqual(["\x1bOA"]);
+  });
+
+  test("a wheel arrow sent to the PTY does not arm a connection probe", async () => {
+    const { term, socket } = await mountGhostty();
+    vi.useFakeTimers();
+    try {
+      term.buffer.active = term.buffer.alternate;
+      term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
+      expect(arrows(socket)).toEqual(["\x1b[A"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

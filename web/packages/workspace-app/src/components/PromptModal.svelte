@@ -3,7 +3,8 @@
   // which doesn't implement native JS dialogs. Driven by `promptState`
   // in the store: callers get a Promise<string | null> via uiPrompt().
 
-  import { promptState, resolvePrompt } from "../state/store.svelte";
+  import { appInputBlocked, promptState, resolvePrompt } from "../state/store.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
   import ModalShell from "./ModalShell.svelte";
 
   let value = $state("");
@@ -30,9 +31,13 @@
     resolvePrompt(null);
   }
   // The answer closes the dialog before the key would bubble on, so the key
-  // stops here: past the dialog, the window would read it as its own.
+  // stops here: past the dialog, the window would read it as its own. Under
+  // a cover that holds the keyboard over the dialog (a dialog opening under
+  // a cover takes focus as it mounts), Enter answers nothing and goes on to
+  // the window's guard, which cancels it.
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
+      if (appInputBlocked() && !mayFocus(e.target instanceof Element ? e.target : null)) return;
       e.preventDefault();
       e.stopPropagation();
       ok();

@@ -28,7 +28,7 @@ Read at `f6c175793`; nothing was run.
 ## Boundaries
 
 - `http_client` in `update.rs`, built like `http_client::explicit_url_builder`. The `chan` crate already depends on chan-tls, so no new dependency is needed. Its `rustls-tls` selection on reqwest may go once no client of the crate needs bundled roots. Also update the "Clients outside it" list in `crates/chan-tls/design.md`, and the self-upgrade section of `crates/chan/design.md`.
-- Relation to [the model download trusts only bundled roots](../v0.132.0/the-model-download-trusts-only-bundled-roots.md): both read the same `chan_tls::client_config()`, and chan-tls needs no change for either, but no single change serves both.
+- Relation to [the model download trusts only bundled roots](../done/the-model-download-trusts-only-bundled-roots.md): both read the same `chan_tls::client_config()`, and chan-tls needs no change for either, but no single change serves both.
   - Here, the change is one reqwest 0.12 builder in a crate that already holds the shared config.
   - There, hf-hub 0.4.3 builds its own ureq agents inside chan-workspace and takes no configuration, so that client must be replaced first.
   - The two can land in one build, and this row does not wait for that one.

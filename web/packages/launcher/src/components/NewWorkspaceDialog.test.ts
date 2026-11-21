@@ -283,6 +283,8 @@ describe("New workspace dialog -- edit", () => {
       gateway_url: "",
       shared: false,
       native_trust_required: false,
+      rows_hidden: false,
+      connection_health: null,
     };
     openEditDevserver(ds);
     const el = render();
@@ -315,6 +317,8 @@ describe("New workspace dialog -- edit", () => {
       gateway_url: "",
       shared: false,
       native_trust_required: false,
+      rows_hidden: false,
+      connection_health: null,
     };
     openEditDevserver(ds);
     const el = render();

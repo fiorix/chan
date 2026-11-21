@@ -7,6 +7,7 @@ import { ApiError } from "../api/errors";
 import type { PreflightSnapshot } from "../api/types";
 import PreflightOverlay from "./PreflightOverlay.svelte";
 import { pendingTimers } from "../__tests__/fakeTimers";
+import { raisedCoverKeys } from "../state/store.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -332,6 +333,88 @@ test("a fake-timer test leaves the real timer API behind", async () => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 });
 
+test("a model download refusal stays visible through polling and clears on retry", async () => {
+  vi.useFakeTimers();
+  const refusal = "The model server refused its certificate: opaque refusal detail";
+  const pending: PreflightSnapshot = {
+    phase: "needs_decision", locked: true, readiness: { state: "ready" },
+    steps: [{ id: "model", label: "Embedding model", state: "needs_decision", decision: {
+      prompt: "Download the model?", choices: [{ id: "download", label: "Download model" }],
+    } }],
+  };
+  const first = held<Response>();
+  const retry = held<Response>();
+  let polls = 0;
+  const decisions: unknown[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+    if (url.pathname === "/api/preflight") {
+      polls += 1;
+      return Response.json(pending);
+    }
+    expect(url.pathname).toBe("/api/preflight/decision");
+    expect(init?.method).toBe("POST");
+    decisions.push(JSON.parse(String(init?.body)));
+    return decisions.length === 1 ? first.promise : retry.promise;
+  });
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PreflightOverlay, { target }));
+  await vi.waitFor(() => expect(target.querySelector(".choices button")).not.toBeNull());
+  const button = target.querySelector<HTMLButtonElement>(".choices button")!;
+  button.click();
+  await tick();
+  expect(button.disabled, "the decision is in flight before its answer").toBe(true);
+  first.resolve(Response.json({ error: refusal }, { status: 500 }));
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
+  expect(target.querySelector(".error")?.textContent, "the failed download names its cause").toBe(refusal);
+  expect(decisions).toEqual([{ step: "model", choice: "download" }]);
+
+  await vi.advanceTimersByTimeAsync(750);
+  expect(polls, "readiness polling resumes after the refusal").toBe(2);
+  expect(target.querySelector(".error")?.textContent, "a successful poll keeps the download refusal").toBe(refusal);
+
+  button.click();
+  await tick();
+  expect(target.querySelector(".error"), "a retry clears the previous refusal").toBeNull();
+  retry.resolve(Response.json(ready));
+  await vi.waitFor(() => expect(target.querySelector("[data-cover=preflight]")).toBeNull());
+  expect(decisions).toEqual([{ step: "model", choice: "download" }, { step: "model", choice: "download" }]);
+  expect(pendingTimers(), "a successful retry ends readiness polling").toBe(0);
+});
+
+test("an unlocked readiness poll clears the previous decision refusal", async () => {
+  const { choice, answer, preflight, target } = await hostDecision();
+  choice.click();
+  answer.reject(new Error("The model download was refused"));
+  await flushSnapshot();
+  expect(target.querySelector(".error")?.textContent).toBe("The model download was refused");
+  preflight.mockResolvedValueOnce(recovering);
+  await vi.advanceTimersByTimeAsync(750);
+  expect(target.querySelector("[data-cover=preflight]")).toBeNull();
+  preflight.mockResolvedValueOnce(needsDecision);
+  await vi.advanceTimersByTimeAsync(750);
+  expect(target.querySelector(".choices button")).not.toBeNull();
+  expect(target.querySelector(".error"), "the earlier refusal belongs to the completed readiness step").toBeNull();
+});
+
+test.each(["removed", "done"])("a %s step does not retain its refusal beside another pending step", async (previous) => {
+  const { choice, answer, preflight, target } = await hostDecision();
+  choice.click();
+  answer.reject(new Error("The readiness action was refused"));
+  await flushSnapshot();
+  expect(target.querySelector(".error")?.textContent).toBe("The readiness action was refused");
+  preflight.mockResolvedValueOnce({
+    ...needsDecision,
+    steps: [...(previous === "done" ? [{ id: "index", label: "Build search index", state: "done" as const }] : []), {
+      id: "model", label: "Embedding model", state: "needs_decision", decision: {
+      prompt: "Download the model?", choices: [{ id: "download", label: "Download model" }],
+    } }],
+  });
+  await vi.advanceTimersByTimeAsync(750);
+  expect(target.querySelector(".choices button")?.textContent?.trim()).toBe("Download model");
+  expect(target.querySelector(".error"), "the failed step is no longer pending").toBeNull();
+});
+
 test("decision buttons take focus and cycle Tab within the cover", async () => {
   vi.spyOn(api, "preflight").mockResolvedValue({
     phase: "needs_decision", locked: true, readiness: { state: "recovering" }, error: null,
@@ -349,4 +432,41 @@ test("decision buttons take focus and cycle Tab within the cover", async () => {
     document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
     expect(document.activeElement?.textContent).toBe("Retry");
   }
+});
+
+const failedIndex = (state: "ready" | "recovering") => ({
+  phase: "failed", locked: false, readiness: { state },
+  steps: [{ id: "index", label: "Build search index", state: "failed" }],
+  error: { step: "index", message: "the search index has more than 500000 files to read" },
+}) as PreflightSnapshot;
+
+test("a failed index opens the window and asks no further poll", async () => {
+  vi.useFakeTimers();
+  const preflight = vi.spyOn(api, "preflight").mockResolvedValue(failedIndex("ready"));
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PreflightOverlay, { target }));
+  await flushSnapshot();
+
+  expect(preflight).toHaveBeenCalledTimes(1);
+  expect(target.querySelector("[data-cover=preflight]"), "no cover over the window").toBeNull();
+  expect(raisedCoverKeys(), "the app's input is not blocked").toEqual([]);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(preflight, "nothing a poll reads changes until another pass").toHaveBeenCalledTimes(1);
+  expect(pendingTimers()).toBe(0);
+});
+
+test("a failed index whose pass is retried keeps polling until it settles", async () => {
+  vi.useFakeTimers();
+  const preflight = vi.spyOn(api, "preflight")
+    .mockResolvedValueOnce(failedIndex("recovering"))
+    .mockResolvedValue(ready);
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PreflightOverlay, { target }));
+  await flushSnapshot();
+
+  expect(target.querySelector("[data-cover=preflight]")).toBeNull();
+  expect(pendingTimers(), "a recovering workspace is polled again").toBe(1);
+  await vi.advanceTimersByTimeAsync(750);
+  expect(preflight).toHaveBeenCalledTimes(2);
+  expect(pendingTimers(), "the ready answer ends polling").toBe(0);
 });

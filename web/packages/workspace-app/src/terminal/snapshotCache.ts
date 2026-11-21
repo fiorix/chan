@@ -18,6 +18,7 @@
 /// `generation` epoch INSIDE the value: a restart reuses the id but bumps the
 /// generation and resets the ring, so a generation mismatch on reattach (or a
 /// `missed_bytes > 0`) invalidates the snapshot and falls back to a full replay.
+/// A session frame under a fresh id drops the snapshot cached under the old one.
 ///
 /// Bounded to coexist with the editor stores in the ~5-10MB per-origin WebView
 /// budget (editor `chan:editor-buffer:` ~10MB + `chan:caret-index:` 256KB):

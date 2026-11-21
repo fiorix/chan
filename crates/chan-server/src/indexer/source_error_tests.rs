@@ -221,7 +221,9 @@ async fn unreadable_source_keeps_preflight_unlocked() {
         .contains("sourceoldtoken"));
 }
 
-async fn assert_backend_locked(app: &Arc<AppState>) {
+/// A failure of the index's own state sets `Error`, which preflight reports
+/// as a failed index step with its error, without locking the window.
+async fn assert_backend_failed(app: &Arc<AppState>) {
     let (result, status) = settle(app, "bad.md").await;
     assert!(
         matches!(status, IndexStatus::Error { .. }),
@@ -229,13 +231,13 @@ async fn assert_backend_locked(app: &Arc<AppState>) {
     );
     let response = preflight(app).await;
     assert_eq!(response["phase"], "failed", "{response}");
-    assert_eq!(response["locked"], true, "{response}");
+    assert_eq!(response["locked"], false, "{response}");
     assert_eq!(response["error"]["step"], "index", "{response}");
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refused_journal_write_keeps_preflight_locked() {
+async fn refused_journal_write_fails_the_index_step() {
     let fixture = Fixture::new();
     let app = fixture.app();
     let workspace = &fixture.workspace;
@@ -250,11 +252,11 @@ async fn refused_journal_write_keeps_preflight_locked() {
         .read_text("bad.md")
         .unwrap()
         .contains("sourceoldtoken"));
-    assert_backend_locked(&app).await;
+    assert_backend_failed(&app).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_journal_write_keeps_preflight_locked() {
+async fn missing_journal_write_fails_the_index_step() {
     use chan_workspace::workspace::journal_test_hooks::{fail_next, Operation};
     let fixture = Fixture::new();
     let app = fixture.app();
@@ -269,7 +271,7 @@ async fn missing_journal_write_keeps_preflight_locked() {
         Operation::Index,
         std::io::ErrorKind::NotFound,
     );
-    assert_backend_locked(&app).await;
+    assert_backend_failed(&app).await;
     assert!(workspace
         .read_text("bad.md")
         .unwrap()

@@ -238,7 +238,7 @@
 {/snippet}
 
 {#if anyVisible}
-  <div class="app-statusbar" class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
+  <div class="app-statusbar" data-app-status-pill class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
         {#if indexShown}
@@ -248,12 +248,14 @@
                user watching the index build jumps straight to the live
                per-directory graph. -->
           <span class="closable">
+            <!-- An error's message names its fix, so the whole of it is
+                 shown, and read again in the title. -->
             <button
               type="button"
               class="section status-action"
               class:err={s.state === "error"}
               aria-label="open indexing dashboard"
-              title="Open indexing dashboard"
+              title={s.state === "error" ? `index error: ${s.message}` : "Open indexing dashboard"}
               onclick={openIndexingDashboard}
             >
               <span
@@ -270,7 +272,7 @@
               {:else if s.state === "recovering"}
                 rebuilding search index <span class="muted">search paused</span>
               {:else if s.state === "error"}
-                index error: <span class="muted">{s.message}</span>
+                index error: <span class="muted err-msg">{s.message}</span>
               {:else if s.state === "idle" && s.embedding}
                 <!-- BM25-ready, embeddings still generating in the
                      background (preflight already unlocked). Passive chip:
@@ -456,6 +458,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* An index error's message names its fix (the setting that brings the
+     index under its cap), so it wraps inside the pill instead of being
+     cut at the filename width. */
+  .muted.err-msg {
+    max-width: min(72ch, 60vw);
+    white-space: normal;
   }
   .status-msg {
     color: var(--warn-text);

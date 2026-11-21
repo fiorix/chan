@@ -15,6 +15,7 @@ import {
 } from "./state/commandLauncher.svelte";
 import { applyTheme, themeState } from "./state/theme.svelte";
 import { closeDialog, openNewDialog } from "./state/dialog.svelte";
+import { decks, resetDeck, showCard } from "./state/deck.svelte";
 
 // Pin the in-memory mock as the backend so loadLibrary succeeds (no spurious
 // error banner from a failed fetch) and the banner test controls library.error.
@@ -52,10 +53,81 @@ describe("launcher root", () => {
     themeState.theme = "dark";
     applyTheme();
     closeDialog();
+    resetDeck();
     vi.unstubAllGlobals();
   }
 
   afterEach(tearDown);
+
+  /// A desktop bridge whose `listen` keeps each handler, so a test can send
+  /// the launcher an event as the desktop does.
+  function desktopEvents(): (event: string, payload: unknown) => void {
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    const listen = vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
+      handlers.set(event, handler);
+      return () => handlers.delete(event);
+    });
+    vi.stubGlobal("__TAURI__", { core: { invoke: vi.fn().mockResolvedValue(undefined) }, event: { listen } });
+    return (event, payload) => {
+      const handler = handlers.get(event);
+      expect(handler, `the launcher listens for ${event}`).toBeDefined();
+      handler!({ payload });
+      flushSync();
+    };
+  }
+
+  it("the desktop's card event brings the devserver's card to the front with the keyboard on it", async () => {
+    const send = desktopEvents();
+    target = document.createElement("div");
+    document.body.append(target);
+    app = mount(App, { target, props: { animatedBackground: false } });
+    await settle();
+    flushSync();
+    expect(library.loaded).toBe(true);
+    screen.current = "gateways";
+    showCard("computers", "local");
+    const asked = decks.computers.focusSeq;
+
+    send("launcher-show-devserver-card", { devserverId: "ds-1" });
+    expect(screen.current).toBe("computers");
+    expect(decks.computers.activeKey).toBe("ds-1");
+    expect(decks.computers.focusSeq).toBe(asked + 1);
+
+    // A devserver the registry does not list, or none, opens at the first card.
+    send("launcher-show-devserver-card", { devserverId: "ds-gone" });
+    expect(decks.computers.activeKey).toBe("all-windows");
+    showCard("computers", "local");
+    send("launcher-show-devserver-card", { devserverId: null });
+    expect(decks.computers.activeKey).toBe("all-windows");
+    expect(decks.computers.focusSeq).toBe(asked + 3);
+  });
+
+  it("a card asked for before the library is read waits for the reading to choose", async () => {
+    const send = desktopEvents();
+    target = document.createElement("div");
+    document.body.append(target);
+    app = mount(App, { target, props: { animatedBackground: false } });
+    flushSync();
+    expect(library.loaded, "the registries have not answered yet").toBe(false);
+    send("launcher-show-devserver-card", { devserverId: "ds-1" });
+    expect(decks.computers.activeKey, "the key is held while the registry loads").toBe("ds-1");
+    await settle();
+    flushSync();
+    expect(decks.computers.activeKey).toBe("ds-1");
+
+    tearDown();
+    const sendAgain = desktopEvents();
+    target = document.createElement("div");
+    document.body.append(target);
+    app = mount(App, { target, props: { animatedBackground: false } });
+    flushSync();
+    expect(library.loaded).toBe(false);
+    sendAgain("launcher-show-devserver-card", { devserverId: "ds-gone" });
+    expect(decks.computers.activeKey).toBe("ds-gone");
+    await settle();
+    flushSync();
+    expect(decks.computers.activeKey, "a devserver the reading does not list gives the first card").toBe("all-windows");
+  });
 
   it("Escape returns from Computers and Gateways, while forms and consumed keys stay local", async () => {
     const invoke = vi.fn().mockResolvedValue(undefined);

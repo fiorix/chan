@@ -9,21 +9,23 @@
 //! Two-stage:
 //!
 //!   1. Open the candle embedder against a stable staging dir under
-//!      `target/fetch-models-cache/`. hf-hub downloads the model
+//!      `target/fetch-models-cache/`. chan-workspace downloads the model
 //!      there if missing; a re-run with the cache populated skips
 //!      the network. With the default target dir, `cargo clean`
 //!      wipes it and the next build re-downloads.
 //!   2. tar+zstd encode the staging dir into the embed bundle.
-//!      Drops `*.lock`, `*.no_exists` and `**/blobs/**` along the
-//!      way; tar follows the snapshots/ symlinks into the blob bytes,
-//!      so the snapshot entries already carry those bytes and keeping
+//!      Drops `*.lock`, `*.no_exists`, `*.part`, `refs/.tmp*` and
+//!      `**/blobs/**` along the way. chan writes plain files under
+//!      snapshots/; a staging dir an earlier version wrote holds
+//!      links there into blobs/, which tar follows, so keeping
 //!      blobs/ too would store them twice.
 //!
 //! Run from the workspace root via `make models` or
 //! `cargo run -p fetch-models`. Idempotent: re-running with the
 //! model already cached AND the tarball up-to-date is a fast
 //! no-op. Honors `HTTPS_PROXY` / `HTTP_PROXY` for restricted
-//! networks; hf-hub's underlying HTTP client picks them up.
+//! networks; chan-workspace's ureq client picks them up and verifies
+//! certificates through chan-tls's trust decision on the build host.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
         staging.display()
     );
 
-    // Open the embedder pointing at the staging dir. hf-hub
+    // Open the embedder pointing at the staging dir. Its downloader
     // downloads the model there if missing; if already present
     // from a prior run it skips the network and returns instantly.
     Embedder::open(DEFAULT_MODEL, &staging).context("download default embedding model")?;
@@ -100,7 +102,7 @@ fn crates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Stable staging dir for the hf-hub cache. Lives under the repo's
+/// Stable staging dir for the model cache. Lives under the repo's
 /// default `target/`, so `cargo clean` there wipes it; survives normal
 /// builds so re-runs of fetch-models hit the on-disk cache and skip the
 /// network. Keep this OUT of `crates/chan-server/resources/` so
@@ -143,10 +145,11 @@ fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
 }
 
 /// Walk `src` and emit a zstd-compressed tar archive at `dst`.
-/// Skips hf-hub's bookkeeping cruft (`*.lock`, `*.no_exists`) and
-/// the `blobs/` subdir (snapshots/ symlinks already point to the
-/// same bytes; tar follows symlinks by default, so blobs/ would
-/// double the archive).
+/// Skips cache bookkeeping (`*.lock`, `*.no_exists`, a `refs/.tmp*`
+/// a crash left), partial downloads (`*.part`) and any `blobs/`
+/// subdir: a staging tree an earlier version wrote holds links under
+/// snapshots/ into blobs/, which tar follows, so keeping blobs/ would
+/// double the archive.
 fn encode_tar_zst(src: &Path, dst: &Path) -> Result<()> {
     encode_tar_zst_via(src, dst, |path| File::create(path))
 }
@@ -242,16 +245,24 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Filenames hf-hub emits that we don't want in the bundle.
+/// Cache entries excluded from the bundle.
 fn should_skip(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
     if s.contains("/blobs/") || s.starts_with("blobs/") {
         return true;
     }
-    if s.ends_with(".lock") || s.ends_with(".no_exists") {
+    if s.ends_with(".lock") || s.ends_with(".no_exists") || s.ends_with(".part") {
         return true;
     }
-    false
+    // A `refs/main` replacement a crash left behind.
+    let in_refs = rel
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "refs");
+    in_refs
+        && rel
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".tmp"))
 }
 
 fn humanize(bytes: u64) -> String {
@@ -267,9 +278,8 @@ fn humanize(bytes: u64) -> String {
     }
 }
 
-/// Report which (if any) HTTP proxy env var is in effect, with
-/// HTTPS_PROXY taking precedence (hf-hub uses HTTPS to hit the
-/// HuggingFace CDN).
+/// Report a configured HTTPS or HTTP proxy variable with credentials
+/// redacted. This diagnostic does not include ureq's ALL_PROXY override.
 fn active_proxy() -> Option<(&'static str, String)> {
     for var in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(v) = std::env::var(var) {
@@ -298,6 +308,21 @@ fn redact_proxy_credentials(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bundle_skips_partial_downloads_and_stranded_ref_temporaries() {
+        for (path, skipped) in [
+            ("models--a--b/refs/.tmpAbC123", true),
+            ("models--a--b/snapshots/c/model.safetensors.part", true),
+            ("models--a--b/snapshots/c/model.safetensors.lock", true),
+            ("models--a--b/blobs/0123", true),
+            ("models--a--b/refs/main", false),
+            ("models--a--b/snapshots/c/model.safetensors", false),
+            ("models--a--b/snapshots/c/.tmpdir/config.json", false),
+        ] {
+            assert_eq!(should_skip(Path::new(path)), skipped, "{path}");
+        }
+    }
 
     #[test]
     fn proxy_credentials_never_reach_the_log() {

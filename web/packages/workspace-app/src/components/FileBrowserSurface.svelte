@@ -31,6 +31,7 @@
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
 
   let { variant, side, tab, focused = false, onClose, onFlip }: {
     variant: "dock" | "tab";
@@ -63,6 +64,7 @@
   let historyIndex = $state(0);
   const visits = new Map<string, { path: string | null; paths: string[]; scroll: number }>();
   let treeRef: FileTree | undefined = $state();
+  let browserEl: HTMLDivElement | undefined = $state();
   let treeWrapEl: HTMLDivElement | undefined = $state();
   let findInputEl: HTMLInputElement | undefined = $state();
   let pathInputEl: HTMLInputElement | undefined = $state();
@@ -176,13 +178,15 @@
   // pulse while focused, as the editors do. The `focused` gate keeps a tab in
   // a background pane, mounted by a session restore or Hybrid Nav's commit,
   // from taking it. The microtask runs after the pulse has parked the
-  // keyboard on the body.
+  // keyboard on the body. The tree takes it only where the keyboard's
+  // owner lets it: a dialog, a window-wide survey, the command deck, Search,
+  // Settings or the Computers launcher keeps it.
   $effect(() => {
     if (!isTab || !focused) return;
     tab;
     tabFocusPulse.value;
     queueMicrotask(() => {
-      if (focused) treeRef?.focusTree();
+      if (focused && mayFocus(browserEl ?? null)) treeRef?.focusTree();
     });
   });
 
@@ -363,7 +367,7 @@
   }
 </script>
 
-<div class="browser" class:dock={!isTab} data-theme={isTab ? surfaceThemeOverride("browser") : undefined} onfocusin={activate} onpointerdown={activate} onclick={onBrowserClick} oncontextmenu={onBrowserContextMenu} onkeydown={onBrowserKeydown} role="presentation">
+<div bind:this={browserEl} class="browser" class:dock={!isTab} data-theme={isTab ? surfaceThemeOverride("browser") : undefined} onfocusin={activate} onpointerdown={activate} onclick={onBrowserClick} oncontextmenu={onBrowserContextMenu} onkeydown={onBrowserKeydown} role="presentation">
   <div class="browser-toolbar">
     {#if isTab}
       <div class="navigation" aria-label="Directory navigation" role="group">

@@ -49,6 +49,8 @@
     onFocusLost,
     mayTakeFocus,
     toggleChord,
+    ownerTag,
+    ownerAbove,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -77,13 +79,22 @@
     /// keyboard is held outside the page, such as a native launcher window
     /// shown over it, answers false, and the deck then hands focus to
     /// nothing: a focus change in the page would take the keyboard from
-    /// that surface.
-    mayTakeFocus?: () => boolean;
+    /// that surface. Receives the element the focus would land on, so the
+    /// host can allow a return into a surface that owns the keyboard.
+    mayTakeFocus?: (heir?: HTMLElement | null) => boolean;
     /// Whether a key is the chord the host opens this deck with. The open
     /// deck takes every key ahead of the host's own listener, which
     /// therefore never sees the chord then: the deck closes on it, so the
     /// chord toggles.
     toggleChord?: (event: KeyboardEvent) => boolean;
+    /// The value the host tags the deck's root with when its keyboard rule
+    /// tells an element inside the deck from one under it by that tag.
+    ownerTag?: string;
+    /// Whether an owner above this deck holds the keyboard, such as a modal
+    /// dialog: the deck then leaves the page's keys and focus to it. A host
+    /// without a keyboard rule leaves this out, and the deck yields to any
+    /// modal dialog showing in the page.
+    ownerAbove?: () => boolean;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -293,9 +304,18 @@
       revealSelection();
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
-      // Preserve the viewport while restoring the caller's focus.
-      const heir = canTakeFocus(deferredFocus) ? deferredFocus : returnFocus;
-      if (!closingRun && heir?.isConnected) heir.focus({ preventScroll: true });
+      // Preserve the viewport while restoring the caller's focus. A dismissal
+      // takes the run's heir and asks the same predicate the run's return
+      // reads: its heir takes the keyboard only where the host lets it, and
+      // a dismissal with no heir that can take focus (the body it opened
+      // from, an element gone) falls back to the focus-lost path, so the
+      // keyboard lands where that path puts it instead of staying where the
+      // deck left it.
+      const heir = canTakeFocus(deferredFocus) ? deferredFocus : canTakeFocus(returnFocus) ? returnFocus : null;
+      if (!closingRun) {
+        if (heir?.isConnected && (!mayTakeFocus || mayTakeFocus(heir))) heir.focus({ preventScroll: true });
+        else if (!mayTakeFocus || mayTakeFocus(null)) onFocusLost?.();
+      }
       returnFocus = null;
       // The pending opener is for a dialog that mounts in the flush that
       // unmounts this deck's input. Once that close has rendered, a dialog
@@ -508,9 +528,9 @@
     await tick();
     if (pendingReturnFocus === published) pendingReturnFocus = null;
     if (open || holdsFocus(document.activeElement)) return;
-    if (mayTakeFocus && !mayTakeFocus()) return;
-    if (canTakeFocus(deferredFocus)) deferredFocus.focus({ preventScroll: true });
-    else if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
+    const heir = canTakeFocus(deferredFocus) ? deferredFocus : canTakeFocus(opener) ? opener : null;
+    if (mayTakeFocus && !mayTakeFocus(heir)) return;
+    if (heir) heir.focus({ preventScroll: true });
     else onFocusLost?.();
   }
 
@@ -733,6 +753,12 @@
     return input.selectionStart === end && input.selectionEnd === end;
   }
 
+  /// Whether the deck leaves the keyboard to an owner above it: the host's
+  /// answer, or else a modal dialog showing in the page.
+  function yieldsToOwner(): boolean {
+    return ownerAbove ? ownerAbove() : modalShowing();
+  }
+
   /// Whether a modal dialog is showing. This deck is not modal and yields
   /// the keyboard to one.
   function modalShowing(): boolean {
@@ -760,14 +786,14 @@
     return true;
   }
 
-  /// The deck holds the keyboard while it is open and no modal dialog is
-  /// showing. Enforced here, on every focus change in the page, so it holds
+  /// The deck holds the keyboard while it is open and no owner above it
+  /// holds it. Enforced here, on every focus change in the page, so it holds
   /// for whatever a row or the page does under the deck, at once or later.
   function onPageFocusIn(event: FocusEvent): void {
     if (!open || !overlay) return;
     const target = event.target;
     if (!(target instanceof Node) || overlay.contains(target)) return;
-    if (modalShowing()) return;
+    if (yieldsToOwner()) return;
     reclaimFocus(target);
   }
 
@@ -775,7 +801,7 @@
     if (!open || !overlay || event.defaultPrevented) return;
     // The yield covers the page's own keys too, while a modal repairs focus
     // after removing its active control.
-    if (modalShowing()) return;
+    if (yieldsToOwner()) return;
     const target = event.target;
     const inside = target instanceof Node && overlay.contains(target);
     const page = target === document.body || target === document.documentElement ||
@@ -995,7 +1021,7 @@
 {/snippet}
 
 {#if open}
-  <div bind:this={overlay} class="deck-overlay" data-direction={direction}>
+  <div bind:this={overlay} class="deck-overlay" data-direction={direction} data-keyboard-owner={ownerTag}>
     <button class="deck-backdrop" type="button" tabindex="-1" aria-label="Hide command launcher" onclick={onClose}></button>
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role, a11y_no_noninteractive_element_interactions -->
     <section
@@ -1230,7 +1256,9 @@
     --deck-danger: var(--danger, var(--danger-text, #d1242f));
     position: fixed;
     inset: 0;
-    z-index: 32000;
+    /* A host that ranks the deck among layers of its own names its layer;
+       without one the deck paints over the whole page. */
+    z-index: var(--deck-layer, 32000);
     display: flex;
     align-items: flex-start;
     justify-content: center;

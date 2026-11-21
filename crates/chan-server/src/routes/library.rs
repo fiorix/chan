@@ -34,6 +34,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
+use super::ws::PONG_FRAME;
 use crate::devserver::{bytes_eq, ForceQuery};
 use crate::error::{live_terminals_refusal, workspace_open_elsewhere, workspace_still_releasing};
 use crate::extract::{Bytes, Json, Path as AxumPath, Query};
@@ -1361,7 +1362,8 @@ async fn handle_list_library_windows(
 /// the live library state without polling. Bearer-gated by
 /// [`require_launcher_bearer`]; a browser WebSocket cannot send the
 /// `Authorization` header, so it presents the bearer in the `?t=` query param,
-/// while `cs` and the desktop use the header.
+/// while `cs` and the desktop use the header. A client's `{"type":"ping"}`
+/// text frame is answered with `{"type":"pong"}` on the same socket.
 ///
 /// A surface that publishes no window set answers 503 with its gate's
 /// sentence and upgrades nothing ([`WindowFeedGate`]).
@@ -1382,6 +1384,12 @@ async fn handle_watch_library_windows(
 /// (`enable`d) BEFORE each snapshot so a change that lands between the snapshot
 /// and the await is never missed. The loop ends when the client disconnects,
 /// or when the surface publishes no window set.
+///
+/// While it waits for a change the feed answers each client `ping` with a
+/// `pong` ([`WindowFeedClientFrame`]) and keeps waiting, so a ping sends no
+/// set. Any other client frame ends the wait as a change does. The gate is
+/// read before each pong too, and a ping a stopping surface reads ends the
+/// socket in place of its pong.
 ///
 /// The surface's gate is read at the head of each turn, before the set is
 /// assembled: a turn that begins while the surface is still starting sends
@@ -1409,7 +1417,7 @@ async fn watch_library_windows(
     let notify: Arc<Notify> = host.library_change_notify();
     let changed = notify.notified();
     tokio::pin!(changed);
-    loop {
+    'feed: loop {
         // Arm the change waiter BEFORE the snapshot. A `Notified` records the
         // `notify_waiters` count when it is created, so creating and `enable`-ing
         // it before the snapshot guarantees a change during the snapshot or the
@@ -1447,19 +1455,55 @@ async fn watch_library_windows(
         if socket.send(Message::text(frame)).await.is_err() {
             break; // the client is gone
         }
-        tokio::select! {
-            _ = changed.as_mut() => {
-                // A window-set change woke us: drop the consumed waiter and
-                // re-arm a fresh one, which the next loop turn enables before
-                // it reads the snapshot.
-                changed.set(notify.notified());
+        // Wait for the change that ends this turn. A ping is answered and
+        // the wait goes on, so the feed sends the same sets in the same order
+        // whether or not its client pings.
+        loop {
+            tokio::select! {
+                _ = changed.as_mut() => {
+                    // A window-set change woke us: drop the consumed waiter and
+                    // re-arm a fresh one, which the next turn enables before
+                    // it reads the snapshot.
+                    changed.set(notify.notified());
+                    break;
+                }
+                msg = socket.recv() => match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break 'feed,
+                    Some(Ok(Message::Text(text))) if is_window_feed_ping(text.as_str()) => {
+                        // A stopping surface publishes nothing, a pong
+                        // included: the socket ends as a refused turn's does.
+                        if feed.refusal().is_some() {
+                            break 'feed;
+                        }
+                        if socket.send(Message::text(PONG_FRAME)).await.is_err() {
+                            break 'feed; // the client is gone
+                        }
+                    }
+                    // Any other client frame is not read. It ends the wait
+                    // as a change does, so the turn's set is sent again.
+                    Some(Ok(_)) => break,
+                },
             }
-            msg = socket.recv() => match msg {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
-                _ => {} // ignore any other client frame
-            },
         }
     }
+}
+
+/// A client's frame on the window feed, in the one shape the feed reads:
+/// `ping`, the client's heartbeat, answered with a `pong` on the same socket
+/// so the client can time a reply over the feed it holds. It is the frame
+/// the tenant event socket reads as its heartbeat and answers the same way.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum WindowFeedClientFrame {
+    Ping,
+}
+
+/// Whether a client's text frame on the window feed is its `ping`.
+fn is_window_feed_ping(text: &str) -> bool {
+    matches!(
+        serde_json::from_str::<WindowFeedClientFrame>(text),
+        Ok(WindowFeedClientFrame::Ping)
+    )
 }
 
 /// Test seam: run, once, a step a test installed for one host on the task
@@ -3139,6 +3183,8 @@ mod devserver_route_tests {
                     gateway_url: String::new(),
                     shared: false,
                     native_trust_required: false,
+                    rows_hidden: false,
+                    connection_health: None,
                 }]),
             }
         }
@@ -3173,6 +3219,8 @@ mod devserver_route_tests {
                 gateway_url: String::new(),
                 shared: false,
                 native_trust_required: false,
+                rows_hidden: false,
+                connection_health: None,
             };
             self.rows.lock().unwrap().push(entry.clone());
             Ok(entry)
@@ -9526,5 +9574,238 @@ mod window_feed_gate_tests {
             Err(error) => panic!("a stopping surface answered its feed's request {error}"),
         }
         served.server.abort();
+    }
+}
+
+#[cfg(test)]
+mod window_feed_ping_tests {
+    //! The window feed's answer to a client's ping: a `pong` on the same
+    //! socket, with the feed's window sets the same in content and order as
+    //! with no ping, and no pong for any other client frame.
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chan_library::windows::WindowRegistry;
+    use chan_workspace::Library;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite;
+
+    use super::launcher_router;
+    use crate::{WindowKind, WindowSet, WorkspaceHost};
+
+    const BOUND: Duration = Duration::from_secs(30);
+
+    const PING: &str = r#"{"type":"ping"}"#;
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// One text frame a client of the feed reads, or the end of its stream.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Frame {
+        Set(WindowSet),
+        Pong,
+        Ended,
+    }
+
+    /// The next text frame the feed sends. The transport's own frames (the
+    /// WebSocket Pong that answers a WebSocket Ping) are skipped.
+    async fn next_frame(client: &mut Client) -> Frame {
+        tokio::time::timeout(BOUND, async {
+            loop {
+                match client.next().await {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        if text.as_str() == r#"{"type":"pong"}"# {
+                            return Frame::Pong;
+                        }
+                        let set = serde_json::from_str(&text).unwrap_or_else(|error| {
+                            panic!("neither a set nor a pong: {text} ({error})")
+                        });
+                        return Frame::Set(set);
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => {
+                        return Frame::Ended
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the feed neither sent a frame nor ended")
+    }
+
+    /// A host with one window in its library, built on a thread with no
+    /// runtime. The window registry bridges its changes to the feed only on
+    /// a runtime, so here no change reaches the feed but the ones a test
+    /// signals, and every frame a test reads follows from what it sent.
+    fn quiet_host(home: &Path) -> Arc<WorkspaceHost> {
+        let home = home.to_path_buf();
+        std::thread::spawn(move || {
+            let library = Library::open_at(home.join("config.toml")).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.join("windows.json"))),
+                "lib-test".into(),
+            );
+            host.mint_window(WindowKind::Terminal, None)
+                .expect("mint a window");
+            host
+        })
+        .join()
+        .expect("build the host")
+    }
+
+    /// Serve `host`'s launcher on a real listener and attach a client to its
+    /// window feed, which has read the feed's first set.
+    async fn attach(host: &Arc<WorkspaceHost>) -> (Client, WindowSet, tokio::task::JoinHandle<()>) {
+        attach_to(launcher_router(host.clone(), None, None)).await
+    }
+
+    /// Serve `app` on a real listener and attach a client to its window
+    /// feed, which has read the feed's first set.
+    async fn attach_to(app: axum::Router) -> (Client, WindowSet, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut client, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/library/windows/watch"))
+                .await
+                .expect("attach the feed");
+        let Frame::Set(first) = next_frame(&mut client).await else {
+            panic!("fixture: the feed's first frame is not a set");
+        };
+        assert_eq!(first.windows.len(), 1, "fixture: the first set");
+        (client, first, server)
+    }
+
+    /// A ping is answered with a pong and sends no set: two pings in a row
+    /// draw two pongs in a row, and the set a change sends after them is
+    /// the one the feed sent first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_feed_answers_a_ping_with_a_pong_and_no_set() {
+        let home = tempfile::tempdir().unwrap();
+        let host = quiet_host(home.path());
+        let (mut client, first, server) = attach(&host).await;
+
+        for _ in 0..2 {
+            client
+                .send(tungstenite::Message::text(PING))
+                .await
+                .expect("send a ping");
+        }
+
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Pong,
+            "the feed did not answer a ping with a pong"
+        );
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Pong,
+            "the feed sent a frame between the pongs of two pings in a row"
+        );
+        host.library_change_notify().notify_waiters();
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Set(first),
+            "the set the feed sent after a change is not the one it sent first"
+        );
+        server.abort();
+    }
+
+    /// No other client frame draws a pong: a frame the tenant's event
+    /// socket reads (`sub`), a client's `pong`, `PING` in capitals, text
+    /// that is not JSON, a binary frame holding a ping and a WebSocket Ping.
+    /// The feed sends its set again after each, as after a change, so the
+    /// frames before the pong of a ping sent last are one set per frame,
+    /// each the set it sent first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_feed_answers_no_other_client_frame() {
+        let home = tempfile::tempdir().unwrap();
+        let host = quiet_host(home.path());
+        let (mut client, first, server) = attach(&host).await;
+        let others = [
+            tungstenite::Message::text(r#"{"type":"sub","dir":""}"#),
+            tungstenite::Message::text(r#"{"type":"pong"}"#),
+            tungstenite::Message::text(r#"{"type":"PING"}"#),
+            tungstenite::Message::text("ping"),
+            tungstenite::Message::binary(PING.as_bytes().to_vec()),
+            tungstenite::Message::Ping(Vec::new().into()),
+        ];
+        let sent = others.len();
+
+        for frame in others {
+            client.send(frame).await.expect("send a client frame");
+        }
+        client
+            .send(tungstenite::Message::text(PING))
+            .await
+            .expect("send a ping");
+
+        for each in 0..sent {
+            assert_eq!(
+                next_frame(&mut client).await,
+                Frame::Set(first.clone()),
+                "frame {each} after the client's frames is not the set the feed sent first"
+            );
+        }
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Pong,
+            "the frame after the sets is not the ping's pong"
+        );
+        host.library_change_notify().notify_waiters();
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Set(first),
+            "the feed sent a frame between the ping's pong and the set of a change"
+        );
+        server.abort();
+    }
+
+    /// A ping read once the surface has begun to stop draws no pong: the
+    /// feed publishes nothing from the stop on, and its socket ends. The
+    /// host signals no change, so the ping's arm is the only one that reads
+    /// the stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ping_to_a_stopping_surface_ends_the_feed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let host = quiet_host(home.path());
+        let stopping = Arc::new(AtomicBool::new(false));
+        let read = Arc::clone(&stopping);
+        let gate: super::WindowFeedGate = Arc::new(move || {
+            if read.load(Ordering::SeqCst) {
+                return Err(super::WindowFeedRefusal::Stopping);
+            }
+            Ok(())
+        });
+        let app =
+            super::admitting_launcher_router(host.clone(), None, None, None, None, Some(gate));
+        let (mut client, _first, server) = attach_to(app).await;
+        client
+            .send(tungstenite::Message::text(PING))
+            .await
+            .expect("send a ping");
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Pong,
+            "fixture: a surface that is not stopping did not answer a ping"
+        );
+
+        stopping.store(true, Ordering::SeqCst);
+        client
+            .send(tungstenite::Message::text(PING))
+            .await
+            .expect("send a ping");
+
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Ended,
+            "a stopping surface answered a ping on its feed"
+        );
+        server.abort();
     }
 }

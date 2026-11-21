@@ -1,20 +1,22 @@
 <script lang="ts">
-  // The window tab bar: a band across the top of the window holding the pane
-  // tree button, the window's title and the slot the active pane's tab strip
-  // moves into (see Pane.svelte). The title sits after the tree button while
-  // the window has no tabs and at the bar's end, left of the strip's actions,
-  // once it has one. In chan-desktop's title bar its insets keep clear of the
-  // window controls, its content row sits on their centre line, and its empty
-  // stretches drag the window. Where the desktop asks for it (Windows, whose
-  // window has no frame in the mode) the window controls sit over the right
-  // inset, in a layer of their own above every overlay. The band is opaque: terminal background opacity cuts its holes
-  // behind terminal panes only. While the window's Computers launcher is
-  // shown over the page, the band holds neither the tree button nor the
-  // strip: they belong to the covered window. On Windows it holds the
-  // launcher menubar's menus there instead, since the frameless window wears
-  // no menubar, and the window's title after them. A tmux pane has no strip,
-  // so while one is active the band marks the window as tmux's and names no
-  // pane: the window's title names the window.
+  // The window tab bar is a band across the top of the window. It holds the
+  // pane tree button, the window's title and the slot the active pane's tab
+  // strip moves into (see Pane.svelte). The title sits after the tree button
+  // while the window has no tabs and at the bar's end, left of the strip's
+  // actions, once it has one. In chan-desktop's title bar its insets keep
+  // clear of the window controls, its content row sits on their centre line,
+  // and its empty stretches drag the window. Where the desktop asks for it
+  // (Windows, whose window has no frame in the mode) the controls sit over
+  // the right inset, in a layer of their own above every overlay. The band
+  // is opaque: terminal background opacity cuts its holes behind terminal
+  // panes only. While the window's Computers launcher is shown over the
+  // page, the band holds neither the tree button nor the strip: they belong
+  // to the covered window. On Windows it holds the launcher's menubar menus
+  // there instead, since the frameless window wears no menubar, and the
+  // window's title after them. A tmux pane has no strip, so while one is
+  // active the band marks the window as tmux's and names no pane: the
+  // window's title names the window. Under the reconnecting cover it keeps
+  // the title while hiding the tree button and strip in place.
 
   import { untrack } from "svelte";
   import {
@@ -26,7 +28,7 @@
   import { commandTitle } from "../state/commands";
   // The tree button is named by its command, which this registers.
   import "../state/commands/install";
-  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard";
+  import { keyboardOwnedAbovePanes, launcherCovers } from "../state/keyboardOwner.svelte";
   import {
     closePaneTree,
     hiddenTabStatus,
@@ -184,33 +186,24 @@
   // cycle, with a rest at each end (the keyframes below).
   const rollSeconds = $derived(Math.max(4, (titleOverflow / WINDOW_TITLE_ROLL_PX_PER_S) * 3));
 
-  // The desktop marks the page's root while the window's Computers launcher
-  // is shown over it, from before the launcher slides in until after it has
-  // slid away. The tree and the strip are hidden in place, so the strip keeps
-  // its size and the band stays the window's drag space; an open tree closes.
-  let covered = $state(launcherShownOverWindow());
-  $effect(() => {
-    const read = () => {
-      covered = launcherShownOverWindow();
-    };
-    const observer = new MutationObserver(read);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: [LAUNCHER_SHOWN_ATTR],
-    });
-    read();
-    return () => observer.disconnect();
-  });
+  // The desktop marks the page root while Computers is shown, from before
+  // the launcher slides in until after it slides away. The launcher and a
+  // reconnect cover below this band hide the tree and strip in place, keeping
+  // its drag space and closing an open tree.
+  const launcherCovered = $derived(launcherCovers());
+  const reconnectCovered = $derived(ui.disconnectBlocking && !keyboardOwnedAbovePanes());
+  const covered = $derived(launcherCovered || reconnectCovered);
   $effect(() => {
     if (covered) closePaneTree();
   });
 
-  // What the covered band holds: the menus the desktop lists, which only a
-  // window wearing no menubar gets, and the title of a frameless window, the
-  // one the bar shows uncovered, so privacy mode masks it here as well from
-  // the moment the page hears of it.
-  const menus = $derived(covered ? chrome.menus : []);
-  const titleShown = $derived(covered && chrome.drawControls && title !== null);
+  // Only Windows, whose frameless window wears no menubar, gets launcher
+  // menus. The covered title is the bar's own, so privacy masks it before
+  // the desktop's mask arrives. The launcher's macOS title stays native;
+  // reconnect alone draws this title on every host.
+  const menus = $derived(launcherCovered ? chrome.menus : []);
+  const titleShown = $derived(title !== null && (launcherCovered ? chrome.drawControls : reconnectCovered));
+  const coveredBandLeft = $derived(reconnectCovered && !launcherCovered ? `${chrome.insetLeft}px` : "0px");
 
   // The menu whose popup is up. The desktop answers once the menu has
   // closed, so its button stays pressed until then and another press waits.
@@ -369,13 +362,10 @@
     <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
   {#if menus.length > 0 || titleShown}
-    <!-- While the launcher covers the page the band belongs to the window.
-         A frameless window has no menubar and no title of its own, so the
-         band draws the launcher menubar's menus at its left, then names the
-         window, as Windows places a title, all clear of the window controls.
-         Only the menu buttons take a press, and none drags, so the rest of
-         the band stays the drag space. -->
-    <div class="covered-band" style:right={`${chrome.insetRight + 8}px`}>
+    <!-- The launcher puts Windows menubar menus and its title in the band.
+         The reconnecting cover keeps the title visible on every host, clear
+         of the window controls. The band remains drag space. -->
+    <div class="covered-band" style:left={coveredBandLeft} style:right={`${chrome.insetRight + 8}px`}>
       {#if menus.length > 0}
         <div class="window-menus">
           {#each menus as menu (menu.id)}

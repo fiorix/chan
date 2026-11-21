@@ -17,7 +17,8 @@ import {
   isTauriDesktop,
   requestCloseWindow,
 } from "../api/desktop";
-import { setTransientStatus } from "./store.svelte";
+import { setTransientStatus, ui } from "./store.svelte";
+import { connectionHealth } from "./connectionHealth.svelte";
 import { flushEditsToRecovery } from "./tabs.svelte";
 
 export type CloseConfirmChoice = "hide" | "close" | "cancel";
@@ -28,10 +29,15 @@ export const closeConfirmState = $state<{
   /// Why the desktop refused the choice just made, shown on the prompt
   /// until it closes; `null` while nothing was refused.
   refusal: string | null;
+  /// The connection and cover seen when this decision was requested.
+  outageEpochAtOpen: number;
+  coveredAtOpen: boolean;
 }>({
   open: false,
   resolve: null,
   refusal: null,
+  outageEpochAtOpen: 0,
+  coveredAtOpen: false,
 });
 
 /// Open the close-confirm overlay and resolve when the user picks Hide / Close /
@@ -43,6 +49,8 @@ export function uiCloseConfirm(): Promise<CloseConfirmChoice> {
     closeConfirmState.resolve?.("cancel");
     closeConfirmState.resolve = resolve;
     closeConfirmState.refusal = null;
+    closeConfirmState.outageEpochAtOpen = connectionHealth.outageEpoch;
+    closeConfirmState.coveredAtOpen = ui.disconnectBlocking;
     closeConfirmState.open = true;
   });
 }
@@ -57,8 +65,8 @@ export function resolveCloseConfirm(choice: CloseConfirmChoice): void {
   r?.(choice);
 }
 
-/// Cancel any pending close prompt when its window changes connection state.
-/// Idempotent so both disconnect and reconnect transitions can call it.
+/// Cancel any pending close prompt at an outage edge or when its cover appears.
+/// Idempotent when both conditions arrive together.
 export function cancelCloseConfirmForConnectionChange(): void {
   resolveCloseConfirm("cancel");
 }
@@ -89,8 +97,8 @@ export async function flushAndHideWindow(): Promise<string | null> {
 /// desktop has answered (a prompt cancelled meanwhile) also leaves the
 /// window as it is. The discard waits for the answer because it cannot be
 /// taken back. Without `discard` the caller has discarded already and the
-/// close is not asked about: the red dot on a window with no tab or while
-/// reconnecting. A window whose last tab has closed closes through
+/// close is not asked about: the red dot on a window with no tab or under a
+/// reconnecting cover with no open watcher. A window whose last tab has closed closes through
 /// `closeEmptiedWindow` instead, each tab's own close having committed its
 /// input or, under force, dropped it.
 export async function flushAndCloseWindow(options?: {

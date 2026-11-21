@@ -9,6 +9,7 @@
   import { DEFAULT_WAVE_SPEED } from "./lib/plasmaBackground";
   import SelectionBar from "./components/SelectionBar.svelte";
   import ScreenFlip from "./components/ScreenFlip.svelte";
+  import KeyBar from "./components/KeyBar.svelte";
   import Library from "./components/Library.svelte";
   import Gateways from "./components/Gateways.svelte";
   import NewWorkspaceDialog from "./components/NewWorkspaceDialog.svelte";
@@ -32,6 +33,7 @@
   import { activeCommandLauncherDraft } from "./state/commandLauncher.svelte";
   import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
+  import { showDevserverCard, type DevserverCardRequest } from "./state/computerActions";
 
   let { animatedBackground = true, waveSpeed = DEFAULT_WAVE_SPEED }: {
     animatedBackground?: boolean;
@@ -88,6 +90,24 @@
     updateError = null;
   }
 
+  // A devserver window's reconnecting cover (Show in Computers) names its
+  // devserver to this window's launcher alone. A card asked for before the
+  // library's first reading is asked for again once that reading says
+  // whether the devserver's row is there.
+  let cardAwaitingLibrary: string | null = $state(null);
+
+  function onShowDevserverCard(request: DevserverCardRequest | null): void {
+    const id = typeof request?.devserverId === "string" ? request.devserverId : null;
+    cardAwaitingLibrary = showDevserverCard(id) ? null : id;
+  }
+
+  $effect(() => {
+    if (cardAwaitingLibrary === null || !library.loaded) return;
+    const id = cardAwaitingLibrary;
+    cardAwaitingLibrary = null;
+    showDevserverCard(id);
+  });
+
   async function restartAfterUpdate(): Promise<void> {
     updateRestarting = true;
     updateError = null;
@@ -124,6 +144,7 @@
     let unlistenAuthError: (() => void) | null = null;
     let unlistenAuthChanged: (() => void) | null = null;
     let unlistenNotice: (() => void) | null = null;
+    let unlistenCard: (() => void) | null = null;
     void onTauriEvent("devserver-control-attention", onControlAttentionEvent).then((un) => {
       unlistenAttention = un;
     });
@@ -152,6 +173,9 @@
     void onTauriEvent<Notice>("launcher-notice", pushNotice).then((un) => {
       unlistenNotice = un;
     });
+    void onTauriEvent<DevserverCardRequest | null>("launcher-show-devserver-card", onShowDevserverCard).then((un) => {
+      unlistenCard = un;
+    });
     return () => {
       unlistenAttention?.();
       unlistenRestored?.();
@@ -159,6 +183,7 @@
       unlistenAuthError?.();
       unlistenAuthChanged?.();
       unlistenNotice?.();
+      unlistenCard?.();
       unwatchLocalTheme?.();
     };
   });
@@ -207,6 +232,10 @@
       {/if}
     </ScreenFlip>
   </main>
+
+  {#if hasDesktopBridge}
+    <KeyBar />
+  {/if}
 
   {#if !readOnly}
     <SelectionBar />
@@ -267,7 +296,9 @@
   }
 
   /* Equal space above and below centers the deck in the whole window. The
-     top bar occupies the upper space; the lower space clears the bulk bar. */
+     top bar occupies the upper space; the lower space clears the bulk bar and
+     holds the key bar along its bottom edge, inside the band's 4rem floor, so
+     the key bar takes none of the deck's height. */
   .launcher-surface.deck {
     display: grid;
     height: 100vh;
@@ -277,6 +308,11 @@
 
   .launcher-surface.deck > :global(.topbar) {
     align-self: start;
+  }
+
+  .launcher-surface.deck > :global(.key-bar) {
+    grid-row: 3;
+    align-self: end;
   }
 
   .content {

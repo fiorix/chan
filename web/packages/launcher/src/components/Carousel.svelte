@@ -282,7 +282,6 @@
       </button>
     {/if}
   </div>
-  <p class="key-hint">g screens · o on/off · t terminal · w workspace window · h show/hide</p>
   {#if count > 1}
     <!-- Pointer convenience mirroring the arrows: hidden from assistive tech
          and out of the tab order, since the arrows and the side buttons
@@ -305,8 +304,9 @@
 </div>
 
 <style>
-  .key-hint { margin: 0; text-align: center; color: var(--text-secondary); font-size: 0.78rem; }
   .carousel {
+    /* The 11rem is the rest of the window: the 4rem bands above and below
+       the deck (App), the content's padding, and the dots under the stage. */
     --deck-height: clamp(12rem, calc(100vh - 11rem), 48rem);
     /* The room under a card's last row, as end padding and as scroll padding. */
     --card-end-gap: 0.75rem;

@@ -491,6 +491,16 @@ describe("a selection", () => {
 });
 
 describe("fitting the view", () => {
+  /// Tick the simulation on d3's timer until it rests, painting a frame per
+  /// tick, as a browser runs it; the tests drive the timer by hand.
+  function settle(): void {
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+  }
+
   function inView(api: CanvasApi, id: string): boolean {
     const c = circle(api, id);
     return c.x > 0 && c.x < canvasHost.width && c.y > 0 && c.y < canvasHost.height;
@@ -672,6 +682,208 @@ describe("fitting the view", () => {
     expect(after.x).toBeCloseTo(before.x, 1);
     expect(after.y).toBeCloseTo(before.y, 1);
     expect(after.r).toBeCloseTo(before.r, 1);
+  });
+
+  test("a node swap under the same scope leaves a view the user has dragged where it is", () => {
+    const p = props(spine(), { focalIds: [""] });
+    const { api, canvas } = render(p);
+    settle();
+    const dragged = circle(api, "directory:a");
+    mouse(canvas, "mousedown", dragged.x, dragged.y);
+    mouse(canvas, "mousemove", dragged.x + 40, dragged.y - 30);
+    mouse(canvas, "mouseup", dragged.x + 40, dragged.y - 30);
+    settle();
+    const before = circle(api, "");
+    const grown = spine();
+    grown.nodes.push(n.file("new.md"));
+    grown.edges.push(n.edge("", "new.md", "contains"));
+    p.nodes = grown.nodes;
+    p.edges = grown.edges;
+    p.visibleNodeIds = new Set(grown.nodes.map((node) => node.id));
+    p.visibleEdges = grown.edges;
+    flushSync();
+    runFrames(90);
+    const after = circle(api, "");
+    expect(after.x, "the view stays where the user put it").toBeCloseTo(before.x, 0);
+    expect(after.y).toBeCloseTo(before.y, 0);
+  });
+
+  test("a node swap under the same scope leaves a view the user has zoomed where it is", () => {
+    const p = props(spine(), { focalIds: [""] });
+    const { api, canvas } = render(p);
+    settle();
+    const zoomed = circle(api, "");
+    canvas.dispatchEvent(new WheelEvent("wheel", { deltaY: 100, bubbles: true, cancelable: true }));
+    runFrames(2);
+    expect(circle(api, "").r, "the wheel zoomed the view").toBeLessThan(zoomed.r);
+    const before = circle(api, "");
+    const grown = spine();
+    grown.nodes.push(n.file("new.md"));
+    grown.edges.push(n.edge("", "new.md", "contains"));
+    p.nodes = grown.nodes;
+    p.edges = grown.edges;
+    p.visibleNodeIds = new Set(grown.nodes.map((node) => node.id));
+    p.visibleEdges = grown.edges;
+    flushSync();
+    runFrames(90);
+    const after = circle(api, "");
+    expect(after.x, "the view stays where the user put it").toBeCloseTo(before.x, 0);
+    expect(after.y).toBeCloseTo(before.y, 0);
+    expect(after.r).toBeCloseTo(before.r, 2);
+  });
+});
+
+describe("a root with many direct entries", () => {
+  /// A workspace whose root holds `count` direct files, optionally with
+  /// one directory holding `nested` files. Mirrors the suite shape that
+  /// check 218 meets: the ring of root children wraps under the root.
+  function fan(count: number, nested = 0): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+    const nodes = [n.dir("")];
+    const edges: CanvasEdge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const p = `f${i}.md`;
+      nodes.push(n.file(p));
+      edges.push(n.edge("", p, "contains"));
+    }
+    if (nested > 0) {
+      nodes.push(n.dir("big"));
+      edges.push(n.edge("", "directory:big", "contains"));
+      for (let i = 0; i < nested; i += 1) {
+        const p = `big/g${i}.md`;
+        nodes.push(n.file(p));
+        edges.push(n.edge("directory:big", p, "contains"));
+      }
+    }
+    return { nodes, edges };
+  }
+
+  /// Tick the simulation until every node's screen circle holds still,
+  /// then let the fit's easing converge, as a browser runs the tab. This
+  /// mounts the real GraphCanvas with the real layout and fit, not a
+  /// replica: positions come from the sim, the view from computeFitForNodes.
+  function settleFan(api: CanvasApi, ids: string[]): void {
+    let steady = 0;
+    let prev = ids.map((id) => circle(api, id));
+    for (let i = 0; i < 3000 && steady < 3; i += 1) {
+      timerFlush();
+      runFrames(2);
+      const now = ids.map((id) => circle(api, id));
+      const held = now.every(
+        (c, j) => Math.abs(c.x - prev[j]!.x) < 0.25 && Math.abs(c.y - prev[j]!.y) < 0.25,
+      );
+      steady = held ? steady + 1 : 0;
+      prev = now;
+    }
+    runFrames(120);
+  }
+
+  /// The room every node's disc leaves to each canvas edge, in canvas
+  /// pixels. Negative room is a node drawn past that edge.
+  function fanRoom(api: CanvasApi, ids: string[]): { left: number; right: number; above: number; below: number } {
+    const discs = ids.map((id) => circle(api, id));
+    return {
+      left: Math.min(...discs.map((d) => d.x - d.r)),
+      right: canvasHost.width - Math.max(...discs.map((d) => d.x + d.r)),
+      above: Math.min(...discs.map((d) => d.y - d.r)),
+      below: canvasHost.height - Math.max(...discs.map((d) => d.y + d.r)),
+    };
+  }
+
+  for (const [count, nested] of [[34, 0], [60, 0], [110, 0], [140, 0], [43, 100]] as const) {
+    test(`a root with ${count} direct entries${nested > 0 ? ` and ${nested} nested files` : ""} holds every node inside the canvas`, () => {
+      const graph = withDrafts(fan(count, nested), ["untitled", "sketch"]);
+      const ids = graph.nodes.map((x) => x.id);
+      const { api } = render(props(graph, { focalIds: [""] }));
+      settleFan(api, ids);
+      const size = `${count}+${nested}`;
+      const r = fanRoom(api, ids);
+      expect(r.left, `${size}: right of the left edge`).toBeGreaterThanOrEqual(0);
+      expect(r.right, `${size}: left of the right edge`).toBeGreaterThanOrEqual(0);
+      expect(r.above, `${size}: below the top edge`).toBeGreaterThanOrEqual(0);
+      expect(r.below, `${size}: above the bottom edge`).toBeGreaterThanOrEqual(0);
+      const root = circle(api, "");
+      expect(root.x, `${size}: the root halfway across`).toBeCloseTo(canvasHost.width / 2, 0);
+    });
+  }
+});
+
+describe("a root on a product-sized canvas", () => {
+  /// A workspace whose root holds `count` direct files. Mirrors the suite
+  /// shape that check 218 meets: the ring of root children wraps under
+  /// the root.
+  function wideFan(count: number): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+    const nodes = [n.dir("")];
+    const edges: CanvasEdge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const p = `f${i}.md`;
+      nodes.push(n.file(p));
+      edges.push(n.edge("", p, "contains"));
+    }
+    return { nodes, edges };
+  }
+
+  /// Tick the simulation on d3's timer until it rests, painting a frame per
+  /// tick, as a browser runs it; the tests drive the timer by hand.
+  function wideSettle(): void {
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(120);
+  }
+
+  /// The lowest disc edge in the canvas, in canvas pixels.
+  function lowestBottom(api: CanvasApi, ids: string[]): number {
+    const discs = ids.map((id) => circle(api, id));
+    return Math.max(...discs.map((d) => d.y + d.r));
+  }
+
+  test("a lone root keeps its seat 56 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = { nodes: [n.dir("")], edges: [] as CanvasEdge[] };
+    const { api, target } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the root 56 px above the bottom edge").toBeCloseTo(644, 0);
+    const seat = target.querySelector("canvas")?.getAttribute("data-focal-seat")?.split(",").map(Number);
+    expect(seat?.length, "the canvas publishes the fit's seat").toBe(2);
+    expect(seat![0], "the published seat sits halfway across").toBeCloseTo(root.x, 0);
+    expect(seat![1], "the published seat is the root's painted centre").toBeCloseTo(root.y, 0);
+  });
+
+  test("a one-level fan of 5 files keeps its seat 56 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(5);
+    const { api } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the root 56 px above the bottom edge").toBeCloseTo(644, 0);
+  });
+
+  test("a raised fan of 110 files ends its lowest disc 24 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(110);
+    const ids = graph.nodes.map((x) => x.id);
+    const { api } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    expect(lowestBottom(api, ids), "the lowest disc at the fit's pad").toBeCloseTo(676, -1);
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the seat rose for the ring below the root").toBeLessThan(644);
+  });
+
+  test("the bounds framing publishes no seat", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(5);
+    const { target } = render(props(graph, { focalIds: [""], focalAnchor: "bounds" }));
+    wideSettle();
+    expect(target.querySelector("canvas")?.getAttribute("data-focal-seat")).toBeNull();
   });
 });
 

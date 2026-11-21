@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "chan"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "anyhow",
  "chan-llm",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "chan-desktop"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "arboard",
  "axum",
@@ -1089,13 +1089,14 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "webview2-com",
  "windows-sys 0.59.0",
  "wry",
 ]
 
 [[package]]
 name = "chan-library"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1126,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "chan-llm"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "base64 0.22.1",
  "chan-workspace",
@@ -1141,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "chan-metrics"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "serde",
  "tokio",
@@ -1149,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "chan-report"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "chrono",
  "encoding_rs_io",
@@ -1163,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "chan-revtunnel"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "chan-metrics",
  "chan-tls",
@@ -1177,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "chan-server"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1226,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "chan-shell"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1242,14 +1243,14 @@ dependencies = [
 
 [[package]]
 name = "chan-systemd"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "rustix 1.1.4",
 ]
 
 [[package]]
 name = "chan-tls"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "ring",
  "rustls",
@@ -1261,14 +1262,14 @@ dependencies = [
 
 [[package]]
 name = "chan-tmux"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "chan-tunnel-client"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1294,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-proto"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1312,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-server"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1339,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "chan-winpipe"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "tokio",
  "windows-sys 0.59.0",
@@ -1347,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "chan-wireguard"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -1371,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "chan-workspace"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -1380,6 +1381,7 @@ dependencies = [
  "candle-transformers",
  "cap-std",
  "chan-report",
+ "chan-tls",
  "chrono",
  "csv",
  "dirs 5.0.1",
@@ -1388,6 +1390,7 @@ dependencies = [
  "gray_matter",
  "hf-hub",
  "ignore",
+ "indicatif",
  "libc",
  "notify",
  "percent-encoding",
@@ -1406,6 +1409,8 @@ dependencies = [
  "tokenizers 0.21.4",
  "toml 0.8.2",
  "tracing",
+ "ureq",
+ "url",
  "walkdir",
  "windows-sys 0.59.0",
  "xattr",
@@ -2530,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "fetch-models"
-version = "0.131.0"
+version = "0.132.0"
 dependencies = [
  "anyhow",
  "chan-workspace",
@@ -3581,17 +3586,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "629d8f3bbeda9d148036d6b0de0a3ab947abd08ce90626327fc3547a49d59d97"
 dependencies = [
  "dirs 6.0.0",
- "http",
- "indicatif",
- "libc",
  "log",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "ureq",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8720,8 +8715,6 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
- "serde",
- "serde_json",
  "socks",
  "url",
  "webpki-roots 0.26.11",

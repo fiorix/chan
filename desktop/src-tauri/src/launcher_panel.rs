@@ -16,8 +16,9 @@
 //! stops a window holding two webviews from resolving as a `WebviewWindow`.
 //! Outside Tauri the launcher webview has no Tauri IPC, so launcher_ipc.js
 //! gives the page the calls its desktop module makes, and this module
-//! answers exactly the commands in `LauncherCommand` and forwards exactly the
-//! events in `FORWARDED_EVENTS`.
+//! answers exactly the commands in `LauncherCommand`, forwards exactly the
+//! events in `FORWARDED_EVENTS` and sends one host's launcher alone the card
+//! event, `SHOW_CARD_EVENT`.
 //!
 //! Off macOS a window wears the launcher menubar while its launcher shows,
 //! except on Windows a window whose title bar holds its page's tab bar
@@ -93,6 +94,22 @@ pub(crate) const FORWARDED_EVENTS: [&str; 7] = [
     "auth-changed",
     crate::gateway::LAUNCHER_NOTICE,
 ];
+
+/// The event that brings one card of the Computers screen to the front
+/// (web-launcher App.svelte). Unlike [`FORWARDED_EVENTS`] it goes to one
+/// host's launcher alone ([`show_card`]), since each launcher keeps its own
+/// deck position and another window's must not move.
+pub(crate) const SHOW_CARD_EVENT: &str = "launcher-show-devserver-card";
+
+/// How long [`show_card`] waits for a toggle already running on its host: a
+/// hang guard, not a measure. A toggle's waits on its pages are bounded, a
+/// first show's page load by `FIRST_LOAD_TIMEOUT`, each stage by
+/// `PRIME_TIMEOUT` and the slide by `START_DELAY_MS + SLIDE_MS`, which ends
+/// even a first show within about 6 s. Its hops to the main thread (building,
+/// showing and hiding the launcher, setting its focus colour) have no bound
+/// of their own and wait on nothing, so a toggle still running past this has
+/// hung.
+const CARD_SHOW_WAIT: Duration = Duration::from_secs(10);
 
 /// Both cards slide together for this long in launcher_transition.js.
 pub(crate) const SLIDE_MS: u64 = 320;
@@ -264,6 +281,55 @@ pub(crate) async fn show_for_attention(app: &AppHandle) -> bool {
     true
 }
 
+/// Show `host`'s launcher, or keep it shown, and bring the card of the
+/// devserver `devserver_id` to the front of its Computers screen with the
+/// keyboard on it; `None` brings the screen's first card. The card goes once
+/// the show has returned, as `show_for_attention`'s event does, so a
+/// launcher the show had to build has loaded and subscribed, and it goes to
+/// this host's launcher alone. A toggle already running on the host is waited
+/// for, so the screen ends shown whichever way that toggle was going.
+pub(crate) async fn show_card(
+    app: &AppHandle,
+    host: &str,
+    devserver_id: Option<&str>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + CARD_SHOW_WAIT;
+    let _guard = loop {
+        if let Some(guard) = TransitionGuard::take(host) {
+            break guard;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the Computers screen is still moving over this window".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if !panel_is_visible(host) {
+        show_async(app, host).await?;
+        if !panel_is_visible(host) {
+            return Err("the Computers screen did not show over this window".into());
+        }
+    }
+    let script = show_card_js(devserver_id);
+    let host = host.to_string();
+    // A screen that was already shown may have lost the keyboard to its
+    // host page; the card's focus is only the launcher page's own.
+    window_ops::on_main(app, move || {
+        reclaim_keyboard(&host);
+        evaluate_in_launcher(&host, &script);
+    })
+    .await
+}
+
+/// The script that hands a launcher page [`SHOW_CARD_EVENT`], naming the
+/// devserver whose card goes in front, or `null` for the screen's first card.
+fn show_card_js(devserver_id: Option<&str>) -> String {
+    format!(
+        "window.__chanLauncherHost&&window.__chanLauncherHost.emit({},{});",
+        serde_json::json!(SHOW_CARD_EVENT),
+        serde_json::json!({ "devserverId": devserver_id }),
+    )
+}
+
 pub(crate) fn toggle(app: &AppHandle, host: &str) {
     spawn_transition(app, host, !panel_is_visible(host));
 }
@@ -295,6 +361,11 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
                 ZOOM_LEVELS.with(|levels| levels.borrow_mut().remove(&host));
             }
         });
+        // A launcher dropped with the keyboard reports no loss of it.
+        app_for_main
+            .state::<Arc<AppState>>()
+            .devserver_feed
+            .screen_focus(&host, false);
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         GTK_LAYERS.with(|layers| {
             layers.borrow_mut().remove(&host);
@@ -399,11 +470,6 @@ pub(crate) fn has_launcher(host: &str) -> bool {
 }
 
 /// Evaluate `script` in `host`'s launcher, when it has one. Main thread.
-/// Compiled everywhere like [`has_launcher`].
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "only the macOS wake repaint calls it")
-)]
 pub(crate) fn evaluate_in_launcher(host: &str, script: &str) {
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
@@ -589,8 +655,7 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
     crate::titlebar_tabs::launcher_visibility_changed(host);
     #[cfg(not(target_os = "macos"))]
     sync_launcher_menu(app, host);
-    #[cfg(target_os = "macos")]
-    let _ = app;
+    app.state::<Arc<AppState>>().devserver_feed.ping_now();
     true
 }
 
@@ -686,6 +751,10 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
             }
         }
     });
+    // A hidden launcher holds no keyboard, whatever its webview reports.
+    app.state::<Arc<AppState>>()
+        .devserver_feed
+        .screen_focus(host, false);
     let Some(host_window) = host_window else {
         return;
     };
@@ -695,8 +764,6 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
         let _ = host_window.remove_menu();
         crate::rebuild_window_menu(app);
     }
-    #[cfg(target_os = "macos")]
-    let _ = app;
 }
 
 /// Hide the launcher overlay and return keyboard focus to the host.
@@ -1039,6 +1106,8 @@ fn build_panel(
         // Built hidden, so parked until its first show fits it.
         #[cfg(target_os = "macos")]
         park(host, &webview);
+        #[cfg(windows)]
+        report_focus(app, &label, &webview);
         webview
     };
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1101,6 +1170,46 @@ fn build_panel(
         });
     }
     Ok(true)
+}
+
+/// Report the focus of `host`'s launcher to the devserver feeds' pacer, which
+/// paces them faster while a window of the desktop has the focus. On Windows
+/// tauri-runtime-wry reads a window's focus from its own webview's WebView2
+/// controller alone, so the launcher taking the keyboard reads as the window
+/// losing the focus, and no gain follows while the launcher holds it: the
+/// launcher's controller reports for itself. A hidden or dropped launcher
+/// holds no focus (`hide_now`, `close_for_host`). Main thread.
+#[cfg(windows)]
+fn report_focus(app: &AppHandle, host: &str, webview: &wry::WebView) {
+    use webview2_com::FocusChangedEventHandler;
+    use wry::WebViewExtWindows;
+
+    let controller = webview.controller();
+    for gained in [true, false] {
+        let app = app.clone();
+        let host_for_event = host.to_string();
+        let handler = FocusChangedEventHandler::create(Box::new(move |_, _| {
+            app.state::<Arc<AppState>>()
+                .devserver_feed
+                .screen_focus(&host_for_event, gained);
+            Ok(())
+        }));
+        // The controller holds the handler until it closes with the
+        // launcher, so the token that would remove it early is not kept.
+        let mut token: i64 = 0;
+        // SAFETY: a COM call on the launcher's live controller, on the main
+        // thread that created it, with a handler it keeps a reference to.
+        let attached = unsafe {
+            if gained {
+                controller.add_GotFocus(&handler, &mut token)
+            } else {
+                controller.add_LostFocus(&handler, &mut token)
+            }
+        };
+        if let Err(e) = attached {
+            tracing::warn!(host, gained, error = %e, "watching the launcher's focus failed");
+        }
+    }
 }
 
 fn open_externally(app: &AppHandle, target: &str) {
@@ -1381,10 +1490,10 @@ mod tests {
     fn the_covered_marker_is_the_one_the_terminal_reads() {
         // The host page's terminal skips its resume refocus on this root
         // attribute, and the window tab bar hides its contents on it, both
-        // through the page's focus guard; both sides spell it from one
-        // constant each.
-        const FOCUS_GUARD: &str =
-            include_str!("../../../web/packages/workspace-app/src/state/focusGuard.ts");
+        // through the page's keyboard owner module; both sides spell it from
+        // one constant each.
+        const KEYBOARD_OWNER: &str =
+            include_str!("../../../web/packages/workspace-app/src/state/keyboardOwner.svelte.ts");
         const TERMINAL_TAB: &str =
             include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
         const WINDOW_TAB_BAR: &str =
@@ -1394,11 +1503,16 @@ mod tests {
             .contains("hostCovered() { document.documentElement.setAttribute(COVERED, ''); }"));
         assert!(TRANSITION_JS
             .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
-        assert!(FOCUS_GUARD.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";"));
-        assert!(FOCUS_GUARD.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)"));
-        assert!(TERMINAL_TAB.contains("from \"../state/focusGuard\";"));
+        assert!(
+            KEYBOARD_OWNER.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";")
+        );
+        assert!(
+            KEYBOARD_OWNER.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)")
+        );
+        assert!(TERMINAL_TAB.contains("from \"../state/keyboardOwner.svelte\";"));
         assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
-        assert!(WINDOW_TAB_BAR.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
+        assert!(KEYBOARD_OWNER.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
+        assert!(WINDOW_TAB_BAR.contains("$derived(launcherCovers())"));
     }
 
     #[test]
@@ -1427,6 +1541,78 @@ mod tests {
             .expect("a show that did not happen unmarks it");
         assert!(covered < uncovered);
         assert!(show.contains("if !matches!(shown, Ok(true))"));
+    }
+
+    #[test]
+    fn a_shown_launcher_asks_every_devserver_feed_for_a_ping() {
+        // The Computers screen shows each card's connection face fresh: a
+        // launcher that took the keyboard asks the feeds for one ping, and a
+        // show that did not happen asks for none.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let (_, rest) = SOURCE
+            .split_once("\nfn show_now(")
+            .expect("the function exists");
+        let show = rest
+            .split_once("\n}\n")
+            .expect("it ends at a column-0 brace")
+            .0;
+        let ping = show
+            .find("devserver_feed.ping_now()")
+            .expect("the show asks the feeds for a ping");
+        let unshown = show.find("return false;").expect("a show can fail");
+        assert!(
+            unshown < ping,
+            "a show that did not happen asked for a ping"
+        );
+    }
+
+    #[test]
+    fn a_launcher_reports_its_own_focus_on_windows_and_none_once_hidden() {
+        // On Windows a window's focus is read from its own webview's WebView2
+        // controller, so a launcher holding the keyboard reads as a window
+        // without the focus unless the launcher's controller reports for
+        // itself. A hidden or dropped launcher holds no focus, whatever its
+        // controller reported last.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let body = |head: &str| {
+            let (_, rest) = SOURCE.split_once(head).expect("the function exists");
+            rest.split_once("\n}\n")
+                .expect("it ends at a column-0 brace")
+                .0
+        };
+        let build = body("\nfn build_panel(");
+        assert!(build.contains("#[cfg(windows)]\n        report_focus(app, &label, &webview);"));
+        let report = body("\nfn report_focus(");
+        let at = |needle: &str| {
+            report
+                .find(needle)
+                .expect("the launcher watches both edges")
+        };
+        let gain = at("if gained {");
+        let got = at("controller.add_GotFocus(&handler, &mut token)");
+        let loss = at("} else {");
+        let lost = at("controller.add_LostFocus(&handler, &mut token)");
+        assert!(
+            gain < got && got < loss && loss < lost,
+            "a gain is watched by add_GotFocus and a loss by add_LostFocus"
+        );
+        assert!(report.contains(".screen_focus(&host_for_event, gained)"));
+        let hide = body("\nfn hide_now(");
+        let hidden = hide
+            .find("webview.set_visible(false)")
+            .expect("the hide hides the launcher");
+        let cleared = hide
+            .find(".screen_focus(host, false)")
+            .expect("a hidden launcher holds no focus");
+        assert!(hidden < cleared);
+        let close = body("\npub(crate) fn close_for_host<");
+        let dropped = close
+            .find("launchers.remove(&host)")
+            .expect("the close drops the launcher");
+        let cleared = close
+            .find(".screen_focus(&host, false)")
+            .expect("a dropped launcher holds no focus");
+        assert!(dropped < cleared);
     }
 
     #[test]
@@ -1663,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn every_event_the_launcher_listens_to_is_forwarded() {
+    fn every_event_the_launcher_listens_to_reaches_it() {
         const LAUNCHER_APP: &str = include_str!("../../../web/packages/launcher/src/App.svelte");
         let mut listened: Vec<String> = LAUNCHER_APP
             .match_indices("onTauriEvent")
@@ -1677,9 +1863,71 @@ mod tests {
             .collect();
         listened.extend(invoked(crate::privacy::BRIDGE, "listen('", '\''));
         listened.sort();
-        let mut forwarded: Vec<String> = FORWARDED_EVENTS.iter().map(|e| e.to_string()).collect();
-        forwarded.sort();
-        assert_eq!(listened, forwarded);
+        // The card event is the one the desktop addresses to a single
+        // launcher, and the only one.
+        let mut delivered: Vec<String> = FORWARDED_EVENTS
+            .iter()
+            .chain([&SHOW_CARD_EVENT])
+            .map(|e| e.to_string())
+            .collect();
+        delivered.sort();
+        assert_eq!(listened, delivered);
+        assert!(!FORWARDED_EVENTS.contains(&SHOW_CARD_EVENT));
+    }
+
+    /// The card event names the devserver by the card's key, or no devserver
+    /// for the screen's first card, in the field the launcher reads.
+    #[test]
+    fn the_card_event_names_the_devserver_or_none() {
+        const COMPUTER_ACTIONS: &str =
+            include_str!("../../../web/packages/launcher/src/state/computerActions.ts");
+        assert_eq!(
+            show_card_js(Some("ds-1")),
+            r#"window.__chanLauncherHost&&window.__chanLauncherHost.emit("launcher-show-devserver-card",{"devserverId":"ds-1"});"#
+        );
+        assert_eq!(
+            show_card_js(None),
+            r#"window.__chanLauncherHost&&window.__chanLauncherHost.emit("launcher-show-devserver-card",{"devserverId":null});"#
+        );
+        // A quote in an id stays inside its JSON string.
+        assert!(show_card_js(Some("a\"b")).contains(r#"{"devserverId":"a\"b"}"#));
+        assert!(COMPUTER_ACTIONS.contains("devserverId"));
+    }
+
+    /// The card goes to the host's own launcher once a show has made it
+    /// visible, under the host's transition guard so no toggle interleaves,
+    /// and never through the broadcast every launcher hears. Pinned in the
+    /// source because the show needs a live webview.
+    #[test]
+    fn the_card_follows_the_show_in_the_hosts_launcher_alone() {
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let (production, _) = SOURCE
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, rest) = production
+            .split_once("\npub(crate) async fn show_card(")
+            .expect("the function exists");
+        let show = rest
+            .split_once("\n}\n")
+            .expect("it ends at a column-0 brace")
+            .0;
+        let guard = show
+            .find("TransitionGuard::take(host)")
+            .expect("the card waits for the host's transition guard");
+        let shown = show
+            .find("show_async(app, host).await?;")
+            .expect("a hidden screen is shown first");
+        let checked = show
+            .find("if !panel_is_visible(host) {\n            return Err(")
+            .expect("a show that did not happen is refused");
+        let keyboard = show
+            .find("reclaim_keyboard(&host);")
+            .expect("the shown launcher holds the keyboard");
+        let card = show
+            .find("evaluate_in_launcher(&host, &script);")
+            .expect("the card goes to this host's launcher");
+        assert!(guard < shown && shown < checked && checked < keyboard && keyboard < card);
+        assert!(!show.contains("emit("), "the card is not broadcast");
     }
 
     #[test]

@@ -122,6 +122,7 @@
   import { api } from "../api/client";
   import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -131,11 +132,20 @@
   // of the active pane. It gates the editor's mount autofocus and the
   // refocus effect below: the bubble stays mounted while its tab is hidden
   // (keep-alive, like the terminal body), so an ungated focus would let a
-  // background tab's composer steal the keyboard.
+  // background tab's composer steal the keyboard. A focused terminal's
+  // composer still yields to what its terminal's own refocus yields to: the
+  // keyboard's owner (a modal dialog, the Computers launcher, an overlay over
+  // the panes, a cover, a survey over this terminal) holds the keyboard
+  // while it shows.
   let { tab, focused = false, shown = true }: { tab: TerminalTab; focused?: boolean; shown?: boolean } =
     $props();
 
   let rootEl = $state<HTMLDivElement>();
+
+  /// Whether the keyboard's owner holds the keyboard away from this composer.
+  function keyboardHeld(): boolean {
+    return !mayFocus(rootEl ?? null);
+  }
   let editor = $state<Wysiwyg>();
   let sourceEditor = $state<Source>();
   // The style toolbar re-reads the editor's marks when this ticks.
@@ -148,6 +158,10 @@
     return sourceMode ? sourceEditor : editor;
   }
   let content = $state("");
+  // The editor takes the keyboard by itself while `autoFocus` holds: as it
+  // mounts, and when its text changes from here, as a delivery empties it.
+  // Every owner is reactive state, so the rule re-reads on each change.
+  const editorAutoFocus = $derived(focused && !keyboardHeld());
   let loaded = $state(false);
   let mounting = $state(false);
   let mountError = $state<string | null>(null);
@@ -437,17 +451,33 @@
       void flushWrite();
       lastQueued = null;
       // The cleared composer restarts at offset 0: reset the persisted
-      // caret with it, and only refocus when this terminal is the focused
-      // one - a delivery landing on a background tab's kept-mounted bubble
-      // must not steal the keyboard.
+      // caret with it. Only the focused terminal's composer takes the
+      // keyboard, and only while nothing else owns it: a delivery landing on
+      // a background tab's kept-mounted bubble, or under a dialog, a survey
+      // or the launcher, must not steal it.
       setRichPromptCaret(tab, 0, 0);
-      if (focused) queueMicrotask(() => activeEditor()?.focusAt(0));
+      if (focused) {
+        queueMicrotask(() => {
+          if (!keyboardHeld()) activeEditor()?.focusAt(0);
+        });
+      }
       if (phase === "drained") showTransientNote("already sent");
     } else if (phase === "recalled") {
       content = recallText ?? content;
       lastQueued = null;
       void flushWrite();
-      if (focused) queueMicrotask(() => activeEditor()?.focusEnd());
+      if (focused) {
+        queueMicrotask(() => {
+          if (!keyboardHeld()) {
+            activeEditor()?.focusEnd();
+            return;
+          }
+          // The caret still lands at the end of what came back; the keyboard
+          // stays with its owner.
+          const view = promptView;
+          if (view) view.dispatch({ selection: { anchor: view.state.doc.length } });
+        });
+      }
     } else {
       if (recallText !== undefined) {
         content = recallText;
@@ -477,19 +507,25 @@
   // back; this effect restores focus without touching the editor's
   // selection, so the caret stays exactly where the user left it. Mirrors
   // FileEditorTab's focus effect (same pulse + same !focused gates); the
-  // terminal's own pulse effect defers to the bubble while it is open.
+  // terminal's own pulse effect defers to the bubble while it is open. Like
+  // the terminal's refocus, it yields while a dialog, a survey over this
+  // terminal, the launcher or an overlay over the panes owns the keyboard,
+  // and the next pulse after they let go lands here again.
   $effect(() => {
     if (!focused) return;
     tabFocusPulse.value;
     queueMicrotask(() => {
       if (!focused) return;
-      activeEditor()?.focus();
+      focus();
     });
   });
 
   /// Give the composer the keyboard without touching its selection, as a focus
-  /// pulse does. Its terminal asks after a move to another pane drops it.
+  /// pulse does, unless a dialog, a survey over this terminal, the launcher
+  /// or an overlay over the panes owns it. Its terminal asks after a move to
+  /// another pane drops it.
   export function focus(): void {
+    if (keyboardHeld()) return;
     activeEditor()?.focus();
   }
 
@@ -643,6 +679,8 @@
 
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
+  /// A keymap or strip submit takes the keyboard whenever no owner holds
+  /// it, even from an unfocused pane.
   function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
@@ -658,7 +696,7 @@
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
     void flushWrite();
-    view.focus();
+    if (!keyboardHeld()) view.focus();
     pendingChipVisible = false;
     if (graceTimer !== null) clearTimeout(graceTimer);
     graceTimer = setTimeout(() => {
@@ -847,7 +885,7 @@
   }
 
   // Keep the caret where it is: a button that took focus would blur the
-  // composer, and every action below returns focus to the editor itself.
+  // composer.
   function keepComposerFocus(e: PointerEvent): void {
     e.preventDefault();
   }
@@ -948,7 +986,8 @@
         bind:this={sourceEditor}
         bind:value={content}
         path={draftPath}
-        autoFocus={focused}
+        autoFocus={editorAutoFocus}
+        mayTakeFocus={() => focused && !keyboardHeld()}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
         extraExtensions={editorExtensions}
@@ -960,7 +999,8 @@
         bind:this={editor}
         bind:value={content}
         currentPath={draftPath}
-        autoFocus={focused}
+        autoFocus={editorAutoFocus}
+        mayTakeFocus={() => focused && !keyboardHeld()}
         {shown}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}

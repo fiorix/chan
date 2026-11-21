@@ -6,6 +6,9 @@
     Clipboard,
     ClipboardPaste,
     Command as CommandIcon,
+    ExternalLink,
+    FileText,
+    Link as LinkIcon,
     Pencil,
     Radio,
     Search,
@@ -39,7 +42,6 @@
   } from "../api/desktop";
   import { isOsFileDrag, shellEscapePaths } from "../state/fileDropGuard";
   import { resolveTerminalColors } from "../state/paneColor";
-  import { openExternalUrl } from "../editor/external_links";
   import {
     chordFor,
     consumeKey,
@@ -114,7 +116,10 @@
     setTransientStatus,
     surfaceThemeOverride,
     ui,
+    appInputBlocked,
   } from "../state/store.svelte";
+  import { middleEllipsis } from "../terminal/linkTarget";
+  import { TerminalLinkMenu, xtermLinkHandlers, type LinkRange } from "../terminal/linkMenu.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
@@ -140,6 +145,7 @@
     routeXtermData,
     shouldForwardGeneratedTerminalInput,
     terminalMessageBytes,
+    terminalMouseReport,
   } from "../terminal/connection";
   import {
     controlSlashBytes,
@@ -168,6 +174,7 @@
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
+  import { freshShellResetSequence } from "../terminal/freshShellReset";
   import {
     alignGhosttyRendererToXterm,
     gateGhosttyScrollbarClicks,
@@ -184,7 +191,7 @@
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
+  import type { Terminal as GhosttyTerminal, TerminalLinkActivation } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -214,9 +221,10 @@
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
-  import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
+  import { ghosttyCopyScrollback, installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
+  import { sessionRunsMuse } from "../terminal/drawnWraps";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
-  import { ghosttyScrollbackText, type GhosttyVt } from "@chan/ghostty-web-ng/vt";
+  import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -236,9 +244,11 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
+  import { handKeyboardToOwner, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
+  import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
+  import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
 
   let {
     tab,
@@ -254,12 +264,17 @@
     focused: boolean;
   } = $props();
 
-  // Modal dialogs, a survey over this terminal and the Computers launcher
-  // own the keyboard. Centralizing their guard keeps every refocus path
-  // from taking it, the mount and pane focus included; once those owners
-  // release it, the same calls legitimately restore the terminal.
+  // The keyboard's owner decides whether this terminal may take the
+  // keyboard; a survey over it owns the keyboard while this is the focused
+  // pane's active tab. Centralizing the guard keeps every refocus path from
+  // taking it, the mount and pane focus included; once the owner releases
+  // it, the same calls legitimately restore the terminal.
+  function keyboardHeld(): boolean {
+    return !mayFocus(host ?? null);
+  }
+
   function focusTerminal(): void {
-    if (refocusRefused(tab.id)) return;
+    if (keyboardHeld()) return;
     term?.focus();
   }
 
@@ -343,6 +358,7 @@
     | { type: "resize_other"; cols: number; rows: number }
     | { type: "closed"; reason: CloseReason }
     | { type: "exit"; code?: number }
+    | { type: "pong" }
     | { type: "error"; message?: string; reason?: string };
 
   type QueuedMessagePreview = {
@@ -400,6 +416,11 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
+  const terminalConnection = createTerminalConnectionHealth(() => sendPing());
+  $effect(() => {
+    const blocked = ui.disconnectBlocking || !active;
+    untrack(() => terminalConnection.setNoticeBlocked(blocked));
+  });
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
   // shared from transport.ts so the two cannot drift) applied to the one SPA
@@ -413,8 +434,9 @@
   let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
   // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
   // loaded at connect time, primed into the xterm on the attach prelude only
-  // when the server confirms the same generation + no missed bytes; otherwise
-  // discarded for a full replay. `receivedSeq` tracks the server byte cursor
+  // when the frame keeps the cached session id and the server confirms the
+  // same generation + no missed bytes; otherwise discarded for a full replay.
+  // `receivedSeq` tracks the server byte cursor
   // (prelude `seq` + live bytes since) so a capture knows where to resume from.
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
@@ -598,6 +620,9 @@
   const menuPos = $derived.by(() => {
     const a = tabMenu.anchor;
     if (!a) return { x: 0, y: 0 };
+    // A link menu's anchor is a band around the pointer: the menu opens
+    // under it and flips to above it, so a second click lands outside.
+    if (tabMenu.source === "link") return { x: Math.round(a.left), y: Math.round(a.bottom), flipY: Math.round(a.top) };
     return { x: Math.round(a.left), y: Math.round(a.bottom + 4) };
   });
   // The broadcast list, which the launcher's choice lists too. Self leads
@@ -654,9 +679,16 @@
     void tick().then(start);
     return teardown;
   });
+  $effect(() => () => terminalConnection.dispose());
 
   $effect(() => {
-    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => sendInput(data, binary));
+    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
+      const sent = sendInput(data, binary);
+      if (!terminalMouseReport(data)) {
+        if (sent) terminalConnection.inputSent();
+        else if (status !== "exited") terminalConnection.inputRefused();
+      }
+    });
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
     // write queue (NOT sendInput's raw keystroke path).
@@ -773,19 +805,26 @@
     else if (host?.contains(target)) keyboardSurface = "terminal";
   }
 
-  // Give the keyboard back to the find input, the composer or the terminal,
-  // whichever last took it and is still open, when this is still the focused
-  // terminal and nothing outside it has taken the keyboard since the move.
+  // Give the keyboard back when this is still the focused terminal and
+  // nothing outside it has taken the keyboard since the move: to its owner
+  // when something owns it, as the owner's surface takes it (a survey over
+  // this terminal among them; the Computers launcher takes nothing here),
+  // else to the find input, the composer or the terminal, whichever last
+  // took it and is still open.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
-      const owner = document.activeElement;
+      const holder = document.activeElement;
       if (
-        owner !== null &&
-        owner !== document.body &&
-        owner !== document.documentElement &&
-        !tabEl?.contains(owner)
+        holder !== null &&
+        holder !== document.body &&
+        holder !== document.documentElement &&
+        !tabEl?.contains(holder)
       ) {
+        return;
+      }
+      if (owner() !== null) {
+        handKeyboardToOwner();
         return;
       }
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
@@ -1251,6 +1290,7 @@
         theme: terminalTheme(),
       });
       term = ghosttyTerm;
+      ghosttyTerm.onLinkActivate(onGhosttyLink);
       // Ghostty's auto-hiding scrollbar is painted onto the content without
       // clearing it (see installGhosttyOverlayScrollbar), so the columns under
       // it stay readable and there is no gutter to hold back. Reserving width
@@ -1342,6 +1382,8 @@
         scrollback: scrollbackLines,
         tabStopWidth: 8,
         theme: terminalTheme(),
+        // An OSC 8 link goes to the link menu, which judges its target.
+        linkHandler: xtermLinks.linkHandler,
       });
       installTerminalReportGuards(term);
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
@@ -1357,18 +1399,10 @@
         if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
       });
       term.loadAddon(serialize);
-      // Route terminal link clicks through the editor's external-open
-      // path: a new browser tab on web, the OS default browser under
-      // chan-desktop's Tauri webview. The default WebLinksAddon handler
-      // is window.open(_blank), which under WKWebView either no-ops or
-      // opens inside the app shell, so links highlighted on hover but the
-      // click never reached a real browser. openExternalUrl also gates on
-      // the scheme (http/https/mailto/tel).
-      term.loadAddon(
-        new WebLinksAddon((_event, uri) => {
-          void openExternalUrl(uri);
-        }),
-      );
+      // A URL in the text goes to the link menu too, never to the addon's
+      // default window.open, which under WKWebView does nothing or opens
+      // inside the app shell.
+      term.loadAddon(new WebLinksAddon(xtermLinks.webLink.handler, xtermLinks.webLink.options));
       termWriter = term;
     }
     // Neither backend's open() takes the keyboard; a terminal in the focused
@@ -1412,12 +1446,12 @@
       if (!installGhosttySelection(ghosttyTerm, (text) => {
         void copyToClipboard(text);
         if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
-      })) {
+      }, runsMuse)) {
         console.warn(
           "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
         );
       }
-      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm);
+      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm, runsMuse);
       if (!ghosttyClickExtents) {
         console.warn(
           "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
@@ -1558,6 +1592,13 @@
       clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
+    terminalConnection.retired();
+  }
+
+  function sendPing(): void {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    terminalConnection.pingSent();
+    send({ type: "ping" });
   }
 
   function cancelReconnect(): void {
@@ -1711,7 +1752,9 @@
       // The control terminal is a single-shot local runner; it does not send
       // the heartbeat ping.
       if (!ui.terminalControl) {
-        pingTimer = setInterval(() => send({ type: "ping" }), WS_PING_MS);
+        terminalConnection.opened();
+        pingTimer = setInterval(sendPing, WS_PING_MS);
+        sendPing();
       }
       if (term) publishLocalSize(term.cols, term.rows);
       sendFocusState();
@@ -1752,6 +1795,10 @@
       try {
         frame = JSON.parse(String(event.data)) as ServerFrame;
       } catch {
+        return;
+      }
+      if (frame.type === "pong") {
+        terminalConnection.pongArrived();
         return;
       }
       if (frame.type === "ready") {
@@ -1800,7 +1847,9 @@
         // no ring bytes were lost: then the replay chunks that follow are just
         // the delta past the cached cursor and append cleanly on top. On any
         // mismatch the server has already fallen back to a full replay, so drop
-        // the stale snapshot and let those chunks repaint from scratch. Written
+        // the stale snapshot and let those chunks repaint from scratch. A
+        // snapshot cached under the old session id is another session's
+        // screen: a fresh id drops it with the wrong modes it carries. Written
         // inside the replay window so xterm's device-report replies stay
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
@@ -1808,25 +1857,21 @@
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
-        // with the xterm still holding a dead TUI's negotiated input modes.
-        // Reset mouse tracking (including the 1015 urxvt format), exit the
-        // alt-screen and drop the keyboard protocol before any replay so that
-        // leftover state does not leak into the new shell. The protocol is
-        // reset in place, since the installed parser and key handlers hold
-        // that object. A same-id live resume keeps the running program's
-        // modes untouched, as the start does for a reattach.
+        // with the terminal still holding a dead TUI's negotiated input
+        // modes. Clear every mode in the server's tracked set plus the
+        // alternate-screen exit, and drop the keyboard protocol, before any
+        // replay so that leftover state does not leak into the new shell.
+        // The protocol is reset in place, since the installed parser and key
+        // handlers hold that object. A same-id live resume keeps the running
+        // program's modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
           ensureTerminalKeyboardProtocol(tab, true);
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
-          writeParsedPtyOutput(
-            new TextEncoder().encode(
-              "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
-            ),
-            "replay",
-          );
+          writeParsedPtyOutput(new TextEncoder().encode(freshShellResetSequence()), "replay");
         }
         if (
           pendingSnapshot &&
+          frame.id === priorId &&
           frame.generation === pendingSnapshot.generation &&
           (frame.missed_bytes ?? 0) === 0
         ) {
@@ -1903,6 +1948,7 @@
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
         terminalCwdVirtual = frame.cwd_rel ?? null;
+        links.noteCwd();
       } else if (frame.type === "activity") {
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
       } else if (frame.type === "program") {
@@ -2070,6 +2116,8 @@
     const seed = ` ${pendingPromptSeed}\x01`;
     clearTerminalSeedInput(tab);
     setTimeout(() => {
+      // Sent directly, the seed arms no input ping, owes no note and
+      // reaches no broadcast group.
       sendInput(seed);
       focusTerminal();
       scheduleTerminalSessionSave();
@@ -2138,8 +2186,8 @@
   /// `binary` marks `data` as one byte per character, which the server writes
   /// as the characters' codes rather than their UTF-8. Text frames carry no
   /// such field.
-  function sendInput(data: string, binary = false): void {
-    send(binary ? { type: "input", data, binary } : { type: "input", data });
+  function sendInput(data: string, binary = false): boolean {
+    return send(binary ? { type: "input", data, binary } : { type: "input", data });
   }
 
   function sendGeneratedTerminalInput(data: string): void {
@@ -2215,10 +2263,9 @@
   /// terminal WS as a `prompt` frame so the server ENQUEUES it into this
   /// session's write queue (shared FIFO with `cs terminal write`) and applies
   /// the submit encoding when the agent is idle. Deliberately NOT `sendInput`
-  /// (the raw keystroke path bypasses the queue). Returns whether the WS was
-  /// open so the orchestrator can retry a freshly-spawned lead. `agent` picks
-  /// the encoding (claude CSI, codex/opencode bracketed paste + CR, gemini
-  /// and muse split CR); omitted defaults to claude server-side, and a name
+  /// (the raw keystroke path bypasses the queue). `agent` picks
+  /// the encoding (claude CSI, agy/codex/kimi/muse/opencode bracketed paste
+  /// + CR, gemini split CR); omitted defaults to claude server-side, and a name
   /// the server does not know as an agent ("none") gets no chord. A Rich
   /// Prompt is its own agent turn: the notification batcher never folds it
   /// into a batch.
@@ -2226,10 +2273,18 @@
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
+  /// Returns whether the send went out: false when the socket is not open,
+  /// so the orchestrator can retry a freshly-spawned lead, and when the
+  /// session is gone, where no retry can succeed.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (id && status !== "exited") terminalConnection.inputRefused();
+      return false;
+    }
     term?.scrollToBottom();
-    return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
+    const sent = send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
+    if (sent && id) terminalConnection.inputSent();
+    return sent;
   }
 
   /// Rich Prompt recall: ask the server to pull a still-queued message out of
@@ -2289,7 +2344,7 @@
       focusTerminal();
       return;
     }
-    if (refocusRefused(tab.id)) return;
+    if (keyboardHeld()) return;
     host?.focus({ preventScroll: true });
   }
 
@@ -2370,8 +2425,12 @@
     sendUserInput(data);
   }
 
-  function sendUserInput(data: string, binary = false): void {
-    sendInput(data, binary);
+  function sendUserInput(data: string, binary = false, probeInput = true): void {
+    const sent = sendInput(data, binary);
+    if (probeInput && !terminalMouseReport(data)) {
+      if (sent) terminalConnection.inputSent();
+      else if (status !== "exited") terminalConnection.inputRefused();
+    }
     broadcastTerminalInput(tab, data, binary);
     // Cross-window broadcast: same-group members in OTHER windows live in the
     // shared terminal registry and are unreachable from this window's SPA, so
@@ -2383,11 +2442,10 @@
   }
 
   function handleGhosttyData(data: string): void {
-    // ghostty-web 0.4.0-next.20's encodeMouseX10 and sendMouseEvent emit
-    // these complete chunks. The end assertion also excludes a trailing newline.
-    if (/^\x1b\[M[\x20-\xff]{3}(?![\s\S])/.test(data)) {
+    const mouseReport = terminalMouseReport(data);
+    if (mouseReport === "x10") {
       sendUserInput(data, true);
-    } else if (/^\x1b\[<\d+;\d+;\d+[Mm](?![\s\S])/.test(data)) {
+    } else if (mouseReport === "sgr") {
       sendUserInput(data);
     } else {
       handleXtermData(data);
@@ -2451,7 +2509,7 @@
       const cellHeight = t.renderer?.getMetrics().height ?? 0;
       if (!(cellHeight > 0)) return false;
       if (ghosttyWheelRows.consume(e, cellHeight, t.rows) !== 0) {
-        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)));
+        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)), false, false);
       }
       return true;
     }
@@ -2701,6 +2759,7 @@
       }
       return;
     }
+    terminalConnection.restartRequested();
     explicitCloseSession();
     // An open find bar searches the terminal torn down here. It closes with
     // it, as on Escape, and keeps its query for the next open: left open it
@@ -2755,13 +2814,20 @@
   /// Scrollback text for the copy actions. The xterm backend serializes
   /// through the SerializeAddon (ANSI styling preserved). The ghostty
   /// backend has no serialize addon; its core formats the history and the
-  /// rows as plain text in one call (`ghosttyScrollbackText`), styling lost.
+  /// rows as plain text (`ghosttyCopyScrollback`), styling lost: one call,
+  /// and a call more for each row in a session that runs Muse.
   function scrollbackText(): string {
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal | null;
-      return ghosttyTerm ? ghosttyScrollbackText(ghosttyTerm) : "";
+      return ghosttyTerm ? ghosttyCopyScrollback(ghosttyTerm, runsMuse()) : "";
     }
     return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
+  }
+
+  /// Whether this terminal's session runs Muse, whose cut rows a ghostty
+  /// copy joins; asked at each copy, so it follows the program in front.
+  function runsMuse(): boolean {
+    return sessionRunsMuse(tab.submitAgent, tab.terminalProgram?.command);
   }
 
   // The terminal's copies write through writeClipboardText and refocus the
@@ -3195,7 +3261,8 @@
   const menuKeys = menuEscape({
     open: () => menuOpen,
     inside: (target) => target instanceof Element && !!target.closest(".terminal-tab-menu-bubble"),
-    close: closeTabMenu,
+    // The link menu holds the keyboard while it shows; Escape hands it back.
+    close: () => (tabMenu.source === "link" ? links.close(true) : closeTabMenu()),
   });
 
   function onDocPointerDown(e: PointerEvent): void {
@@ -3236,6 +3303,82 @@
       "body",
     );
   }
+
+  // ---- The menu on a link the terminal underlines ----
+  //
+  // Its state and actions live in `terminal/linkMenu.svelte.ts`; this tab
+  // gives it the terminal and the menu bubble, and closes it when the link's
+  // cells change or move on the screen.
+
+  const LINK_BAND_PX = 8;
+  const links = new TerminalLinkMenu({
+    blocked: appInputBlocked,
+    requestCwd: requestTerminalCwd,
+    cwd: () => terminalCwdAbs,
+    anchorKey: linkAnchorKey,
+    // The anchor is a band around the pointer, which the menu opens below
+    // and flips above (see `menuPos`).
+    open: ({ x, y }) =>
+      openTabMenu(tab.id, { left: x, right: x, top: y - LINK_BAND_PX, bottom: y + LINK_BAND_PX }, "link"),
+    close: () => {
+      if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
+    },
+    focusTerminal,
+  });
+  const xtermLinks = xtermLinkHandlers(
+    () => (backend === "xterm" ? (term as Terminal | null) : null),
+    (target, range, event) => void links.onLink(target, range, event),
+  );
+  const linkMenuOpen = $derived(menuOpen && tabMenu.source === "link" && links.menu !== null);
+  /// The longest target the menu shows whole; a longer one keeps both ends.
+  const LINK_TARGET_SHOWN = 72;
+
+  /// The rows a link sits on and where the viewport shows them; a change in
+  /// either means the menu no longer points at what is on the screen.
+  function linkAnchorKey(range: LinkRange): string | null {
+    const t = term;
+    if (!t) return null;
+    const top =
+      backend === "ghostty"
+        ? (t as GhosttyTerminal).getScrollbackLength() - Math.floor((t as GhosttyTerminal).getViewportY())
+        : (t as Terminal).buffer.active.viewportY;
+    const rows: string[] = [String(range.start.y - top)];
+    for (let y = range.start.y; y <= range.end.y; y++) {
+      rows.push(t.buffer.active.getLine(y)?.translateToString(true) ?? "");
+    }
+    return rows.join("\n");
+  }
+
+  function onGhosttyLink({ target, range, event }: TerminalLinkActivation): void {
+    void links.onLink(target, range, event);
+  }
+
+  /// The link menu takes the keyboard as it shows, onto its first live
+  /// entry, unless something above the panes holds it. It waits a frame for
+  /// the portal, whose move would drop the focus.
+  function takeLinkMenuFocus(node: HTMLElement): void {
+    requestAnimationFrame(() => {
+      const first = node.querySelector<HTMLButtonElement>("button.mbtn:not(:disabled)");
+      if (node.isConnected && first && mayFocus(first)) first.focus({ preventScroll: true });
+    });
+  }
+
+  // Closes the link menu when its link's cells change or move on the screen
+  // (output, a scroll, a resize) or a cover rises over the window, read ten
+  // times a second while it shows; the keyboard goes back to the terminal
+  // only if the menu held it.
+  $effect(() => {
+    if (!linkMenuOpen) return;
+    const watch = setInterval(() => {
+      if (!untrack(() => links.menu)) return;
+      const covered = appInputBlocked();
+      if (covered || links.stale()) {
+        const held = document.activeElement?.closest(".terminal-tab-menu-bubble") != null;
+        links.close(held && !covered);
+      }
+    }, 100);
+    return () => clearInterval(watch);
+  });
 </script>
 
 <svelte:window
@@ -3277,14 +3420,80 @@
   {#if menuOpen}
     <div
       class="terminal-tab-menu-bubble"
-      role={tabMenu.source === "body" ? "menu" : "dialog"}
+      role={tabMenu.source === "tab" ? "dialog" : "menu"}
       tabindex="-1"
-      aria-label={tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
+      aria-label={tabMenu.source === "link" ? "terminal link menu" : tabMenu.source === "body" ? "terminal menu" : "terminal tab settings"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      {#if tabMenu.source === "body"}
+      {#if tabMenu.source === "link" && links.menu}
+        <!-- Link menu: the link's real target, a web link's host on a line
+             of its own (a target is untrusted, and its text can lead the eye
+             to another host), then its two entries. A long target keeps both
+             ends. A refused entry stays in place, disabled, with its reason. -->
+        {@const linkMenu = links.menu}
+        {@const link = linkMenu.link}
+        {@const target = link.kind === "web" ? link.url : link.path}
+        {@const clickChord = currentOS() === "mac" ? "\u2318 Click" : "Ctrl+Click"}
+        <div class="action-list" use:takeLinkMenuFocus>
+          {#if link.kind === "web" && link.host}
+            <div class="terminal-link-target">
+              <span>Host</span>
+              <span class="terminal-link-value" data-terminal-link-host={link.host}>{link.host}</span>
+            </div>
+          {/if}
+          <div class="terminal-link-target">
+            <span>{link.kind === "web" ? "Link" : "Path"}</span>
+            <span
+              class="terminal-link-value"
+              data-terminal-link-target={target}
+              title={target}
+            >{middleEllipsis(target, LINK_TARGET_SHOWN)}</span>
+          </div>
+          {#if link.kind === "web"}
+            <button
+              class="mbtn"
+              role="menuitem"
+              data-terminal-link-action="open-browser"
+              disabled={link.refusal !== null}
+              onclick={() => links.openInBrowser()}
+            >
+              <span class="mbtn-icon"><ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Open in browser</span>
+              <span class="mbtn-chord">{clickChord}</span>
+            </button>
+            {#if link.refusal}
+              <div class="terminal-link-reason" data-terminal-link-reason>{link.refusal}</div>
+            {/if}
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-link" onclick={() => links.copyTarget()}>
+              <span class="mbtn-icon"><LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Copy link</span>
+              <span class="mbtn-chord"></span>
+            </button>
+          {:else}
+            <button
+              class="mbtn"
+              role="menuitem"
+              data-terminal-link-action="open-editor"
+              disabled={linkMenu.editorRefusal !== null || linkMenu.editorBusy}
+              onclick={() => links.openInEditor()}
+            >
+              <span class="mbtn-icon"><FileText size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Open in editor</span>
+              <span class="mbtn-chord">{clickChord}</span>
+            </button>
+            {#if linkMenu.editorRefusal}
+              <div class="terminal-link-reason" data-terminal-link-reason>{linkMenu.editorRefusal}</div>
+            {/if}
+            <button class="mbtn" role="menuitem" data-terminal-link-action="copy-path" onclick={() => links.copyTarget()}>
+              <span class="mbtn-icon"><Clipboard size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="mbtn-label">Copy path</span>
+              <span class="mbtn-chord"></span>
+            </button>
+          {/if}
+        </div>
+      {:else if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
              body): the live engine and the masking toggle, Find + Copy
              (selection or scrollback) + Paste + Copy scrollback, the Rich
@@ -3564,6 +3773,12 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
+    <TerminalConnectionNotice
+      notice={terminalConnection.state.notice && status === "connected" && active && !ui.disconnectBlocking}
+      {findOpen}
+      inspectorOpen={!!tab.inspectorOpen}
+      inspectorWidth={tab.inspectorWidth ?? 280}
+    />
     <TmuxConsentBanner
       question={tab.tmuxConsent?.question ?? null}
       program={terminalTabName(tab)}
@@ -4038,6 +4253,32 @@
   .terminal-backend-value {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .terminal-link-target {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 4px 8px 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    max-width: min(480px, calc(100vw - 40px));
+  }
+  /* The value wraps rather than ending in an ellipsis: an untrusted
+     target's end (the host after a long path, the name after a long
+     folder) must show, and the menu shortens it in the middle. */
+  .terminal-link-value {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .terminal-link-reason {
+    padding: 0 8px 6px 34px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    max-width: min(480px, calc(100vw - 40px));
+    overflow-wrap: anywhere;
   }
   .target-self {
     margin-left: 4px;

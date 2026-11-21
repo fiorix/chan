@@ -366,6 +366,59 @@ describe("Library: devserver groups", () => {
     expect(target!.textContent).toContain("Not connected");
   });
 
+  // A connected devserver with no rows on the card, the desktop hiding them
+  // or not; with no flag given, its row carries no rows_hidden key, as a
+  // producer that sends no such key lists it.
+  async function quietDevserver(rows_hidden?: boolean): Promise<Element> {
+    await saveDevserver({ host: "quiet.example", port: 9100, label: "quiet" });
+    library.devservers = library.devservers.map((d): DevserverEntry => {
+      if (d.host !== "quiet.example") return d;
+      const { rows_hidden: _sent, ...row } = d;
+      return (rows_hidden === undefined ? { ...row, status: "connected" } : { ...row, status: "connected", rows_hidden }) as DevserverEntry;
+    });
+    mountList();
+    const quiet = [...target!.querySelectorAll("section.machine")].find((m) => m.textContent?.includes("quiet.example"));
+    expect(quiet).toBeTruthy();
+    return quiet!;
+  }
+  const hintOf = (machine: Element): string | undefined =>
+    machine.querySelector(".empty-hint")?.textContent?.replace(/\s+/g, " ").trim();
+  const emptyPrompt =
+    "No workspaces on this devserver yet. Add one with the buttons above, or run chan workspace serve /path/on/that/machine --on quiet in a terminal here.";
+
+  it("says a connected devserver's rows show again when the desktop hides them for an outage", async () => {
+    const quiet = await quietDevserver(true);
+    expect(hintOf(quiet)).toBe("Windows and workspaces show again when the connection recovers.");
+    expect(quiet.textContent).not.toContain("No workspaces on this devserver yet");
+    expect(quiet.textContent).not.toContain("chan workspace serve");
+  });
+
+  it("keeps the empty prompt for a connected devserver with no rows that the desktop does not hide", async () => {
+    const quiet = await quietDevserver(false);
+    expect(hintOf(quiet)).toBe(emptyPrompt);
+  });
+
+  it("keeps the empty prompt for a connected devserver whose row carries no rows_hidden key", async () => {
+    const quiet = await quietDevserver();
+    expect(hintOf(quiet)).toBe(emptyPrompt);
+  });
+
+  it("says the hidden rows show again under a control terminal the outage leaves on the card", () => {
+    const ds = library.devservers.find((d) => d.id === "ds-1")!;
+    library.devservers = library.devservers.map(
+      (d): DevserverEntry => (d.id === "ds-1" ? { ...d, rows_hidden: true } : d),
+    );
+    library.windows = library.windows.filter((w) => w.library_id !== ds.library_id || w.control);
+    library.workspaces = library.workspaces.filter((w) => w.devserver_id !== "ds-1");
+
+    mountList();
+
+    const prod = [...target!.querySelectorAll("section.machine")].find((m) => m.textContent?.includes("box.example.com:8787"));
+    expect(prod).toBeTruthy();
+    expect(prod!.textContent).toContain("Control terminal");
+    expect(hintOf(prod!)).toBe("Windows and workspaces show again when the connection recovers.");
+  });
+
   it("narrates a pending browser sign-in as a waiting row with a live re-click Connect", async () => {
     // A gateway connect that handed off to the browser: status stays
     // disconnected (waiting is a row state, not a connection state), but the
@@ -1021,17 +1074,13 @@ describe("Library: tmux connection cards", () => {
     expect(remoteCard.textContent).toContain("session work");
     expect(remoteCard.textContent).toContain("tmux 3.5a");
     expect(localCard.querySelector(".machine-icon.live")).not.toBeNull();
-    // The control terminal is pinned first; the rows are the connection's,
-    // and a tmux window past the cap closes the list.
+    // The rows are the connection's windows, and a tmux window past the cap
+    // closes the list; the control terminal is This machine's row alone.
     expect(localCard.querySelector(".section-label")?.textContent).toBe("Windows");
-    expect(rowNames(localCard)).toEqual(["Control terminal", "Terminal Window 1"]);
-    expect(rowNames(remoteCard)).toEqual(["Control terminal", "Terminal Window 1", "logs"]);
-    // The control terminal stays buried while the connection runs: its row
-    // offers no action, while the connection's window keeps its buttons.
+    expect(rowNames(localCard)).toEqual(["Terminal Window 1"]);
+    expect(rowNames(remoteCard)).toEqual(["Terminal Window 1", "logs"]);
+    // The connection's window keeps its buttons.
     const localRows = [...localCard.querySelectorAll<HTMLElement>(".row")];
-    const controlRow = localRows.find((r) => r.textContent?.includes("Control terminal"))!;
-    expect(controlRow.querySelector("button")).toBeNull();
-    expect(controlRow.textContent).toContain("buried");
     const windowRow = localRows.find((r) => r.textContent?.includes("Terminal Window 1"))!;
     expect(windowRow.querySelector("button")).not.toBeNull();
     // This machine lists the control terminals its terminals ran, the local
@@ -1043,8 +1092,8 @@ describe("Library: tmux connection cards", () => {
     // The badge counts the rows the card shows, the unopened window included.
     const badge = (c: HTMLElement) =>
       c.querySelector(".machine-actions .count-badge")?.getAttribute("title");
-    expect(badge(localCard)).toBe("2 windows");
-    expect(badge(remoteCard)).toBe("3 windows");
+    expect(badge(localCard)).toBe("1 window");
+    expect(badge(remoteCard)).toBe("2 windows");
   });
 
   /** The buried control terminal rows a machine card lists for its tmux runs. */
@@ -1094,12 +1143,11 @@ describe("Library: tmux connection cards", () => {
         ["tm-geekom", { request: "detach" }],
       ]);
       expect(library.error).toBeNull();
-      // The connection's card keeps its detach on the title and its control
-      // row as before: buried, with no action.
+      // The connection's card keeps its detach on the title and lists no
+      // control terminal.
       const own = card(LOCAL_TITLE);
       expect(own.querySelector(`.machine-header button[aria-label="Detach ${LOCAL_TITLE}"]`)).not.toBeNull();
-      const ownControl = buriedRows(own)[0]!;
-      expect(ownControl.querySelector("button")).toBeNull();
+      expect(buriedRows(own)).toEqual([]);
     } finally {
       request.mockRestore();
     }
@@ -1130,6 +1178,23 @@ describe("Library: tmux connection cards", () => {
     } finally {
       request.mockRestore();
     }
+  });
+
+  it("keeps a devserver run's buried control terminal on the devserver's card while it is disconnected", async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    const prodLibrary = library.devservers.find((d) => d.label === "prod")!.library_id!;
+    const onProd = entry({ connection: "tm-prod", library_id: prodLibrary, session: { id: "$4", name: "ops" } });
+    setMockTmuxConnections([onProd], [{ ...row("tm-prod", "tm-prod-control", true, 0), library_id: prodLibrary }]);
+    library.devservers = library.devservers.map(
+      (d): DevserverEntry => (d.id === "ds-1" ? { ...d, status: "disconnected" } : d),
+    );
+    // The devserver's own connect control terminal is gone, so the tmux
+    // connection's is the one control terminal its card holds.
+    library.windows = library.windows.filter((w) => !(w.control && !w.tmux && w.library_id === prodLibrary));
+    mountList();
+    const holders = [...target!.querySelectorAll<HTMLElement>("section.machine")].filter((m) => buriedRows(m).length > 0);
+    expect(holders).toEqual([devserverCard("prod")]);
+    expect(buriedRows(holders[0]!)[0]!.textContent).toContain("tmux -CC on prod (ops)");
   });
 
   it("masks the machine card's control terminal row in privacy mode and keeps its detach", async () => {

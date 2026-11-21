@@ -2,9 +2,9 @@
 // drop, the flat-feed grouping, the nested tree (disjoint control / terminal
 // / per-workspace partition, window counts, trailing-slash path join, loose +
 // orphan fallbacks, LOCAL-first machine ordering), and the tmux connection
-// nodes (rows grouped by their mark, the pinned control row, the provisional
-// node, the unopened windows, the card title, and the control terminal listed
-// again on the card of the machine that runs the connection).
+// nodes (rows grouped by their mark, the provisional node, the unopened
+// windows, the card title, and the control terminal listed on the card of the
+// machine that runs the connection instead of the connection's card).
 
 import { describe, it, expect } from "vitest";
 import {
@@ -73,6 +73,8 @@ function ds(over: Partial<DevserverEntry> & Pick<DevserverEntry, "id">): Devserv
     gateway_url: "",
     shared: false,
     native_trust_required: false,
+    rows_hidden: false,
+    connection_health: null,
     ...over,
   };
 }
@@ -382,7 +384,7 @@ describe("tmuxWindowMachine", () => {
 });
 
 describe("buildMachineTree: tmux connections", () => {
-  it("groups a connection's rows under its own machine, control first, and off This machine", () => {
+  it("groups a connection's windows under its own machine, and its control terminal on This machine", () => {
     const entry = tmux({ connection: "tm-1" });
     const windows = [
       win({ window_id: "plain", library_id: "local", ordinal: 1 }),
@@ -394,12 +396,13 @@ describe("buildMachineTree: tmux connections", () => {
     const local = tree.machines[0]!;
     expect(local.terminals.map((w) => w.window_id)).toEqual(["plain"]);
     expect(local.control).toEqual([]);
+    expect(local.tmuxControls.map((row) => row.window.window_id)).toEqual(["tm-1-control"]);
     const node = tree.machines.find((m) => m.kind === "tmux")!;
     expect(node.connection).toBe("tm-1");
     expect(node.tmux).toBe(entry);
     expect(node.devserver).toBeNull();
     expect(node.libraryId).toBe("local");
-    expect(node.control.map((w) => w.window_id)).toEqual(["tm-1-control"]);
+    expect(node.control).toEqual([]);
     expect(node.terminals.map((w) => w.window_id)).toEqual(["tm-1-w1", "tm-1-w2"]);
     expect(node.workspaces).toEqual([]);
     expect(node.looseWindows).toEqual([]);
@@ -408,16 +411,16 @@ describe("buildMachineTree: tmux connections", () => {
     expect(machineName(local)).toBe("This machine");
   });
 
-  it("pins the control row by its tmux mark alone", () => {
+  it("finds the control row by its tmux mark alone", () => {
     // The plain control flag is the devserver's; a tmux row is the control
     // terminal when its mark says so, whatever the flag reads.
     const windows = [
       win({ window_id: "c", library_id: "local", ordinal: 5, tmux: { connection: "tm-1", control: true } }),
       win({ window_id: "w", library_id: "local", ordinal: 1, tmux: { connection: "tm-1", control: false } }),
     ];
-    const node = buildMachineTree([], [], windows, [tmux({ connection: "tm-1" })]).machines[1]!;
-    expect(node.control.map((w) => w.window_id)).toEqual(["c"]);
-    expect(node.terminals.map((w) => w.window_id)).toEqual(["w"]);
+    const [local, node] = buildMachineTree([], [], windows, [tmux({ connection: "tm-1" })]).machines;
+    expect(local!.tmuxControls.map((row) => row.window.window_id)).toEqual(["c"]);
+    expect(node!.terminals.map((w) => w.window_id)).toEqual(["w"]);
   });
 
   it("takes a devserver library's tmux rows off the devserver card", () => {
@@ -505,8 +508,9 @@ describe("buildMachineTree: tmux connections", () => {
     const rows = [tmuxRow("tm-1", "tm-1-control", true, 0), tmuxRow("tm-1", "tm-1-w1", false, 1)];
     const node = buildMachineTree([], [], rows, [entry]).machines[1]!;
     expect(node.unopened.map((tw) => tw.id)).toEqual(["@3", "@4"]);
-    // The badge counts every row the card shows: control, open, unopened.
-    expect(machineWindowCount(node)).toBe(4);
+    // The badge counts every row the card shows: open, then unopened; the
+    // control terminal is This machine's row.
+    expect(machineWindowCount(node)).toBe(3);
   });
 
   it("gives a record with no rows yet a node of its own", () => {
@@ -627,7 +631,7 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     return Object.values(keyedLists(node)).flat();
   }
 
-  it("lists a local run's control terminal on This machine and its windows on the connection's card alone", () => {
+  it("lists a local run's control terminal on This machine alone and its windows on the connection's card alone", () => {
     const entry = tmux({ connection: "tm-1" });
     const windows = [
       win({ window_id: "plain", library_id: "local", ordinal: 1 }),
@@ -641,16 +645,18 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     // The row carries the connection's node: its detach and its title.
     expect(local.tmuxControls[0]!.node).toBe(node);
     expect(local.tmuxControls[0]!.window.tmux).toEqual({ connection: "tm-1", control: true });
-    // Nothing else moves: the machine's own buckets and the connection's card.
+    // The machine's own buckets keep its own windows, and the connection's
+    // card lists its windows and not the control terminal.
     expect(local.control).toEqual([]);
     expect(local.terminals.map((w) => w.window_id)).toEqual(["plain"]);
-    expect(node.control.map((w) => w.window_id)).toEqual(["tm-1-control"]);
+    expect(node.control).toEqual([]);
     expect(node.terminals.map((w) => w.window_id)).toEqual(["tm-1-w1"]);
     expect(node.tmuxControls).toEqual([]);
+    expect(cardIds(node)).toEqual(["tm-1-w1"]);
     expect(cardIds(local)).not.toContain("tm-1-w1");
     // The badge counts the rows the card shows.
     expect(machineWindowCount(local)).toBe(2);
-    expect(machineWindowCount(node)).toBe(2);
+    expect(machineWindowCount(node)).toBe(1);
   });
 
   it("lists a devserver run's control terminal on that devserver's card", () => {
@@ -670,6 +676,7 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     expect(alpha.tmuxControls[0]!.node.connection).toBe("tm-a");
     expect(alpha.terminals.map((w) => w.window_id)).toEqual(["a-term"]);
     expect(cardIds(alpha)).not.toContain("tm-a-w1");
+    expect(cardIds(tree.machines.find((m) => m.connection === "tm-a")!)).toEqual(["tm-a-w1"]);
     expect(tree.machines[0]!.tmuxControls).toEqual([]);
     expect(beta.tmuxControls).toEqual([]);
   });
@@ -733,10 +740,28 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     for (const connection of ["tm-far", "tm-far-ssh", "tm-early"]) {
       const node = tree.machines.find((m) => m.connection === connection)!;
       expect(node.control.map((w) => w.window_id)).toEqual([`${connection}-control`]);
+      // The one card that lists it, and its badge counts it.
+      expect(tree.machines.filter((m) => cardIds(m).includes(`${connection}-control`))).toEqual([node]);
+      expect(machineWindowCount(node)).toBe(1);
     }
+    expect(tree.orphans).toEqual([]);
   });
 
-  it("repeats no id inside any one card, with the control terminal on two cards", () => {
+  it("moves the control terminal to its machine's card once that card holds the library", () => {
+    const entry = tmux({ connection: "tm-a", library_id: "lib-a" });
+    const windows = [tmuxRow("tm-a", "tm-a-control", true, 0, "lib-a"), tmuxRow("tm-a", "tm-a-w1", false, 1, "lib-a")];
+    const before = buildMachineTree([ds({ id: "ds-a", label: "alpha", library_id: null })], [], windows, [entry]);
+    const after = buildMachineTree([ds({ id: "ds-a", label: "alpha", library_id: "lib-a" })], [], windows, [entry]);
+    const holders = (tree: typeof before) =>
+      tree.machines.filter((m) => cardIds(m).includes("tm-a-control")).map((m) => m.kind);
+    expect(holders(before)).toEqual(["tmux"]);
+    expect(holders(after)).toEqual(["devserver"]);
+    const node = after.machines.find((m) => m.connection === "tm-a")!;
+    expect(cardIds(node)).toEqual(["tm-a-w1"]);
+    expect(machineWindowCount(node)).toBe(1);
+  });
+
+  it("repeats no id inside any one card, and lists the control terminal on one", () => {
     const entries = [
       tmux({ connection: "tm-1" }),
       // A repeated record keeps its first copy.
@@ -761,9 +786,9 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
       "tm-1-control",
       "tm-2-control",
     ]);
-    // The control terminal is on its connection's card and its machine's.
+    // The control terminal is on its machine's card alone.
     const holders = tree.machines.filter((m) => cardIds(m).includes("tm-1-control"));
-    expect(holders.map((m) => m.kind)).toEqual(["local", "tmux"]);
+    expect(holders.map((m) => m.kind)).toEqual(["local"]);
   });
 
   it("leaves the buried control terminals out of All windows and lists every other window once", () => {
@@ -787,7 +812,7 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
       tmuxRow("tm-ssh", "tm-ssh-w1", false, 1),
     ];
     const tree = buildMachineTree(devservers, [], windows, entries);
-    // The connections' cards and the machines' cards keep them.
+    // The machines' cards keep them, and the connections' cards do not.
     const alpha = tree.machines.find((m) => m.devserver?.id === "ds-a")!;
     expect(tree.machines[0]!.tmuxControls.map((row) => row.window.window_id)).toEqual([
       "tm-local-control",
@@ -796,7 +821,7 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     expect(alpha.tmuxControls.map((row) => row.window.window_id)).toEqual(["tm-alpha-control"]);
     for (const connection of ["tm-local", "tm-alpha", "tm-ssh"]) {
       const node = tree.machines.find((m) => m.connection === connection)!;
-      expect(node.control.map((w) => w.window_id)).toEqual([`${connection}-control`]);
+      expect(node.control).toEqual([]);
     }
     expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
       ["plain", "local"],

@@ -391,9 +391,16 @@ impl Index {
         let _write = self.config_write.lock().unwrap();
         let mut candidate = self.config();
         if model == candidate.model {
-            return Ok(());
+            if candidate.replaced_model.is_none() {
+                return Ok(());
+            }
+            // Choosing the model that stood in for a dropped one ends the
+            // note and keeps the vectors it made.
+            candidate.replaced_model = None;
+            return self.persist_config(candidate);
         }
         candidate.model = model;
+        candidate.replaced_model = None;
         self.persist_config(candidate)?;
         // The vectors on disk were produced by the previous model, so wipe
         // them. `clear_vectors` also clears the `vectors_*` stamp so the next
@@ -468,8 +475,8 @@ impl Index {
     ///
     /// `resolve_model_in` checks the handle's retained model directory
     /// before `Embedder::open` loads from that same directory. An absent
-    /// model produces `ModelNotDownloaded` without an hf-hub network fetch;
-    /// a present model is found through hf-hub's cache lookup.
+    /// model produces `ModelNotDownloaded` without a network fetch;
+    /// a present model is found through chan-workspace's cache lookup.
     #[cfg(feature = "embeddings")]
     fn embedder(&self) -> Result<Arc<Embedder>, IndexError> {
         self.embedder_with(|model_id| {
@@ -1801,6 +1808,91 @@ mod tests {
     }
 
     #[test]
+    fn an_index_whose_config_names_a_dropped_model_opens_on_the_default_until_one_is_chosen() {
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            config::config_path(&dir),
+            format!(
+                "schema_version = {}\nmodel = \"BAAI/bge-m3\"\n",
+                config::SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let idx = Index::open(tmp.path(), &dir).expect("the index opens");
+        assert_eq!(idx.config().model, crate::DEFAULT_MODEL);
+        assert!(idx
+            .config()
+            .model_note()
+            .unwrap()
+            .starts_with("BAAI/bge-m3 is no longer offered"));
+        idx.set_model(crate::DEFAULT_MODEL.into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model, crate::DEFAULT_MODEL);
+            assert_eq!(cfg.model_note(), None, "choosing the model ends the note");
+        }
+    }
+
+    /// An index whose default stood in for BAAI/bge-m3 and has embedded:
+    /// its config keeps the dropped id and stamps the default's vectors.
+    fn open_on_the_stand_in_with_its_vectors(tmp: &TempDir) -> (Index, PathBuf, u32) {
+        let dir = idx_dir(tmp);
+        let dim = config::embedding_model(crate::DEFAULT_MODEL).unwrap().dim;
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            config::config_path(&dir),
+            format!(
+                "schema_version = {}\nmodel = \"{}\"\nreplaced_model = \"BAAI/bge-m3\"\n\
+                 vectors_model = \"{}\"\nvectors_dim = {dim}\n",
+                config::SCHEMA_VERSION,
+                crate::DEFAULT_MODEL,
+                crate::DEFAULT_MODEL
+            ),
+        )
+        .unwrap();
+        let idx = Index::open(tmp.path(), &dir).expect("the index opens");
+        assert!(idx.config().model_note().is_some(), "fixture: the note");
+        assert_eq!(
+            idx.config().vectors_model.as_deref(),
+            Some(crate::DEFAULT_MODEL),
+            "fixture: the stand-in's vectors"
+        );
+        (idx, dir, dim)
+    }
+
+    #[test]
+    fn choosing_the_stand_in_model_ends_the_note_and_keeps_its_vectors() {
+        let tmp = make_workspace();
+        let (idx, dir, dim) = open_on_the_stand_in_with_its_vectors(&tmp);
+        idx.set_model(crate::DEFAULT_MODEL.into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model_note(), None, "choosing the model ends the note");
+            assert_eq!(cfg.vectors_model.as_deref(), Some(crate::DEFAULT_MODEL));
+            assert_eq!(cfg.vectors_dim, Some(dim), "the vectors it made are kept");
+        }
+    }
+
+    #[test]
+    fn choosing_another_model_ends_the_note_and_drops_the_stand_ins_vectors() {
+        let tmp = make_workspace();
+        let (idx, dir, _) = open_on_the_stand_in_with_its_vectors(&tmp);
+        idx.set_model("BAAI/bge-base-en-v1.5".into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model, "BAAI/bge-base-en-v1.5");
+            assert_eq!(
+                cfg.model_note(),
+                None,
+                "choosing another model ends the note"
+            );
+            assert!(
+                cfg.vectors_model.is_none(),
+                "another model's vectors start over"
+            );
+        }
+    }
+
+    #[test]
     fn corrupt_vector_shard_keeps_bm25_available_and_rebuild_reclaims_it() {
         use super::super::vectors::{pair, VectorStore};
 
@@ -2175,6 +2267,7 @@ mod tests {
             vectors_model: Some("BAAI/bge-large-en-v1.5".to_owned()),
             vectors_dim: Some(1024),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         config::save(&dir, &cfg_on_disk).unwrap();
         drop(idx);
@@ -2210,6 +2303,7 @@ mod tests {
             vectors_model: Some(model.clone()),
             vectors_dim: Some(384),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         std::fs::create_dir_all(&dir).unwrap();
         config::save(&dir, &cfg_on_disk).unwrap();
@@ -2243,6 +2337,7 @@ mod tests {
             vectors_model: Some("BAAI/bge-small-en-v1.5".to_owned()),
             vectors_dim: Some(384),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         config::save(&dir, &cfg_on_disk).unwrap();
         let _idx = Index::open(tmp.path(), &dir).unwrap();

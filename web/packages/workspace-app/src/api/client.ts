@@ -80,6 +80,7 @@ import {
   withTokenQuery as transportWithTokenQuery,
 } from "./transport";
 import type { WatchSocket } from "./transport";
+import type { ConnectionProbe } from "./connectionProbe";
 import type { WatchScopeDir } from "./types";
 
 import {
@@ -1364,6 +1365,8 @@ const calls = {
   /// Compile-time identity (chan version + cargo features). Used by
   /// the Settings "About" footer.
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
+  /// The serving process's identity alone, its host name among it.
+  metricsIdentity: () => req<Pick<MetricsView, "identity">>("GET", "/api/metrics"),
   metrics: (since?: number, signal?: AbortSignal) => req<MetricsView>("GET", `/api/metrics?history=true${since === undefined ? "" : `&since=${since}`}`, undefined, signal),
   /// Ready local extensions for this process. The catalog is served to any
   /// authenticated client. Over the gateway tunnel the owner and a grantee
@@ -1894,10 +1897,12 @@ export type WindowReplyRequest = {
 /// Body of `POST /api/open` (Contract C). snake_case to match the server's
 /// `OpenRequest`. `window_id` is the submitting window (`sessionWindowId()`);
 /// `target` is a workspace-relative or absolute path, or a serialized
-/// `chan://graph?...` link, forwarded verbatim.
+/// `chan://graph?...` link, forwarded verbatim. `must_exist` refuses a missing
+/// path with a 404 instead of creating it.
 export type OpenPathRequest = {
   window_id: string;
   target: string;
+  must_exist?: boolean;
 };
 
 /// Body of `POST /api/session/handover/reply` (the leader's answer to
@@ -1960,16 +1965,22 @@ export interface WatchSubscription {
 /// re-establish per-directory scope subscriptions (the server registry
 /// is per-socket). Returns a `WatchSubscription`: callable as the
 /// disposer, plus typed `subscribeDir` / `unsubscribeDir` helpers.
+/// `connectionProbe` is the probe the watcher reports its pings and pongs to, for a
+/// caller that follows the connection through it.
+/// `options.remote` selects the shorter focused read deadline for a remote
+/// watcher; focused answered watchers ping fast on either kind of window.
 export function openWatchSocket(
   onEvent: (e: unknown) => void,
-  onStatus?: (s: import("./transport").WsStatus, attempt: number) => void,
+  onStatus?: (s: import("./transport").WsStatus, attempt: number, drop?: import("./transport").WatchDrop) => void,
   onReady?: () => void,
+  connectionProbe?: ConnectionProbe,
+  options?: import("./transport").WatchOptions,
 ): WatchSubscription {
   // Pass this window's session id and its URL holder hint to the watcher.
   // The transport presents the client holder on every socket dial, including
   // a retained or minted holder for a directly navigated page.
   const holder = holderTagOf(window.location.href) ?? undefined;
-  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder);
+  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder, connectionProbe, options);
   const sub = (() => socket.close()) as WatchSubscription;
   sub.subscribeDir = (dir: WatchScopeDir) => socket.send({ type: "sub", dir });
   sub.unsubscribeDir = (dir: WatchScopeDir) => socket.send({ type: "unsub", dir });

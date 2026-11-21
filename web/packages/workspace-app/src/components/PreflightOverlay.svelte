@@ -1,16 +1,18 @@
 <script lang="ts">
   // New-workspace pre-flight. chan-server runs first-boot readiness
   // (open / seed / index / embedding-model) and reports it on
-  // GET /api/preflight; this surface renders that snapshot LOCKED until
-  // `phase === "ready"`. Locked here means locked by construction: a
+  // GET /api/preflight; this surface renders that snapshot LOCKED while
+  // the server reports `locked`, which it does only while a step waits on
+  // the user's choice. Locked here means locked by construction: a
   // full-viewport layer with no close affordance, not part of the
   // dismissable overlay stack, so there is no close button and ESC has
   // nothing to dismiss. It matches
   // MissingTokenOverlay's full-page boot-surface shape.
   //
-  // The snapshot is derived server-side on every poll, so the only state
-  // here is the latest snapshot plus a poll timer. A ready (or
-  // unreachable) pre-flight never blocks the editor.
+  // The snapshot is derived server-side on every poll. A pending decision's refusal
+  // stays visible while readiness is polled. A ready, failed (or unreachable)
+  // pre-flight never blocks the editor: a failed index leaves the window
+  // usable, and the index status chip names the error.
 
   import { onMount, onDestroy, tick } from "svelte";
   import { api } from "../api/client";
@@ -26,6 +28,7 @@
 
   let snapshot = $state<PreflightSnapshot | null>(null);
   let deciding = $state(false);
+  let decisionError = $state<{ step: string; message: string } | null>(null);
   let coverEl = $state<HTMLElement>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -214,18 +217,21 @@
 
   // Keep polling until the workspace has SETTLED, not merely until it
   // unlocks. The two differ because the boot does not lock behind a
-  // recovery pass: `phase === "ready"` arrives while an index rebuild is
+  // recovery pass: an unlocked snapshot arrives while an index rebuild is
   // still running. Stopping there would freeze the last snapshot mid-rebuild,
   // and the server attaches `summary` only once settled -- so the first-run
   // onboarding nudge would never arrive at all for a workspace that booted
-  // into recovery.
+  // into recovery. A failed step with no recovery running is settled too:
+  // nothing a poll reads changes until some other trigger starts a pass, and
+  // the index status chip, which polls its own route, reports that pass.
   // The `?.` is load-bearing, not defensive habit: `demo/router.ts` mocks this
   // route with a hardcoded ready snapshot that carries no `readiness` at all,
   // and its `json({...})` is untyped so the compiler cannot see the gap. Absent
   // readiness means the in-memory test transport, which is settled by
   // definition.
   function settled(snap: PreflightSnapshot): boolean {
-    return snap.phase === "ready" && snap.readiness?.state !== "recovering";
+    return (snap.phase === "ready" || snap.phase === "failed") &&
+      !snap.locked && snap.readiness?.state !== "recovering";
   }
 
   // Poll and decide both write the snapshot after an await, and only the
@@ -240,6 +246,9 @@
       const next = await api.preflight();
       if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
+      if (!next.locked || !next.steps.some((step) => step.id === decisionError?.step && step.state === "needs_decision")) {
+        decisionError = null;
+      }
       errorStreak = 0;
       if (!settled(snapshot)) schedule();
     } catch {
@@ -261,6 +270,7 @@
   async function decide(step: string, choice: string): Promise<void> {
     if (stopped || deciding) return;
     deciding = true;
+    decisionError = null;
     if (timer !== null) clearTimeout(timer);
     timer = null;
     const seq = ++snapshotSeq;
@@ -270,8 +280,9 @@
       if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
       resumePolling = !settled(next);
-    } catch {
+    } catch (error) {
       if (stopped || seq !== snapshotSeq) return;
+      decisionError = { step, message: errorText(error) };
       resumePolling = true;
     } finally {
       deciding = false;
@@ -331,6 +342,9 @@
     </ul>
     {#if snapshot.error}
       <p class="error">{snapshot.error.message}</p>
+    {/if}
+    {#if decisionError}
+      <p class="error" role="alert">{decisionError.message}</p>
     {/if}
   </main>
 {/if}

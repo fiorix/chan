@@ -42,46 +42,56 @@ async function openTerminal() {
   const metrics = term.renderer.getMetrics();
   return {
     term,
+    // A press and its click on a cell, as a pointer makes them.
     click(column: number, row: number) {
       const rect = canvas.getBoundingClientRect();
-      canvas.dispatchEvent(new MouseEvent("click", {
+      const at = {
         bubbles: true,
         cancelable: true,
-        ctrlKey: true,
+        button: 0,
         clientX: rect.left + (column + 0.5) * metrics.width,
         clientY: rect.top + (row + 0.5) * metrics.height,
-      }));
+      };
+      canvas.dispatchEvent(new MouseEvent("mousedown", at));
+      canvas.dispatchEvent(new MouseEvent("click", { ...at, detail: 1 }));
     },
   };
 }
 
+/// The links the widget reports a click on, as "kind target".
+function linkTargets(term: Terminal): string[] {
+  const seen: string[] = [];
+  term.onLinkActivate(({ kind, target }) => seen.push(`${kind} ${target}`));
+  return seen;
+}
+
 describe("the widget's links through its registered providers", () => {
-  test("the registered OSC8 provider opens an explicit label's URI through the real buffer", async () => {
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
+  test("the registered OSC8 provider reports an explicit label's URI through the real buffer", async () => {
     const screen = await openTerminal();
+    const targets = linkTargets(screen.term);
     screen.term.write("\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\ text");
     screen.click(1, 0);
-    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://e.x/a", "_blank", "noopener,noreferrer"));
+    await vi.waitFor(() => expect(targets).toEqual(["osc8 https://e.x/a"]));
   });
 
-  test("the registered regex provider opens a plain URL through the real buffer", async () => {
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
+  test("the registered regex provider reports a plain URL through the real buffer", async () => {
     const screen = await openTerminal();
+    const targets = linkTargets(screen.term);
     screen.term.write("https://plain.example/b");
     screen.click(4, 0);
-    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://plain.example/b", "_blank", "noopener,noreferrer"));
+    await vi.waitFor(() => expect(targets).toEqual(["url https://plain.example/b"]));
   });
 
-  test("the registered OSC8 provider opens a link after its row enters history", async () => {
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
+  test("the registered OSC8 provider reports a link after its row enters history", async () => {
     const screen = await openTerminal();
+    const targets = linkTargets(screen.term);
     screen.term.write("\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\\r\n" + "line\r\n".repeat(ROWS));
     const history = screen.term.getScrollbackLength();
     expect(history).toBeGreaterThan(0);
     screen.term.viewport.scrollTo(history);
     expect(screen.term.getViewportY()).toBe(history);
     screen.click(1, 0);
-    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://e.x/a", "_blank", "noopener,noreferrer"));
+    await vi.waitFor(() => expect(targets).toEqual(["osc8 https://e.x/a"]));
   });
 });
 

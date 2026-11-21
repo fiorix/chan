@@ -7,6 +7,7 @@ import { focusOrigin, press, recordDocumentKeys, settle } from "../__tests__/dia
 import { pathPromptState, promptState, tree } from "../state/store.svelte";
 import { confirmState } from "../state/confirm.svelte";
 import { draftCloseState } from "../state/tabs.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 
 let harness: ReturnType<typeof render> | undefined;
 afterEach(async () => {
@@ -15,6 +16,7 @@ afterEach(async () => {
   promptState.open = pathPromptState.open = confirmState.open = draftCloseState.open = false;
   draftCloseState.unsavable = null;
   draftCloseState.resolve = null;
+  document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   await settle();
   document.body.replaceChildren();
   vi.restoreAllMocks();
@@ -448,4 +450,15 @@ test("disposing a registration twice restores once and leaves later shells usabl
   press(document.body, "Escape"); expect(close).not.toHaveBeenCalled();
   render(); await open("a");
   expect(document.activeElement).toBe(panel("a"));
+});
+
+test("closing the last dialog under the Computers launcher focuses nothing", async () => {
+  // The launcher is a second webview holding the window's keyboard: a focus
+  // in this page would take the window's first responder from it.
+  const origin = focusOrigin();
+  render(); await open("a");
+  document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+  const restore = vi.spyOn(origin, "focus");
+  harness!.show("a", false); await settle();
+  expect(restore, "the opener took the keyboard under the launcher").not.toHaveBeenCalled();
 });

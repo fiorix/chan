@@ -118,13 +118,13 @@ template = '{}\r'
 template = '\e[200~{}\e[201~\r'
 
 [muse]
-template = '{}\r'
+template = '\e[200~{}\e[201~\r'
 
 [opencode]
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini and muse deliver a non-empty normalized body before their submit chord, in separate ordered PTY writes. With a bracketing override, the body write includes the template prefix and the first closing bracket after `{}`; only the suffix after that bracket is the chord. A template with no chord sends one body write, and an empty body sends only the chord, without an empty bracket pair. An unclosed bracket keeps the remaining template with the body; chan does not add a closing marker.
+The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini delivers a non-empty normalized body before its submit chord, in separate ordered PTY writes; every other agent receives its template's bytes in one write. With a bracketing override, the body write includes the template prefix and the first closing bracket after `{}`; only the suffix after that bracket is the chord. A template with no chord sends one body write, and an empty body sends only the chord, without an empty bracket pair. An unclosed bracket keeps the remaining template with the body; chan does not add a closing marker. Submitted messages queued for agy, claude, codex, kimi, muse or opencode under the built-in template drain as one framed batch per agent turn; gemini, and any agent under an override, take one message per turn.
 
 When the part of a template before `{}` leaves a bracketed paste open (an `\e[200~` with no `\e[201~` after it), a default or an override alike, the body's NUL, ENQ, EOT, BS, ESC and DEL bytes and its Ctrl+C, `Ctrl+\`, Ctrl+U, Ctrl+Z, Ctrl+Q, Ctrl+S, Ctrl+W, Ctrl+V, Ctrl+R and Ctrl+O characters are sent as spaces, as a terminal's paste sends them, so a body holding `\e[201~` cannot end the bracket early; line feeds and tabs are kept. Any other template sends the body unchanged.
 
@@ -236,7 +236,8 @@ Source: `crates/chan-workspace/src/index/config.rs`.
 | Field | Type | Default | Reachability | Use |
 |-------|------|---------|--------------|-----|
 | `schema_version` | `u32` | current schema | internal | a mismatch wipes and rebuilds the index |
-| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model`, `PATCH /api/index/semantic/model`, Settings → This workspace | the embedding model new vectors are built with |
+| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model`, `PATCH /api/index/semantic/model`, Settings → This workspace | the embedding model new vectors are built with; a model chan does not offer loads as the default, its id kept in `replaced_model` |
+| `replaced_model` | `Option<String>` | unset | set on load when `model` names one chan does not offer; cleared when a model is chosen | the id the default replaced, for the note in Settings and `chan workspace index status` |
 | `chunking` | `Chunking` | `headings` | internal | how a Markdown file is split into indexable units: `headings`, `whole-doc` or `fixed` |
 | `vectors_model` | `Option<String>` | unset | internal stamp | the model that produced the vectors on disk; a mismatch with `model` wipes the vector store on open |
 | `vectors_dim` | `Option<u32>` | unset | internal stamp | the dimension of the vectors on disk, cross-checked before more are written |
@@ -320,7 +321,7 @@ Source: `desktop/src-tauri/src/config.rs`. `CHAN_HOME` moves it with the rest of
 | `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window close and quit | OS window geometry per window label (below), newest first, capped |
 | `local_color` | `Option<String>` | unset | the launcher's local colour route | the local library's pane highlight, hex `#rrggbb`; unset is the default accent |
 | `launcher_theme` | `Option<String>` | unset | the launcher's theme route | `dark`, `light`, or follow the OS when absent |
-| `privacy.enabled` | `bool` | `false` | Settings > Global > Privacy mode on | conceal computer/gateway connection details, the host name and chan home path on the Dashboard's Metrics slide, the workspace root path on its Workspace slide, and window and workspace names in the workspace app's command launcher, across desktop windows, with individual reveals where an eye button is shown |
+| `privacy.enabled` | `bool` | `false` | Settings > Global > Privacy mode on | conceal computer/gateway connection details (a devserver's connection face and chart on the Computers screen stay shown), the host name and chan home path on the Dashboard's Metrics slide, the workspace root path on its Workspace slide, and window and workspace names in the workspace app's command launcher, across desktop windows, with individual reveals where an eye button is shown |
 | `privacy.mask_terminal_secrets` | `bool` | `false` | Settings > Global > Mask terminal secrets in privacy mode | enable the existing terminal masker while privacy is on; keep each terminal's previous setting afterwards |
 | `privacy.revision` | `u64` | `0` | maintained by the desktop | order live updates and invalidate field reveals when privacy settings change |
 | `titlebar_tabs` | `bool` | `true` | Settings → Global → title bar tabs, shown in chan-desktop on macOS and Windows | every window puts its active pane's tabs in the title bar, beside a button that lists the window's panes and tabs; the other panes draw no strip and the pane strip auto-hide row leaves Settings while it is on; applies live to every open window; a config without the key reads on, so only a stored `false` keeps the normal title bar |

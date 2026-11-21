@@ -1,6 +1,6 @@
 // Pure, DOM-free grouping of the library feed into the machine-first tree the
 // launcher renders: LOCAL, each devserver and each tmux control-mode connection
-// as an equal top-level machine that owns its windows (control terminal first,
+// as an equal top-level machine that owns its windows (control terminals first,
 // then standalone terminals, then per-workspace windows nested in their
 // workspace cards). No Svelte, no reactive state -- all inputs are passed in,
 // so it is exhaustively unit-testable.
@@ -11,14 +11,13 @@
 //   machine -> workspaces: WorkspaceEntry.devserver_id  (null for local)
 //   workspace -> windows:  same library_id AND workspace_path === WorkspaceEntry.path
 //
-// Buckets are DISJOINT: every window lands in exactly one of control / terminals
-// / a workspace card / loose / orphan, so no window_id repeats inside a keyed
-// {#each} (a repeat throws Svelte each_key_duplicate and freezes the tree). A
-// tmux row goes to its connection's node before any library lookup, so the
-// library's own machine never lists it in those buckets. The one exception is
-// a connection's control terminal, which its machine's node also carries in
-// `tmuxControls`, a list of its own that no flattened view reads (see
-// `TmuxControlRow`).
+// Buckets are DISJOINT: every window lands in exactly one of control /
+// tmuxControls / terminals / a workspace card / loose / orphan, so no window_id
+// repeats inside a keyed {#each} (a repeat throws Svelte each_key_duplicate and
+// freezes the tree). A tmux row goes to its connection's node before any
+// library lookup, so the library's own machine never lists it in its own
+// buckets; a connection's control terminal then moves from the connection's
+// node to its machine's `tmuxControls` (see `TmuxControlRow`).
 
 import type {
   DevserverEntry,
@@ -160,13 +159,13 @@ export interface MachineNode {
 
 /** A tmux connection's control terminal as the card of the machine whose
  * terminal ran `tmux -CC` lists it. Running it buries that terminal, and the
- * user looks for the terminal on the machine where they ran it, so
- * the control terminal is the one window two cards list: its connection's
- * card, which lists every window of the connection, and its machine's. The
- * connection's other windows stay on the connection's card alone. The
- * command launcher's window list reads the disjoint buckets and never this
- * list, so it lists the window once; All windows leaves it out
- * (`windowOverview`). */
+ * user looks for the terminal on the machine where they ran it, so that card
+ * is the one that lists it: the connection's card lists the connection's
+ * windows, and the control terminal is not one of them. Until a machine card
+ * can hold it (no record yet, or no card holds the record's library) it stays
+ * in the connection node's `control`, so it is never unlisted. The command
+ * launcher lists it under the machine whose card lists it; All windows leaves
+ * it out (`windowOverview`). */
 export interface TmuxControlRow {
   window: WindowRecord;
   /** The connection's own node: its id is what the row's detach names, and
@@ -201,9 +200,10 @@ function windowMachineName(node: MachineNode): string {
 
 /** The desktop overview keeps hidden, detached and not-yet-associated windows.
  * It leaves out a tmux connection's buried control terminal, which offers no
- * action of its own while the connection runs and which its connection's card
- * and its machine's card already list; once the connection ends the library
- * clears the mark and the overview lists it as a plain window. */
+ * action of its own while the connection runs and which its machine's card,
+ * or its connection's card until a machine card holds it, already lists; once
+ * the connection ends the library clears the mark and the overview lists it
+ * as a plain window. */
 export function windowOverview(tree: MachineTree): { window: WindowRecord; machine: string }[] {
   return [
     ...tree.machines.flatMap((node) => {
@@ -259,8 +259,9 @@ function machineNode(
 }
 
 /** A tmux connection's node: the row its mark names as the control terminal
- * pinned first, its open windows as terminals, and the tmux windows the record
- * lists with no chan window as unopened rows. It has no workspace cards. */
+ * (which the tree moves to its machine's card when one holds it), its open
+ * windows as terminals, and the tmux windows the record lists with no chan
+ * window as unopened rows. It has no workspace cards. */
 function tmuxNode(
   connection: string,
   entry: TmuxConnectionEntry | null,
@@ -410,10 +411,13 @@ export function buildMachineTree(
   tmuxNodes.sort(compareTmuxNodes);
   // Each connection is one node and each control row one connection's (the
   // feed and the records are deduplicated above), so a machine's list holds
-  // a control terminal once.
+  // a control terminal once. It moves there, off the connection's node; with
+  // no machine to hold it, it stays where it is.
   for (const node of tmuxNodes) {
     const machine = tmuxMachine(node.tmux, machines);
-    if (machine) machine.tmuxControls.push(...node.control.map((window) => ({ window, node })));
+    if (!machine) continue;
+    machine.tmuxControls.push(...node.control.map((window) => ({ window, node })));
+    node.control = [];
   }
   machines.push(...tmuxNodes);
 

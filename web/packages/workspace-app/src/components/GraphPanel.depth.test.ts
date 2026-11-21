@@ -35,7 +35,8 @@ import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { openedForPath } from "../graph/selectionView";
+import { GRAPH_DRAWN_NODE_BUDGET, openedForPath } from "../graph/selectionView";
+import { FS_GRAPH_DEPTH_MAX } from "../graph/depth";
 import { layout, type GraphTab } from "../state/tabs.svelte";
 
 installGraphDom();
@@ -117,11 +118,21 @@ afterEach(() => {
   timers.release();
 });
 
-/// Move the depth slider to `value`, as a drag ends on it.
+/// Move the depth slider to `value` and release it there, as a drag ends.
 async function slideTo(slider: HTMLInputElement, value: number): Promise<void> {
   slider.value = String(value);
   slider.dispatchEvent(new Event("input", { bubbles: true }));
+  slider.dispatchEvent(new Event("change", { bubbles: true }));
   await settle();
+}
+
+/// Move the depth slider through `values` without releasing it.
+async function dragThrough(slider: HTMLInputElement, values: number[]): Promise<void> {
+  for (const value of values) {
+    slider.value = String(value);
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(2);
+  }
 }
 
 async function depthRow(tab: GraphTab): Promise<HTMLElement> {
@@ -181,6 +192,737 @@ describe("the depth slider", () => {
     expect([slider.min, slider.value], "a file's depth is hops, from one").toEqual(["1", "1"]);
   });
 });
+
+/// Under `top` ("" for the root): 10 folders, 20 under each and 20 notes
+/// under each of those. From `top`, 11 nodes draw at depth 1, 211 at depth 2
+/// and 4,211 at depth 3, past the drawn-node budget.
+function serveWideTree(top: string): void {
+  const view: { nodes: ReturnType<typeof g.dir>[]; edges: ReturnType<typeof g.edge>[] } = { nodes: [g.dir("")], edges: [] };
+  const fs: { nodes: ReturnType<typeof fsg.dir>[]; edges: ReturnType<typeof fsg.contains>[] } = { nodes: [fsg.dir("")], edges: [] };
+  const add = (parent: string, path: string, file: boolean): void => {
+    view.nodes.push(file ? g.file(path) : g.dir(path));
+    view.edges.push(g.edge(parent === "" ? "" : `directory:${parent}`, file ? path : `directory:${path}`, "contains"));
+    fs.nodes.push(file ? fsg.file(path) : fsg.dir(path));
+    fs.edges.push(fsg.contains(parent, path));
+  };
+  const under = (name: string): string => (top ? `${top}/${name}` : name);
+  if (top) add("", top, false);
+  for (let a = 0; a < 10; a += 1) {
+    add(top, under(`a${a}`), false);
+    for (let b = 0; b < 20; b += 1) {
+      add(under(`a${a}`), under(`a${a}/b${b}`), false);
+      for (let c = 0; c < 20; c += 1) add(under(`a${a}/b${b}`), under(`a${a}/b${b}/${c}.md`), true);
+    }
+  }
+  expect(view.nodes.length).toBeGreaterThan(GRAPH_DRAWN_NODE_BUDGET);
+  graphServer.view = view;
+  graphServer.fs = fs;
+}
+
+describe("the depth's bounds", () => {
+  test("a drag applies its value once, when it is released", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    const reads = graphServer.fsGraphCalls.length;
+
+    await dragThrough(slider, [2, 3, 2, 3]);
+    expect(tab.expanded, "nothing opens while the drag is under way").toEqual({ "": true });
+    expect(graphServer.fsGraphCalls.length, "nothing is read while the drag is under way").toBe(reads);
+    expect(row.querySelector(".depth-value")?.textContent?.trim(), "the value follows the drag").toBe("3");
+
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(tab.expanded.notes).toBe(true);
+    expect(tab.expanded["notes/deep"], "the released value, three levels").toBe(true);
+    expect(visibleIds()).toEqual(expect.arrayContaining([D, MAIN]));
+    expect(row.querySelector(".depth-value")?.textContent?.trim(), "a full depth that fits").toBe("3");
+    expect(row.classList.contains("limited"), "no limit at a depth that fits").toBe(false);
+  });
+
+  test("a drag that ends with no change shows the depth again once the slider loses focus", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+
+    await dragThrough(slider, [3, 2]);
+    expect(row.querySelector(".depth-value")?.textContent?.trim()).toBe("2");
+    slider.dispatchEvent(new FocusEvent("blur"));
+    await settle(2);
+    expect(row.querySelector(".depth-value")?.textContent?.trim(), "the depth as it stands").toBe("1");
+    expect(tab.expanded).toEqual({ "": true });
+  });
+
+  test("a new selection drops a drag's value", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+
+    await dragThrough(slider, [3]);
+    canvas.props!.onSelect(SRC);
+    await settle(2);
+    expect(row.querySelector(".depth-value")?.textContent?.trim(), "src is closed").toBe("0");
+  });
+
+  test("a directory's depth goes no deeper than the server's walk", async () => {
+    // A chain of 13 directories under the root with a note at the bottom.
+    const chain = Array.from({ length: 13 }, (_, i) => Array.from({ length: i + 1 }, (_, j) => `l${j}`).join("/"));
+    const leaf = `${chain.at(-1)}/leaf.md`;
+    graphServer.view = {
+      nodes: [g.dir(""), ...chain.map((path) => g.dir(path)), g.file(leaf)],
+      edges: [
+        ...chain.map((path, i) => g.edge(i === 0 ? "" : `directory:${chain[i - 1]}`, `directory:${path}`, "contains")),
+        g.edge(`directory:${chain.at(-1)}`, leaf, "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...chain.map((path) => fsg.dir(path)), fsg.file(leaf)],
+      edges: [
+        ...chain.map((path, i) => fsg.contains(i === 0 ? "" : chain[i - 1], path)),
+        fsg.contains(chain.at(-1)!, leaf),
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+
+    expect(slider.max, "the note is 14 levels down").toBe(String(FS_GRAPH_DEPTH_MAX));
+    await slideTo(slider, 14);
+    expect(tab.expanded[chain[FS_GRAPH_DEPTH_MAX - 2]], "ten levels show").toBe(true);
+    expect(tab.expanded[chain[FS_GRAPH_DEPTH_MAX - 1]], "the eleventh does not").toBeUndefined();
+  });
+
+  test("a raised depth stops at the deepest level the drawn-node budget fits, and says so", async () => {
+    serveWideTree("");
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.max).toBe("3");
+
+    await slideTo(slider, 3);
+    expect(tab.expanded.a0, "the first level opens").toBe(true);
+    expect(tab.expanded["a0/b0"], "the third would draw past the budget").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row")!;
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("2 [limit]");
+    expect(row.classList.contains("limited")).toBe(true);
+    expect(row.getAttribute("title")).toContain("more than");
+
+    await slideTo(slider, 1);
+    expect(tab.expanded.a0, "a lowered depth applies").toBeUndefined();
+    expect(row.querySelector(".depth-cue"), "one level below the limit is no limit").toBeNull();
+  });
+
+  test("a graph opened on a directory opens toward its files only as far as the budget fits", async () => {
+    // The first notes under wide/ sit three levels down, past the budget.
+    serveWideTree("wide");
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ pendingSelectId: "wide", expanded: openedForPath("wide") }),
+    );
+    expect(canvas.props?.selectedId).toBe("directory:wide");
+    expect(tab.expanded["wide/a0"], "the second level fits").toBe(true);
+    expect(tab.expanded["wide/a0/b0"], "the level of its files does not").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+  });
+
+  test("a raise reads the folders it opens in bounded batches, then opens them all", async () => {
+    // 100 folders under the root whose notes the shared graph does not hold,
+    // and one chain two levels deep that gives the depth its second level.
+    serveUnreadFolders(100, 1);
+    const drawnAtRead: Array<{ path: string; nodes: number }> = [];
+    graphServer.onFsGraph = (request) => drawnAtRead.push({ path: request.path, nodes: canvas.props?.nodes.length ?? 0 });
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    const start = drawnAtRead.length;
+
+    await slideTo(slider, 2);
+    await settle(30);
+    // The root's 101 folders: deep/ and the 100 u's.
+    const reads = drawnAtRead.slice(start).filter((read) => /^(u\d+|deep)$/.test(read.path));
+    expect(reads.length, "every folder of the level is read, past the first batch").toBe(101);
+    const batches = [...new Set(reads.map((read) => read.nodes))];
+    expect(batches.length, "the second batch is read once the first is drawn").toBe(2);
+    expect(reads.filter((read) => read.nodes === batches[0]).length).toBe(64);
+    expect(tab.expanded.u99, "the level opens once all of it is read").toBe(true);
+    expect(visibleIds()).toContain("u99/n0.md");
+  });
+
+  test("a raise counts the notes it is about to read against the budget", async () => {
+    // 60 folders of 60 notes the shared graph does not hold: a second level
+    // would draw 3,663 nodes.
+    serveUnreadFolders(60, 60);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.max).toBe("2");
+
+    await slideTo(slider, 2);
+    await settle(30);
+    expect(tab.expanded.u0, "the level that would pass the budget stays closed").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row")!;
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [limit]");
+  });
+
+  test("a raise over a level the shared graph already counts past the budget reads none of it", async () => {
+    // As the server answers a gitignored folder: the shared graph's tree
+    // layer holds its 60 folders of 60 notes, the spine none of their
+    // levels, and the tab is restored on it with its deep/ folder open.
+    const dirs = ["ignored", "ignored/heavy", "ignored/heavy/deep"];
+    const files = ["ignored/heavy/deep/x.md"];
+    for (let f = 0; f < 60; f += 1) {
+      dirs.push(`ignored/heavy/u${f}`);
+      for (let n = 0; n < 60; n += 1) files.push(`ignored/heavy/u${f}/n${n}.md`);
+    }
+    const parent = (path: string): string => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+    const dirId = (path: string): string => (path === "" ? "" : `directory:${path}`);
+    graphServer.view = {
+      nodes: [g.dir(""), ...dirs.map((path) => g.dir(path)), ...files.map((path) => g.file(path))],
+      edges: [
+        ...dirs.map((path) => g.edge(dirId(parent(path)), dirId(path), "contains")),
+        ...files.map((path) => g.edge(dirId(parent(path)), path, "contains")),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...dirs.map((path) => fsg.dir(path)), ...files.map((path) => fsg.file(path))],
+      edges: [...dirs, ...files].map((path) => fsg.contains(parent(path), path)),
+    };
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({
+        pendingSelectId: "directory:ignored/heavy",
+        selectedNodeId: "directory:ignored/heavy",
+        expanded: { ignored: true, "ignored/heavy": true, "ignored/heavy/deep": true },
+      }),
+    );
+    let row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.max).toBe("2");
+    const start = graphServer.fsGraphCalls.length;
+
+    await slideTo(slider, 2);
+    await settle(30);
+    const reads = graphServer.fsGraphCalls.slice(start).filter((call) => call.path.startsWith("ignored/heavy/u"));
+    expect(reads, "no folder of a level already past the budget is read").toEqual([]);
+    expect(tab.expanded["ignored/heavy/u0"]).toBeUndefined();
+    row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row")!;
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [limit]");
+  });
+
+  test("a raise reads a level's folders before the level below them", async () => {
+    // Five folders whose children are unread hold three folders each, whose
+    // notes are unread too; a chain gives the depth its third level.
+    const view = { nodes: [g.dir(""), g.dir("deep"), g.dir("deep/x"), g.file("deep/x/y.md")], edges: [
+      g.edge("", "directory:deep", "contains"),
+      g.edge("directory:deep", "directory:deep/x", "contains"),
+      g.edge("directory:deep/x", "deep/x/y.md", "contains"),
+    ] };
+    const fs = { nodes: [fsg.dir(""), fsg.dir("deep"), fsg.dir("deep/x"), fsg.file("deep/x/y.md")], edges: [
+      fsg.contains("", "deep"),
+      fsg.contains("deep", "deep/x"),
+      fsg.contains("deep/x", "deep/x/y.md"),
+    ] };
+    for (let f = 0; f < 5; f += 1) {
+      view.nodes.push(g.dir(`f${f}`));
+      view.edges.push(g.edge("", `directory:f${f}`, "contains"));
+      fs.nodes.push(fsg.dir(`f${f}`));
+      fs.edges.push(fsg.contains("", `f${f}`));
+      for (let c = 0; c < 3; c += 1) {
+        fs.nodes.push(fsg.dir(`f${f}/g${c}`), fsg.file(`f${f}/g${c}/n.md`));
+        fs.edges.push(fsg.contains(`f${f}`, `f${f}/g${c}`), fsg.contains(`f${f}/g${c}`, `f${f}/g${c}/n.md`));
+      }
+    }
+    graphServer.view = view;
+    graphServer.fs = fs;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    const start = graphServer.fsGraphCalls.length;
+
+    await slideTo(slider, 3);
+    await settle(30);
+    const order = graphServer.fsGraphCalls.slice(start).map((call) => call.path).filter((path) => /^f\d/.test(path));
+    expect(order.slice(0, 5).every((path) => /^f\d$/.test(path)), `the first level first: ${order}`).toBe(true);
+    expect(order.slice(5).every((path) => /^f\d\/g\d$/.test(path)), `then the second: ${order}`).toBe(true);
+    expect(order.length).toBe(20);
+    expect(tab.expanded["f4/g2"], "three levels open").toBe(true);
+    expect(visibleIds()).toContain("f4/g2/n.md");
+  });
+});
+
+describe("the drawn-node budget holds", () => {
+  /// The tab's drawn count, its depth row's text, and whether u0 is open.
+  async function reading(tab: GraphTab): Promise<{ drawn: number; depth: string; open: boolean }> {
+    const row = await depthRow(tab);
+    return {
+      drawn: visibleIds().length,
+      depth: row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      open: tab.expanded.u0 === true,
+    };
+  }
+
+  /// What the canvas's status line says of a depth or a folder that did
+  /// not open.
+  function note(): string | null {
+    return document.body.querySelector(".statusbar .depth-note")?.textContent?.trim() ?? null;
+  }
+
+  async function raiseRootTo2(tab: GraphTab): Promise<void> {
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    await slideTo(slider, 2);
+    await settle(30);
+  }
+
+  async function reloadGraph(): Promise<void> {
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.graph.reload" } }));
+    await settle(30);
+  }
+
+  test("a raise over folders the shared graph holds one note of reads them, and a burst of saves keeps the budget", async () => {
+    // The shape of a workspace over the listing cap: the shared graph holds
+    // one note of each folder, the disk holds 60.
+    serveUnreadFolders(60, 60);
+    for (let i = 0; i < 60; i += 1) {
+      graphServer.view.nodes.push(g.file(`u${i}/n0.md`));
+      graphServer.view.edges.push(g.edge(`directory:u${i}`, `u${i}/n0.md`, "contains"));
+    }
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+
+    await raiseRootTo2(tab);
+    expect(await reading(tab)).toMatchObject({ depth: "1 [limit]", open: false });
+
+    graphServer.fs.nodes.push(...Array.from({ length: 60 }, (_, i) => fsg.file(`u${i}/new.md`)));
+    graphServer.fs.edges.push(...Array.from({ length: 60 }, (_, i) => fsg.contains(`u${i}`, `u${i}/new.md`)));
+    graphReloadSignal.paths = Array.from({ length: 60 }, (_, i) => `u${i}/new.md`);
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    const after = await reading(tab);
+    expect(after.drawn, "drawn after the burst").toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(after.open).toBe(false);
+  });
+
+  test("a raise whose reads fail stops below their level, and a reload keeps the budget", async () => {
+    serveUnreadFolders(60, 60);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    graphServer.fsFail = (path) => (/^u\d+$/.test(path) ? new Error("request timed out after 10000 ms") : null);
+
+    await raiseRootTo2(tab);
+    expect((await reading(tab)).open, "a level whose folders could not be read stays closed").toBe(false);
+    expect(note(), "the canvas says why").toBe("u0 could not be read; the depth stops above it");
+
+    graphServer.fsFail = null;
+    await reloadGraph();
+    const after = await reading(tab);
+    expect(after.drawn, "drawn after the reload").toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(after.open).toBe(false);
+  });
+
+  test("a raise after a whole fetch reads its folders again", async () => {
+    serveUnreadFolders(60, 60);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await raiseRootTo2(tab);
+    expect((await reading(tab)).depth).toBe("1 [limit]");
+
+    await reloadGraph();
+    await raiseRootTo2(tab);
+    expect((await reading(tab)).open, "the same raise stops again").toBe(false);
+    await reloadGraph();
+    const after = await reading(tab);
+    expect(after.drawn, "drawn after the next reload").toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(after.open).toBe(false);
+  });
+
+  test("files that arrive in the open tree past the budget close it back", async () => {
+    serveUnreadFolders(60, 10);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await raiseRootTo2(tab);
+    expect((await reading(tab)).open, "60 folders of 10 notes fit").toBe(true);
+
+    const arriving = Array.from({ length: 60 }, (_, i) => Array.from({ length: 50 }, (_, n) => `u${i}/more${n}.md`)).flat();
+    graphServer.fs.nodes.push(...arriving.map((path) => fsg.file(path)));
+    graphServer.fs.edges.push(...arriving.map((path) => fsg.contains(path.split("/")[0], path)));
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    const after = await reading(tab);
+    expect(after.drawn, "drawn once the files arrived").toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(after).toMatchObject({ depth: "1 [limit]", open: false });
+  });
+
+  test("a double-click on a folder that holds more than fits is closed back", async () => {
+    serveUnreadFolders(1, 3500);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    canvas.props!.onSelect("directory:u0");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded.u0).toBeUndefined();
+    expect(note(), "the canvas says why").toBe("opening u0 would draw more than 3,000 files and folders");
+    expect((await depthRow(tab)).getAttribute("title")).toBe("Opening this folder would draw more than 3,000 files and folders");
+  });
+
+  test("a double-click on a folder whose children are drawn refuses past the budget", async () => {
+    serveUnreadFolders(1, 3500);
+    for (let n = 0; n < 3500; n += 1) {
+      graphServer.view.nodes.push(g.file(`u0/n${n}.md`));
+      graphServer.view.edges.push(g.edge("directory:u0", `u0/n${n}.md`, "contains"));
+    }
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const reads = graphServer.fsGraphCalls.length;
+    canvas.props!.onSelect("directory:u0");
+    await settle(2);
+    const fit = canvas.props!.expansionFitRequest;
+    canvas.props!.onSetAsScope();
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded.u0).toBeUndefined();
+    expect(graphServer.fsGraphCalls.length, "refused up front, with no read").toBe(reads);
+    expect(canvas.props!.expansionFitRequest, "and nothing opened to fit").toBe(fit);
+    expect(note()).toBe("opening u0 would draw more than 3,000 files and folders");
+  });
+
+  test("a close names no folder the user did not select", async () => {
+    serveUnreadFolders(2, 10);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    for (const folder of ["u1", "u0"]) {
+      canvas.props!.onSelect(`directory:${folder}`);
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle(10);
+    }
+    canvas.props!.onSelect("directory:deep");
+    await settle(2);
+    const arriving = ["u0/one.md", ...Array.from({ length: 3000 }, (_, n) => `u1/more${n}.md`)];
+    graphServer.fs.nodes.push(...arriving.map((path) => fsg.file(path)));
+    graphServer.fs.edges.push(...arriving.map((path) => fsg.contains(path.split("/")[0], path)));
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded.u1, "the folder the files grew closes").toBeUndefined();
+    expect(note(), "no note names a folder for a cause it did not have").toBeNull();
+  });
+
+  test("a close names the selected folder only when it would not fit alone", async () => {
+    // u0 and u1 hold 10 notes each and are open; u0 is selected. One burst
+    // adds a note to u0 and 3,000 to u1, and both close at their level.
+    serveUnreadFolders(2, 10);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    for (const folder of ["u1", "u0"]) {
+      canvas.props!.onSelect(`directory:${folder}`);
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle(10);
+    }
+    const arriving = ["u0/one.md", ...Array.from({ length: 3000 }, (_, n) => `u1/more${n}.md`)];
+    graphServer.fs.nodes.push(...arriving.map((path) => fsg.file(path)));
+    graphServer.fs.edges.push(...arriving.map((path) => fsg.contains(path.split("/")[0], path)));
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    expect(tab.expanded.u0, "u0 closed with its level").toBeUndefined();
+    expect(note(), "u0 alone fits, so no note says otherwise").toBeNull();
+  });
+
+  test("a graph opened on a folder past the budget says why it stays closed", async () => {
+    serveUnreadFolders(1, 3500);
+    for (let n = 0; n < 3500; n += 1) {
+      graphServer.view.nodes.push(g.file(`u0/n${n}.md`));
+      graphServer.view.edges.push(g.edge("directory:u0", `u0/n${n}.md`, "contains"));
+    }
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "u0", expanded: openedForPath("u0") }));
+    await settle(30);
+    expect(tab.expanded.u0).toBeUndefined();
+    expect(note()).toBe("opening u0 would draw more than 3,000 files and folders");
+  });
+
+  test("files that arrive in a raised folder itself close its subfolders, not it", async () => {
+    // p raised to its second level, 60 folders of 40 notes: 2,460 counted.
+    const view = { nodes: [g.dir(""), g.dir("p")], edges: [g.edge("", "directory:p", "contains")] };
+    const fs = { nodes: [fsg.dir(""), fsg.dir("p")], edges: [fsg.contains("", "p")] };
+    const add = (parent: string, path: string, file: boolean): void => {
+      view.nodes.push(file ? g.file(path) : g.dir(path));
+      view.edges.push(g.edge(`directory:${parent}`, file ? path : `directory:${path}`, "contains"));
+      fs.nodes.push(file ? fsg.file(path) : fsg.dir(path));
+      fs.edges.push(fsg.contains(parent, path));
+    };
+    for (let i = 0; i < 60; i += 1) {
+      add("p", `p/u${i}`, false);
+      for (let n = 0; n < 40; n += 1) add(`p/u${i}`, `p/u${i}/n${n}.md`, true);
+    }
+    graphServer.view = view;
+    graphServer.fs = fs;
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { "": true, p: true }, selectedNodeId: "directory:p", pendingSelectId: "directory:p" }),
+    );
+    await settle(10);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    await slideTo(slider, 2);
+    await settle(30);
+    expect(tab.expanded["p/u0"], "p's second level fits").toBe(true);
+
+    const arriving = Array.from({ length: 700 }, (_, n) => `p/new${n}.md`);
+    graphServer.fs.nodes.push(...arriving.map((path) => fsg.file(path)));
+    graphServer.fs.edges.push(...arriving.map((path) => fsg.contains("p", path)));
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded["p/u0"], "p's subfolders close").toBeUndefined();
+    expect(tab.expanded.p, "p itself stays open").toBe(true);
+    expect(visibleIds(), "with the files that arrived").toContain("p/new699.md");
+  });
+
+  test("a raise over a folder gone from disk stops below it, reading it once", async () => {
+    // The shared graph lists u3; the disk no longer has it.
+    serveUnreadFolders(10, 1);
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => n.path !== "u3" && !n.path.startsWith("u3/"));
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "u3" && !e.target.startsWith("u3/"));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let goneReads = 0;
+    graphServer.onFsGraph = (request) => {
+      if (request.path === "u3") goneReads += 1;
+    };
+    // A raise that read the gone folder again and again would never end;
+    // past a few reads the fixture fails it, which ends the raise anyway.
+    graphServer.fsFail = (path) => (path === "u3" && goneReads > 4 ? new Error("read again") : null);
+
+    await raiseRootTo2(tab);
+    expect(goneReads, "the gone folder is read once").toBe(1);
+    expect(tab.expanded.u0, "the level stays closed").toBeUndefined();
+    expect(note()).toBe("u3 could not be read; the depth stops above it");
+  });
+
+  test("a root that alone holds more than the budget still opens folders below it", async () => {
+    // 3,100 files at the root, a folder of 10 and a folder of 3,500, all
+    // held by the shared graph.
+    const view = { nodes: [g.dir(""), g.dir("small"), g.dir("big")], edges: [
+      g.edge("", "directory:small", "contains"), g.edge("", "directory:big", "contains"),
+    ] };
+    const fs = { nodes: [fsg.dir(""), fsg.dir("small"), fsg.dir("big")], edges: [fsg.contains("", "small"), fsg.contains("", "big")] };
+    const add = (dir: string, path: string): void => {
+      view.nodes.push(g.file(path));
+      view.edges.push(g.edge(dir === "" ? "" : `directory:${dir}`, path, "contains"));
+      fs.nodes.push(fsg.file(path));
+      fs.edges.push(fsg.contains(dir, path));
+    };
+    for (let n = 0; n < 3100; n += 1) add("", `root${n}.md`);
+    for (let n = 0; n < 10; n += 1) add("small", `small/n${n}.md`);
+    for (let n = 0; n < 3500; n += 1) add("big", `big/n${n}.md`);
+    graphServer.view = view;
+    graphServer.fs = fs;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+
+    canvas.props!.onSelect("directory:small");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle(30);
+    expect(tab.expanded.small, "the root's own level is not counted").toBe(true);
+    expect(visibleIds()).toContain("small/n9.md");
+
+    canvas.props!.onSelect("directory:big");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle(30);
+    expect(tab.expanded.big, "3,500 below the root is past it").toBeUndefined();
+    expect(note()).toBe("opening big would draw more than 3,000 files and folders");
+    expect(tab.expanded.small, "the folder that fit stays").toBe(true);
+  });
+
+  test("double-clicks that add up past the budget stop at the one that would pass it", async () => {
+    serveUnreadFolders(10, 400);
+    for (let i = 0; i < 10; i += 1) {
+      for (let n = 0; n < 400; n += 1) {
+        graphServer.view.nodes.push(g.file(`u${i}/n${n}.md`));
+        graphServer.view.edges.push(g.edge(`directory:u${i}`, `u${i}/n${n}.md`, "contains"));
+      }
+    }
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    for (let i = 0; i < 10; i += 1) {
+      canvas.props!.onSelect(`directory:u${i}`);
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle(10);
+    }
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(Object.keys(tab.expanded).filter((dir) => dir.startsWith("u")).length, "seven folders of 400 fit").toBe(7);
+    expect(note()).toBe("opening u9 would draw more than 3,000 files and folders");
+  });
+
+  test("files that arrive past the budget close the folders they grew, not a folder opened elsewhere", async () => {
+    // p/ raised to its second level; q/r opened by hand.
+    const view = { nodes: [g.dir(""), g.dir("p"), g.dir("q"), g.dir("q/r")], edges: [
+      g.edge("", "directory:p", "contains"), g.edge("", "directory:q", "contains"), g.edge("directory:q", "directory:q/r", "contains"),
+    ] };
+    const fs = { nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("q"), fsg.dir("q/r")], edges: [
+      fsg.contains("", "p"), fsg.contains("", "q"), fsg.contains("q", "q/r"),
+    ] };
+    const add = (parent: string, path: string, file: boolean): void => {
+      fs.nodes.push(file ? fsg.file(path) : fsg.dir(path));
+      fs.edges.push(fsg.contains(parent, path));
+    };
+    for (let i = 0; i < 60; i += 1) {
+      add("p", `p/u${i}`, false);
+      view.nodes.push(g.dir(`p/u${i}`));
+      view.edges.push(g.edge("directory:p", `directory:p/u${i}`, "contains"));
+      for (let n = 0; n < 10; n += 1) {
+        add(`p/u${i}`, `p/u${i}/n${n}.md`, true);
+        view.nodes.push(g.file(`p/u${i}/n${n}.md`));
+        view.edges.push(g.edge(`directory:p/u${i}`, `p/u${i}/n${n}.md`, "contains"));
+      }
+    }
+    for (let n = 0; n < 100; n += 1) add("q/r", `q/r/n${n}.md`, true);
+    graphServer.view = view;
+    graphServer.fs = fs;
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { "": true, p: true, q: true, "q/r": true }, selectedNodeId: "directory:p", pendingSelectId: "directory:p" }),
+    );
+    await settle(10);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    await slideTo(slider, 2);
+    await settle(30);
+    expect(tab.expanded["p/u0"], "p's second level fits").toBe(true);
+
+    const arriving = Array.from({ length: 60 }, (_, i) => Array.from({ length: 45 }, (_, n) => `p/u${i}/more${n}.md`)).flat();
+    for (const path of arriving) add(path.split("/").slice(0, 2).join("/"), path, true);
+    graphReloadSignal.paths = arriving;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded["p/u0"], "the folders the files grew close").toBeUndefined();
+    expect(tab.expanded["q/r"], "the folder opened elsewhere stays").toBe(true);
+  });
+
+  test("a restored tree the shared graph shows past the budget closes before its spine arrives", async () => {
+    serveUnreadFolders(1, 3500);
+    for (let n = 0; n < 3500; n += 1) {
+      graphServer.view.nodes.push(g.file(`u0/n${n}.md`));
+      graphServer.view.edges.push(g.edge("directory:u0", `u0/n${n}.md`, "contains"));
+    }
+    let release!: () => void;
+    graphServer.fsGate = new Promise((resolve) => (release = resolve));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, u0: true } }));
+    await settle(30);
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    expect(tab.expanded.u0).toBeUndefined();
+    release();
+    await settle(10);
+  });
+
+  test("a raise whose batch a reload supersedes reads it again", async () => {
+    serveUnreadFolders(60, 60);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let reloaded = false;
+    const opened: boolean[] = [];
+    graphServer.onFsGraph = (request) => {
+      opened.push(tab.expanded.u0 === true);
+      if (!reloaded && request.path === "u3") {
+        reloaded = true;
+        window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.graph.reload" } }));
+      }
+    };
+    await raiseRootTo2(tab);
+    await settle(30);
+    expect(reloaded).toBe(true);
+    expect(opened.some(Boolean), "the level never opened on a count it could not make").toBe(false);
+    expect(await reading(tab)).toMatchObject({ depth: "1 [limit]", open: false });
+  });
+
+  test("a graph opened on a directory over unread folders stays within the budget", async () => {
+    // p/ holds 60 folders; the shared graph holds one note of each, so the
+    // first files sit two levels down, and the disk holds 60 of each.
+    const view = { nodes: [g.dir(""), g.dir("p")], edges: [g.edge("", "directory:p", "contains")] };
+    const fs = { nodes: [fsg.dir(""), fsg.dir("p")], edges: [fsg.contains("", "p")] };
+    for (let i = 0; i < 60; i += 1) {
+      view.nodes.push(g.dir(`p/u${i}`), g.file(`p/u${i}/n0.md`));
+      view.edges.push(g.edge("directory:p", `directory:p/u${i}`, "contains"), g.edge(`directory:p/u${i}`, `p/u${i}/n0.md`, "contains"));
+      fs.nodes.push(fsg.dir(`p/u${i}`));
+      fs.edges.push(fsg.contains("p", `p/u${i}`));
+      for (let n = 0; n < 60; n += 1) {
+        fs.nodes.push(fsg.file(`p/u${i}/n${n}.md`));
+        fs.edges.push(fsg.contains(`p/u${i}`, `p/u${i}/n${n}.md`));
+      }
+    }
+    graphServer.view = view;
+    graphServer.fs = fs;
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ pendingSelectId: "p", expanded: openedForPath("p") }),
+    );
+    await settle(30);
+    expect(tab.expanded["p/u0"], "the level of the files would pass the budget").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+  });
+
+  test("a depth lowered while a raise reads stays lowered", async () => {
+    serveUnreadFolders(10, 2);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    let release!: () => void;
+    graphServer.fsGate = new Promise((resolve) => (release = resolve));
+
+    await slideTo(slider, 2);
+    await slideTo(slider, 1);
+    release();
+    await settle(30);
+    expect(tab.expanded.u0, "the raise ended with the lowering").toBeUndefined();
+  });
+
+  test("a raise a new selection ends reads no more of its batch", async () => {
+    serveUnreadFolders(100, 1);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    let release!: () => void;
+    graphServer.fsGate = new Promise((resolve) => (release = resolve));
+    const start = graphServer.fsGraphCalls.length;
+
+    await slideTo(slider, 2);
+    canvas.props!.onSelect("directory:deep");
+    await settle(2);
+    release();
+    await settle(30);
+    const reads = graphServer.fsGraphCalls.slice(start).filter((call) => /^u\d+$/.test(call.path));
+    expect(reads.length, "reads after the raise ended").toBeLessThanOrEqual(1);
+    expect(tab.expanded.u0).toBeUndefined();
+  });
+});
+
+/// Under the root: `count` folders `u0`... holding `notes` notes each on
+/// disk, which the shared graph lists as empty folders, beside a chain
+/// `deep/x` that gives the depth its second level.
+function serveUnreadFolders(count: number, notes: number): void {
+  const folders = Array.from({ length: count }, (_, i) => `u${i}`);
+  graphServer.view = {
+    nodes: [g.dir(""), g.dir("deep"), g.dir("deep/x"), ...folders.map((path) => g.dir(path))],
+    edges: [
+      g.edge("", "directory:deep", "contains"),
+      g.edge("directory:deep", "directory:deep/x", "contains"),
+      ...folders.map((path) => g.edge("", `directory:${path}`, "contains")),
+    ],
+  };
+  const notesOf = (path: string): string[] => Array.from({ length: notes }, (_, n) => `${path}/n${n}.md`);
+  graphServer.fs = {
+    nodes: [fsg.dir(""), fsg.dir("deep"), fsg.dir("deep/x"), ...folders.flatMap((path) => [fsg.dir(path), ...notesOf(path).map((note) => fsg.file(note))])],
+    edges: [
+      fsg.contains("", "deep"),
+      fsg.contains("deep", "deep/x"),
+      ...folders.flatMap((path) => [fsg.contains("", path), ...notesOf(path).map((note) => fsg.contains(path, note))]),
+    ],
+  };
+}
 
 describe("the workspace tree", () => {
   test("shows a directory's files only while it and its ancestors are expanded", async () => {

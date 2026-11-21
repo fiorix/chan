@@ -395,6 +395,13 @@ pub enum RecoveryOutcome {
     /// on the passes it claims later, and until one succeeds every
     /// `Complete`, from any claimant, keeps being requeued.
     CompleteWithReportRefreshOwed,
+    /// The pass action failed in a way running the same pass again cannot
+    /// change, such as a listing over its cap: complete the pass's generation
+    /// without requeueing it, so readiness reads ready rather than recovering
+    /// toward a pass that fails each time it runs. An owed persisted-report
+    /// refresh stays owed. The next pass a trigger requests runs the action
+    /// again.
+    Failed,
     /// Requeue the pass, merged into any pass requested meanwhile, and wake the
     /// installed recovery driver.
     Retry,
@@ -829,6 +836,69 @@ pub mod subtree_test_hooks {
             )));
         }
         Ok(())
+    }
+}
+
+/// Lowered bounds on the full rebuild's listing and on the scoped
+/// whole-tree walk, so a test can cross either with a few files instead of
+/// half a million.
+///
+/// Compiled for this crate's tests and for downstream test builds that
+/// enable `test-hooks`. A bound is keyed by the workspace's graph directory,
+/// so tests over separate workspaces do not interfere, and holds until the
+/// guard `lower` or `lower_tree_walk` returns is dropped.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod listing_limit_test_hooks {
+    use super::Workspace;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    type Limits = LazyLock<Mutex<HashMap<PathBuf, usize>>>;
+
+    static REBUILD_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TREE_WALK_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct LimitGuard(&'static Limits, PathBuf);
+
+    impl Drop for LimitGuard {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().remove(&self.1);
+        }
+    }
+
+    pub fn lower(workspace: &Workspace, limit: usize) -> LimitGuard {
+        lower_in(&REBUILD_LIMITS, workspace, limit)
+    }
+
+    /// Lower the bound of [`Workspace::list_tree_filtered_unified`], the
+    /// walk the graph and the search catalog read, and not the rebuild's.
+    pub fn lower_tree_walk(workspace: &Workspace, limit: usize) -> LimitGuard {
+        lower_in(&TREE_WALK_LIMITS, workspace, limit)
+    }
+
+    fn lower_in(limits: &'static Limits, workspace: &Workspace, limit: usize) -> LimitGuard {
+        let key = workspace.paths.graph_dir.clone();
+        assert!(limits.lock().unwrap().insert(key.clone(), limit).is_none());
+        LimitGuard(limits, key)
+    }
+
+    pub(super) fn rebuild_listing_limit(workspace: &Workspace) -> usize {
+        limit_in(&REBUILD_LIMITS, workspace)
+    }
+
+    pub(super) fn tree_walk_limit(workspace: &Workspace) -> usize {
+        limit_in(&TREE_WALK_LIMITS, workspace)
+    }
+
+    fn limit_in(limits: &Limits, workspace: &Workspace) -> usize {
+        limits
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .copied()
+            .unwrap_or(crate::fs_ops::LIST_TREE_LIMIT)
     }
 }
 
@@ -1737,7 +1807,9 @@ impl Workspace {
             }
             status.active = None;
             match outcome {
-                RecoveryOutcome::Complete | RecoveryOutcome::CompleteWithReportRefreshOwed => {
+                RecoveryOutcome::Complete
+                | RecoveryOutcome::CompleteWithReportRefreshOwed
+                | RecoveryOutcome::Failed => {
                     status.completed_generation =
                         std::cmp::max(status.completed_generation, pass.generation);
                 }
@@ -2384,7 +2456,11 @@ impl Workspace {
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<TreeEntry>> {
         let policy = self.scope_policy();
-        fs_ops::list_tree_scoped_cancelable(self.root(), &policy, cancel)
+        #[cfg(any(test, feature = "test-hooks"))]
+        let limit = listing_limit_test_hooks::tree_walk_limit(self);
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let limit = fs_ops::LIST_TREE_LIMIT;
+        fs_ops::list_tree_scoped_cancelable(self.root(), &policy, limit, cancel)
     }
 
     /// Filtered counterpart of `list_tree_prefix_unified`, still rooted
@@ -3290,8 +3366,18 @@ impl Workspace {
         // point in between leaves the marker on disk, which the
         // next `Workspace::open` promotes into a supervised full rebuild
         // instead of trusting an index that may have skipped its final commit.
+        let marker_was_present = self.paths.graph_dir.join(REBUILD_MARKER).exists();
         self.write_rebuild_marker()?;
-        self.rebuild_graph(cancel, progress, &policy)?;
+        if let Err(error) = self.rebuild_graph(cancel, progress, &policy) {
+            // A listing over its cap refuses before either store is touched,
+            // so the marker goes back to what it was: this pass's own marker
+            // would only make the next open run the same refusal again, and
+            // one an earlier pass left still means the stores may disagree.
+            if matches!(error, ChanError::ListingTooLarge { .. }) && !marker_was_present {
+                self.clear_rebuild_marker();
+            }
+            return Err(error);
+        }
         let index = self.index()?;
         // Push the EFFECTIVE filter (global baseline unioned with this
         // workspace's `excluded_dirs` additions) to the index facade so the
@@ -3444,8 +3530,18 @@ impl Workspace {
         let graph = self.graph()?;
         // Effective filter = global baseline + this workspace's blocklist
         // additions, so the graph rebuild skips the same subtrees the index
-        // build does (both re-derive it per reindex).
-        let entries = fs_ops::list_tree_scoped(self.root(), policy)?;
+        // build does (both re-derive it per reindex). Only the files the
+        // index reads are listed, and the cap counts those, so a tree of
+        // directories and files the index never reads does not fail it.
+        #[cfg(any(test, feature = "test-hooks"))]
+        let limit = listing_limit_test_hooks::rebuild_listing_limit(self);
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let limit = fs_ops::LIST_TREE_LIMIT;
+        let mut entries = fs_ops::list_indexable_files(self.root(), policy, limit, cancel)?;
+        // In path order: a pass cut short has then staged every file up to
+        // its cursor, the greatest staged path, which the resume skip below
+        // relies on. A directory read hands its entries in no such order.
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
         // Only Markdown files become graph documents. Plain text gets stat
         // rows for reconcile, replaced atomically with the staged graph.
         let total: u64 = entries
@@ -3513,7 +3609,7 @@ impl Workspace {
                 }
                 continue;
             }
-            // Resume skip: the walk is sorted, so a strictly-
+            // Resume skip: the listing is in path order, so a
             // less-or-equal comparison against the cursor matches
             // every file already staged in a prior session.
             if let Some(c) = cursor.as_deref() {
@@ -3653,6 +3749,12 @@ impl Workspace {
     /// name flows through the same source as `set_model`.
     pub fn semantic_model(&self) -> Result<String> {
         Ok(self.index()?.config().model)
+    }
+
+    /// Why the workspace's model stands in for one it named that chan does
+    /// not offer, for Settings and the CLI; `None` when nothing was replaced.
+    pub fn semantic_model_note(&self) -> Result<Option<String>> {
+        Ok(self.index()?.config().model_note())
     }
 
     /// Persist the per-workspace embedding model.
@@ -5844,6 +5946,10 @@ pub(crate) fn rename_case_only(dir: &Path, from: &str, to: &str) {
 #[cfg(test)]
 #[path = "workspace_rebuild_skip_tests.rs"]
 mod rebuild_skip_tests;
+
+#[cfg(test)]
+#[path = "workspace_listing_cap_tests.rs"]
+mod listing_cap_tests;
 
 #[cfg(test)]
 mod tests {
@@ -8721,6 +8827,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuild_cut_short_resumes_with_every_file_whatever_the_read_order() {
+        // The pass is cancelled after it staged two notes, then run again.
+        // The notes are created out of order, so a directory read that
+        // hands them in creation order, or in reverse, or by hash, puts a
+        // late name first; the resumed pass must still stage every note.
+        struct CancelAtSecond(Arc<AtomicBool>);
+        impl crate::progress::ProgressCallback for CancelAtSecond {
+            fn on_progress(&self, event: crate::progress::ProgressEvent) {
+                if event.stage == crate::progress::ProgressStage::GraphRebuild && event.current >= 1
+                {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let (_cfg, workspace_dir, workspace) = fixture();
+        workspace.stop_open_recovery();
+        let names = ["m", "c", "x", "a", "q", "f", "z", "k"];
+        for name in names {
+            std::fs::write(
+                workspace_dir.path().join(format!("{name}.md")),
+                format!("# {name}\n"),
+            )
+            .unwrap();
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cut = workspace.reindex_with(Some(&cancel), &CancelAtSecond(cancel.clone()));
+        assert!(matches!(cut, Err(ChanError::Cancelled)), "{cut:?}");
+        assert!(
+            workspace
+                .graph()
+                .unwrap()
+                .staging_cursor()
+                .unwrap()
+                .is_some(),
+            "the cut pass left its staged notes"
+        );
+
+        workspace.reindex(None).unwrap();
+
+        let mut files = workspace.graph().unwrap().files().unwrap();
+        files.sort();
+        let mut expected: Vec<String> = names.iter().map(|name| format!("{name}.md")).collect();
+        expected.sort();
+        assert_eq!(files, expected);
+    }
+
+    #[test]
     fn reindex_resume_reparses_staged_file_changed_by_checkout() {
         // Checkout-storm hardening: a prior run staged a.md and
         // crashed. Before the next process resumes, the working tree
@@ -9356,6 +9509,24 @@ mod tests {
             .write_bytes("img.png", &[0xff, 0xd8, 0xff])
             .unwrap();
         assert_eq!(workspace.read("img.png").unwrap(), vec![0xff, 0xd8, 0xff]);
+    }
+
+    #[test]
+    fn write_bytes_replaces_a_file_open_by_another_handle() {
+        use std::io::Read;
+
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_bytes("shared.bin", b"old-bytes").unwrap();
+        let mut reader = std::fs::File::open(root.path().join("shared.bin")).unwrap();
+        workspace.write_bytes("shared.bin", b"new-bytes").unwrap();
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            workspace.read("shared.bin").unwrap(),
+            b"new-bytes",
+            "fresh open did not see the replacement"
+        );
     }
 
     #[test]

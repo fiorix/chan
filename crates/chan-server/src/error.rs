@@ -277,6 +277,49 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    #[cfg(feature = "embeddings")]
+    #[tokio::test]
+    async fn model_certificate_refusal_retains_its_transport_cause() {
+        use chan_workspace::index::{embeddings::EmbedError, IndexError};
+
+        // The shape of a refused certificate as the downloader reports it.
+        let cause = "request error: https://127.0.0.1:1/fixture/model/resolve/\
+                     0123456789abcdef0123456789abcdef01234567/config.json: Connection Failed: \
+                     tls connection init failed: invalid peer certificate: UnknownIssuer"
+            .to_owned();
+        let error = EmbedError::Certificate(cause.clone());
+        let workspace_error = chan_workspace::ChanError::from(IndexError::Embed(error));
+        let response = err_from(&workspace_error);
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a model certificate refusal must remain an HTTP 500"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json",
+            "a model certificate refusal must use the JSON error response"
+        );
+        let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = value["error"].as_str().unwrap();
+        assert!(
+            message.contains(&cause),
+            "the transport cause reaches the HTTP error"
+        );
+        assert!(
+            message.contains("certificate verification failed"),
+            "the certificate classification reaches the HTTP error"
+        );
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": format!("search error: model download: {cause} (certificate verification failed)")
+            }),
+            "the model download refusal retains the complete search error envelope"
+        );
+    }
+
     #[tokio::test]
     async fn refusal_shapes_are_pinned_bytes() {
         for (response, expected) in [

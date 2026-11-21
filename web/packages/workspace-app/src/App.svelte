@@ -3,12 +3,14 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import AppStatusBar from "./components/AppStatusBar.svelte";
   import RequestColumn from "./components/RequestColumn.svelte";
+  import { keyboardOwnedAbovePanes, mayFocus } from "./state/keyboardOwner.svelte";
   import { disposeUploadRequests } from "./state/uploadRequest.svelte";
   import ConfirmModal from "./components/ConfirmModal.svelte";
   import ConflictModal from "./components/ConflictModal.svelte";
   import DisconnectOverlay from "./components/DisconnectOverlay.svelte";
   import SessionEndedOverlay from "./components/SessionEndedOverlay.svelte";
   import CloseConfirmOverlay from "./components/CloseConfirmOverlay.svelte";
+  import { connectionHealth } from "./state/connectionHealth.svelte";
   import { installWakeGapDetector } from "./wakeGap";
   import {
     flushAndCloseWindow,
@@ -90,7 +92,6 @@
     appInputBlocked,
     coverOwnsTextEntry,
     coverOwnsButton,
-    keyboardOwnedAbovePanes,
     modalDialogOpen,
     setTransientStatus,
     syncOverlayStack,
@@ -838,6 +839,12 @@
       : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "K";
   }
 
+  /// An enabled button the keyboard's owner may hold under the raised
+  /// covers: one in an owner's root painted over every cover.
+  function ownerButtonOverCovers(target: EventTarget | null): boolean {
+    return target instanceof HTMLButtonElement && !target.matches(":disabled") && mayFocus(target);
+  }
+
   /// App-level keyboard shortcuts. Layout follows VS Code where possible.
   ///
   /// Context-aware spawn chord (resolves focused surface context):
@@ -871,7 +878,9 @@
   function onWindowKey(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
     // Cancel app keys behind a cover. Preserve text insertion and native
-    // Enter/Space activation on the raised cover's own controls; cancelling
+    // Enter/Space activation on the raised cover's own controls, and native
+    // activation on the buttons of an owner that paints over every raised
+    // cover and so holds the keyboard over it (the close prompt); cancelling
     // a button's keydown also cancels the browser's synthesized click.
     if (appInputBlocked()) {
       // Let cmd+` through to the native window cycler: the overlay must not trap
@@ -889,7 +898,7 @@
       }
       if (!e.ctrlKey && !e.metaKey && !e.altKey && (
         coverOwnsTextEntry(e.target) ||
-        ((e.key === "Enter" || e.key === " ") && coverOwnsButton(e.target))
+        ((e.key === "Enter" || e.key === " ") && (coverOwnsButton(e.target) || ownerButtonOverCovers(e.target)))
       )) return;
       e.preventDefault();
       e.stopPropagation();
@@ -1720,7 +1729,7 @@
         return;
       // The desktop OS red-dot on a LIVE window. The host prevented the close
       // and asked us. Two fast paths close straight away (no prompt): while the
-      // reconnect overlay is up (ui.disconnectBlocking) there is nothing to keep
+      // reconnect overlay is up with no open watcher there is nothing to keep
       // interacting with, and an empty window (no tabs) must never be recorded --
       // the discard cascade removes its row and DELETEs its session blob. Any
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
@@ -1731,7 +1740,7 @@
         if (!requestTmuxWindow()) setTransientStatus("not a tmux window");
         return;
       case "app.window.confirmClose":
-        if (ui.disconnectBlocking || !hasAnyTab()) {
+        if (!hasAnyTab() || (ui.disconnectBlocking && !connectionHealth.watcherOpen)) {
           discardWindowSession({ reap: true });
           flushAndCloseWindow();
           return;
@@ -1986,7 +1995,7 @@
      when the window-wide slot is empty. -->
 <BubbleOverlay />
 <!-- Screensaver cover. Mounts at App root so z-index sits above every
-     chan overlay (screensaver-backdrop uses z=2000). Renders nothing
+     chan overlay (screensaver-backdrop uses z=39000). Renders nothing
      while screensaver.locked === false; when locked it covers the SPA
      and accepts PIN entry. -->
 <ScreensaverOverlay />

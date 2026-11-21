@@ -855,8 +855,10 @@ export type WorkspaceSummary = {
 };
 export type PreflightSnapshot = {
   phase: PreflightPhase;
-  /// True until `phase === "ready"`. The single signal the locked surface
-  /// keys on: while true it shows with no close affordance and ignores ESC.
+  /// True while a step waits on the user's choice, beside a failed step too.
+  /// The single signal the locked surface keys on: while true it shows with
+  /// no close affordance and ignores ESC. A failed step alone does not lock;
+  /// it rides `steps` and `error`.
   locked: boolean;
   /// Whether the workspace has settled, independent of `locked`. The boot
   /// unlocks while a recovery or index pass is in flight; the pre-flight
@@ -1216,6 +1218,9 @@ export type SemanticState = {
   mode: "bm25" | "hybrid";
   model_present: boolean;
   model_name: string;
+  /// Why `model_name` stands in for a model the workspace named that chan
+  /// does not offer; absent when nothing was replaced.
+  model_note?: string;
   model_path: string;
   model_size_bytes: number | null;
   semantic_enabled: boolean;

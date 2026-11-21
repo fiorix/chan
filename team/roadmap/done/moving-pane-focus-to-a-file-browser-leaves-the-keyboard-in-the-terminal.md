@@ -25,7 +25,7 @@ By reading, gap 2 is not specific to a file browser: after a press into a ghostt
 
 ## Boundaries
 
-- The workspace app's handoff of the keyboard to a file browser tab on a pane focus move (`Pane.svelte`, `FileBrowserSurface.svelte`, `FileTree.svelte`), on the terminal's and editor's `focused` and focus-pulse model; and `Terminal.blur()` in `@chan/ghostty-web-ng`. The blur fix is small and does not wait for the focus hook of the fork's part 4 ([chan drives ghostty-web from outside](../v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md)); part 4 keeps its behavior.
+- The workspace app's handoff of the keyboard to a file browser tab on a pane focus move (`Pane.svelte`, `FileBrowserSurface.svelte`, `FileTree.svelte`), on the terminal's and editor's `focused` and focus-pulse model; and `Terminal.blur()` in `@chan/ghostty-web-ng`. The blur fix is small and does not wait for the focus hook of the fork's part 4 ([chan drives ghostty-web from outside](../v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md)); part 4 keeps its behavior.
 - Not here: the docked file browser beside an editor, which is not a pane; which surface the launcher's file commands act on (a boundary of [the New and Paste row](the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md)).
 
 ## Acceptance

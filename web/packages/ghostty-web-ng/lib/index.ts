@@ -9,7 +9,13 @@
 // Main Terminal class
 export { Terminal } from './terminal';
 
-export type { ITheme, TerminalChange, TerminalViewport } from './interfaces';
+export type {
+  ITheme,
+  TerminalChange,
+  TerminalLinkActivation,
+  TerminalLinkKind,
+  TerminalViewport,
+} from './interfaces';
 
 // The key numbering the input handler encodes keys by
 export { Key, KeyEncoderOption } from './types';

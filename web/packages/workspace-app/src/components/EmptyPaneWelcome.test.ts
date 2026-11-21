@@ -4,6 +4,8 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { recordingContext2d, type CanvasOp } from "../__tests__/canvas";
 import EmptyPaneWelcome from "./EmptyPaneWelcome.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
+import { COVER_ROOT_ATTR, setCoverBlocking } from "../state/store.svelte";
 import type { EmptyPaneAnimationId } from "./emptyPaneAnimations";
 
 const START_DELAY_MS = 2000;
@@ -440,5 +442,40 @@ describe("EmptyPaneWelcome start delay", () => {
         ?.textContent?.trim(),
       "name flash after the start",
     ).toBe("Radial Ribbons");
+  });
+});
+
+describe("EmptyPaneWelcome and the keyboard's owner", () => {
+  async function mountWelcome(): Promise<HTMLElement> {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted = mount(EmptyPaneWelcome, { target, props: { animation: "sixfold-vortex" } });
+    await tick();
+    await Promise.resolve();
+    return target.querySelector<HTMLElement>(".welcome")!;
+  }
+
+  test("takes no keyboard under the Computers launcher", async () => {
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    try {
+      const welcome = await mountWelcome();
+      expect(document.activeElement, "the launcher keeps the window's first responder").not.toBe(welcome);
+    } finally {
+      document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    }
+  });
+
+  test("takes no keyboard under a cover over the window", async () => {
+    const cover = document.body.appendChild(document.createElement("div"));
+    cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
+    setCoverBlocking("reconnect", true);
+    try {
+      const welcome = await mountWelcome();
+      expect(document.activeElement, "the cover holds the keyboard").not.toBe(welcome);
+    } finally {
+      setCoverBlocking("reconnect", false);
+      cover.remove();
+    }
   });
 });

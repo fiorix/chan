@@ -3,8 +3,8 @@
 //! [`client_config`] supplies certificate verification for the desktop's HTTP
 //! clients, its WebSocket feeds and `cs tunnel` sockets, its updater, the
 //! devserver's tunnel dial, the CLI's self-update and `chan metrics --url`,
-//! and the gateway's WireGuard agent. A server one of them trusts is trusted
-//! by all of them.
+//! the model downloader and the gateway's WireGuard agent. A server one of
+//! them trusts is trusted by all of them.
 //!
 //! The decision depends on the platform. On macOS and Windows the operating
 //! system verifies each chain, through `rustls-platform-verifier`, so a CA
@@ -208,9 +208,13 @@ mod platform {
 /// Stand-ins for the tests of the clients that take [`client_config`]: a
 /// test hands a client a recorded copy of the shared config and a sink to
 /// dial, and reads back that the client started its handshake with that
-/// config and what it offered on the wire.
+/// config and what it offered on the wire; or it makes a CA and a leaf
+/// that CA signs ([`testing::pki`]) to stand up a server the client must
+/// trust through the system store.
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing {
+    pub mod pki;
+
     use std::io::Read;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::{Arc, Mutex};
@@ -367,8 +371,7 @@ pub mod testing {
 
 /// The CA, leaf and in-memory handshake the integration tests use too.
 #[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-mod support;
+use testing::pki as support;
 
 #[cfg(test)]
 mod tests {

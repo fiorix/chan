@@ -70,11 +70,11 @@ describe("watcher heartbeat + read-deadline", () => {
     const handle = openWatch(() => {});
     const s = FakeSocket.instances[0];
     s.open();
-    expect(pingCount(s)).toBe(0);
-    vi.advanceTimersByTime(20_000);
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s)).toBe(1); // the one every socket sends as it opens
     vi.advanceTimersByTime(20_000);
     expect(pingCount(s)).toBe(2);
+    vi.advanceTimersByTime(20_000);
+    expect(pingCount(s)).toBe(3);
     handle.close();
   });
 
@@ -141,12 +141,12 @@ describe("watcher heartbeat + read-deadline", () => {
     const s0 = FakeSocket.instances[0];
     s0.open();
     vi.advanceTimersByTime(20_000);
-    expect(pingCount(s0)).toBe(1);
+    expect(pingCount(s0)).toBe(2); // the open's and one heartbeat's
     // Dispose: no more pings on the (now closed) socket, and no reconnect churn.
     handle.close();
     const before = FakeSocket.instances.length;
     vi.advanceTimersByTime(60_000);
-    expect(pingCount(s0)).toBe(1);
+    expect(pingCount(s0)).toBe(2);
     expect(FakeSocket.instances.length).toBe(before);
   });
 });
@@ -169,16 +169,17 @@ describe("wake-gap probe", () => {
     expect(ready).toHaveBeenCalledTimes(1);
     onWake();
     // App's debounced resume can nudge in the same turn as the transport
-    // detector. One pending probe sends one ping and keeps its first deadline.
+    // detector. One pending probe sends one ping, after the open's, and keeps
+    // its first deadline.
     handle.probe();
-    expect(pingCount(s0)).toBe(1);
+    expect(pingCount(s0)).toBe(2);
     s0.message('{"type":"pong"}');
     expect(FakeSocket.instances).toHaveLength(1);
     expect(s0.readyState).toBe(FakeSocket.OPEN);
     expect(ready).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(300);
     handle.probe(); // App's delayed hook runs after the transport got its pong.
-    expect(pingCount(s0)).toBe(1);
+    expect(pingCount(s0)).toBe(2);
 
     const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
     s0.message(survey);
@@ -196,7 +197,7 @@ describe("wake-gap probe", () => {
     const s0 = FakeSocket.instances[0];
     s0.open();
     handle.probe();
-    expect(pingCount(s0)).toBe(1);
+    expect(pingCount(s0)).toBe(2); // the open's and the probe's
     vi.advanceTimersByTime(3_000);
     expect(s0.readyState).toBe(FakeSocket.CLOSED);
     vi.advanceTimersByTime(500);

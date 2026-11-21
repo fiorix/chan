@@ -94,6 +94,7 @@
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
+    mayTakeFocus = () => autoFocus,
     shown = true,
     placeholderText,
     extraExtensions = [],
@@ -116,6 +117,12 @@
     /// editor unfocused on mount; otherwise the unconditional mount
     /// focus would race past the host's gate.
     autoFocus?: boolean;
+    /// Decides a delayed focus at the moment it would run: the mount,
+    /// caret-restore and reset frames ask this instead of reading the
+    /// `autoFocus` snapshot they scheduled with, so an owner that took
+    /// the keyboard meanwhile keeps it. Defaults to the host's `autoFocus`
+    /// as it reads when the frame runs.
+    mayTakeFocus?: () => boolean;
     /// Whether the host shows this editor, independently of keyboard focus.
     shown?: boolean;
     /// Empty-state placeholder text. When set the editor adds CM6's
@@ -498,7 +505,8 @@
 
   /// Place caret at end of doc and focus. RichPrompt calls this after a
   /// recall restores its composer's text, when its terminal is the focused
-  /// one, so the caret lands at the end of what came back.
+  /// one and nothing else owns the keyboard, so the caret lands at the end
+  /// of what came back.
   export function focusEnd(): void {
     if (!view) return;
     const end = view.state.doc.length;
@@ -534,7 +542,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }
@@ -774,7 +782,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   });
@@ -811,7 +819,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }

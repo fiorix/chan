@@ -1657,6 +1657,41 @@ describe("the caret command", () => {
     expect(view.state.selection.main.to).toBe(at + 4);
     expect(tab.caretCommand).toBeUndefined();
   });
+
+  // The delayed reset frame reads the host's autoFocus when it runs, not the
+  // snapshot from when it was scheduled: with autoFocus true at resetCaret
+  // and the tab no longer focused before the frame runs, the caret still
+  // moves but takes no focus.
+  test("a reset frame that runs after the tab lost focus moves the caret without taking focus", async () => {
+    const a = fileTab({ id: "a", path: "notes/a.md", content: DOC, saved: DOC });
+    const b = fileTab({ id: "b", path: "notes/b.md", content: "Bee.\n", saved: "Bee.\n" });
+    layout.nodes = { [PANE]: { kind: "leaf", id: PANE, tabs: [a, b], activeTabId: a.id } };
+    layout.rootId = PANE;
+    layout.activePaneId = PANE;
+    const live = (layout.nodes[PANE] as LeafNode).tabs as FileTab[];
+    const liveA = live[0]!;
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane: layout.nodes[PANE] as LeafNode } }));
+    await settle();
+    const editor = target.querySelectorAll<HTMLElement>(".editor-tab .cm-content")[0]!;
+    const view = EditorView.findFromDOM(editor)!;
+    const focus = vi.spyOn(view, "focus");
+    focus.mockClear();
+    const realRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => setTimeout(() => cb(0), 0)) as unknown as typeof requestAnimationFrame;
+    try {
+      liveA.caretCommand = { from: 1, to: 1 };
+      await tick();
+      (layout.nodes[PANE] as LeafNode).activeTabId = live[1]!.id;
+      await settle();
+      expect(view.state.selection.main.from, "the frame ran").toBe(1);
+      expect(focus, "the frame took no focus").not.toHaveBeenCalled();
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      focus.mockRestore();
+    }
+  });
 });
 
 describe("the slide chord", () => {

@@ -221,6 +221,13 @@ function startTour(tour: HTMLElement): void {
       wake(part);
     });
   }
+  // A press or tap anywhere else puts the awake part back to rest. The callout belongs to the
+  // part: a press in it keeps the part awake, so its link follows and its text can be read.
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target as Node;
+    if (!awake || parts.some((part) => part.contains(target)) || callout?.contains(target)) return;
+    wake(null);
+  });
   for (const clip of clips) {
     clip.addEventListener("playing", () => clip.classList.add("is-playing"));
     for (const rest of ["pause", "ended"]) clip.addEventListener(rest, () => clip.classList.remove("is-playing"));

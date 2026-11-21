@@ -36,7 +36,9 @@ import {
   recordDocumentKeys,
 } from "../__tests__/dialog";
 import {
+  COVER_ROOT_ATTR,
   resolvePathPrompt,
+  setCoverBlocking,
   tree,
   uiPathPrompt,
   type PathPromptKind,
@@ -634,5 +636,43 @@ describe("dismissal", () => {
 
     clickBackdrop(target);
     await expect(promise).resolves.toBeNull();
+  });
+});
+
+/// The reconnect cover's root raised at its layer, over the dialogs' 26000;
+/// the answer lowers it. The dialog's focus stays where it was, as when the
+/// dialog opened under the cover.
+function raiseReconnectCover(): () => void {
+  const cover = document.body.appendChild(document.createElement("div"));
+  cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
+  cover.style.position = "fixed";
+  cover.style.zIndex = "30000";
+  setCoverBlocking("reconnect", true);
+  return () => {
+    setCoverBlocking("reconnect", false);
+    cover.remove();
+  };
+}
+
+describe("under a cover over the window", () => {
+  test("Enter in its field left focused under the reconnect cover submits nothing until the cover lifts", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "file", mode: "create" }, "docs/new.md");
+    await settle();
+    let settled = false;
+    void promise.then(() => (settled = true));
+    const field = target.querySelector("input")!;
+    expect(document.activeElement).toBe(field);
+    const lower = raiseReconnectCover();
+    try {
+      press(field, "Enter");
+      await settle();
+      expect(settled, "the dialog stays open during the outage").toBe(false);
+      expect(dialogIn(target)).not.toBeNull();
+    } finally {
+      lower();
+    }
+    press(field, "Enter");
+    await expect(promise, "Enter submits once the cover lifts").resolves.toBe("docs/new.md");
   });
 });

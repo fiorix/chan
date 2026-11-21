@@ -4,7 +4,7 @@
 // core. The socket records the PTY wire; the software canvas serves jsdom.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { unmount } from "svelte";
+import { tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 const ghostty = vi.hoisted(() => ({
@@ -33,13 +33,17 @@ import {
   attachGhostty, compileGhosttyCore, ghosttyAlternateScreen, ghosttyCellMetrics,
   ghosttyLineText, ghosttyMode, ghosttyMouseTracking, installSoftwareCanvas, mountGhostty,
 } from "../__tests__/ghosttyTab";
+import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import { TERMINAL_INPUT_PROBE_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
+import { FRESH_SHELL_ALT_EXIT, FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
 import {
   attach,
   installTerminalDom,
   output,
   receive,
+  resetClearsMode,
   resetTerminals,
   seatTerminals,
   sentFrames,
@@ -50,6 +54,9 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 
 const SESSION = "sess-ghostty";
+// The mounted cases below stay a literal list so a dropped mode goes red at
+// its own case; the drift test forces it to grow with the reset list.
+const GHOSTTY_CASES = [1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 1049];
 const mounted = new Set<Record<string, unknown>>();
 const cleanups: Array<() => void> = [];
 
@@ -107,6 +114,25 @@ function inputFrames(socket: TerminalSocket) {
 }
 
 describe("a Ghostty tab reconnecting to a session", () => {
+  test("an alternate-screen wheel arrow arms no input ping and owes no note", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[?1049h");
+    expect(ghosttyAlternateScreen(term)).toBe(true);
+    await receive(socket, { type: "pong" });
+    const beforePings = sentFrames(socket).filter((frame) => frame.type === "ping").length;
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    expect(ghosttyCellMetrics(term).height).toBeGreaterThan(0);
+    canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1, deltaMode: 1 }));
+    expect(inputFrames(socket)).toContainEqual({ type: "input", data: "\x1b[A" });
+    await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 1_000);
+    expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(beforePings);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    await attach(TerminalSocket.all.at(-1)!, { id: SESSION });
+    await tick();
+    expect(document.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
   test.each([
     ["replacement", "sess-fresh", "\n"],
     ["resume", SESSION, "\x1b[27;2;13~"],
@@ -126,7 +152,12 @@ describe("a Ghostty tab reconnecting to a session", () => {
     expect(ghostty.terminals).toEqual([term]);
   });
 
-  test.each([1000, 1002, 1003, 1004, 1006, 1015, 1049])(
+  // The server's tracked set the core records, plus the alternate-screen
+  // exit the reset keeps: each mode set by the dead program, kept on a
+  // same-id resume and cleared for a fresh shell. Mode 1001 has its own
+  // case below: the core keeps no highlight-tracking state, so that case
+  // reads the reset's bytes written to ghostty instead.
+  test.each(GHOSTTY_CASES)(
     "preserves DEC %i on resume and clears it for a fresh shell",
     async (mode) => {
       const [tab] = seatTerminals([terminalTab()]);
@@ -147,6 +178,56 @@ describe("a Ghostty tab reconnecting to a session", () => {
       expect(ghostty.terminals).toEqual([term]);
     },
   );
+
+  test("a fresh shell's first output sets 2004 and mode 1 after the reset", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[?2004h\x1b[?1h");
+    expect(ghosttyMode(term, 2004), "the dead program set bracketed paste").toBe(true);
+    expect(ghosttyMode(term, 1), "the dead program set application cursor keys").toBe(true);
+
+    const replaced = await reconnect(socket, "sess-fresh");
+    await output(replaced, "\x1b[?2004h\x1b[?1h");
+    await receive(replaced, { type: "ready", cols: 80, rows: 24 });
+    expect(ghosttyMode(term, 2004), "the fresh shell's bracketed paste survives the reset").toBe(true);
+    expect(ghosttyMode(term, 1), "the fresh shell's cursor keys survive the reset").toBe(true);
+    expect(ghostty.terminals).toEqual([term]);
+  });
+
+  test("clears DEC 1001 for a fresh shell (reads the reset bytes written to ghostty: the core records no highlight-tracking state)", async () => {
+    const spy = vi.spyOn(GhosttyViewportController.prototype, "write");
+    try {
+      const [tab] = seatTerminals([terminalTab()]);
+      const { socket, term } = await openGhostty(tab!);
+      await output(socket, "\x1b[?1001h");
+      // The first attach adopts a session the tab never held, so it writes
+      // the reset too; the resume and replacement cases read from here.
+      spy.mockClear();
+      const written = () =>
+        spy.mock.calls.map(([data]) => (typeof data === "string" ? data : new TextDecoder().decode(data))).join("");
+
+      const resumed = await reconnect(socket, SESSION);
+      await receive(resumed, { type: "ready", cols: 80, rows: 24 });
+      expect(resetClearsMode(written(), 1001), "a same-id resume writes no reset").toBe(false);
+
+      const replaced = await reconnect(resumed, "sess-fresh");
+      await receive(replaced, { type: "ready", cols: 80, rows: 24 });
+      expect(resetClearsMode(written(), 1001), "the fresh shell's reset clears highlight tracking").toBe(true);
+      expect(ghostty.terminals).toEqual([term]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("ties the mounted case list to the reset list", () => {
+    // The cases above stay literal so a dropped mode goes red at its own
+    // case; this ties that literal list to the reset list. Ghostty's core
+    // keeps no highlight-tracking state, so 1001 has the byte-reading case
+    // above instead, and the alternate-screen exit rides alongside.
+    expect(new Set(GHOSTTY_CASES)).toEqual(
+      new Set([...FRESH_SHELL_RESET_MODES.filter((mode) => mode !== 1001), FRESH_SHELL_ALT_EXIT]),
+    );
+  });
 });
 
 describe("mouse events encoded by the Ghostty input handler", () => {

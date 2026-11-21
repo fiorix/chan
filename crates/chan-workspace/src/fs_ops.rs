@@ -878,6 +878,21 @@ pub(crate) fn indexable_rel_files<'a>(
         })
 }
 
+/// The tree entries of the files [`indexable_rel_files`] yields under `root`,
+/// in walk order. Refuses with `ListingTooLarge` once more than `limit` such
+/// files arrive: the bound counts the files the index reads, so directories
+/// and files it never reads do not fail it. Once `cancel` is set, the next
+/// file returns `Cancelled` instead.
+pub(crate) fn list_indexable_files(
+    root: &Path,
+    policy: &IndexScopePolicy,
+    limit: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<TreeEntry>> {
+    let files = indexable_rel_files(root, root, policy).map(|(_, entry)| entry);
+    tree_entries(root, files, limit, cancel)
+}
+
 /// Whether a recursive listing walk keeps `entry`, entering it when it is a
 /// directory. The atomic writer's reserved names are left out whatever
 /// their type (an in-flight temporary, a create's stage directory), as the
@@ -957,9 +972,26 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| ChanError::from(e.error))?;
+    persist_tempfile(tmp, path)?;
     apply_metadata(path, preserved);
     sync_dir(dir)?;
+    Ok(())
+}
+
+/// Close `tmp`, clear Windows' temporary attribute, and rename it over `target`
+/// via `std::fs::rename`.
+///
+/// `tmp` must live in `target`'s directory for an atomic rename, and callers
+/// must sync `tmp` beforehand and that directory afterward when durability is
+/// required. On Windows an open `target` is replaced only when its handle
+/// shares delete and the filesystem supports POSIX-style rename; on failure
+/// `target` is untouched and `tmp` is removed.
+pub fn persist_tempfile(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    let kept = tmp.into_temp_path().keep()?;
+    // Cannot fail: tempfile makes its paths absolute when it creates them.
+    let mut staged = tempfile::TempPath::try_from_path(kept)?;
+    std::fs::rename(&staged, target)?;
+    staged.disable_cleanup(true);
     Ok(())
 }
 
@@ -1886,17 +1918,18 @@ pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEn
 
 /// `list_tree` variant governed by one generated scope policy.
 pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<TreeEntry>> {
-    list_tree_scoped_cancelable(root, policy, None)
+    list_tree_scoped_cancelable(root, policy, LIST_TREE_LIMIT, None)
 }
 
-/// [`list_tree_scoped`] that stops at the next walked entry once `cancel` is
-/// set, returning [`ChanError::Cancelled`].
+/// [`list_tree_scoped`] bounded at `limit` entries that stops at the next
+/// walked entry once `cancel` is set, returning [`ChanError::Cancelled`].
 pub(crate) fn list_tree_scoped_cancelable(
     root: &Path,
     policy: &IndexScopePolicy,
+    limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
-    list_tree_scoped_inner(root, root, 1, policy, cancel)
+    list_tree_scoped_inner(root, root, 1, policy, limit, cancel)
 }
 
 /// Variant of `list_tree` scoped to the subtree at `subtree_abs`,
@@ -1954,7 +1987,7 @@ pub fn list_tree_prefix_scoped(
     if !subtree_abs.exists() {
         return Ok(Vec::new());
     }
-    list_tree_scoped_inner(root, subtree_abs, 0, policy, None)
+    list_tree_scoped_inner(root, subtree_abs, 0, policy, LIST_TREE_LIMIT, None)
 }
 
 fn list_tree_scoped_inner(
@@ -1962,6 +1995,7 @@ fn list_tree_scoped_inner(
     walk_from: &Path,
     min_depth: usize,
     policy: &IndexScopePolicy,
+    limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
@@ -1991,7 +2025,7 @@ fn list_tree_scoped_inner(
             });
         Box::new(walker)
     };
-    tree_entries(root, iter, LIST_TREE_LIMIT, cancel)
+    tree_entries(root, iter, limit, cancel)
 }
 
 /// Collect walked entries into tree entries, refusing with
@@ -2325,6 +2359,70 @@ mod tests {
             Some(&b"hello"[..]),
             "xattr lost on overwrite"
         );
+    }
+
+    #[test]
+    fn atomic_write_failure_leaves_no_temporaries() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let target = dir.join("out");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), b"kept").unwrap();
+        // Renaming a file over a non-empty directory fails on every
+        // platform, after the temporary is written and synced.
+        let result = atomic_write(&target, b"unpublished");
+        assert!(
+            result.is_err(),
+            "write over a directory unexpectedly published"
+        );
+        assert_eq!(
+            std::fs::read(target.join("keep")).unwrap(),
+            b"kept",
+            "failed write disturbed the directory's content"
+        );
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .all(|entry| !is_atomic_write_temp_name(
+                    entry.unwrap().file_name().to_str().unwrap_or("")
+                )),
+            "temporary left behind after failed write"
+        );
+    }
+
+    /// A reader holding the old file open keeps the old bytes while a fresh
+    /// open sees the replacement. The open handle shares delete access, so
+    /// the rename replaces the target instead of failing on it.
+    #[test]
+    fn atomic_write_replaces_a_file_open_by_another_handle() {
+        use std::io::Read;
+
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("shared.bin");
+        std::fs::write(&target, b"old-bytes").unwrap();
+        let mut reader = std::fs::File::open(&target).unwrap();
+        atomic_write(&target, b"new-bytes").unwrap();
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new-bytes",
+            "fresh open did not see the replacement"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY;
+            let attributes = std::fs::metadata(&target)
+                .expect("stat published file")
+                .file_attributes();
+            assert_eq!(
+                attributes & FILE_ATTRIBUTE_TEMPORARY,
+                0,
+                "published file kept the temporary attribute"
+            );
+        }
     }
 
     #[test]

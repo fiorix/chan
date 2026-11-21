@@ -9,12 +9,14 @@
 
   import { tick } from "svelte";
   import {
+    appInputBlocked,
     loadTreeDir,
     pathPromptState,
     resolvePathPrompt,
     tree,
     typedPathRoot,
   } from "../state/store.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
   import {
     BACKSLASH_REASON,
     BACKSLASH_SEPARATOR_REASON,
@@ -638,9 +640,12 @@
 
   // Enter can answer the dialog, which closes it before the key would bubble
   // on, so Enter stops here: past the dialog, the window would read it as
-  // its own.
+  // its own. Under a cover that holds the keyboard over the dialog (a dialog
+  // opening under a cover takes focus as it mounts), Enter answers nothing
+  // and goes on to the window's guard, which cancels it.
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
+      if (appInputBlocked() && !mayFocus(e.target instanceof Element ? e.target : null)) return;
       e.preventDefault();
       e.stopPropagation();
       if (highlightIdx >= 0 && highlightIdx < suggestions.length) {

@@ -68,6 +68,18 @@ describe("the indexing pill", () => {
     expect(pill()).toEqual({ text: "index error: boom", pulsing: false, error: true });
   });
 
+  test("an error shows its whole message, the fix included", () => {
+    const message =
+      "the search index has more than 500,000 files to read; add the directories it should skip " +
+      "under Settings > This workspace > Excluded directories";
+    show({ state: "error", message } as IndexStatus);
+    const button = target.querySelector<HTMLElement>('[aria-label="open indexing dashboard"]')!;
+    expect(button.getAttribute("title")).toBe(`index error: ${message}`);
+    const text = button.querySelector(".muted")!;
+    expect(text.textContent).toBe(message);
+    expect(text.classList.contains("err-msg"), "the message is not cut at the filename width").toBe(true);
+  });
+
   test("clears the moment the indexer reports idle", () => {
     show({ state: "building", current: 99, total: 100, file: "notes/a.md" } as IndexStatus);
     expect(pill()).not.toBeNull();

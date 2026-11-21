@@ -44,7 +44,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. The `embeddings` feature pulls candle, tokenizers and hf-hub, which are heavy first-build dependencies; `--no-default-features` skips them.
+The Rust toolchain is pinned in `rust-toolchain.toml`. The `embeddings` feature pulls the candle and tokenizers inference stack and a ureq downloader configured by chan-tls; `--no-default-features` skips them. hf-hub is a dev dependency used to check cache compatibility, with its network API disabled.
 
 ## Design reference
 

@@ -10,6 +10,15 @@
 
   let currentPaneId = $state("pane-1");
   let currentSide = $state<PaneSide>("a");
+  let shown = $state(true);
+
+  export function hide(): void {
+    shown = false;
+  }
+
+  export function show(): void {
+    shown = true;
+  }
 
   export function move(nextPaneId: string, nextSide: PaneSide): void {
     currentPaneId = nextPaneId;
@@ -21,6 +30,6 @@
   {tab}
   paneId={currentPaneId}
   side={currentSide}
-  active={true}
+  active={shown}
   focused={true}
 />

@@ -3,13 +3,15 @@ import test from "node:test";
 import { rootedFailures } from "./graph-discs.mjs";
 
 /// A read of `count` discs with room on every side and one disc on the
-/// root's seat, as `readGraphDiscs` answers it.
+/// root's seat, as `readGraphDiscs` answers it: the seat is the one the
+/// canvas published, in device pixels.
 function read(count) {
   return {
     canvas: [800, 600],
     count,
     box: [100, 100, 700, 500],
     room: { left: 100, right: 100, above: 100, below: 100 },
+    seat: { x: 400, y: 544 },
     rootOff: [0, 1],
   };
 }
@@ -34,4 +36,9 @@ test("a disc past an edge or no disc on the root's seat fails", () => {
   assert.match(rootedFailures(past, 12, 0).join("; "), /4 px past the canvas's left edge/);
   const offSeat = { ...read(12), rootOff: [9, 0] };
   assert.match(rootedFailures(offSeat, 12, 0).join("; "), /no node on the root's seat/);
+});
+
+test("a read with no published seat fails naming the seat", () => {
+  const noSeat = { ...read(12), seat: null, rootOff: null };
+  assert.match(rootedFailures(noSeat, 12, 0).join("; "), /no seat on the page/);
 });

@@ -49,6 +49,64 @@ pub enum DevserverStatus {
     Unreachable,
 }
 
+/// How many finished pings a [`ConnectionHealth`] keeps: three minutes of
+/// the desktop's 3 s cadence, enough to show a bad spell and the recovery
+/// after it.
+pub const CONNECTION_SAMPLE_CAP: usize = 60;
+
+/// What a devserver's [`ConnectionHealth`] reads, on the lowercase wire.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionFace {
+    /// The devserver has not answered a ping yet.
+    Unknown,
+    /// Its replies come back in time.
+    Healthy,
+    /// A reply is late, or the latest ones were.
+    Slow,
+    /// A reply is waiting, and the devserver has sent nothing for a while.
+    Stalled,
+    /// The feed socket that answered was lost, and no later one has answered
+    /// yet.
+    Reconnecting,
+}
+
+/// A connected devserver's connection health, as the desktop reads it from
+/// the replies to the pings it sends on the devserver's window feed. Every
+/// time is Unix milliseconds on the desktop's clock, which is the launcher's.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionHealth {
+    /// What the reading shows.
+    pub face: ConnectionFace,
+    /// A slow face whose latest reply time was under the time that ends slow,
+    /// with no [`wait_since`](Self::wait_since), when the desktop read it:
+    /// the replies have come back, and slow ends once enough of them have.
+    /// The launcher shows it as the mark alone, named "Connection
+    /// recovering". `false` for every other face. `#[serde(default)]`: a
+    /// reading without the field reads `false`.
+    #[serde(default)]
+    pub recovering: bool,
+    /// When `face` took its value.
+    pub since: u64,
+    /// The latest reply time in milliseconds, kept across feed sockets;
+    /// `None` before the first.
+    pub rtt_ms: Option<u64>,
+    /// When the oldest ping still waiting for its reply left, once it has
+    /// waited the second that makes a connection slow; `None` with none
+    /// waiting that long or before the devserver's first reply. The
+    /// launcher counts the wait on from the reading until the next one, so
+    /// a shorter wait, any ping's round trip, would count a quick reply up.
+    pub wait_since: Option<u64>,
+    /// When the devserver's last frame on the feed arrived, kept across feed
+    /// sockets; `None` before the first.
+    pub last_contact: Option<u64>,
+    /// The reply times of the last finished pings in milliseconds, oldest
+    /// first, at most [`CONNECTION_SAMPLE_CAP`]: `None` for a ping its feed
+    /// socket was lost before answering. The launcher's chart spaces them by
+    /// place, so they carry no send time.
+    pub samples: Vec<Option<u64>>,
+}
+
 /// One configured devserver, as the launcher lists it. The token is WRITE-ONLY:
 /// accepted on add/update, never serialized back -- [`has_token`](Self::has_token)
 /// reports its presence instead.
@@ -137,6 +195,23 @@ pub struct DevserverEntry {
     /// the key always serializes for the launcher's required wire mirror.
     #[serde(default)]
     pub native_trust_required: bool,
+    /// Whether the desktop holds a connection to this devserver but lists
+    /// none of its window, tmux or workspace rows, because its workspace
+    /// poll finds the devserver not answering. The rows return when the
+    /// poll is answered again; the launcher reads this so that it does not
+    /// take the devserver for an empty one meanwhile. `false` for a row
+    /// whose connection the desktop does not hold, and on every surface
+    /// with no desktop. The key always serializes. `#[serde(default)]`: a
+    /// row without the field reads `false`.
+    #[serde(default)]
+    pub rows_hidden: bool,
+    /// This devserver's connection health while the desktop holds a
+    /// connection to it, or `None` with no reading: a disconnected or
+    /// connecting devserver, one whose feed answers no ping, and every row
+    /// of a surface with no desktop. The key always serializes, `null` for
+    /// `None`. `#[serde(default)]`: a row without the field reads `None`.
+    #[serde(default)]
+    pub connection_health: Option<ConnectionHealth>,
 }
 
 /// The add/update payload. `host` + `port` are required; the rest are optional.
@@ -245,6 +320,126 @@ mod tests {
         assert_eq!(
             obj.get("native_trust_required"),
             Some(&serde_json::json!(false))
+        );
+    }
+
+    /// A row as the launcher reads it, with `connection_health` last.
+    fn row(connection_health: Option<ConnectionHealth>) -> DevserverEntry {
+        DevserverEntry {
+            id: "ds1".into(),
+            url: "http://box:8787".into(),
+            host: "box".into(),
+            port: 8787,
+            label: String::new(),
+            script: String::new(),
+            has_token: false,
+            auto_hide_control: false,
+            library_id: None,
+            status: DevserverStatus::Connected,
+            pending_signin: false,
+            os: String::new(),
+            pretty_name: None,
+            gateway_id: None,
+            gateway_url: String::new(),
+            shared: false,
+            native_trust_required: false,
+            rows_hidden: false,
+            connection_health,
+        }
+    }
+
+    /// Every key of [`row`] before `connection_health`, as it serializes.
+    const ROW_HEAD: &str = "{\"id\":\"ds1\",\"url\":\"http://box:8787\",\"host\":\"box\",\
+                            \"port\":8787,\"label\":\"\",\"script\":\"\",\"has_token\":false,\
+                            \"auto_hide_control\":false,\"library_id\":null,\
+                            \"status\":\"connected\",\"pending_signin\":false,\"os\":\"\",\
+                            \"pretty_name\":null,\"gateway_id\":null,\"gateway_url\":\"\",\
+                            \"shared\":false,\"native_trust_required\":false,\
+                            \"rows_hidden\":false";
+
+    #[test]
+    fn a_row_with_a_reading_carries_it_on_the_wire() {
+        // A miss on an earlier socket, then a 1.2 s reply and a 250 ms one:
+        // slow, and recovering with no wait served.
+        let health = ConnectionHealth {
+            face: ConnectionFace::Slow,
+            recovering: true,
+            since: 1_700_000_012_000,
+            rtt_ms: Some(250),
+            wait_since: None,
+            last_contact: Some(1_700_000_013_400),
+            samples: vec![None, Some(1_200), Some(250)],
+        };
+        let entry = row(Some(health));
+        let wire = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            wire,
+            format!(
+                "{ROW_HEAD},\"connection_health\":{{\"face\":\"slow\",\
+                 \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":250,\
+                 \"wait_since\":null,\"last_contact\":1700000013400,\
+                 \"samples\":[null,1200,250]}}}}"
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
+            entry
+        );
+        // A reading from a producer that sends no `recovering` is not one.
+        let older = wire.replace("\"recovering\":true,", "");
+        let read = serde_json::from_str::<DevserverEntry>(&older).unwrap();
+        assert!(!read.connection_health.unwrap().recovering);
+        for (face, spelled) in [
+            (ConnectionFace::Unknown, "\"unknown\""),
+            (ConnectionFace::Healthy, "\"healthy\""),
+            (ConnectionFace::Slow, "\"slow\""),
+            (ConnectionFace::Stalled, "\"stalled\""),
+            (ConnectionFace::Reconnecting, "\"reconnecting\""),
+        ] {
+            assert_eq!(serde_json::to_string(&face).unwrap(), spelled);
+        }
+    }
+
+    #[test]
+    fn a_row_without_a_reading_carries_null() {
+        let entry = row(None);
+        let wire = serde_json::to_string(&entry).unwrap();
+        assert_eq!(wire, format!("{ROW_HEAD},\"connection_health\":null}}"));
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
+            entry
+        );
+    }
+
+    #[test]
+    fn a_row_with_hidden_rows_says_so_and_an_older_producer_reads_none() {
+        let entry = DevserverEntry {
+            rows_hidden: true,
+            ..row(None)
+        };
+        let wire = serde_json::to_string(&entry).unwrap();
+        let head = ROW_HEAD.replace("\"rows_hidden\":false", "\"rows_hidden\":true");
+        assert_eq!(wire, format!("{head},\"connection_health\":null}}"));
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
+            entry
+        );
+        let older = format!(
+            "{},\"connection_health\":null}}",
+            ROW_HEAD.replace(",\"rows_hidden\":false", "")
+        );
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&older).unwrap(),
+            row(None)
+        );
+    }
+
+    #[test]
+    fn a_row_from_an_older_producer_reads_no_reading() {
+        let older = format!("{ROW_HEAD}}}");
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&older).unwrap(),
+            row(None)
         );
     }
 }

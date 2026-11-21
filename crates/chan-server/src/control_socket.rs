@@ -1363,6 +1363,7 @@ where
                     &window_id,
                     &path,
                     destination,
+                    chan_library::MissingPath::Create,
                     session_registry,
                     events_tx,
                 ));
@@ -1383,6 +1384,7 @@ where
                 workspace.root(),
                 &path,
                 &window_id,
+                chan_library::MissingPath::Create,
                 session_registry,
                 events_tx,
             )
@@ -1409,6 +1411,7 @@ where
                 &window_id,
                 &path,
                 destination,
+                chan_library::MissingPath::Create,
                 session_registry,
                 events_tx,
             ))
@@ -2422,8 +2425,7 @@ async fn require_single_pane_window(window_id: &str, ctx: &ControlSocketCtx) -> 
 const TEAM_SPAWN_POKE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Gap between the body write and the submit-chord write of a multi-write
-/// poke (gemini and muse: the prompt, then the bare CR as a distinct
-/// keypress). The gap lets the agent render + settle on the body before the
+/// poke (gemini: the prompt, then the bare CR as a distinct keypress). The gap lets the agent render + settle on the body before the
 /// CR arrives, so the CR is read as Enter rather than coalesced into the
 /// body's read. The queue-based poke paths (cs / Rich Prompt) get this
 /// separation for free from the drainer's idle-gating; this direct-write
@@ -2452,8 +2454,7 @@ struct TeamSpawn {
     failed: Vec<(String, String)>,
     /// One exact session handle per AGENT member plus the ordered PTY writes
     /// that deliver and submit its identity prompt. Most agents use one write;
-    /// gemini and muse use two with a gap so the CR remains a distinct
-    /// keypress.
+    /// gemini uses two with a gap so the CR remains a distinct keypress.
     pokes: Vec<TeamPoke>,
     /// Each spawned member's tab name + live `session_id`, for the
     /// SPA-surfacing push (`WindowCommand::TeamSpawned`).
@@ -2668,9 +2669,8 @@ async fn deliver_team_pokes(pokes: &mut [TeamPoke]) -> TeamPokeResult {
         .await
         {
             Ok(true) => {
-                // Most agents have a single write; gemini and muse have two
-                // (prompt, then the bare CR), which must arrive as distinct
-                // keypresses.
+                // Most agents have a single write; gemini has two (prompt,
+                // then the bare CR), which must arrive as distinct keypresses.
                 for (index, write) in poke.writes.iter().enumerate() {
                     if index > 0 {
                         tokio::time::sleep(SUBMIT_SPLIT_GAP).await;
@@ -5291,13 +5291,17 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
 // pub(crate): `routes::open` (POST /api/open, the command-launcher Open)
 // calls this directly so the HTTP path and `cs open` share ONE semantics
 // (dir -> browser, text/sniffed-text -> editor, missing -> create + open,
-// binary -> browser reveal) instead of a reimplementation.
+// binary -> browser reveal) instead of a reimplementation. `missing` refuses
+// instead of creating a path the workspace cannot stat (the terminal link
+// menu's open), with the workspace's own reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open_path(
     workspace: &Workspace,
     self_writes: &crate::self_writes::SelfWrites,
     window_id: &str,
     requested: &Path,
     destination: Option<TabDestination>,
+    missing: chan_library::MissingPath,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
@@ -5316,7 +5320,13 @@ pub(crate) fn open_path(
         )?;
         return Ok("open request queued for /".into());
     }
-    let stat = workspace.stat(&rel).ok();
+    let stat = match workspace.stat(&rel) {
+        Ok(stat) => Some(stat),
+        Err(error) if missing == chan_library::MissingPath::Refuse => {
+            return Err(format!("cannot open {rel}: {error}"));
+        }
+        Err(_) => None,
+    };
     let command = if let Some(stat) = stat {
         if stat.is_dir {
             WindowCommand::OpenBrowser {
@@ -5382,7 +5392,8 @@ pub(crate) enum StandaloneOpenTarget {
 
 /// Resolve `requested` against the standalone capability root and decide what
 /// to open, creating an empty file for a name that does not exist yet (what a
-/// workspace does, bounded by the same editable-text gate).
+/// workspace does, bounded by the same editable-text gate) unless `missing`
+/// refuses it.
 ///
 /// The path arrives absolute (the CLI absolutizes against the caller's cwd).
 /// Canonicalizing what exists means a path reached through a symlink or `..`
@@ -5393,6 +5404,7 @@ pub(crate) enum StandaloneOpenTarget {
 pub(crate) fn standalone_open_target(
     fs: &chan_workspace::MiniWorkspace,
     requested: &Path,
+    missing: chan_library::MissingPath,
 ) -> Result<StandaloneOpenTarget, String> {
     if !requested.is_absolute() {
         return Err("control path must be absolute".into());
@@ -5442,6 +5454,9 @@ pub(crate) fn standalone_open_target(
             dir: parent_rel(&rel),
             select: rel,
         }),
+        Err(error) if missing == chan_library::MissingPath::Refuse => {
+            Err(format!("cannot open {rel}: {error}"))
+        }
         Err(_) => {
             fs.create_file(&rel, "")
                 .map_err(|e| format!("create {rel}: {e}"))?;
@@ -5506,10 +5521,11 @@ pub(crate) fn open_path_standalone(
     window_id: &str,
     requested: &Path,
     destination: Option<TabDestination>,
+    missing: chan_library::MissingPath,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let target = standalone_open_target(&files.fs, requested)?;
+    let target = standalone_open_target(&files.fs, requested, missing)?;
     let (command, summary) = standalone_open_command(target, destination);
     send_window_command_if_live(session_registry, window_id, command, events_tx)?;
     Ok(format!("open request queued for {summary}"))
@@ -5533,11 +5549,14 @@ pub(crate) enum OpenRoutingError {
 /// Probe on the blocking pool, then route an escaping path through the host.
 /// `None` leaves resolution to the workspace opener, including errors other
 /// than an escape. A hostless tenant refuses with `chan serve PATH` guidance.
+/// `missing` reaches the tenant that resolves the path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn route_open_if_outside_workspace(
     unserve: &UnserveScope,
     workspace_root: &Path,
     path: &Path,
     caller_window_id: &str,
+    missing: chan_library::MissingPath,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<Option<RoutedOpen>, OpenRoutingError> {
@@ -5556,7 +5575,10 @@ pub(crate) async fn route_open_if_outside_workspace(
     let Some(host) = host else {
         return Err(OpenRoutingError::Refused(escape_guidance(path)));
     };
-    match host.open_outside_workspace(path, caller_window_id).await {
+    match host
+        .open_outside_workspace(path, caller_window_id, missing)
+        .await
+    {
         Ok(ack) => {
             // A browser-origin mint is opened by the page that asked for it: a
             // tab is what a desktop window is on that surface, and only the
@@ -5658,8 +5680,9 @@ impl chan_library::StandaloneFiles for StandaloneFilesResolver {
         &self,
         window_id: &str,
         requested: &Path,
+        missing: chan_library::MissingPath,
     ) -> Result<chan_library::StandaloneOpenFrame, String> {
-        let target = standalone_open_target(&self.0.fs, requested)?;
+        let target = standalone_open_target(&self.0.fs, requested, missing)?;
         // No destination: the caller's pane and side name geometry in the
         // window the command came FROM, which is not the window this lands in.
         let (command, path) = standalone_open_command(target, None);
@@ -8241,6 +8264,36 @@ mod tests {
     }
 
     #[test]
+    fn open_path_refusing_missing_creates_nothing() {
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
+        let lib =
+            chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path())
+            .expect("register workspace");
+        let workspace = lib.open_workspace(root.path()).expect("open workspace");
+        let self_writes = crate::self_writes::SelfWrites::new();
+        let (tx, mut rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
+
+        let err = open_path(
+            &workspace,
+            &self_writes,
+            "window-a",
+            &root.path().join("fresh.md"),
+            None,
+            chan_library::MissingPath::Refuse,
+            &session_registry,
+            &tx,
+        )
+        .expect_err("a missing path is refused");
+
+        assert!(err.starts_with("cannot open fresh.md:"), "{err}");
+        assert!(!workspace.exists("fresh.md"), "nothing created");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[test]
     fn open_path_creates_markdown_and_broadcasts_window_command() {
         let cfg = private_tempdir().expect("config dir");
         let root = private_tempdir().expect("workspace root");
@@ -8263,6 +8316,7 @@ mod tests {
                 pane_id: Some("pane-2".into()),
                 side: Some(chan_shell::PaneSide::B),
             }),
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8300,6 +8354,7 @@ mod tests {
             "window-a",
             &root.path().join("notes/new.md"),
             None,
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8331,6 +8386,7 @@ mod tests {
             "window-a",
             &root.path().join("notes/sub"),
             None,
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8370,6 +8426,7 @@ mod tests {
             "window-a",
             &root.path().join("notes.txt"),
             None,
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8404,6 +8461,7 @@ mod tests {
             "window-a",
             &root.path().join("LICENSE"),
             None,
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8441,6 +8499,7 @@ mod tests {
                 pane_id: Some("pane-2".into()),
                 side: Some(chan_shell::PaneSide::B),
             }),
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -8479,6 +8538,7 @@ mod tests {
             "window-a",
             &root.path().join("notes/foo.log"),
             None,
+            chan_library::MissingPath::Create,
             &session_registry,
             &tx,
         )
@@ -9241,6 +9301,8 @@ mod tests {
         outside: Option<(String, String, bool, Option<String>)>,
         open_in_browser: Option<(String, String)>,
         open_requests: std::sync::Mutex<Vec<(PathBuf, String)>>,
+        /// What each open asked the resolving tenant to do with a missing path.
+        open_missing: std::sync::Mutex<Vec<chan_library::MissingPath>>,
         refuse_open: std::sync::atomic::AtomicBool,
         /// The live-terminal count a close and a removal are refused for:
         /// `None` stands for a host with nothing to refuse them over.
@@ -9262,6 +9324,7 @@ mod tests {
                 outside: None,
                 open_in_browser: None,
                 open_requests: std::sync::Mutex::new(Vec::new()),
+                open_missing: std::sync::Mutex::new(Vec::new()),
                 refuse_open: std::sync::atomic::AtomicBool::new(false),
                 teardown_refusal: None,
                 rows: Vec::new(),
@@ -9279,6 +9342,10 @@ mod tests {
 
         pub(crate) fn open_requests(&self) -> Vec<(PathBuf, String)> {
             self.open_requests.lock().unwrap().clone()
+        }
+
+        pub(crate) fn open_missing(&self) -> Vec<chan_library::MissingPath> {
+            self.open_missing.lock().unwrap().clone()
         }
 
         pub(crate) fn refuse_opens(&self) {
@@ -9344,11 +9411,13 @@ mod tests {
             &self,
             requested: &std::path::Path,
             caller_window_id: &str,
+            missing: chan_library::MissingPath,
         ) -> Result<chan_library::OpenOutsideAck, chan_library::Error> {
             self.open_requests
                 .lock()
                 .unwrap()
                 .push((requested.to_path_buf(), caller_window_id.into()));
+            self.open_missing.lock().unwrap().push(missing);
             if self.refuse_open.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(chan_library::Error::Config(
                     "this host serves no standalone filesystem".into(),
@@ -9913,22 +9982,37 @@ mod tests {
         let (dir, fs) = mini_fs();
         let root = dir.path();
         assert_eq!(
-            standalone_open_target(&fs, &root.join("home/user")).expect("dir"),
+            standalone_open_target(
+                &fs,
+                &root.join("home/user"),
+                chan_library::MissingPath::Create
+            )
+            .expect("dir"),
             StandaloneOpenTarget::Browser("home/user".into())
         );
         assert_eq!(
-            standalone_open_target(&fs, &root.join("home/user/notes.md")).expect("text"),
+            standalone_open_target(
+                &fs,
+                &root.join("home/user/notes.md"),
+                chan_library::MissingPath::Create
+            )
+            .expect("text"),
             StandaloneOpenTarget::Editor("home/user/notes.md".into())
         );
         assert_eq!(
-            standalone_open_target(&fs, &root.join("home/user/photo.png")).expect("binary"),
+            standalone_open_target(
+                &fs,
+                &root.join("home/user/photo.png"),
+                chan_library::MissingPath::Create
+            )
+            .expect("binary"),
             StandaloneOpenTarget::Reveal {
                 dir: "home/user".into(),
                 select: "home/user/photo.png".into(),
             }
         );
         assert_eq!(
-            standalone_open_target(&fs, root).expect("root"),
+            standalone_open_target(&fs, root, chan_library::MissingPath::Create).expect("root"),
             StandaloneOpenTarget::Root
         );
     }
@@ -9939,7 +10023,8 @@ mod tests {
         let target = dir.path().join("home/user/fresh.md");
         assert!(!target.exists());
         assert_eq!(
-            standalone_open_target(&fs, &target).expect("create"),
+            standalone_open_target(&fs, &target, chan_library::MissingPath::Create)
+                .expect("create"),
             StandaloneOpenTarget::Editor("home/user/fresh.md".into())
         );
         assert!(
@@ -9949,15 +10034,31 @@ mod tests {
     }
 
     #[test]
+    fn standalone_open_refusing_missing_creates_nothing() {
+        let (dir, fs) = mini_fs();
+        let target = dir.path().join("home/user/fresh.md");
+        let err = standalone_open_target(&fs, &target, chan_library::MissingPath::Refuse)
+            .expect_err("a missing name is refused");
+        assert!(err.starts_with("cannot open home/user/fresh.md:"), "{err}");
+        assert!(!target.exists(), "nothing created");
+    }
+
+    #[test]
     fn cs_open_refuses_a_path_the_capability_cannot_express() {
         let (dir, fs) = mini_fs();
         // Relative input never reaches the filesystem: the CLI absolutizes,
         // so a relative path here is a caller error, not a cwd guess.
-        let err = standalone_open_target(&fs, std::path::Path::new("home/user")).expect_err("rel");
+        let err = standalone_open_target(
+            &fs,
+            std::path::Path::new("home/user"),
+            chan_library::MissingPath::Create,
+        )
+        .expect_err("rel");
         assert!(err.contains("must be absolute"), "{err}");
         // A real path outside the root is refused rather than clamped.
         let outside = private_tempdir().expect("outside");
-        let err = standalone_open_target(&fs, outside.path()).expect_err("outside");
+        let err = standalone_open_target(&fs, outside.path(), chan_library::MissingPath::Create)
+            .expect_err("outside");
         assert!(err.contains("outside this machine's root"), "{err}");
         drop(dir);
     }
@@ -9973,7 +10074,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("home/user/notes.md"), &link).expect("symlink");
         #[cfg(unix)]
         assert_eq!(
-            standalone_open_target(&fs, &link).expect("symlink"),
+            standalone_open_target(&fs, &link, chan_library::MissingPath::Create).expect("symlink"),
             StandaloneOpenTarget::Editor("home/user/notes.md".into())
         );
         let _ = link;
@@ -9996,6 +10097,7 @@ mod tests {
             root.path(),
             std::path::Path::new("/etc/hosts"),
             "w-caller",
+            chan_library::MissingPath::Create,
             &session_registry,
             &events_tx,
         )
@@ -10089,6 +10191,7 @@ mod tests {
                 root.path(),
                 &path,
                 "w-caller",
+                chan_library::MissingPath::Create,
                 &session_registry,
                 &events_tx,
             )
@@ -10129,6 +10232,7 @@ mod tests {
                         root.path(),
                         &path,
                         "w-caller",
+                        chan_library::MissingPath::Create,
                         &sessions,
                         &events
                     )
@@ -10165,6 +10269,7 @@ mod tests {
             root.path(),
             &path,
             "w-caller",
+            chan_library::MissingPath::Create,
             &sessions,
             &events,
         )
@@ -10730,7 +10835,7 @@ is_lead = false
     }
 
     #[test]
-    fn spawn_team_muse_lead_gets_its_body_then_a_bare_cr() {
+    fn spawn_team_muse_lead_gets_one_bracketed_write() {
         let (root, registry) = empty_registry();
         let mut config = spawnable_config();
         let lead = config
@@ -10749,17 +10854,17 @@ is_lead = false
             .collect();
         assert_eq!(
             writes.len(),
-            2,
-            "a muse lead's identity poke is a body write, then a chord write: {writes:?}"
+            1,
+            "a muse lead's identity poke is one write: {writes:?}"
         );
         assert!(
-            writes[0].starts_with("# Team work")
-                && writes[0].contains("You are @@Lead")
-                && writes[0].ends_with('\n')
-                && !writes[0].contains('\r'),
-            "the body write carries the prompt and no chord: {writes:?}"
+            writes[0].starts_with("\x1b[200~# Team work") && writes[0].contains("You are @@Lead"),
+            "the muse lead body starts inside bracketed paste: {writes:?}"
         );
-        assert_eq!(writes[1], "\r", "the chord write is the bare CR");
+        assert!(
+            writes[0].ends_with("\n\x1b[201~\r"),
+            "the muse lead submits after the bracketed paste: {writes:?}"
+        );
     }
 
     // The open_survey frame must carry the target tab as camelCase
@@ -14806,7 +14911,11 @@ position = { row = 0, col = 1 }
         let files = private_tempdir().unwrap();
         let unreachable = files.path().join("gone").join("notes.md");
         let error = host
-            .open_outside_workspace(&unreachable, "w-workspace-caller")
+            .open_outside_workspace(
+                &unreachable,
+                "w-workspace-caller",
+                chan_library::MissingPath::Create,
+            )
             .await
             .err()
             .expect("an unreachable path is refused");

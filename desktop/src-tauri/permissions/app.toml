@@ -11,6 +11,7 @@ permissions = [
   "allow-close-window-refusal",
   "allow-abandon-devserver-for-window",
   "allow-reconnect-devserver-for-window",
+  "allow-show-computers-for-window",
   "allow-zoom-in",
   "allow-zoom-out",
   "allow-zoom-reset",
@@ -59,6 +60,7 @@ permissions = [
   "allow-close-window-refusal",
   "allow-abandon-devserver-for-window",
   "allow-reconnect-devserver-for-window",
+  "allow-show-computers-for-window",
   "allow-zoom-in",
   "allow-zoom-out",
   "allow-zoom-reset",
@@ -202,6 +204,11 @@ commands.allow = ["abandon_devserver_for_window"]
 identifier = "allow-reconnect-devserver-for-window"
 description = "Enables the reconnect_devserver_for_window command (disconnect overlay Reconnect)."
 commands.allow = ["reconnect_devserver_for_window"]
+
+[[permission]]
+identifier = "allow-show-computers-for-window"
+description = "Enables the show_computers_for_window command (disconnect overlay Show in Computers: the Computers screen over the calling devserver window, on its devserver's card)."
+commands.allow = ["show_computers_for_window"]
 
 [[permission]]
 identifier = "allow-zoom-in"

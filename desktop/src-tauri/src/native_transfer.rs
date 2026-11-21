@@ -422,22 +422,42 @@ pub fn reason_without_url(error: reqwest::Error) -> String {
 mod tests {
     use super::*;
 
+    /// Fresh ports the test tries for a refused send before it gives up: a
+    /// client that is never refused fails every one and stays red.
+    const REFUSAL_ATTEMPTS: usize = 5;
+
+    /// Whether the send failed because nothing listened on its port.
+    fn refused(error: &reqwest::Error) -> bool {
+        std::iter::successors(std::error::Error::source(error), |cause| cause.source())
+            .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .any(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    }
+
     /// A send that fails, here to a port nothing listens on, is reported by
     /// what failed and why, and neither the URL nor the token the page put in
-    /// its query reaches the reason.
+    /// its query reaches the reason. The port is freed just before the send,
+    /// and any process binding a port in between can take it and answer the
+    /// send or reset it, at its connect or its first write; a send that is not
+    /// refused tries a fresh port.
     #[tokio::test]
     async fn a_failed_send_names_its_cause_and_not_the_url_or_its_token() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let url = format!("http://127.0.0.1:{port}/api/files/upload?t=secret-token");
-        let error = http_client()
-            .unwrap()
-            .post(&url)
-            .send()
-            .await
-            .expect_err("nothing listens on the port");
-        assert!(error.is_connect(), "{error:?}");
+        let client = http_client().unwrap();
+        let mut attempts = Vec::new();
+        let (url, error) = loop {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let url = format!("http://127.0.0.1:{port}/api/files/upload?t=secret-token");
+            let send = client.post(&url).send();
+            drop(listener);
+            match send.await {
+                Err(error) if refused(&error) => break (url, error),
+                other => attempts.push(format!("{other:?}")),
+            }
+            assert!(
+                attempts.len() < REFUSAL_ATTEMPTS,
+                "no send was refused: {attempts:?}"
+            );
+        };
         let reason = reason_without_url(error);
         for leaked in ["secret-token", "t=", "/api/files/upload", url.as_str()] {
             assert!(!reason.contains(leaked), "{leaked:?} in {reason:?}");

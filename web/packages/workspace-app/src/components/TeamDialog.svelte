@@ -33,6 +33,7 @@
     validateTeamConfig,
   } from "../state/teamDialog.svelte";
   import { runTeamBootstrap, wireToDialog } from "../state/teamOrchestrator.svelte";
+  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   /// Team Work dialog. Opens over the already-created Team Work Lead
   /// terminal (the dialog request
@@ -79,10 +80,25 @@
   let dirSuggestions = $state<string[]>([]);
   let dirSuggestReq = 0;
   let nameInputEl = $state<HTMLInputElement | undefined>();
+  let dialogEl = $state<HTMLDivElement | undefined>();
 
   onMount(() => {
-    queueMicrotask(() => nameInputEl?.focus());
     void refreshDirSuggestions(config.teamDir);
+  });
+
+  // The name field takes the keyboard once, where the keyboard's owner lets
+  // it (not under the Computers launcher, a cover or a window-wide survey
+  // painted above it); asking reads the owners' state, so this runs again
+  // when one lets go, and a hand-back to the dialog lands on the field too.
+  let tookKeyboard = false;
+  $effect(() => {
+    if (tookKeyboard || !dialogEl || !mayFocus(dialogEl)) return;
+    tookKeyboard = true;
+    queueMicrotask(() => nameInputEl?.focus());
+  });
+  $effect(() => {
+    if (!dialogEl) return;
+    return registerKeyboardTaker(dialogEl, () => nameInputEl?.focus());
   });
 
   // Mirror the live config draft onto the lead terminal and schedule a session
@@ -333,6 +349,12 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && !busy) {
+      // Escape is the dialog's only while it holds the keyboard: under a
+      // cover painted over it (the screen lock, the reconnect or
+      // session-ended cover) or an owner shown over it (the close prompt, a
+      // window-wide survey), it is not, and the dialog's Cancel would close
+      // the lead terminal.
+      if (!mayFocus(dialogEl ?? null)) return;
       // The modal owns Escape before any terminal or compose-box handler;
       // stopPropagation keeps its dismissal out of the underlying surface.
       e.preventDefault();
@@ -348,10 +370,12 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="team-dialog-backdrop" onclick={onBackdropClick} role="presentation">
   <div
+    bind:this={dialogEl}
     class="team-dialog"
     role="dialog"
     aria-modal="true"
     aria-labelledby="team-dialog-title"
+    data-keyboard-owner={ownerTag("modal")}
   >
     <header class="team-dialog-header">
       <h2 id="team-dialog-title">Spawn agents</h2>
@@ -706,11 +730,15 @@
 </div>
 
 <style>
+  /* A modal dialog: over the overlays' stack (Search, Settings and the
+     command deck, 25000 and up while a dialog shows), whose keyboard it
+     holds, and a step under the app-root dialogs (26000), so a prompt
+     raised while it is open paints over it and takes the keyboard. */
   .team-dialog-backdrop {
     position: fixed;
     inset: 0;
     background: color-mix(in srgb, var(--bg) 75%, transparent);
-    z-index: 50;
+    z-index: 25990;
     display: flex;
     align-items: center;
     justify-content: center;

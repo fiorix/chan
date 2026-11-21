@@ -52,7 +52,7 @@ fn write_inner_with_byte_producer(
     byte_producer(&mut tmp)?;
     tmp.as_file().sync_all()?;
     pre_persist(tmp.path())?;
-    tmp.persist(path).map_err(|error| error.error)?;
+    chan_workspace::fs_ops::persist_tempfile(tmp, path)?;
     sync_dir(dir)
 }
 
@@ -176,5 +176,76 @@ mod tests {
             1,
             "only the preserved target may remain visible"
         );
+    }
+
+    #[test]
+    fn write_onto_a_directory_preserves_its_entries_and_cleans_up() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("subdir");
+        std::fs::create_dir_all(&target).expect("seed directory target");
+        std::fs::write(target.join("keep"), b"kept").expect("seed kept entry");
+        write(&target, b"replacement", None).expect_err("rename over a directory must fail");
+        assert_eq!(
+            std::fs::read(target.join("keep")).expect("read kept entry"),
+            b"kept",
+            "failed write disturbed the directory's entries"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read target directory")
+                .count(),
+            1,
+            "only the preserved directory may remain visible"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_mode_survives_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("mode.bin");
+        write(&target, b"bytes", Some(0o640)).expect("publish with mode");
+        let mode = std::fs::metadata(&target)
+            .expect("stat published file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o640, "published file lost its mode");
+    }
+
+    /// A reader holding the old file open keeps the old bytes while a fresh
+    /// open sees the replacement. The open handle shares delete access, so
+    /// the rename replaces the target instead of failing on it.
+    #[test]
+    fn write_replaces_a_file_open_by_another_handle() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("shared.bin");
+        std::fs::write(&target, b"old-bytes").expect("seed old target");
+        let mut reader = std::fs::File::open(&target).expect("open old target");
+        write(&target, b"new-bytes", None).expect("replace open target");
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).expect("read old bytes");
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            std::fs::read(&target).expect("fresh open"),
+            b"new-bytes",
+            "fresh open did not see the replacement"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+            let attributes = std::fs::metadata(&target)
+                .expect("stat published file")
+                .file_attributes();
+            assert_eq!(
+                attributes & FILE_ATTRIBUTE_TEMPORARY,
+                0,
+                "published file kept the temporary attribute"
+            );
+        }
     }
 }

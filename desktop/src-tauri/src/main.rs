@@ -2,6 +2,7 @@
 
 mod auth;
 mod config;
+mod connection_health;
 mod cs_install;
 mod devserver;
 mod download;
@@ -673,6 +674,9 @@ pub struct DevserverFeed {
     /// fight a watchdog-driven bit, so the feed watchdog owns this flag and
     /// `entry_from_devserver` maps it to `DevserverStatus::Unreachable`.
     unreachable: Mutex<std::collections::HashSet<String>>,
+    /// What paces every devserver feed's pings. Each connection's reading of
+    /// them rides its window snapshot, so it leaves with `forget`.
+    pacer: connection_health::ProbePacer,
 }
 
 impl DevserverFeed {
@@ -795,6 +799,12 @@ impl DevserverFeed {
         }
     }
 
+    /// Whether this devserver is marked down, so `windows()`,
+    /// `workspaces()` and `tmux_connections()` serve none of its rows.
+    fn is_down(&self, id: &str) -> bool {
+        self.down.lock().unwrap().contains(id)
+    }
+
     /// Flip a devserver's UNREACHABLE state (its window/color feed sockets are
     /// down while the connection record still exists). Returns whether it
     /// changed, so the caller fires the attention/library signals only on a real
@@ -811,6 +821,38 @@ impl DevserverFeed {
     /// Whether this devserver's feed sockets are currently marked unreachable.
     fn is_unreachable(&self, id: &str) -> bool {
         self.unreachable.lock().unwrap().contains(id)
+    }
+
+    /// A connected devserver's connection health as its window feed reads it
+    /// now, or `None` with no connection registered or no face to show.
+    fn connection_health(&self, id: &str) -> Option<chan_server::ConnectionHealth> {
+        use connection_health::Clock;
+        let snapshot = self.windows.lock().unwrap().get(id).cloned()?;
+        let mut snapshot = snapshot.lock().unwrap();
+        let now = connection_health::SystemClock.now();
+        snapshot.health.health(now)
+    }
+
+    /// The pace every devserver feed's pings follow.
+    fn probe_pace(&self) -> tokio::sync::watch::Receiver<connection_health::ProbePace> {
+        self.pacer.subscribe()
+    }
+
+    /// A window of the desktop gained or lost the focus, or went away.
+    fn window_focus(&self, label: &str, focused: bool) {
+        self.pacer.window_focus(label, focused);
+    }
+
+    /// The Computers screen over window `host` gained or lost the keyboard,
+    /// or was hidden or dropped.
+    fn screen_focus(&self, host: &str, focused: bool) {
+        self.pacer.screen_focus(host, focused);
+    }
+
+    /// Ask every devserver that answers its feed's ping for one now, so the
+    /// Computers screen shows each card's face fresh as it shows.
+    fn ping_now(&self) {
+        self.pacer.ping_now();
     }
 
     /// Mark a devserver window LOCALLY buried (or un-buried) so `windows()`
@@ -4540,6 +4582,18 @@ fn devserver_id_for_window_label(feed: &DevserverFeed, label: &str) -> Option<St
     feed.devserver_id_for_library(library_id)
 }
 
+/// The Computers card that Show in Computers brings to the front for the
+/// window `label`: its devserver's, named by the devserver's id, which is the
+/// card's key on the Computers screen. `Ok(None)` when no devserver holds the
+/// window's library any more, where the screen opens at its first card. A
+/// window that no devserver serves (a local window, a control terminal) is
+/// refused.
+fn devserver_card_for_window(feed: &DevserverFeed, label: &str) -> Result<Option<String>, String> {
+    let library_id = devserver_library_id_from_window_label(label)
+        .ok_or_else(|| format!("{label} is not a devserver window"))?;
+    Ok(feed.devserver_id_for_library(library_id))
+}
+
 /// Reload the calling webview window. Backs the SPA's tab
 /// context-menu "Reload" entry AND the
 /// `Cmd+R` accelerator wired in `KEY_BRIDGE_JS`. The accelerator
@@ -4812,6 +4866,25 @@ fn hide_from_close_confirm<R: tauri::Runtime>(
 #[tauri::command]
 fn close_window_refusal(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Option<String> {
     last_window::check_window(&app, window.label(), last_window::Gesture::Close).err()
+}
+
+/// Show the Computers screen over the calling devserver window, or keep it
+/// shown, with that devserver's card in front and the keyboard on it (the
+/// disconnect overlay's Show in Computers). The card is resolved from the
+/// window's `<library_id>::<window_id>` label through the feed's cached
+/// lookup, as Reconnect resolves its devserver, and the screen opens at its
+/// first card when no devserver holds the library any more. It reads the
+/// desktop's own state and the launcher's library, nothing of the devserver's,
+/// so it works while the devserver does not answer. Refused on a window no
+/// devserver serves and when the screen did not show.
+#[tauri::command]
+async fn show_computers_for_window(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let card = devserver_card_for_window(&state.devserver_feed, window.label())?;
+    launcher_panel::show_card(&app, window.label(), card.as_deref()).await
 }
 
 /// Abandon the devserver backing a workspace window (the disconnect overlay's
@@ -5529,6 +5602,7 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         close_window_refusal,
         abandon_devserver_for_window,
         reconnect_devserver_for_window,
+        show_computers_for_window,
         // The command deck's library-window actions. Both resolve the
         // library from the invoking window's own label, so a window reaches
         // only its own; the ACL decides which windows may invoke at all.
@@ -6354,6 +6428,18 @@ fn main() {
             } => {
                 single_instance::reopen_without_a_window(_app);
             }
+            // The feeds ping faster while a window of the desktop has the
+            // focus, and once when the desktop gains it.
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Focused(focused),
+                ..
+            } => state_for_exit.devserver_feed.window_focus(&label, focused),
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => state_for_exit.devserver_feed.window_focus(&label, false),
             _ => {}
         }
     });
@@ -10221,6 +10307,15 @@ mod tests {
     }
 
     #[test]
+    fn the_computers_screen_asks_every_devserver_feed_for_one_ping() {
+        let feed = DevserverFeed::default();
+        let pace = feed.probe_pace();
+        feed.ping_now();
+        assert_eq!(pace.borrow().nudges, 1);
+        assert!(!pace.borrow().focused, "a ping asked for no focus");
+    }
+
+    #[test]
     fn seed_library_id_resolves_before_any_window_arrives() {
         // On connect the desktop already knows the
         // devserver's library_id (from `wait_for_devserver`'s info) before any
@@ -10252,6 +10347,27 @@ mod tests {
         );
         assert_eq!(devserver_id_for_window_label(&feed, "local::w-1"), None);
         assert_eq!(devserver_id_for_window_label(&feed, "lib-fed"), None);
+    }
+
+    /// Show in Computers brings the window's devserver card to the front by
+    /// the devserver's id, the card's key; a devserver window whose library no
+    /// devserver holds any more gets the screen's first card, and a window no
+    /// devserver serves is refused rather than shown some other card.
+    #[test]
+    fn show_in_computers_names_the_windows_devserver_card() {
+        let feed = DevserverFeed::default();
+        feed.seed_library_id("ds-1".to_string(), "lib-fed".to_string());
+        assert_eq!(
+            devserver_card_for_window(&feed, "lib-fed::w-1"),
+            Ok(Some("ds-1".to_string()))
+        );
+        assert_eq!(devserver_card_for_window(&feed, "lib-gone::w-1"), Ok(None));
+        for label in ["local::w-1", "control-terminal-ds-1", "lib-fed", "about"] {
+            assert_eq!(
+                devserver_card_for_window(&feed, label),
+                Err(format!("{label} is not a devserver window")),
+            );
+        }
     }
 
     /// The library-window commands scope every action to the library named by
@@ -11316,8 +11432,8 @@ mod tests {
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
         let frame = source_region(
             WIRING_RS,
-            "\n            let first_snapshot = !saw_snapshot;",
-            "\n            feed.write_frame(windows, set.tmux_connections);",
+            "\n                let first_snapshot = !saw_snapshot;",
+            "\n                feed.write_frame(windows, set.tmux_connections);",
         );
         assert!(
             frame.contains("pending_hide_posts_for_feed_snapshot("),
