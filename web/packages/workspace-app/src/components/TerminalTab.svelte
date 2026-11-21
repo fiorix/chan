@@ -834,6 +834,7 @@
         handKeyboardToOwner();
         return;
       }
+      if (keyboardHeld()) return;
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
       else if (keyboardSurface === "composer" && composer) composer.focus();
       else focusTerminal();
@@ -2915,7 +2916,9 @@
     // search, and its bar stays closed.
     if (backend === "ghostty" && !ghosttyFinder()) return;
     findOpen = true;
-    void tick().then(() => searchInput?.focus());
+    void tick().then(() => {
+      if (searchInput && mayFocus(searchInput)) searchInput.focus();
+    });
   }
 
   /// New file OR directory at the terminal's CWD, the unified path prompt
@@ -3012,7 +3015,9 @@
   // are dead on a terminal pane.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
-      if (!active || !focused) return;
+      // This bus reaches the listener past App's gate, so it keeps the
+      // gate's cover rule itself.
+      if (!active || !focused || appInputBlocked()) return;
       const detail = (e as CustomEvent).detail;
       const name = detail?.name;
       if (name === "app.terminal.restart") void restart();

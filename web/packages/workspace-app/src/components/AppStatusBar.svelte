@@ -400,8 +400,11 @@
     position: fixed;
     /* Sits below the pane tab-strip (the tab pills + the top-right
        hamburger button, ~33px tall) so the pill never covers it. The inline
-       top follows the window tab bar when the window draws one. */
+       top follows the window tab bar when the window draws one, and the
+       margins carry the safe areas on top of the inline offsets. */
     top: 48px;
+    margin-top: env(safe-area-inset-top, 0px);
+    margin-right: env(safe-area-inset-right, 0px);
     z-index: 28000;
     display: flex;
     align-items: center;

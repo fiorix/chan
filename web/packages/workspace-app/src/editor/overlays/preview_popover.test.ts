@@ -144,3 +144,23 @@ test("a link preview leaves wikilinks as authored", async () => {
       .toBe("[[note]] [[note|alias]]");
   });
 });
+
+describe("under a cover over the window", () => {
+  test("Escape, Mod+Enter and a press on the cover reach no preview, which answers again when the cover lifts", async () => {
+    click(pill("a.md"));
+    await macrotask();
+    const cover = document.body.appendChild(document.createElement("div"));
+    cover.setAttribute("data-cover", "screensaver");
+    cover.style.zIndex = "39000";
+
+    press("Escape");
+    press("Enter", { ctrlKey: true });
+    click(cover);
+    expect(popovers().length, "the preview stays open under the cover").toBe(1);
+    expect(opened, "nothing opened").toEqual([]);
+
+    cover.remove();
+    press("Escape");
+    expect(popovers().length, "Escape closes it once the cover lifts").toBe(0);
+  });
+});

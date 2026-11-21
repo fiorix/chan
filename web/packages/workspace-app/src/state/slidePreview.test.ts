@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { flushSync } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { screensaver } from "./screensaver.svelte";
 import { openSlidePreview } from "./slidePreview";
 
 vi.mock("../editor/mermaid_render", () => ({
@@ -581,5 +583,129 @@ flowchart LR
           ?.getAttribute("data-excalidraw-diagram-theme"),
       ).toBe("light");
     });
+  });
+});
+
+describe("the slide player under the screen lock", () => {
+  const proto = HTMLElement.prototype as Partial<HTMLElement>;
+  const originalRequest = proto.requestFullscreen;
+  const requestFullscreen = vi.fn(async () => {});
+  let lockRoot: HTMLElement | null = null;
+
+  function raiseLock(): void {
+    lockRoot = document.body.appendChild(document.createElement("div"));
+    lockRoot.setAttribute("data-cover", "screensaver");
+    lockRoot.tabIndex = -1;
+    lockRoot.style.position = "fixed";
+    lockRoot.style.zIndex = "39000";
+    screensaver.locked = true;
+    flushSync();
+  }
+
+  function liftLock(): void {
+    lockRoot?.remove();
+    lockRoot = null;
+    screensaver.locked = false;
+    flushSync();
+  }
+
+  const play = () => openSlidePreview({ source: SOURCE, currentLine: 0, fromPath: "slides-test.md", theme: "dark", mode: "play" })!;
+
+  beforeEach(() => {
+    requestFullscreen.mockClear();
+    Object.defineProperty(proto, "requestFullscreen", { configurable: true, value: requestFullscreen });
+  });
+
+  afterEach(() => {
+    liftLock();
+    delete (document as { fullscreenElement?: unknown }).fullscreenElement;
+    delete (document as { exitFullscreen?: unknown }).exitFullscreen;
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    if (originalRequest) Object.defineProperty(proto, "requestFullscreen", { configurable: true, value: originalRequest });
+    else delete proto.requestFullscreen;
+  });
+
+  test("an update under the lock asks for no fullscreen, and the lift asks once", () => {
+    const handle = play();
+    expect(requestFullscreen, "as the player opens").toHaveBeenCalledTimes(1);
+    raiseLock();
+    handle.update({ theme: "light", mode: "play" });
+    handle.update({ source: `${SOURCE}\nmore\n`, mode: "play" });
+    expect(requestFullscreen, "under the lock").toHaveBeenCalledTimes(1);
+    liftLock();
+    expect(requestFullscreen, "as the lock lifts").toHaveBeenCalledTimes(2);
+  });
+
+  test("a fullscreen entered under the lock is left, the lock takes the keyboard, and the lift restores it", async () => {
+    play();
+    raiseLock();
+    let current: Element | null = backdrop();
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => current });
+    const exitFullscreen = vi.fn(async () => { current = null; });
+    Object.defineProperty(document, "exitFullscreen", { configurable: true, value: exitFullscreen });
+    requestFullscreen.mockClear();
+    document.dispatchEvent(new Event("fullscreenchange"));
+    expect(exitFullscreen, "left as it lands").toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(document.activeElement, "the lock's keyboard").toBe(lockRoot));
+    liftLock();
+    expect(requestFullscreen, "asked back on unlock").toHaveBeenCalledTimes(1);
+  });
+
+  test("a fullscreen entered under a woken lock hands the keyboard back to its PIN field", async () => {
+    play();
+    raiseLock();
+    const pin = lockRoot!.appendChild(document.createElement("input"));
+    pin.type = "password";
+    pin.focus();
+    let current: Element | null = backdrop();
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => current });
+    Object.defineProperty(document, "exitFullscreen", { configurable: true, value: vi.fn(async () => { current = null; }) });
+    // Entering fullscreen takes focus off the field.
+    pin.blur();
+    document.dispatchEvent(new Event("fullscreenchange"));
+    await vi.waitFor(() => expect(document.activeElement, "the PIN field").toBe(pin));
+  });
+
+  test("a player that leaves play mode under the lock is not put back in fullscreen", () => {
+    const handle = play();
+    raiseLock();
+    handle.update({ theme: "light", mode: "play" });
+    handle.update({ mode: "preview" });
+    requestFullscreen.mockClear();
+    liftLock();
+    expect(requestFullscreen).not.toHaveBeenCalled();
+  });
+
+  test("a player opened under the lock leaves the keyboard on the lock", () => {
+    raiseLock();
+    lockRoot!.focus();
+    const handle = play();
+    expect(document.activeElement, "as it opens").toBe(lockRoot);
+    handle.close();
+    expect(document.activeElement, "as it closes").toBe(lockRoot);
+  });
+
+  test("a player closed under the lock does not refocus what it opened from", () => {
+    const opener = document.body.appendChild(document.createElement("button"));
+    opener.focus();
+    const handle = play();
+    raiseLock();
+    lockRoot!.focus();
+    handle.close();
+    expect(document.activeElement, "the lock keeps the keyboard").toBe(lockRoot);
+    opener.remove();
+  });
+
+  test("on chan-desktop the native window still follows the deck's mode under the lock", async () => {
+    const invoke = vi.fn(async () => undefined);
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: { invoke }, configurable: true });
+    const handle = play();
+    raiseLock();
+    invoke.mockClear();
+    handle.update({ mode: "play" });
+    await vi.waitFor(() => expect(invoke).toHaveBeenLastCalledWith("plugin:window|set_fullscreen", { value: true }));
+    handle.update({ mode: "preview" });
+    await vi.waitFor(() => expect(invoke).toHaveBeenLastCalledWith("plugin:window|set_fullscreen", { value: false }));
+    expect(requestFullscreen).not.toHaveBeenCalled();
   });
 });

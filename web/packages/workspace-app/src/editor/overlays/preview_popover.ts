@@ -20,6 +20,7 @@
 
 import { api } from "../../api/client";
 import { renderMarkdown } from "../../api/markdown";
+import { coverPaintsOver } from "../../state/paintLevel";
 import { resolveImageSrc } from "../extensions/image";
 import { trackEditorOverlay } from "./lifetime";
 
@@ -197,12 +198,12 @@ export function openPreviewPopover(
   }
 
   function outsideClick(e: MouseEvent): void {
-    if (wrap.contains(e.target as Node)) return;
+    if (wrap.contains(e.target as Node) || coverPaintsOver(wrap)) return;
     dismiss();
   }
 
   function keyHandler(e: KeyboardEvent): void {
-    if (!alive) return;
+    if (!alive || coverPaintsOver(wrap)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopImmediatePropagation();

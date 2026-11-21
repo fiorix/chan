@@ -210,6 +210,7 @@
     syncLiveFocusColorMenu,
   } from "./state/paneColor";
   import { installIdleTracker, setReadMode } from "./state/idle.svelte";
+  import { installLockMediaPause } from "./state/lockMedia.svelte";
   import {
     installScreensaverTracker,
     loadScreensaverState,
@@ -530,6 +531,7 @@
     // load doesn't need a re-install pass; the lock fires only when
     // `enabled=true`.
     stopTrackers.push(installScreensaverTracker());
+    stopTrackers.push(installLockMediaPause());
     // Hook pagehide BEFORE bootstrap so a fast reload during the
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
@@ -2236,6 +2238,15 @@
   :global(html), :global(body), :global(#app) {
     height: 100%; margin: 0; padding: 0;
   }
+  /* The page fills the whole screen on a phone or tablet (viewport-fit=cover),
+     so the window keeps clear of the status bar, the notch, the rounded
+     corners and the home indicator through the safe-area insets, which are 0
+     on a desktop. */
+  :global(#app) {
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  }
   :global(body) {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     /* Baseline; chrome / file tree / overlays inherit this where
@@ -2304,10 +2315,11 @@
   @keyframes md-bubble-spin {
     to { transform: rotate(360deg); }
   }
+  /* The window fills #app, which is the viewport less the safe-area insets. */
   .app {
     display: flex;
-    height: 100vh;
-    width: 100vw;
+    height: 100%;
+    width: 100%;
   }
   /* The window's focus colour preset, for what no pane encloses: the docked
      file browser's resize handle reads `--pane-active-focus` from here, as a

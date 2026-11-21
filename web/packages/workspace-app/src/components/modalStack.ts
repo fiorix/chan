@@ -105,6 +105,23 @@ function setLayers(): void {
   shells.forEach((shell, index) => { shell.layer.style.zIndex = String(26000 + index); });
 }
 
+/// Give `element`, inside an open dialog, the keyboard as the dialog opens.
+/// Where the keyboard's owner refuses it (a cover over the dialog holds the
+/// keyboard, the screen lock's PIN among them) it stays where it is, and
+/// `element` is what the dialog takes when the keyboard is handed back to it.
+/// Answers whether it took the keyboard now. Only a cover refuses: between
+/// dialogs, the stack's focus repair already puts the keyboard on the top one.
+export function focusInDialog(element: HTMLElement | null | undefined): boolean {
+  if (!element) return false;
+  if (!appInputBlocked() || mayFocus(element)) {
+    element.focus();
+    return true;
+  }
+  const shell = shells.find((candidate) => candidate.panel.contains(element));
+  if (shell) shell.lastFocus = element;
+  return false;
+}
+
 /** Register one mounted ModalShell. Only actual unmount ends its ownership. */
 export function registerModalShell(options: ShellOptions): { isTop: () => boolean; destroy: () => void } {
   const previous = top();

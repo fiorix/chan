@@ -304,6 +304,15 @@ describe("the Computers deck", () => {
     expect(document.activeElement).toBe(slots()[1]);
   });
 
+  it("selects the card a dot brings forward", async () => {
+    mountDeck();
+    target!.querySelectorAll<HTMLButtonElement>(".dots .dot")[1].click();
+    flushSync();
+    await tick();
+    expect(front()).toBe("This machine, 2 of 4");
+    expect(document.activeElement).toBe(slots()[1]);
+  });
+
   it("keeps the card in front across a remount", () => {
     mountDeck();
     press("ArrowRight");
@@ -619,6 +628,73 @@ describe("the Computers deck's letter actions", () => {
     key("h", row);
     await settleAll();
     expect(library.windows.find((w) => w.window_id === "w-local-term-1")?.hidden).toBe(false);
+  });
+
+  // Browser check 318 drives a devserver's card. These are the other cards:
+  // This machine, whose header has t but no o while its workspace row has
+  // both, and All windows, which has no header row and stands for its first
+  // window.
+  it("acts from the card itself on the row Enter takes, and on no other", () => {
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="local"]')!;
+    const header = slot.querySelector<HTMLElement>(".machine-header")!;
+    const terminal = watchClick(header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!);
+    const workspace = slot.querySelector<HTMLElement>(".ws-head")!;
+    const power = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="Turn off"]')!);
+    const opened = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="New window of"]')!);
+    slot.focus();
+    expect(document.activeElement).toBe(slot);
+    key("t", slot);
+    expect(terminal).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(slot);
+    for (const letter of ["o", "w", "h"]) expect(key(letter, slot).defaultPrevented).toBe(false);
+    expect(power).not.toHaveBeenCalled();
+    expect(opened).not.toHaveBeenCalled();
+    // The guards hold at the card as they do on a row.
+    key("t", slot, { repeat: true });
+    key("t", slot, { ctrlKey: true });
+    openCommandLauncher();
+    key("t", slot);
+    closeCommandLauncher();
+    // A letter on a card that is not in front does nothing.
+    expect(key("t", target!.querySelector('.slot[data-key="ds-1"]')!).defaultPrevented).toBe(false);
+    expect(terminal).toHaveBeenCalledOnce();
+
+    decks.computers.activeKey = "all-windows";
+    flushSync();
+    const all = target!.querySelector<HTMLElement>('.slot[data-key="all-windows"]')!;
+    const first = all.querySelector<HTMLElement>("[data-window-id]")!;
+    const toggle = watchClick(first.querySelector<HTMLButtonElement>('[aria-label^="Show window"], [aria-label^="Hide window"]')!);
+    for (const letter of ["t", "o", "w"]) expect(key(letter, all).defaultPrevented).toBe(false);
+    key("h", all);
+    expect(toggle).toHaveBeenCalledOnce();
+  });
+
+  it("acts from the card only while the card itself holds focus", () => {
+    mountDeck();
+    decks.computers.activeKey = "ds-1";
+    flushSync();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="ds-1"]')!;
+    const header = slot.querySelector<HTMLElement>(".machine-header")!;
+    const connection = watchClick(header.querySelector<HTMLButtonElement>('[aria-label^="Disconnect"]')!);
+    const terminal = watchClick(header.querySelector<HTMLButtonElement>('[aria-label^="New terminal"]')!);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    for (const on of [document.body, document.documentElement]) {
+      expect(key("o", on).defaultPrevented).toBe(false);
+      expect(key("t", on).defaultPrevented).toBe(false);
+    }
+    const next = target!.querySelector<HTMLButtonElement>('button[aria-label="Next card"]')!;
+    next.focus();
+    expect(document.activeElement).toBe(next);
+    expect(key("o", next).defaultPrevented).toBe(false);
+    expect(connection).not.toHaveBeenCalled();
+    expect(terminal).not.toHaveBeenCalled();
+    slot.focus();
+    key("o", slot);
+    expect(connection).toHaveBeenCalledOnce();
   });
 
   it("leaves fields, modifiers, inactive cards, disabled buttons and repeats alone", async () => {

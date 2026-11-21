@@ -7,7 +7,9 @@
 // arrows/WASD) rides on a layer translate. Escape or a plain backdrop
 // click dismisses; the overlay cleans itself up.
 
+import { coverPaintsOver } from "./paintLevel";
 import { consumeKey } from "./shortcuts";
+import { VIEWER_LAYER } from "./viewerLayer.svelte";
 
 const MIN_SCALE = 0.2;
 const MAX_SCALE = 8;
@@ -27,7 +29,7 @@ export function openDiagramZoom(svg: string): void {
   const backdrop = document.createElement("div");
   backdrop.className = "md-diagram-zoom";
   backdrop.style.cssText =
-    "position:fixed;inset:0;z-index:40000;overflow:hidden;" +
+    `position:fixed;inset:0;z-index:${VIEWER_LAYER};overflow:hidden;` +
     "background:rgba(0,0,0,0.92);cursor:grab;";
 
   // The layer is anchored at the backdrop centre (top/left 50%); the -50%
@@ -193,6 +195,7 @@ export function openDiagramZoom(svg: string): void {
   // unmodified; Shift is part of "+" and the capital WASD. A chord with
   // Ctrl, Cmd or Alt held is the app's and travels on.
   const onKey = (e: KeyboardEvent): void => {
+    if (coverPaintsOver(backdrop)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     switch (e.key) {
       case "Escape":

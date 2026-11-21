@@ -19,6 +19,7 @@ import {
   formatDate,
   type DateFormatId,
 } from "../dateFormats";
+import { coverPaintsOver } from "../../state/paintLevel";
 import { trackEditorOverlay } from "./lifetime";
 
 export interface DatePopoverOpts {
@@ -193,7 +194,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
     if (focusCell) {
       focusCell.tabIndex = 0;
       setTimeout(() => {
-        if (!alive) return;
+        if (!alive || coverPaintsOver(wrap)) return;
         focusCell.focus({ preventScroll: true });
       }, 0);
     }
@@ -276,12 +277,12 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
   }
 
   function outsideClick(e: MouseEvent): void {
-    if (wrap.contains(e.target as Node)) return;
+    if (wrap.contains(e.target as Node) || coverPaintsOver(wrap)) return;
     dismiss();
   }
 
   function escListener(e: KeyboardEvent): void {
-    if (!alive) return;
+    if (!alive || coverPaintsOver(wrap)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopImmediatePropagation();

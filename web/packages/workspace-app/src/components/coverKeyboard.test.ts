@@ -38,8 +38,8 @@ import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { demoWorkspaceInfo } from "../demo/data";
 import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { bumpTabFocusPulse, layout, type LeafNode } from "../state/tabs.svelte";
-import { COVER_ROOT_ATTR, promptState, resolvePrompt, setCoverBlocking, uiPrompt, workspace } from "../state/store.svelte";
+import { bumpTabFocusPulse, draftCloseState, layout, resolveDraftClose, type LeafNode } from "../state/tabs.svelte";
+import { COVER_ROOT_ATTR, pathPromptState, promptState, resolvePathPrompt, resolvePrompt, setCoverBlocking, uiPathPrompt, uiPrompt, workspace } from "../state/store.svelte";
 import { closeTeamDialog, openTeamDialog, teamDialogState } from "../state/teamDialog.svelte";
 
 installTerminalDom();
@@ -68,6 +68,8 @@ beforeEach(() => {
 afterEach(async () => {
   screensaver.locked = false;
   if (promptState.open) resolvePrompt(null);
+  if (pathPromptState.open) resolvePathPrompt(null);
+  if (draftCloseState.open) resolveDraftClose("cancel");
   resolveCloseConfirm("cancel");
   closeTeamDialog();
   resetTerminals();
@@ -113,6 +115,51 @@ test("the screen lock over an open dialog holds the keyboard, and the dialog tak
   screensaver.locked = false;
   await settle();
   expect(document.activeElement, "the dialog's field once the lock lifts").toBe(field);
+});
+
+// The confirm dialog's path is the browser check's, through a real file
+// picker; nothing in the product opens these three after an await, so the
+// check has no way to raise them under the lock.
+const OPENED_UNDER_THE_LOCK: Array<[string, () => void]> = [
+  ["the prompt", () => void uiPrompt("Name", "draft name")],
+  // A move is the path prompt's arm that selects the whole field.
+  ["the path prompt", () => void uiPathPrompt({ title: "Path", kind: "file", mode: "move", sourcePath: "notes/old.md", defaultValue: "notes/old.md" })],
+  ["the draft close dialog", () => {
+    Object.assign(draftCloseState, {
+      path: "draft.md", name: "draft.md", target: "draft.md", targetKind: "file",
+      hasAttachments: false, unsavable: null, error: null, resolve: () => {},
+    });
+    draftCloseState.open = true;
+  }],
+];
+
+test.each(OPENED_UNDER_THE_LOCK)("%s opening under the screen lock leaves the PIN the keyboard and takes it on unlock", async (_, open) => {
+  focusOrigin();
+  const dialogs = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(Harness, { target: dialogs, props: { callers: true } }));
+  flushSync();
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  await settle();
+  const pin = backdrop.querySelector<HTMLInputElement>('input[type="password"]')!;
+  expect(document.activeElement, "the woken card's PIN field").toBe(pin);
+  // A browser's select() focuses the field, and jsdom's does not, so the call
+  // itself is what a refused field must not make.
+  const select = vi.spyOn(HTMLInputElement.prototype, "select");
+  open();
+  await settle();
+  const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
+  expect(field, "the dialog opened").not.toBeNull();
+  expect(document.activeElement, "the PIN keeps the keyboard").toBe(pin);
+  expect(select, "a refused field is not selected by select()").not.toHaveBeenCalled();
+  screensaver.locked = false;
+  await settle();
+  expect(document.activeElement, "the dialog's field once the lock lifts").toBe(field);
+  expect([field.selectionStart, field.selectionEnd], "the field's text is selected, to overtype").toEqual([0, field.value.length]);
+  expect(field.value.length, "the field holds its default").toBeGreaterThan(0);
 });
 
 /// Bring the screen lock up over the page and lift it.
