@@ -7,10 +7,10 @@
 // window's bottom edge, at three window heights with no page scroll and at a
 // phone width with no sideways scroll, and it is painted and on top: the
 // element at its centre is inside it, it is visible, and neither it nor an
-// ancestor is transparent. Nothing in it takes focus, and it carries no role or
-// label, as the deck's footer carries none; its type, colour and spacing are
-// read against that footer's in the open deck. The devserver and read-only
-// surfaces, which deal no deck, show no bar and no legend.
+// ancestor is transparent. Nothing in it takes focus, and it carries no role,
+// label or aria-hidden, as the deck's footer carries none; its type, colour and
+// spacing are read against that footer's in the open deck. The devserver and
+// read-only surfaces, which deal no deck, show no bar and no legend.
 //
 // The harness's `chan serve` has no launcher at `/`, so this spawns its own
 // isolated `chan devserver run` over a fresh CHAN_HOME. Only the desktop
@@ -133,6 +133,7 @@ function readScreen(deckSelector, legendWords) {
     hints,
     role: bar?.getAttribute("role") ?? null,
     label: bar?.getAttribute("aria-label") ?? bar?.getAttribute("aria-labelledby") ?? null,
+    ariaHidden: bar?.getAttribute("aria-hidden") ?? null,
     painted,
     boxes: {
       bar: box(bar),
@@ -198,6 +199,9 @@ function judgeScreen(reading, expected, label, problems) {
   }
   if (reading.role !== null || reading.label !== null) {
     problems.push(`${label}: the key bar carries role ${JSON.stringify(reading.role)} and label ${JSON.stringify(reading.label)}; the deck's footer carries neither`);
+  }
+  if (reading.ariaHidden !== null) {
+    problems.push(`${label}: the key bar carries aria-hidden ${JSON.stringify(reading.ariaHidden)}, which takes its keys from assistive tech; the deck's footer carries none`);
   }
   judgeLayout(reading, label, problems);
 }
