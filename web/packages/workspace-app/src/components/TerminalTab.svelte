@@ -28,6 +28,7 @@
     createSocket,
     WS_CONNECT_DEADLINE_MS,
     WS_PING_MS,
+    WS_PROBE_DEADLINE_MS,
     WS_READ_DEADLINE_MS,
     WS_RECONNECT_BACKOFF_MIN_MS,
     WS_RECONNECT_BACKOFF_MAX_MS,
@@ -248,6 +249,7 @@
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
+  import { createTerminalWakeProbe } from "./terminalWakeProbe";
   import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
 
   let {
@@ -432,6 +434,14 @@
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
+  // How late the read deadline's timer may fire and still mean what it says.
+  const READ_DEADLINE_LATE_MS = 1_000;
+  const wakeProbe = createTerminalWakeProbe({
+    quietLimitMs: WS_PROBE_DEADLINE_MS,
+    onSilent: () => {
+      if (ws?.readyState === WebSocket.OPEN) void connect();
+    },
+  });
   // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
   // loaded at connect time, primed into the xterm on the attach prelude only
   // when the frame keeps the cached session id and the server confirms the
@@ -1079,14 +1089,15 @@
     // queueFit -> recovery). The shared wall-clock detector catches the wake
     // directly (a coarse interval firing far later than scheduled means JS
     // timers froze while the machine slept); on wake it runs the renderer
-    // recovery the resize path proves works AND recycles a frozen PTY socket.
+    // recovery the resize path proves works AND probes the PTY socket, which
+    // the sleep may have left half-open.
     // One detector per terminal so EVERY pane recovers at once, matching
     // "resize any window clears ALL terminals". (Pure display-only sleep that
     // does not freeze timers is not caught here; verify in chan-desktop --
     // WebKit-only.)
     disposeWakeGap = installWakeGapDetector(() => {
       recoverTerminalAfterHostResume();
-      recyclePtySocketAfterWake();
+      probePtySocketAfterWake();
     });
     hostResumeListenerCleanup = () => {
       window.removeEventListener("focus", onHostResume);
@@ -1098,20 +1109,24 @@
     };
   }
 
-  // A machine sleep freezes the PTY socket into a half-open zombie: readyState
+  // A machine sleep can freeze the PTY socket into a half-open zombie: readyState
   // stays OPEN but the far end (through the gateway proxy) was torn down, so no
-  // onclose fires and typed keys are swallowed. On a detected wake, force a
-  // reconnect via the existing resume path (sessionId/since/generation), which
-  // replays only the missed bytes -- no scrollback loss. A socket that is not
-  // OPEN is already reconnecting (or intentionally closed); leave it alone.
-  function recyclePtySocketAfterWake(): void {
+  // onclose fires and typed keys are swallowed. A main-thread stall trips the
+  // same detector over a healthy socket, whose queued output a redial would
+  // discard. So a wake pings the socket, and wakeProbe redials through the
+  // resume path (sessionId/since/generation) only if neither that ping's pong
+  // nor any other frame arrives for its quiet limit. Input sent meanwhile stays
+  // in flight, so the Reconnected note reports it if the socket is replaced. A
+  // socket that is not OPEN is already reconnecting (or intentionally closed);
+  // leave it alone.
+  function probePtySocketAfterWake(): void {
     // The control terminal is a single-shot local runner owned by the desktop
     // exit watcher; a wake redial would mint a fresh session whose tenant
     // default re-runs the devserver connect script.
     if (ui.terminalControl) return;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      void connect();
-    }
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    wakeProbe.begin();
+    sendPing();
   }
 
   // The live WebGL context can be lost long after mount (GPU reset,
@@ -1592,12 +1607,14 @@
       clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
+    wakeProbe.reset();
     terminalConnection.retired();
   }
 
   function sendPing(): void {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     terminalConnection.pingSent();
+    wakeProbe.pingSent();
     send({ type: "ping" });
   }
 
@@ -1617,8 +1634,16 @@
     // desktop exit watcher; it never heartbeats or read-deadline-force-closes.
     if (ui.terminalControl) return;
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+    const armedAt = Date.now();
     deadlineTimer = setTimeout(() => {
       deadlineTimer = null;
+      // A running wake probe owns the verdict, and a deadline that fires late
+      // ran after a stall, possibly ahead of frames the stall left queued.
+      if (wakeProbe.active) return;
+      if (Date.now() - armedAt > WS_READ_DEADLINE_MS + READ_DEADLINE_LATE_MS) {
+        probePtySocketAfterWake();
+        return;
+      }
       try {
         ws?.close();
       } catch {
@@ -1763,6 +1788,7 @@
       // Any inbound frame proves the socket is live -- refresh the deadline
       // first, before decoding.
       armDeadline();
+      wakeProbe.frameReceived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
         if (resetBeforeReplay && bytes.length > 0) {
@@ -1799,6 +1825,7 @@
       }
       if (frame.type === "pong") {
         terminalConnection.pongArrived();
+        wakeProbe.pongReceived();
         return;
       }
       if (frame.type === "ready") {

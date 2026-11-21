@@ -4,7 +4,7 @@ import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
-import { WS_PING_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import { WS_PING_MS, WS_PROBE_DEADLINE_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
@@ -180,7 +180,7 @@ describe("terminal connection in the tab", () => {
     await receive(first, { type: "pong" });
     await vi.advanceTimersByTimeAsync(3900);
     vi.setSystemTime(Date.now() + 30_000);
-    await vi.advanceTimersByTimeAsync(2100);
+    await vi.advanceTimersByTimeAsync(2100 + WS_PROBE_DEADLINE_MS);
     await tick();
     const recycled = TerminalSocket.all.at(-1)!;
     expect(recycled).not.toBe(first);
@@ -207,7 +207,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
-  test("a wake recycle of a healthy socket shows no note", async () => {
+  test("a wake over a healthy socket keeps it and shows no note", async () => {
     const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
@@ -215,9 +215,28 @@ describe("terminal connection in the tab", () => {
     const dials = TerminalSocket.all.length;
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 2);
     await tick();
-    expect(TerminalSocket.all.length).toBeGreaterThan(dials);
+    expect(TerminalSocket.all.length).toBe(dials);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("a key typed into a socket that a wake then replaces shows the note", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    term.type("x");
+    expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    expect(replacement).not.toBe(first);
+    await attach(replacement);
+    await tick();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
   });
 
   test("holds the reconnect warning under the cover then announces it once", async () => {
