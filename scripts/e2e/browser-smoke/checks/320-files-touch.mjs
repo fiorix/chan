@@ -4,7 +4,8 @@
 // Details open a tap shows the row there, and in Select multiple it toggles.
 // A touch row is 44px tall and ends in a button that opens its menu. A mouse
 // keeps select and double click and sees no button. In landscape behind a
-// notch, the window, its tab bar and an overlay stay inside the safe areas.
+// notch, the window, its tab bar, an overlay, a row's menu and the status pill
+// stay inside the safe areas.
 //
 // Each leg runs in its own window and is judged alone, so a failure names
 // every behaviour that is missing rather than the first.
@@ -101,6 +102,30 @@ function rectOf(page, selector) {
   }, selector);
 }
 
+async function emulateInsets(page) {
+  const cdp = await page.createCDPSession();
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: INSETS });
+  return cdp;
+}
+
+// Puppeteer's own evaluate grants a user gesture, which turns `chan shell
+// upload` into a file chooser, so the pill's leg reads with none.
+async function quietRead(cdp, expression) {
+  const response = await cdp.send("Runtime.evaluate", { expression: `JSON.stringify(${expression})`, returnByValue: true, userGesture: false });
+  if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text);
+  return JSON.parse(response.result.value);
+}
+
+async function quietWait(cdp, expression, label) {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const value = await quietRead(cdp, expression);
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`waiting for ${label}`);
+    await sleep(100);
+  }
+}
+
 const LEGS = [
   {
     label: "tap-opens-file",
@@ -108,6 +133,17 @@ const LEGS = [
     async run(page) {
       await tapRow(page, "alpha.md");
       await waitOpen(page, "alpha.md");
+    },
+  },
+  {
+    label: "tap-on-row-background-opens-file",
+    viewport: PHONE,
+    async run(page) {
+      const row = await waitFileRow(page, "beta.md");
+      const size = await row.$(".entry-size");
+      const box = await size.boundingBox();
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      await waitOpen(page, "beta.md");
     },
   },
   {
@@ -203,8 +239,7 @@ const LEGS = [
     files: false,
     async prepare(page) {
       await page.evaluateOnNewDocument(() => localStorage.setItem("chan.windowTabBar", "1"));
-      const cdp = await page.createCDPSession();
-      await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: INSETS });
+      await emulateInsets(page);
     },
     async run(page) {
       const { width, height } = LANDSCAPE;
@@ -228,6 +263,47 @@ const LEGS = [
       within(await rectOf(page, ".overlay .panel"), width, height, "an overlay");
     },
   },
+  {
+    label: "landscape-row-menu",
+    viewport: LANDSCAPE,
+    prepare: emulateInsets,
+    async run(page) {
+      const { width, height } = LANDSCAPE;
+      const row = await waitFileRow(page, "c07.md");
+      const button = await row.$(".row-menu");
+      assert.ok(button, "the row has a menu button");
+      await button.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      const box = await button.boundingBox();
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      await page.waitForSelector('.ctx[role="menu"]', { visible: true, timeout: 5_000 });
+      await page.waitForFunction(() => document.querySelector(".ctx")?.getAnimations().every((a) => a.playState !== "running"),
+        { timeout: 5_000 });
+      await sleep(100);
+      within(await rectOf(page, ".ctx"), width, height, "the row's menu");
+    },
+  },
+  {
+    label: "landscape-status-pill",
+    viewport: LANDSCAPE,
+    files: false,
+    control: true,
+    prepare: emulateInsets,
+    async run(page, ctx) {
+      const { width, height } = LANDSCAPE;
+      const windowId = "files-touch-320-landscape-status-pill";
+      await ctx.waitWindowLive(windowId);
+      const cdp = await page.createCDPSession();
+      await quietWait(cdp, "navigator.userActivation.isActive === false", "user activation to lapse");
+      const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
+      await ctx.exec(ctx.chanBin, ["shell", "upload", DIR], { cwd: ctx.workspaceDir, env, timeout: 60_000 });
+      await quietWait(cdp, "Boolean(document.querySelector('[data-app-status-pill]'))", "the status pill");
+      const rect = await quietRead(cdp, `(() => {
+        const box = document.querySelector('[data-app-status-pill]').getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+      })()`);
+      within(rect, width, height, "the status pill");
+    },
+  },
 ];
 
 // The path field can close under the press while a new tab settles its focus.
@@ -249,6 +325,10 @@ async function enterDirectory(page, directory) {
 }
 
 async function runLeg(ctx, leg) {
+  if (leg.control && !ctx.controlSocket) {
+    console.log(`[smoke]   ${leg.label}: SKIPPED: it needs the server's control socket`);
+    return null;
+  }
   const page = await ctx.browser.newPage();
   try {
     await page.setViewport(leg.viewport);
@@ -262,7 +342,7 @@ async function runLeg(ctx, leg) {
       const directory = leg.directory ?? DIR;
       if (directory) await enterDirectory(page, directory);
     }
-    await leg.run(page);
+    await leg.run(page, ctx);
     console.log(`[smoke]   ${leg.label}: ok`);
     return null;
   } catch (error) {
