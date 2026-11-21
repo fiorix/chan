@@ -1,10 +1,17 @@
-// `seq 1 400000` through a ghostty terminal that falls behind arrives whole,
-// in headless Chrome with the page's CPU throttled 20 times: unthrottled, the
-// page keeps up with this load and the check would prove nothing. It reads
-// every byte the page's sockets handed to the app and walks the numbers in
-// order, then reads what the terminal itself retains: its history and screen
-// must be consecutive numbers ending at the last one, with no lag line and no
-// missed-bytes line. It says nothing about WebKit or the xterm.js engine.
+// Fast numbered streams through a ghostty terminal that falls behind arrive
+// whole, in headless Chrome.
+//
+//   short:   `seq 1 400000`, about 3.1 MB, with the page's CPU throttled 20
+//            times. An unpaced server's broadcast and socket buffers absorb
+//            this much, so this leg passes without pacing too.
+//   stalled: `seq 1 4000000`, about 35 MB, with the page's main thread stopped
+//            for 3 s partway through, inside the 5 s bound. This is the leg
+//            an unpaced server fails, with its lag line.
+//
+// Each leg reads every byte the page's socket handed to the app, in order,
+// then what the terminal itself retains: consecutive numbers ending at the
+// last one, no lag line and no missed-bytes line. It says nothing about
+// WebKit or the xterm.js engine.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -14,10 +21,11 @@ import {
 } from "../lib/stream-probe.mjs";
 
 const NAME = "FastStream334";
-const COUNT = 400_000;
-const BEGIN = "__SEQ334_BEGIN__";
-const END = "__SEQ334_END__";
-const CPU_THROTTLE = 20;
+const LEGS = [
+  { key: "short", count: 400_000, throttle: 20, stallAfterLines: null },
+  { key: "stalled", count: 4_000_000, throttle: null, stallAfterLines: 500_000 },
+].map((leg) => ({ ...leg, begin: `__${leg.key}334_BEGIN__`, end: `__${leg.key}334_END__` }));
+const STALL_MS = 3_000;
 
 export default {
   name: "terminal-fast-stream-whole",
@@ -40,47 +48,56 @@ export default {
       await writeTerminalPrefs(page, token, { ghostty: true, secret_masking: false });
       assert.ok(await trackGhosttyTerminals(page), "the entry module names a ghostty-web chunk");
       await page.evaluate(installStreamProbe);
-      const command = `stty -echo; IFS= read -r _; printf '${BEGIN}\\n'; seq 1 ${COUNT}; printf '${END}'; exec sleep 600`;
+      const command = ["stty -echo", ...LEGS.flatMap(({ begin, end, count }) => [
+        "IFS= read -r _", `printf '${begin}\\n'`, `seq -f %.0f 1 ${count}`, `printf '${end}'`,
+      ]), "exec sleep 600"].join("; ");
       await openAttachedTerminal(ctx, page, cs, windowId, NAME, "ghostty", ["--command", command]);
       const read = () => page.evaluate((name) => __streamProbe.read(name), NAME);
       await until("the terminal socket is ready", read, (state) => state?.ready);
-      await page.emulateCPUThrottling(CPU_THROTTLE);
-      await page.evaluate((name, begin, count, end) => {
-        __streamProbe.verifySeq(name, begin, count, end);
-        __streamProbe.input(name, "\r");
-      }, NAME, BEGIN, COUNT, END);
-
-      const finished = await until("the stream reaches its end marker", read,
-        (state) => state.verifier.done || state.verifier.mismatch || state.allErrors.length > 0, 240_000);
-      await page.emulateCPUThrottling(null);
-      assert.deepEqual(finished.allErrors, [], "the terminal prints no lag line");
-      if (finished.verifier.mismatch) {
-        const sockets = await page.evaluate((name) => __streamProbe.readAll(name), NAME);
-        throw new Error(`a number arrived out of order: ${JSON.stringify({
-          mismatch: finished.verifier.mismatch,
-          sockets: sockets.map(({ handled, frames, acks, lastAck, cursor, ready, sessions }) => ({
-            handled, frames, acks, lastAck, cursor, ready, sessions,
-          })),
-        })}`);
+      const legs = {};
+      for (const leg of LEGS) {
+        await page.emulateCPUThrottling(leg.throttle);
+        await page.evaluate((name, { begin, end, count }) => {
+          __streamProbe.verifySeq(name, begin, count, end);
+          __streamProbe.input(name, "\r");
+        }, NAME, leg);
+        if (leg.stallAfterLines !== null) {
+          await until(`the ${leg.key} stream is under way`, read,
+            (state) => state.verifier.lines >= leg.stallAfterLines || state.verifier.done
+              || state.verifier.mismatch || state.allErrors.length > 0, 120_000);
+          await page.evaluate((name, ms) => __streamProbe.stall(name, ms), NAME, STALL_MS);
+        }
+        const finished = await until(`the ${leg.key} stream reaches its end marker`, read,
+          (state) => state.verifier.done || state.verifier.mismatch || state.allErrors.length > 0, 240_000);
+        await page.emulateCPUThrottling(null);
+        assert.deepEqual(finished.allErrors, [], `${leg.key}: the terminal prints no lag line`);
+        if (finished.verifier.mismatch) {
+          const sockets = await page.evaluate((name) => __streamProbe.readAll(name), NAME);
+          throw new Error(`${leg.key}: a number arrived out of order: ${JSON.stringify({
+            mismatch: finished.verifier.mismatch,
+            sockets: sockets.map(({ handled, frames, acks, lastAck, cursor, ready, sessions }) => ({
+              handled, frames, acks, lastAck, cursor, ready, sessions,
+            })),
+          })}`);
+        }
+        assert.equal(finished.verifier.lines, leg.count, `${leg.key}: the page handled the whole stream`);
+        assert.equal(finished.socketCount, 1, `${leg.key}: the view kept its socket`);
+        assert.equal(finished.sessions.length, 1, `${leg.key}: no recovery was needed`);
+        if (leg.stallAfterLines !== null) assert.ok(finished.stalls.at(-1)?.ended, `${leg.key}: the stall ran`);
+        const retained = await readGhosttyText(page);
+        assert.ok(!retained.text.includes("terminal output lagged"), `${leg.key}: no lag line in the buffer`);
+        assert.ok(!retained.text.includes("terminal replay missed"), `${leg.key}: no missed-bytes line in the buffer`);
+        const numbers = retained.text.split("\n").map((line) => line.trim())
+          .filter((line) => /^\d+$/.test(line)).map(Number);
+        assert.ok(numbers.length >= retained.rows - 2, `${leg.key}: the terminal retains the stream: ${numbers.length}`);
+        for (let index = 1; index < numbers.length; index += 1) {
+          assert.equal(numbers[index], numbers[index - 1] + 1, `${leg.key}: retained line ${index} follows its neighbour`);
+        }
+        assert.equal(numbers.at(-1), leg.count, `${leg.key}: the retained text ends at the last number`);
+        legs[leg.key] = { lines: finished.verifier.lines, retainedLines: numbers.length, acks: finished.acks };
       }
-      assert.equal(finished.verifier.lines, COUNT, "the page handled the whole sequence");
-      assert.equal(finished.socketCount, 1, "the view kept its socket");
-      assert.equal(finished.sessions.length, 1, "no recovery was needed");
-
-      const retained = await readGhosttyText(page);
-      const lines = retained.text.split("\n").map((line) => line.trim()).filter(Boolean);
-      assert.ok(!retained.text.includes("terminal output lagged"), "no lag line in the buffer");
-      assert.ok(!retained.text.includes("terminal replay missed"), "no missed-bytes line in the buffer");
-      const numbers = lines.filter((line) => /^\d+$/.test(line)).map(Number);
-      assert.ok(numbers.length >= retained.rows - 2, `the terminal retains the stream: ${numbers.length}`);
-      for (let index = 1; index < numbers.length; index += 1) {
-        assert.equal(numbers[index], numbers[index - 1] + 1, `retained line ${index} follows its neighbour`);
-      }
-      assert.equal(numbers.at(-1), COUNT, "the retained text ends at the last number");
       await ctx.shot("334-whole-stream");
-      return {
-        cpuThrottle: CPU_THROTTLE, lines: finished.verifier.lines, retainedLines: numbers.length, acks: finished.acks,
-      };
+      return { legs };
     } finally {
       await page.emulateCPUThrottling(null).catch(() => {});
       await cs(["close", "--tab-name", NAME]).catch(() => {});

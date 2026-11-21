@@ -77,8 +77,9 @@ export function installStreamProbe() {
     /// Every socket this terminal has had, oldest first: a redial adds one.
     readAll: (name) => sockets.filter((entry) => entry.name === name).map(view),
     input: (name, data) => find(name).peer.send(JSON.stringify({ type: "input", data })),
-    /// Check the numbered stream `seq 1 count` prints between two markers.
-    verifySeq(name, begin, count, end) {
+    /// Check the stream between two markers: `seq 1 count`, or `count` copies
+    /// of one line when `text` is given.
+    verifySeq(name, begin, count, end, text = null) {
       const encoder = new TextEncoder();
       const state = { phase: "before", next: 1, lines: 0, mismatch: null, done: false };
       const head = encoder.encode(`${begin}\r\n`);
@@ -86,7 +87,8 @@ export function installStreamProbe() {
       let want = head, at = 0, previous = new Uint8Array(0);
       const printable = (bytes) => Array.from(bytes, (byte) => (
         byte >= 32 && byte < 127 ? String.fromCharCode(byte) : `<${byte.toString(16)}>`)).join("");
-      const line = () => encoder.encode(`${state.next}\r\n`);
+      const fixed = text === null ? null : encoder.encode(`${text}\r\n`);
+      const line = () => fixed ?? encoder.encode(`${state.next}\r\n`);
       verifiers.set(name, {
         state,
         push(bytes, where) {
