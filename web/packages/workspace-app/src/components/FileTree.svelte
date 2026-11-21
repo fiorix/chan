@@ -642,6 +642,12 @@
     if (!repeat) opens?.();
   }
 
+  // A browser can make a double click of two taps. Where a tap opens its row
+  // the first one already has, and the second lies on whatever replaced it.
+  function openOnDoubleClick(opens: () => void): void {
+    if (!(touchGesture && tapOpens)) opens();
+  }
+
   /// A click selects an entry, and the Details panel follows the selection
   /// while it shows. A file opens on a double click or from that panel's
   /// Open. A touch screen has no double click, so a plain tap also runs
@@ -1433,7 +1439,7 @@
           ? `padding-right: ${depth * 12}px`
           : `padding-left: ${depth * 12}px`}
         onclick={(e) => selectPath(node.path, e, () => { if (view === "list") onNavigate?.(node.path); else toggle(node.path); })}
-        ondblclick={() => { if (view === "list") onNavigate?.(node.path); }}
+        ondblclick={() => openOnDoubleClick(() => { if (view === "list") onNavigate?.(node.path); })}
         oncontextmenu={(e) => showMenu(e, node.path, true)}
         role={view === "list" ? "option" : "treeitem"}
         id={rowId(node.path)}
@@ -1546,7 +1552,7 @@
           ? `padding-right: ${depth * 12 + 16}px`
           : `padding-left: ${depth * 12 + 16}px`}
         onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
-        ondblclick={() => openFileRow(node.path)}
+        ondblclick={() => openOnDoubleClick(() => openFileRow(node.path))}
         oncontextmenu={(e) => showMenu(e, node.path, false)}
         role={view === "list" ? "option" : "treeitem"}
         id={rowId(node.path)}
@@ -1580,7 +1586,7 @@
           class="name"
           tabindex="-1"
           onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
-          ondblclick={(e) => { e.stopPropagation(); openFileRow(node.path); }}
+          ondblclick={(e) => { e.stopPropagation(); openOnDoubleClick(() => openFileRow(node.path)); }}
         >{node.name}</button>
         {@render metadata(node)}
         {#if editorDirty.has(node.path)}

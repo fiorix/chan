@@ -101,10 +101,21 @@ describe("a tap on a Files row", () => {
   test("the second of a double tap opens nothing under the finger", async () => {
     await press(row("docs")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1000);
     await vi.waitFor(() => expect(row("x.md")).toBeDefined());
-    await press(row("x.md")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1399);
+    const name = row("x.md")!.querySelector<HTMLElement>(".name")!;
+    await press(name, "touch", {}, 1399);
+    name.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
     expect(openFileTabs()).toEqual([]);
-    await press(row("x.md")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1799);
+    await press(name, "touch", {}, 1799);
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["docs/x.md"]));
+  });
+
+  test("a double tap with Details open opens the row", async () => {
+    await showDetails(true);
+    const name = row("a.md")!.querySelector<HTMLElement>(".name")!;
+    await press(name, "touch");
+    name.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(openFileTabs()).toEqual(["a.md"]));
   });
 
   test("from a mouse only selects", async () => {
