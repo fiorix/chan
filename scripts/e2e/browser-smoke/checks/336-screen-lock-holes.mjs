@@ -8,7 +8,9 @@
 //      unlock it is still open and answers them;
 //      the slide player in element fullscreen paints in the browser's top
 //      layer, over any z-index: the lock leaves fullscreen as it comes up and
-//      the unlock asks for it back;
+//      the unlock asks for it back; a theme change under the lock, with the
+//      PIN's key as a live activation, does not put it back over the lock,
+//      and neither does a fullscreen request made while the lock is up;
 //   2. the editor's date popover open at lock time: arrows and Enter on the
 //      PIN commit no date, and it is still open after unlock;
 //   3. a dialog that opens under the lock (the import archive's confirm,
@@ -21,7 +23,8 @@
 //      nothing under the lock and answers after it;
 //   6. the terminal's find input, when a pane swap moves the terminal into
 //      the active pane while the PIN field is disabled by a running check:
-//      focus stays off it.
+//      focus stays off it, and the same move after unlock gives it the
+//      keyboard.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -224,6 +227,9 @@ export default {
         currentLeg = null;
         lock.hold?.resolve();
         lock.hold = null;
+        // A red run can leave the player in fullscreen, where the PIN cannot
+        // take focus and the leg's cleanup could not unlock.
+        await page.evaluate(() => document.fullscreenElement && document.exitFullscreen()).catch(() => {});
         if (await page.$(LOCK)) {
           await wake(`${name} cleanup`).catch(() => {});
           await unlock(`${name} cleanup`).catch((error) => result.cleanupErrors.push(`${name} unlock: ${error.message}`));
@@ -310,6 +316,62 @@ export default {
           .catch(async () => fullscreen());
         assert.ok(r.openAfterUnlock, "the slide player is still open after unlock");
         assert.ok(r.fullscreenAfterUnlock, "the slide player is back in fullscreen after unlock");
+      });
+
+      await leg("slidesFullscreenUnderLock", async (r) => {
+        const fullscreen = () => page.evaluate(() => document.fullscreenElement?.className?.toString?.() ?? null);
+        const deckTheme = () => page.evaluate((slide) => document.querySelector(slide)?.dataset.theme ?? null, SLIDE);
+        // A request resolves shortly after it is made: read over a bound, and
+        // stop at the first reading that shows fullscreen.
+        const enteredWithin = async (ms) => {
+          const deadline = Date.now() + ms;
+          do {
+            const now = await fullscreen();
+            if (now) return now;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          } while (Date.now() < deadline);
+          return null;
+        };
+        const cdp = await page.createCDPSession();
+        const scheme = (value) => cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value }] });
+        try {
+          await scheme("light");
+          await openDeckViewer(true);
+          await page.waitForSelector(`${SLIDE}[data-mode="play"]`, { timeout: 15_000 });
+          r.fullscreenBefore = await until("precondition: the player is in element fullscreen", fullscreen, Boolean, 5000);
+          r.themeBefore = await until("precondition: the deck follows the light scheme", deckTheme, (theme) => theme === "light", 5000);
+          await lockNow();
+          await until("the lock leaves fullscreen", fullscreen, (now) => now === null, 3000);
+          await wake("theme");
+          // The key is the live activation a fullscreen request would spend.
+          await page.keyboard.press("1");
+          await scheme("dark");
+          r.themeUnderLock = await until("precondition: the deck takes the theme under the lock", deckTheme, (theme) => theme === "dark", 5000);
+          r.fullscreenAfterTheme = await enteredWithin(1500);
+          r.topAfterTheme = await topAtCentre();
+          await ctx.shot("336-slides-theme-under-lock");
+          assert.equal(r.fullscreenAfterTheme, null, "a theme change under the lock does not put the player in fullscreen");
+          assert.equal(r.topAfterTheme, "lock", "the lock still paints over the player after the theme change");
+          // A request made while the lock is up, as one racing the lock is.
+          r.requestUnderLock = await page.evaluate((slide) => document.querySelector(slide).requestFullscreen().then(() => "entered", (error) => String(error)), SLIDE);
+          r.fullscreenAfterRequest = await until("a fullscreen entered under the lock is left", fullscreen, (now) => now === null, 3000)
+            .catch(async () => fullscreen());
+          r.topAfterRequest = await topAtCentre();
+          r.keyboardAfterRequest = await keyboardSurface(page);
+          assert.equal(r.fullscreenAfterRequest, null, "a fullscreen entered under the lock is left");
+          assert.equal(r.topAfterRequest, "lock", "the lock paints over the player after that request");
+          assert.equal(r.keyboardAfterRequest, "screen-lock", "the lock has the keyboard after that request");
+          await wake("request");
+          await unlock("theme");
+          r.openAfterUnlock = Boolean(await page.$(SLIDE));
+          r.fullscreenAfterUnlock = await until("the unlock asks for fullscreen back", fullscreen, Boolean, 3000)
+            .catch(async () => fullscreen());
+          assert.ok(r.openAfterUnlock, "the player is still open after unlock");
+          assert.ok(r.fullscreenAfterUnlock, "the player is back in fullscreen after unlock");
+        } finally {
+          await cdp.send("Emulation.setEmulatedMedia", { features: [] }).catch(() => {});
+          await cdp.detach().catch(() => {});
+        }
       });
 
       await leg("datePopover", async (r) => {
@@ -514,6 +576,17 @@ export default {
         await unlock("move");
         assert.equal(r.holderBeforeMove, "body", "precondition: the keyboard is at large when the terminal moves");
         assert.ok(!r.afterMove.findFocused, `the find input does not take the keyboard under the lock: ${JSON.stringify(r.afterMove)}`);
+        // The control: with no cover up, the same move hands the find input
+        // the keyboard, so the leg above cannot pass on a path that is dead.
+        await page.focus(FIND);
+        await page.evaluate(() => document.activeElement?.blur());
+        r.holderBeforeControl = await until("control: the keyboard is at large", () => keyboardSurface(page), (at) => at === "body", 5000);
+        await shell(["pane", "swap", terminal.pane, "--window", windowId, "--pane", r.otherPane]);
+        r.controlFindFocused = await until("control: the same move gives the find input the keyboard",
+          () => page.evaluate((find) => {
+            const input = document.querySelector(find);
+            return Boolean(input) && document.activeElement === input;
+          }, FIND), Boolean, 5000);
       });
     } catch (error) {
       result.failure = String(error.message ?? error);
