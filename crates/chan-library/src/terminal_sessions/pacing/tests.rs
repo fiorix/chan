@@ -70,6 +70,26 @@ fn a_completed_send_is_not_progress() {
 }
 
 #[test]
+fn a_completed_send_does_not_renew_the_deadline() {
+    let pacing = Pacing::new(100, 0);
+    let view = attach(&pacing);
+    let started = Instant::now();
+    pacing.publish(50, || ());
+    view.sent_output(30);
+    assert_eq!(
+        admission(&pacing, 1000, started),
+        Admission::Wait(started + NO_PROGRESS_LIMIT)
+    );
+    view.sent_output(20);
+    assert_eq!(
+        admission(&pacing, 1000, started + NO_PROGRESS_LIMIT),
+        Admission::Read(1000),
+        "the send completed during the hold leaves its deadline in place"
+    );
+    assert!(view.needs_replay());
+}
+
+#[test]
 fn an_acknowledgement_cannot_vouch_for_unsent_or_unpublished_bytes() {
     let pacing = Pacing::new(100, 0);
     let view = attach(&pacing);
