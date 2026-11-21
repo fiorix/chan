@@ -621,6 +621,48 @@ describe("the Computers deck's letter actions", () => {
     expect(library.windows.find((w) => w.window_id === "w-local-term-1")?.hidden).toBe(false);
   });
 
+  // Browser check 318 drives a devserver's card. These are the other cards:
+  // This machine, whose header has t but no o while its workspace row has
+  // both, and All windows, which has no header row and stands for its first
+  // window.
+  it("acts from the card itself on the row Enter takes, and on no other", () => {
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="local"]')!;
+    const header = slot.querySelector<HTMLElement>(".machine-header")!;
+    const terminal = watchClick(header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!);
+    const workspace = slot.querySelector<HTMLElement>(".ws-head")!;
+    const power = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="Turn off"]')!);
+    const opened = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="New window of"]')!);
+    slot.focus();
+    expect(document.activeElement).toBe(slot);
+    key("t", slot);
+    expect(terminal).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(slot);
+    for (const letter of ["o", "w", "h"]) expect(key(letter, slot).defaultPrevented).toBe(false);
+    expect(power).not.toHaveBeenCalled();
+    expect(opened).not.toHaveBeenCalled();
+    // The guards hold at the card as they do on a row.
+    key("t", slot, { repeat: true });
+    key("t", slot, { ctrlKey: true });
+    openCommandLauncher();
+    key("t", slot);
+    closeCommandLauncher();
+    // A letter on a card that is not in front does nothing.
+    expect(key("t", target!.querySelector('.slot[data-key="ds-1"]')!).defaultPrevented).toBe(false);
+    expect(terminal).toHaveBeenCalledOnce();
+
+    decks.computers.activeKey = "all-windows";
+    flushSync();
+    const all = target!.querySelector<HTMLElement>('.slot[data-key="all-windows"]')!;
+    const first = all.querySelector<HTMLElement>("[data-window-id]")!;
+    const toggle = watchClick(first.querySelector<HTMLButtonElement>('[aria-label^="Show window"], [aria-label^="Hide window"]')!);
+    for (const letter of ["t", "o", "w"]) expect(key(letter, all).defaultPrevented).toBe(false);
+    key("h", all);
+    expect(toggle).toHaveBeenCalledOnce();
+  });
+
   it("leaves fields, modifiers, inactive cards, disabled buttons and repeats alone", async () => {
     mountDeck();
     decks.computers.activeKey = "local";
