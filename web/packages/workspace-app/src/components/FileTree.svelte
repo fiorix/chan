@@ -135,6 +135,7 @@
     descending = false,
     showHidden = true,
     selectionMode = $bindable(false),
+    tapOpens = false,
     onNavigate,
     onPreview,
     onFind,
@@ -152,6 +153,9 @@
     descending?: boolean;
     showHidden?: boolean;
     selectionMode?: boolean;
+    /// Whether a plain tap from a touch screen opens its row as well as
+    /// selecting it. The surface clears it while its Details panel shows.
+    tapOpens?: boolean;
     onNavigate?: (path: string) => void;
     onPreview?: () => void;
     onFind?: () => void;
@@ -623,24 +627,25 @@
     void onOpen(path);
   }
 
-  /// Single-click selects an entry; the file browser's inspector
-  /// then renders its details. Files do not open on click;
-  /// double-click (or the Open button in the panel) is the path
-  /// to actually opening a file. A plain tap from a touch screen selects
-  /// and then runs `opens`: the file opens, the folder is entered.
-  ///
-  /// A click also forces the inspector open: the user expects the
-  /// metadata pane to surface the selection. If they explicitly
-  /// closed the inspector earlier and then click another row, the
-  /// click takes precedence (and reopens it on next reload via the
-  /// URL hash). The inspector-open call sits behind `onClickRow` so
-  /// the surface can gate it per variant (tab + overlay auto-open;
-  /// dock doesn't).
-  // Whether the gesture now ending began with a finger. A touch screen has
-  // no double click to open with, and a phone's browser no room for the
-  // inspector a selection fills, so a plain tap there also opens the row.
+  // Whether the press now ending began with a finger.
   let touchGesture = false;
+  let lastTapAt = -Infinity;
+  const DOUBLE_TAP_MS = 400;
 
+  // The second tap of a double tap lands on whatever row the first one's
+  // folder put under the finger, so a tap that soon after another opens
+  // nothing.
+  function openFromTap(ev: MouseEvent, opens?: () => void): void {
+    const repeat = ev.timeStamp - lastTapAt < DOUBLE_TAP_MS;
+    lastTapAt = ev.timeStamp;
+    if (!repeat) opens?.();
+  }
+
+  /// A click selects an entry, and the Details panel follows the selection
+  /// while it shows. A file opens on a double click or from that panel's
+  /// Open. A touch screen has no double click, so a plain tap also runs
+  /// `opens` while the surface shows no Details, where selecting alone would
+  /// show nothing.
   function selectPath(path: string, ev?: MouseEvent, opens?: () => void): void {
     activate();
     ev?.stopPropagation();
@@ -658,7 +663,7 @@
       fbSelectRange(path, visibleRows.map((r) => r.path));
     } else {
       fbSelectSingle(path);
-      if (touchGesture) opens?.();
+      if (ev && touchGesture && tapOpens) openFromTap(ev, opens);
     }
     onClickRow?.(path);
   }

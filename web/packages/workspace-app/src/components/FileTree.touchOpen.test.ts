@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 //
-// A tap from a touch screen opens the Files row it lands on: a file opens in
-// an editor tab, a folder is entered. A touch screen has no double click, and
-// a phone's browser no room for the inspector a selection fills, so a tap
-// that only selected did nothing anyone could see. A mouse click still only
-// selects, and a tap with a modifier still only adds to the selection.
+// While Details is closed, a tap from a touch screen opens the Files row it
+// lands on: a file opens in an editor tab, a folder is entered. A touch screen
+// has no double click, and with no Details a tap that only selected would show
+// nothing. With Details open a tap selects and the panel shows the row. A mouse
+// click still only selects, and a tap with a modifier still only adds to the
+// selection.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -31,7 +32,7 @@ beforeEach(async () => {
   );
   resetLayout([]);
   openBrowserInActivePane();
-  await settle();
+  await showDetails(false);
   await vi.waitFor(() => expect(row("a.md")).toBeDefined());
 });
 
@@ -50,12 +51,26 @@ function openFileTabs(): string[] {
   return (layout.nodes["pane-test"] as LeafNode).tabs.flatMap((tab) => (tab.kind === "file" ? [tab.path] : []));
 }
 
-/// A pointer press and its click, as a finger or a mouse makes them.
-async function press(target: HTMLElement, pointerType: "touch" | "mouse", init: MouseEventInit = {}): Promise<void> {
+async function showDetails(open: boolean): Promise<void> {
+  const tab = (layout.nodes["pane-test"] as LeafNode).tabs.find((candidate) => candidate.kind === "browser");
+  if (tab?.kind === "browser") tab.inspectorOpen = open;
+  await settle();
+}
+
+/// A pointer press and its click, as a finger or a mouse makes them. `at` is
+/// the click's event time, for the taps whose spacing matters.
+async function press(
+  target: HTMLElement,
+  pointerType: "touch" | "mouse",
+  init: MouseEventInit = {},
+  at?: number,
+): Promise<void> {
   const down = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, ...init });
   Object.defineProperty(down, "pointerType", { value: pointerType });
   target.dispatchEvent(down);
-  target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+  const click = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+  if (at !== undefined) Object.defineProperty(click, "timeStamp", { value: at });
+  target.dispatchEvent(click);
   await settle();
 }
 
@@ -74,6 +89,22 @@ describe("a tap on a Files row", () => {
     expect(row("x.md")).toBeUndefined();
     await press(row("docs")!.querySelector<HTMLElement>(".name")!, "touch");
     await vi.waitFor(() => expect(row("x.md")).toBeDefined());
+  });
+
+  test("with Details open only selects", async () => {
+    await showDetails(true);
+    await press(row("a.md")!.querySelector<HTMLElement>(".name")!, "touch");
+    expect(browserSelection.path).toBe("a.md");
+    expect(openFileTabs()).toEqual([]);
+  });
+
+  test("the second of a double tap opens nothing under the finger", async () => {
+    await press(row("docs")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1000);
+    await vi.waitFor(() => expect(row("x.md")).toBeDefined());
+    await press(row("x.md")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1399);
+    expect(openFileTabs()).toEqual([]);
+    await press(row("x.md")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1799);
+    await vi.waitFor(() => expect(openFileTabs()).toEqual(["docs/x.md"]));
   });
 
   test("from a mouse only selects", async () => {
