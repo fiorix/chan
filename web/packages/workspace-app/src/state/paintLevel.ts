@@ -24,15 +24,17 @@ export const COVER_ROOT_ATTR = "data-cover";
 /// page only while it shows. The surfaces that are not the keyboard's owners
 /// (a viewer, an editor popover, an image's selection ring) listen on the
 /// document whatever has focus, so each asks this before it answers a key or
-/// takes focus: what a cover hides takes neither. This reads the page, so
-/// those modules need not import the store.
+/// takes focus: what a cover hides takes neither. A cover at the element's own
+/// level counts as over it, as the keyboard's owner ranks the two, and no
+/// cover is over what is inside it. This reads the page, so those modules
+/// need not import the store.
 export function coverPaintsOver(element: Element): boolean {
   // Asked on every key: with no cover up, no style is read.
   const covers = document.querySelectorAll(`[${COVER_ROOT_ATTR}]`);
   if (covers.length === 0) return false;
   const level = paintLevel(element);
   for (const root of covers) {
-    if (paintLevel(root) > level) return true;
+    if (!root.contains(element) && paintLevel(root) >= level) return true;
   }
   return false;
 }

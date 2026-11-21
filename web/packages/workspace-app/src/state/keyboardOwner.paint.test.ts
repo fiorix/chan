@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, test } from "vitest";
 import { commandDeckLayer, overlayLayer, overlayStack, promptState } from "./store.svelte";
+import { VIEWER_LAYER } from "./viewerLayer.svelte";
 
 // The layers the stylesheets set, read from the sources: jsdom applies no
 // stylesheet, so no mounted surface paints at its layer.
@@ -87,6 +88,13 @@ describe("the keyboard's owners paint in the order they hold it", () => {
     expect(closePrompt, "under the missing-token cover").toBeLessThan(covers["the missing-token cover"]);
     expect(closePrompt, "under the preflight cover").toBeLessThan(covers["the preflight cover"]);
     expect(closePrompt, "over the window-wide survey").toBeGreaterThan(survey);
+  });
+
+  test("the full-window viewers paint over the close prompt and under the lock and the auth and preflight pages", () => {
+    expect(VIEWER_LAYER, "over the close prompt").toBeGreaterThan(closePrompt);
+    expect(VIEWER_LAYER, "under the screen lock").toBeLessThan(covers["the screen lock"]);
+    expect(VIEWER_LAYER, "under the missing-token cover").toBeLessThan(covers["the missing-token cover"]);
+    expect(VIEWER_LAYER, "under the preflight cover").toBeLessThan(covers["the preflight cover"]);
   });
 
   test("the window-wide survey paints over the dialogs and over the command deck that holds the keyboard", () => {

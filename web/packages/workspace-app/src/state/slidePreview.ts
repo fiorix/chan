@@ -9,7 +9,7 @@
 import { isTauriDesktop, setWindowFullscreen } from "../api/desktop";
 import { coverPaintsOver } from "./paintLevel";
 import { consumeKey } from "./shortcuts";
-import { VIEWER_LAYER } from "./viewerLayer.svelte";
+import { forgetFullscreen, holdFullscreenFor, VIEWER_LAYER } from "./viewerLayer.svelte";
 import {
   contentStyle,
   cssNumber,
@@ -457,6 +457,12 @@ function requestSlideFullscreen(el: HTMLElement): void {
     void setWindowFullscreen(true);
     return;
   }
+  // Element fullscreen paints over every z-index, a cover's included. The
+  // native window above does not: a cover still paints inside it.
+  if (coverPaintsOver(el)) {
+    holdFullscreenFor(el);
+    return;
+  }
   const request = el.requestFullscreen?.bind(el);
   if (!request) return;
   try {
@@ -472,6 +478,7 @@ function exitSlideFullscreen(el: HTMLElement): void {
     void setWindowFullscreen(false);
     return;
   }
+  forgetFullscreen(el);
   if (document.fullscreenElement !== el) return;
   const exit = document.exitFullscreen?.bind(document);
   if (!exit) return;
