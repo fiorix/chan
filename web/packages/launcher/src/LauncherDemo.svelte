@@ -150,12 +150,6 @@
   :global(.launcher-demo-frame .content .carousel) {
     --deck-height: clamp(12rem, calc(100cqh - 11rem), 48rem);
   }
-  /* A phone-width frame wraps the key hint under the deck onto a second line. */
-  @container (max-width: 30rem) {
-    :global(.launcher-demo-frame .content .carousel) {
-      --deck-height: clamp(12rem, calc(100cqh - 12rem), 48rem);
-    }
-  }
   /* The modal's 90vh cap reads the page; in the frame it reads the frame, so a
      dialog taller than the mock scrolls inside it instead of running past the
      frame's clipped edge. */
