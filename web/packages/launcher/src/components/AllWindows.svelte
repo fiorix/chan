@@ -44,7 +44,6 @@
   .windows { list-style: none; padding: 2px; margin: 0; overflow-y: auto; min-height: 0; }
   li { border-radius: 8px; outline: none; }
   li + li { margin-top: 4px; }
-  li:focus, li:focus-within { outline: 1px solid var(--launcher-focus-color, var(--brand)); outline-offset: -1px; }
   li :global(.row) { border-radius: inherit; gap: 0.6rem; padding: 0.65rem 0.55rem; }
   li:focus :global(.row), li:focus-within :global(.row) { background: color-mix(in srgb, var(--launcher-focus-color, var(--brand)) 8%, var(--bg-card)); }
   li :global(.row-sub) { max-width: 100%; }

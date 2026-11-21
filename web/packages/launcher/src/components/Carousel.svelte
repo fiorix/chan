@@ -415,12 +415,6 @@
     border-radius: 8px;
   }
 
-  /* All windows nests the shared row in its list item, whose ring is the one
-     that shows while either of them holds focus. */
-  .slot :global([data-deck-row]) :global([data-deck-row]:focus) {
-    outline: none;
-  }
-
   .nav {
     position: absolute;
     top: 50%;

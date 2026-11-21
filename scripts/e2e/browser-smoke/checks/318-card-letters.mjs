@@ -23,7 +23,8 @@
 //   6. pointer row: a mouse click on an empty point of the workspace row
 //      selects it and paints its one ring, and t acts on that row;
 //   7. All windows row: a click on the row nested in its list item paints
-//      one ring, the list item's, before and after a key;
+//      one ring, on the row holding focus, before and after a key, and a
+//      focused control inside it lights no row's ring;
 //   8. mouse turn: the side buttons, pressed with the mouse, leave the new
 //      front card selected with its ring, and a letter acts on that card and
 //      not on the one that was in front; Enter on a side button turns the
@@ -498,13 +499,16 @@ export default {
         precondition(r.point, "the All windows row has no point outside its controls");
         await page.mouse.click(r.point.x, r.point.y);
         r.clicked = await page.evaluate(readRows);
-        const single = (reading) => reading.rings.length === 1 && reading.rings[0].startsWith("li.") && reading.width === "1px" && reading.cardsWithRing === 0;
+        const single = (reading) => reading.rings.length === 1 && reading.rings[0] === reading.active && reading.width === "1px" && reading.cardsWithRing === 0;
         check(single(r.clicked), `the clicked All windows row does not paint one ring: ${JSON.stringify(r.clicked)}`);
         // A key turns :focus-visible on for whatever holds focus, which is
         // the row nested in the list item after a click on it.
         await page.keyboard.press("x");
         r.afterKey = await page.evaluate(readRows);
         check(single(r.afterKey), `the All windows row does not paint one ring after a key: ${JSON.stringify(r.afterKey)}`);
+        await page.$eval(`${ALL_WINDOWS_ROW} button[aria-label="Hide window"]`, (button) => button.focus());
+        r.onControl = await page.evaluate(readRows);
+        check(r.onControl.rings.length === 0, `a focused control lights a row's ring: ${JSON.stringify(r.onControl)}`);
       });
 
       await leg("mouseTurn", async (r) => {
