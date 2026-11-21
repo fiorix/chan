@@ -14,8 +14,16 @@ export const EXTENSION_KEYDOWN_MESSAGE = "chan:extension-keydown:v2";
 export const EXTENSION_SESSION_CONTEXT_MESSAGE = "chan:extension-session-context:v1";
 export const EXTENSION_VIEW_STATE_MESSAGE = "chan:extension-view-state:v1";
 export const EXTENSION_PRESENTATION_REQUEST = "chan:extension-presentation:v1";
+export const EXTENSION_MICROPHONE_REQUEST = "chan:extension-microphone-request:v1";
+export const EXTENSION_MICROPHONE_EVENT = "chan:extension-microphone-event:v1";
 
 export type ExtensionPresentationAction = "enter" | "exit" | "toggle";
+export type ExtensionMicrophoneAction = "start" | "stop" | "cancel";
+export type ExtensionMicrophoneRequest = {
+  type: typeof EXTENSION_MICROPHONE_REQUEST;
+  request_id: string;
+  action: ExtensionMicrophoneAction;
+};
 
 /// One chord the host claims while an extension has focus: the key token the
 /// shared keyboard contract names (`T`, `/`, `1`, `Enter`) and the exact
@@ -95,6 +103,23 @@ export function extensionPresentationAction(
     message.action === "toggle"
     ? message.action
     : null;
+}
+
+export function extensionMicrophoneRequest(
+  value: unknown,
+): ExtensionMicrophoneRequest | null {
+  if (!value || typeof value !== "object") return null;
+  const message = value as Record<string, unknown>;
+  if (
+    message.type !== EXTENSION_MICROPHONE_REQUEST ||
+    typeof message.request_id !== "string" ||
+    message.request_id.length === 0 ||
+    message.request_id.length > 128 ||
+    (message.action !== "start" && message.action !== "stop" && message.action !== "cancel")
+  ) {
+    return null;
+  }
+  return message as ExtensionMicrophoneRequest;
 }
 
 export function keyboardEventFromExtension(message: ExtensionKeydownMessage): KeyboardEvent {

@@ -91,6 +91,8 @@ All host communication is `postMessage` between the iframe and its parent. Messa
 | `chan:extension-session-context:v1` | host->ext | Participant snapshots (`session-context` only) |
 | `chan:extension-view-state:v1`      | host->ext | The tab's visibility state                     |
 | `chan:extension-presentation:v1`    | ext->host | Enter, exit or toggle full-surface mode        |
+| `chan:extension-microphone-request:v1` | ext->host | Start, stop or cancel recording (`microphone` only) |
+| `chan:extension-microphone-event:v1` | host->ext | Recording state, errors, or completed audio    |
 
 Declared commands register as `extension.<id>.<command-id>` beside the base `extension.<id>` Open command, and the launcher lists them under the extension's name while one of its tabs is focused. They have no default chords and are assignable through the shortcut settings. A `singleton` extension's commands focus or create its one tab and queue delivery until that exact iframe posts `chan:extension-ready:v1`; the queue is bounded, and an overflow is reported rather than dropped silently.
 
@@ -100,7 +102,7 @@ Keyboard events inside an iframe never bubble to the parent document, which is w
 
 ### The grants
 
-The two grants are deliberately narrow. `session-context` streams participant snapshots with opaque ids, display names, chan roles, statuses and the receiving window id; the labels are informational, not authenticated identities. `presentation` lets the extension ask for its iframe wrapper to be promoted into the browser top layer (a popover) without reparenting, so the browsing context, and any WebGL or WASM state in it, survives entering and leaving full-surface mode; chan supplies the Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs or a general host message bus.
+The three grants are deliberately narrow. `session-context` streams participant snapshots with opaque ids, display names, chan roles, statuses and the receiving window id; the labels are informational, not authenticated identities. `presentation` lets the extension ask for its iframe wrapper to be promoted into the browser top layer (a popover) without reparenting, so the browsing context, and any WebGL or WASM state in it, survives entering and leaving full-surface mode; chan supplies the Restore and Close controls and leaves Escape to the extension. `microphone` lets the exact extension frame ask the parent to start, stop, or cancel one `MediaRecorder` take. The parent owns `getUserMedia` and all tracks, enforces a 10-minute and 64 MiB limit, returns the completed audio blob, and stops capture on cancellation, reload, or close; the iframe keeps its opaque origin and receives no device object. No grant exposes workspace files, chan APIs or a general host message bus.
 
 ## Creating an extension
 

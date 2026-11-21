@@ -165,7 +165,7 @@ tmux control mode is off by default. Once enabled, a `tmux -CC` marker from a tm
 
 Teams put a configured set of agents into named tabs of one group from a single TOML config, with a generated bootstrap document and task and journal directories inside the workspace. Agents coordinate through `cs`: pokes into each other's tabs, scrollback reads, surveys to the host. The in-process MCP server exposes the workspace's files and search to agent CLIs through a socket, discovered from environment variables that are off by default. See [.agents/orchestration/README.md](.agents/orchestration/README.md).
 
-Extensions are local programs declared under the chan home. chan spawns each when serving starts, reverse-proxies its loopback HTTP app into a sandboxed iframe tab, and lists it under Apps; the program never holds chan's API authority. See [docs/extensions.md](docs/extensions.md).
+Extensions are local programs declared under the chan home. chan spawns each when serving starts, reverse-proxies its loopback HTTP app into a sandboxed iframe tab, and lists it under Apps; the program never holds chan's API authority. An opt-in microphone bridge lets the parent record for a declared extension and return audio without relaxing the frame's sandbox. See [docs/extensions.md](docs/extensions.md).
 
 ## The workspace
 

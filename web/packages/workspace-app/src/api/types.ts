@@ -1196,7 +1196,7 @@ export type ExtensionInfo = {
   id: string;
   name: string;
   entry_path: string;
-  capabilities?: ("session-context" | "presentation")[];
+  capabilities?: ("session-context" | "presentation" | "microphone")[];
   singleton?: boolean;
   running?: boolean;
   commands?: ExtensionCommandInfo[];

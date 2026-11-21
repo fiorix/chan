@@ -154,7 +154,7 @@ export function extensionsReady(): boolean {
 
 export function extensionHasCapability(
   extension: ExtensionInfo | undefined,
-  capability: "session-context" | "presentation",
+  capability: "session-context" | "presentation" | "microphone",
 ): boolean {
   return extension?.capabilities?.includes(capability) ?? false;
 }
@@ -295,7 +295,9 @@ export function isValidExtensionInfo(value: unknown): value is ExtensionInfo {
     (!Array.isArray(candidate.capabilities) ||
       candidate.capabilities.some(
         (capability) =>
-          capability !== "session-context" && capability !== "presentation",
+          capability !== "session-context" &&
+          capability !== "presentation" &&
+          capability !== "microphone",
       ))
   ) {
     return false;

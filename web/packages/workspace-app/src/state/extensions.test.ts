@@ -57,6 +57,14 @@ describe("local extensions", () => {
         id: "echo",
         name: "Echo",
         entry_path: `/_chan/extensions/echo/${capability}/`,
+        capabilities: ["session-context", "presentation", "microphone"],
+      }),
+    ).toBe(true);
+    expect(
+      isValidExtensionInfo({
+        id: "echo",
+        name: "Echo",
+        entry_path: `/_chan/extensions/echo/${capability}/`,
         capabilities: ["workspace-files"],
       }),
     ).toBe(false);

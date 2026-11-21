@@ -35,5 +35,7 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Chan records the microphone only when an extension with the microphone capability requests a take.</string>
 </dict>
 </plist>
