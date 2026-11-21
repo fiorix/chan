@@ -2,18 +2,22 @@
 // the command deck's footer sets its keys, and no card or gap between the deck
 // and its dots carries a key legend. On the Computers screen the bar holds the
 // arrows, Enter, g and the row letters o, t, w and h, each once as kbd keycaps
-// with its word; on the Gateways screen, g and o. The bar sits below the front
-// card and the dots, at the window's bottom edge, at three window heights with
-// no page scroll and at a phone width with no sideways scroll. Nothing in it
-// takes focus, and it carries no role or label, as the deck's footer carries
-// none; its type, colour and spacing are read against that footer's in the
-// open deck. A devserver page, which deals no deck, shows no bar.
+// with its word; on the Gateways screen, the arrows, Enter as activates, g and
+// o. On both screens the bar sits below the front card and the dots, at the
+// window's bottom edge, at three window heights with no page scroll and at a
+// phone width with no sideways scroll, and it is painted and on top: the
+// element at its centre is inside it, it is visible, and neither it nor an
+// ancestor is transparent. Nothing in it takes focus, and it carries no role or
+// label, as the deck's footer carries none; its type, colour and spacing are
+// read against that footer's in the open deck. The devserver and read-only
+// surfaces, which deal no deck, show no bar and no legend.
 //
 // The harness's `chan serve` has no launcher at `/`, so this spawns its own
 // isolated `chan devserver run` over a fresh CHAN_HOME. Only the desktop
 // surface deals the deck, so one page keeps the devserver's own document and
 // rewrites its surface meta to the desktop's when parsing ends, as check 219
-// does; a second page keeps the devserver surface.
+// does; a second page keeps the devserver surface, and a third is rewritten to
+// the read-only surface the same way.
 //
 // A page that never loads its deck fails as a precondition, named so, apart
 // from the contract's findings, which are reported together. Skips when the
@@ -27,6 +31,9 @@ import { goto, killChild, mask, spawnDevserver, wait } from "../lib/launcher-dev
 
 const DECK = '[role="region"][aria-roledescription="carousel"]';
 const THIS_MACHINE = 'button[aria-label="New local terminal"]';
+// The local card's name, which every surface renders; the read-only surface
+// has no New terminal button to wait for.
+const MACHINE_NAME = "section.card.machine .machine-name";
 const COMMAND_DECK = '[role="dialog"][aria-label="Command launcher"]';
 
 const COMPUTERS_KEYS = [
@@ -40,6 +47,9 @@ const COMPUTERS_KEYS = [
   { keys: ["h"], does: "show/hide" },
 ];
 const GATEWAYS_KEYS = [
+  { keys: ["↑", "↓"], does: "rows" },
+  { keys: ["←", "→"], does: "controls" },
+  { keys: ["Enter"], does: "activates" },
   { keys: ["g"], does: "screens" },
   { keys: ["o"], does: "on/off" },
 ];
@@ -94,8 +104,26 @@ function readScreen(deckSelector, legendWords) {
     if (!text || bars.some((b) => b.contains(node)) || node.parentElement?.closest("script, style, noscript")) continue;
     if (legendWords.some((word) => text.includes(word))) strays.push(text.slice(0, 120));
   }
+  // Whether the bar is what the window shows at its centre. An element at
+  // opacity 0 still answers elementFromPoint, so opacity is read on its own,
+  // through the ancestors, whose opacity the bar's computed value leaves out.
+  let painted = null;
+  if (bar) {
+    const r = bar.getBoundingClientRect();
+    const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    let opacity = 1;
+    for (let el = bar; el; el = el.parentElement) opacity *= Number(getComputedStyle(el).opacity);
+    painted = {
+      inside: !!hit && bar.contains(hit),
+      hit: hit ? `${hit.tagName.toLowerCase()}${hit.className ? `.${hit.className}` : ""}` : null,
+      visibility: getComputedStyle(bar).visibility,
+      opacity,
+    };
+  }
   const root = document.documentElement;
   return {
+    surface: document.querySelector('meta[name="chan-launcher-surface"]')?.getAttribute("content") ?? null,
+    newTerminal: !!document.querySelector('button[aria-label="New local terminal"]'),
     deck: deck?.getAttribute("aria-label") ?? null,
     front: front?.getAttribute("aria-label") ?? null,
     outsideStage: deck ? [...deck.children].filter((el) => el !== stage).map((el) => el.textContent.trim()).filter(Boolean) : null,
@@ -105,6 +133,7 @@ function readScreen(deckSelector, legendWords) {
     hints,
     role: bar?.getAttribute("role") ?? null,
     label: bar?.getAttribute("aria-label") ?? bar?.getAttribute("aria-labelledby") ?? null,
+    painted,
     boxes: {
       bar: box(bar),
       card: box(front?.querySelector(".card") ?? front),
@@ -174,7 +203,7 @@ function judgeScreen(reading, expected, label, problems) {
 }
 
 /// The bar below the front card and the dots, at the window's bottom edge,
-/// with no page scroll either way.
+/// painted and on top, with no page scroll either way.
 function judgeLayout(reading, label, problems) {
   const { bar, card, dots } = reading.boxes;
   const at = `${label} at ${reading.viewport.width}x${reading.viewport.height}`;
@@ -186,6 +215,10 @@ function judgeLayout(reading, label, problems) {
   if (dots && bar.top < dots.bottom - 0.5) problems.push(`${at}: the key bar's top ${bar.top} is above the dots' bottom ${dots.bottom}`);
   if (Math.abs(bar.bottom - reading.viewport.height) > 1) problems.push(`${at}: the key bar's bottom ${bar.bottom} is not the window's bottom edge ${reading.viewport.height}`);
   if (bar.left < -0.5 || bar.right > reading.viewport.width + 0.5) problems.push(`${at}: the key bar spans ${bar.left}..${bar.right}, past the window's width ${reading.viewport.width}`);
+  const { painted } = reading;
+  if (!painted.inside) problems.push(`${at}: the key bar is not on top: the element at its centre is ${painted.hit}`);
+  if (painted.visibility !== "visible") problems.push(`${at}: the key bar is not painted: its visibility is ${painted.visibility}`);
+  if (painted.opacity !== 1) problems.push(`${at}: the key bar is not painted: its opacity is ${painted.opacity}`);
   const { scroll } = reading;
   if (scroll.width > scroll.clientWidth) problems.push(`${at}: the page scrolls sideways (${scroll.width} > ${scroll.clientWidth})`);
   if (scroll.height > scroll.clientHeight) problems.push(`${at}: the page scrolls (${scroll.height} > ${scroll.clientHeight})`);
@@ -196,6 +229,57 @@ async function resize(page, viewport) {
   await page.setViewport(viewport);
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await wait(300);
+}
+
+/// The layout and paint of the screen in front at the other window sizes,
+/// leaving the window at its first size.
+async function judgeSizes(ctx, page, label, readings, problems) {
+  const sizes = [...HEIGHTS.slice(1).map((height) => ({ width: 1280, height })), PHONE];
+  for (const size of sizes) {
+    await resize(page, size);
+    const name = `${label}-${size.width}x${size.height}`;
+    readings[name] = await page.evaluate(readScreen, DECK, LEGEND_WORDS);
+    judgeLayout(readings[name], label, problems);
+    await ctx.shot(name, page);
+  }
+  await resize(page, { width: 1280, height: HEIGHTS[0] });
+}
+
+/// A page of a surface that deals no deck: the rewrite, when it asks for one,
+/// is shown to have taken, and the page holds no bar and no legend.
+async function judgeFlatSurface(ctx, url, surface, problems, readings) {
+  const page = await ctx.browser.newPage();
+  try {
+    await page.setViewport({ width: 1280, height: HEIGHTS[0] });
+    if (surface !== "devserver") await rewriteSurface(page, surface);
+    await goto(page, url);
+    await page.bringToFront();
+    await need(page, `the ${surface} page's This machine card`, MACHINE_NAME);
+    const reading = await page.evaluate(readScreen, DECK, LEGEND_WORDS);
+    readings[surface] = reading;
+    if (reading.surface !== surface || reading.newTerminal !== (surface !== "readonly")) {
+      throw new Precondition(`precondition: the page is not the ${surface} surface (meta ${JSON.stringify(reading.surface)}, New terminal button ${reading.newTerminal})`);
+    }
+    if (reading.deck !== null) problems.push(`${surface}: the page deals a deck (${reading.deck}); this leg needs the flat surface`);
+    if (reading.bars !== 0) problems.push(`${surface}: ${reading.bars} key bar(s) on a surface with no deck`);
+    if (reading.strays.length) problems.push(`${surface}: legend text on the page: ${JSON.stringify(reading.strays)}`);
+    await ctx.shot(`${surface}-1280x800`, page);
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+/// The page keeps the devserver's own document and rewrites its surface meta
+/// when parsing ends, before the launcher's module script reads it. A document
+/// fulfilled by interception is not a loopback document to Chrome, which then
+/// refuses its sockets to the devserver.
+async function rewriteSurface(page, surface) {
+  await page.evaluateOnNewDocument((from, to) => {
+    document.addEventListener("readystatechange", () => {
+      const meta = document.querySelector('meta[name="chan-launcher-surface"]');
+      if (meta?.getAttribute("content") === from) meta.setAttribute("content", to);
+    });
+  }, "devserver", surface);
 }
 
 async function openCommandDeck(page) {
@@ -225,12 +309,7 @@ export default {
       const desk = await ctx.browser.newPage();
       pages.push(desk);
       await desk.setViewport({ width: 1280, height: HEIGHTS[0] });
-      await desk.evaluateOnNewDocument((from, to) => {
-        document.addEventListener("readystatechange", () => {
-          const meta = document.querySelector('meta[name="chan-launcher-surface"]');
-          if (meta?.getAttribute("content") === from) meta.setAttribute("content", to);
-        });
-      }, "devserver", "desktop");
+      await rewriteSurface(desk, "desktop");
       await goto(desk, launchUrl);
       await desk.bringToFront();
       await need(desk, "the Computers deck", `${DECK}[aria-label="Computers"]`);
@@ -260,19 +339,7 @@ export default {
       if (!own) problems.push("computers: no key bar to read the type of");
       else if (!same(own, footer)) problems.push(`computers: the key bar's type, colour and spacing ${JSON.stringify(own)} differ from the command deck footer's ${JSON.stringify(footer)}`);
 
-      for (const height of HEIGHTS.slice(1)) {
-        await resize(desk, { width: 1280, height });
-        const reading = await desk.evaluate(readScreen, DECK, LEGEND_WORDS);
-        readings[`computers-1280x${height}`] = reading;
-        judgeLayout(reading, "computers", problems);
-        await ctx.shot(`computers-1280x${height}`, desk);
-      }
-      await resize(desk, PHONE);
-      const phone = await desk.evaluate(readScreen, DECK, LEGEND_WORDS);
-      readings.phone = phone;
-      judgeLayout(phone, "computers", problems);
-      await ctx.shot(`computers-${PHONE.width}x${PHONE.height}`, desk);
-      await resize(desk, { width: 1280, height: HEIGHTS[0] });
+      await judgeSizes(ctx, desk, "computers", readings, problems);
 
       // g turns to the Gateways screen; its turn is observed before reading.
       await desk.evaluate(() => document.activeElement?.blur?.());
@@ -285,20 +352,11 @@ export default {
       readings.gateways = gateways;
       judgeScreen(gateways, GATEWAYS_KEYS, "gateways", problems);
       await ctx.shot("gateways-1280x800", desk);
+      await judgeSizes(ctx, desk, "gateways", readings, problems);
 
-      // The devserver surface lists its cards with no deck and no bar.
-      const flat = await ctx.browser.newPage();
-      pages.push(flat);
-      await flat.setViewport({ width: 1280, height: HEIGHTS[0] });
-      await goto(flat, launchUrl);
-      await flat.bringToFront();
-      await need(flat, "the devserver page's This machine card", THIS_MACHINE);
-      const devserverPage = await flat.evaluate(readScreen, DECK, LEGEND_WORDS);
-      readings.devserver = devserverPage;
-      if (devserverPage.deck !== null) problems.push(`devserver: the page deals a deck (${devserverPage.deck}); this leg needs the flat surface`);
-      if (devserverPage.bars !== 0) problems.push(`devserver: ${devserverPage.bars} key bar(s) on a surface with no deck`);
-      if (devserverPage.strays.length) problems.push(`devserver: legend text on the page: ${JSON.stringify(devserverPage.strays)}`);
-      await ctx.shot("devserver-1280x800", flat);
+      // The other two surfaces list their cards with no deck and no bar.
+      await judgeFlatSurface(ctx, launchUrl, "devserver", problems, readings);
+      await judgeFlatSurface(ctx, launchUrl, "readonly", problems, readings);
 
       if (problems.length) {
         const error = new Error(`key bar contract: ${problems.length} finding(s):\n- ${problems.join("\n- ")}`);
