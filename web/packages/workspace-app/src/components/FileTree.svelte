@@ -46,6 +46,7 @@
     Command as CommandIcon,
     Copy,
     Download,
+    Ellipsis,
     Eye,
     FilePlus,
     FileText,
@@ -135,6 +136,7 @@
     descending = false,
     showHidden = true,
     selectionMode = $bindable(false),
+    tapOpens = false,
     onNavigate,
     onPreview,
     onFind,
@@ -152,6 +154,9 @@
     descending?: boolean;
     showHidden?: boolean;
     selectionMode?: boolean;
+    /// Whether a plain tap from a touch screen opens its row as well as
+    /// selecting it. The surface clears it while its Details panel shows.
+    tapOpens?: boolean;
     onNavigate?: (path: string) => void;
     onPreview?: () => void;
     onFind?: () => void;
@@ -623,19 +628,34 @@
     void onOpen(path);
   }
 
-  /// Single-click selects an entry; the file browser's inspector
-  /// then renders its details. Files do not open on click;
-  /// double-click (or the Open button in the panel) is the path
-  /// to actually opening a file.
-  ///
-  /// A click also forces the inspector open: the user expects the
-  /// metadata pane to surface the selection. If they explicitly
-  /// closed the inspector earlier and then click another row, the
-  /// click takes precedence (and reopens it on next reload via the
-  /// URL hash). The inspector-open call sits behind `onClickRow` so
-  /// the surface can gate it per variant (tab + overlay auto-open;
-  /// dock doesn't).
-  function selectPath(path: string, ev?: MouseEvent): void {
+  // Whether the press now ending began with a finger.
+  let touchGesture = false;
+  let folderEnteredAt = -Infinity;
+  const DOUBLE_TAP_MS = 400;
+
+  // Entering a folder puts a new row under the finger, so the second tap of
+  // a double tap on the folder opens nothing.
+  function openFromTap(ev: MouseEvent, opens?: () => void): void {
+    if (ev.timeStamp - folderEnteredAt >= DOUBLE_TAP_MS) opens?.();
+  }
+
+  function enterFolderFromTap(path: string, ev: MouseEvent): void {
+    folderEnteredAt = ev.timeStamp;
+    onNavigate?.(path);
+  }
+
+  // A browser can make a double click of two taps. Where a tap opens its row
+  // the first one already has, and the second lies on whatever replaced it.
+  function openOnDoubleClick(opens: () => void): void {
+    if (!(touchGesture && tapOpens)) opens();
+  }
+
+  /// A click selects an entry, and the Details panel follows the selection
+  /// while it shows. A file opens on a double click or from that panel's
+  /// Open. A touch screen has no double click, so a plain tap also runs
+  /// `opens` while the surface shows no Details, where selecting alone would
+  /// show nothing.
+  function selectPath(path: string, ev?: MouseEvent, opens?: () => void): void {
     activate();
     ev?.stopPropagation();
     treeRootEl?.focus({ preventScroll: true });
@@ -652,6 +672,7 @@
       fbSelectRange(path, visibleRows.map((r) => r.path));
     } else {
       fbSelectSingle(path);
+      if (ev && touchGesture && tapOpens) openFromTap(ev, opens);
     }
     onClickRow?.(path);
   }
@@ -1252,7 +1273,7 @@
     // empty gutter and inter-row space start a band.
     if (e.button !== 0) return;
     const t = e.target as HTMLElement | null;
-    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl")) return;
+    if (t && t.closest(".name, .row-icon, .dirty-dot, .empty, .twirl, .row-menu")) return;
     // Don't start a band from a modifier-less click that is really a row
     // background click; we still allow it (it becomes a clear on mouseup
     // if no drag happens).
@@ -1365,6 +1386,7 @@
   bind:this={treeRootEl}
   onkeydown={onTreeKeydown}
   onmousedown={onTreeMouseDown}
+  onpointerdowncapture={(e) => { touchGesture = e.pointerType === "touch"; }}
   ondragover={(e) => onRowDragOver(e, view === "list" ? directory : "")}
   ondragleave={() => onRowDragLeave(view === "list" ? directory : "")}
   ondrop={(e) => onRowDrop(e, view === "list" ? directory : "")}
@@ -1418,8 +1440,8 @@
         style={rightDock
           ? `padding-right: ${depth * 12}px`
           : `padding-left: ${depth * 12}px`}
-        onclick={(e) => selectPath(node.path, e)}
-        ondblclick={() => { if (view === "list") onNavigate?.(node.path); }}
+        onclick={(e) => selectPath(node.path, e, () => { if (view === "list") enterFolderFromTap(node.path, e); else toggle(node.path); })}
+        ondblclick={() => openOnDoubleClick(() => { if (view === "list") onNavigate?.(node.path); })}
         oncontextmenu={(e) => showMenu(e, node.path, true)}
         role={view === "list" ? "option" : "treeitem"}
         id={rowId(node.path)}
@@ -1478,13 +1500,14 @@
           class="name"
           onclick={(e) => {
             if (view === "tree" && !(e.shiftKey || e.metaKey || e.ctrlKey || selectionMode)) toggle(node.path);
-            selectPath(node.path, e);
+            selectPath(node.path, e, () => { if (view === "list") enterFolderFromTap(node.path, e); });
           }}
           onkeydown={() => {}}
           role="button"
           tabindex="-1"
         >{node.name}</span>
         {@render metadata(node)}
+        {@render rowMenuButton(node)}
       </div>
       {#if view === "tree" && expanded[node.path]}
         <ul class="children" role="group" id={`${rowId(node.path)}-children`}>
@@ -1530,8 +1553,8 @@
         style={rightDock
           ? `padding-right: ${depth * 12 + 16}px`
           : `padding-left: ${depth * 12 + 16}px`}
-        onclick={(e) => selectPath(node.path, e)}
-        ondblclick={() => openFileRow(node.path)}
+        onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
+        ondblclick={() => openOnDoubleClick(() => openFileRow(node.path))}
         oncontextmenu={(e) => showMenu(e, node.path, false)}
         role={view === "list" ? "option" : "treeitem"}
         id={rowId(node.path)}
@@ -1564,13 +1587,14 @@
         <button
           class="name"
           tabindex="-1"
-          onclick={(e) => selectPath(node.path, e)}
-          ondblclick={(e) => { e.stopPropagation(); openFileRow(node.path); }}
+          onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
+          ondblclick={(e) => { e.stopPropagation(); openOnDoubleClick(() => openFileRow(node.path)); }}
         >{node.name}</button>
         {@render metadata(node)}
         {#if editorDirty.has(node.path)}
           <span class="dirty-dot unsaved" title="unsaved changes" aria-label="unsaved">●</span>
         {/if}
+        {@render rowMenuButton(node)}
       </div>
     {/if}
   </li>
@@ -1583,6 +1607,17 @@
     <span class="entry-size">{node.kind === "dir" ? "" : formatSize(entry?.size ?? 0)}</span>
     <span class="entry-modified">{entry?.mtime ? formatMtime(entry.mtime) : ""}</span>
   {/if}
+{/snippet}
+
+<!-- The row's menu for a touch screen, which has no right click and whose
+     long press does not reliably send `contextmenu`. Hidden for a mouse. -->
+{#snippet rowMenuButton(node: Node)}
+  <button
+    class="row-menu"
+    tabindex="-1"
+    aria-label={`Actions for ${node.name}`}
+    onclick={(e) => showMenu(e, node.path, node.kind === "dir")}
+  ><Ellipsis size={18} strokeWidth={1.75} aria-hidden="true" /></button>
 {/snippet}
 
 {#if menu}
@@ -1670,7 +1705,7 @@
 
 <style>
   .tree.directory-list { padding: 4px 8px; }
-  .directory-list .row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 82px 80px 136px; gap: 10px; padding: 0 10px !important; min-height: 34px; border-radius: 5px; }
+  .directory-list .row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 82px 80px 136px var(--row-menu-column,); gap: 10px; padding: 0 10px !important; min-height: 34px; border-radius: 5px; }
   .directory-list .name { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; text-align: left; }
   .entry-kind, .entry-size, .entry-modified { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .entry-size { text-align: right; font-variant-numeric: tabular-nums; }
@@ -1681,7 +1716,39 @@
   .tree .row:hover { background: var(--hover-bg); }
   .tree:focus-visible .row.active-cursor { outline: 2px solid var(--focus-color, var(--link)); outline-offset: -2px; }
   .tree .row.active-cursor:not(.selected) { background: transparent; }
-  @container (max-width: 700px) { .directory-list .row { grid-template-columns: 18px minmax(100px, 1fr) 80px; } .entry-kind, .entry-modified { display: none; } }
+  @container (max-width: 700px) { .directory-list .row { grid-template-columns: 18px minmax(100px, 1fr) 80px var(--row-menu-column,); } .entry-kind, .entry-modified { display: none; } }
+  .row-menu { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    .tree { --row-menu-column: 44px; }
+    /* WKWebView fires `click` on a non-button only with a pointer cursor,
+       and the row's background is most of its 44px. */
+    .tree .row { min-height: 44px; cursor: pointer; }
+    .row-menu {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      align-self: stretch;
+      grid-column: -2;
+      grid-row: 1;
+      width: 44px;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    /* A phone in landscape is shorter than the menu, which scrolls there.
+       Only here: a mouse's hovered row scales past the menu's box, and a
+       scroller would show a bar for it. */
+    .ctx {
+      max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+      max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .ctx > * { flex: none; }
+  }
 
   .tree, .children {
     list-style: none;

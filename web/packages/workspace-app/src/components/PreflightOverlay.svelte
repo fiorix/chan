@@ -515,10 +515,10 @@
      so the two never overlap. */
   .boot-cards {
     position: fixed;
-    right: 1rem;
-    bottom: 1rem;
+    right: calc(1rem + env(safe-area-inset-right, 0px));
+    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     z-index: 9000;
-    width: min(340px, calc(100vw - 2rem));
+    width: min(340px, calc(100vw - 2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
     display: flex;
     flex-direction: column;
     gap: 0.75rem;

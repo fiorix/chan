@@ -24,41 +24,61 @@ export interface ClampOpts {
   margin?: number;
 }
 
+// Only CSS can read `env()`, so a hidden probe resolves the insets.
+function safeAreaInsets(): { top: number; right: number; bottom: number; left: number } {
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:fixed;visibility:hidden;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)";
+  document.body.append(probe);
+  const style = getComputedStyle(probe);
+  const insets = {
+    top: parseFloat(style.paddingTop) || 0,
+    right: parseFloat(style.paddingRight) || 0,
+    bottom: parseFloat(style.paddingBottom) || 0,
+    left: parseFloat(style.paddingLeft) || 0,
+  };
+  probe.remove();
+  return insets;
+}
+
 /// Given a target rect (already rendered with width/height), return
-/// the {left, top} position that keeps it within the viewport while
-/// staying as close to (x, y) as possible. Picks above / left flips
-/// when the menu would otherwise overflow the bottom / right edges.
+/// the {left, top} position that keeps it within the viewport's safe
+/// area while staying as close to (x, y) as possible. Picks above / left
+/// flips when the menu would otherwise overflow the bottom / right edges.
 export function clampToViewport(
   width: number,
   height: number,
   { x, y, flipY = y, margin = 8 }: ClampOpts,
 ): { left: number; top: number } {
-  const vw = window.innerWidth;
-  const vh = window.visualViewport?.height ?? window.innerHeight;
+  const inset = safeAreaInsets();
+  const minLeft = margin + inset.left;
+  const minTop = margin + inset.top;
+  const maxRight = window.innerWidth - margin - inset.right;
+  const maxBottom = (window.visualViewport?.height ?? window.innerHeight) - margin - inset.bottom;
   let left = x;
   let top = y;
-  if (left + width > vw - margin) {
+  if (left + width > maxRight) {
     // Flip left: anchor right edge near the cursor.
-    left = Math.max(margin, x - width);
+    left = Math.max(minLeft, x - width);
   }
-  if (left + width > vw - margin) {
+  if (left + width > maxRight) {
     // Still doesn't fit (menu wider than viewport minus margins);
     // pin to the right edge with the margin honoured.
-    left = Math.max(margin, vw - margin - width);
+    left = Math.max(minLeft, maxRight - width);
   }
-  if (top + height > vh - margin) {
+  if (top + height > maxBottom) {
     // Flip up: anchor bottom edge near the cursor.
-    top = Math.max(margin, flipY - height);
+    top = Math.max(minTop, flipY - height);
   }
-  if (top + height > vh - margin) {
-    top = Math.max(margin, vh - margin - height);
+  if (top + height > maxBottom) {
+    top = Math.max(minTop, maxBottom - height);
   }
   // The flips above only pull the menu back from the right and bottom
   // edges. A displaced anchor (e.g. a trigger rect measured while a pane
   // flip or hover-scale is mid-transform) can sit past the top or left
   // edge, where nothing above catches it, so floor both here.
-  left = Math.max(margin, left);
-  top = Math.max(margin, top);
+  left = Math.max(minLeft, left);
+  top = Math.max(minTop, top);
   return { left, top };
 }
 
