@@ -46,6 +46,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [ctlresize]: v0.134.0/a-control-terminal-hidden-in-place-on-windows-stops-following-resizes.md
 [surveytab]: v0.134.0/a-survey-over-an-unfocused-pane-takes-tab-and-its-keys.md
 [wakemac]: v0.134.0/the-half-scale-wake-fix-is-unread-on-macos.md
+[csfocus]: v0.134.0/a-cs-command-run-from-a-terminal-takes-the-focus-from-it.md
 
 ### v0.133.0
 
@@ -62,7 +63,7 @@ Six rows the owner raised on 2026-11-20, each built that day, reviewed with end-
 
 ### v0.134.0
 
-Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap").
+Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]).
 
 In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved to v0.133.0, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands.
 
@@ -87,6 +88,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a hidden control terminal stops resizing][ctlresize] | not started | build |
 | [an unfocused survey takes Tab and keys][surveytab] | not started | build |
 | [the wake fix unread on macOS][wakemac] | not started | measure |
+| [a cs command takes the focus from its terminal][csfocus] | not started | build |
 
 ## Completed
 
