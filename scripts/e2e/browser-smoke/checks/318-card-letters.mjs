@@ -48,6 +48,7 @@
 import { createServer } from "node:http";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
+import { WebSocketServer } from "ws";
 import { showCarouselCard } from "../lib/carousel.mjs";
 
 const MIME = {
@@ -180,7 +181,12 @@ function cardBackend(distRoot) {
       }
     });
   });
-  server.on("upgrade", (_req, socket) => socket.destroy());
+  // The launcher reads its windows from this feed alone, as one snapshot.
+  const feed = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    if (new URL(req.url, "http://launcher.test").pathname !== "/api/library/windows/watch") return socket.destroy();
+    feed.handleUpgrade(req, socket, head, (client) => client.send(JSON.stringify({ windows: [{ ...LOCAL_WINDOW }], leaders: {} })));
+  });
 
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -189,7 +195,10 @@ function cardBackend(distRoot) {
         events,
         url: `http://127.0.0.1:${port}`,
         restoreWorkspace: () => { state.workspace = initial().workspace; },
-        close: () => new Promise((done) => server.close(done)),
+        close: () => new Promise((done) => {
+          for (const client of feed.clients) client.terminate();
+          server.close(done);
+        }),
       });
     });
   });
