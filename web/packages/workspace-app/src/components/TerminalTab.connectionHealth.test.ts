@@ -404,6 +404,23 @@ describe("terminal connection in the tab", () => {
     expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x", "\x03"]);
   });
 
+  test("a pong before the replacement's session frame releases nothing", async () => {
+    const { term } = await wokenTerminal();
+    term.type("x");
+    await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
+    const replacement = TerminalSocket.all.at(-1)!;
+    replacement.onopen?.();
+    // A second wake puts the open replacement under a probe of its own.
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(pings(replacement)).toBe(2);
+    await receive(replacement, { type: "pong" });
+    await receive(replacement, { type: "pong" });
+    expect(framesOfType(replacement, "input"), "it has not shown which session it reached").toEqual([]);
+    await receive(replacement, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
+    expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x"]);
+  });
+
   test("on a slow link the hold waits for the probe's verdict past its own cap", async () => {
     const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
