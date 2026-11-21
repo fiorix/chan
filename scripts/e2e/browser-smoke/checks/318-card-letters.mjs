@@ -1,5 +1,5 @@
 // A row letter pressed on a Computers card selected as a whole, the card
-// itself holding focus with its ring showing, acts on the row Enter takes from the card, which on a
+// itself holding focus and its ring painted, acts on the row Enter takes from the card, which on a
 // devserver's card is its header: `t` asks for a terminal on that devserver
 // and `o` disconnects or connects it. With nothing selected it does nothing.
 // The built launcher runs on the desktop surface against this check's own
@@ -16,20 +16,24 @@
 //      stays on the card;
 //   4. nothing focused: with focus on the page, no dialog and the surface
 //      not inert, t and o ask for nothing;
-//   5. pointer: with the card focused by a mouse click on its empty body and
-//      no ring showing, t and o ask for nothing; the slot's :focus-visible as
-//      the keydown reads it is recorded, since an engine may set it there;
-//   6. header row: t and o with the header row focused act as before;
-//   7. outside the deck: t and o with a top bar button focused ask for
+//   5. pointer: a mouse click on the card's empty body selects it and paints
+//      its one ring before any key, then t asks for the terminal and o for
+//      the disconnect, and focus stays on the card;
+//   6. mouse turn: the side buttons, pressed with the mouse, leave the new
+//      front card selected with its ring, and a letter acts on that card and
+//      not on the one that was in front; Enter on a side button turns the
+//      deck and keeps focus on the button;
+//   7. header row: t and o with the header row focused act as before;
+//   8. outside the deck: t and o with a top bar button focused ask for
 //      nothing;
-//   8. dialog: with the devserver's edit dialog open the surface is inert
+//   9. dialog: with the devserver's edit dialog open the surface is inert
 //      and cannot hold focus on the card, so the letters are pressed with
 //      focus on the page, and ask for nothing;
-//   9. workspace row: t and o with the workspace row focused act on the
+//  10. workspace row: t and o with the workspace row focused act on the
 //      workspace, not on the devserver.
-// Every leg reaches the card and its rows as the owner does, by the keyboard:
-// an arrow turns the deck away and back, which focuses the card, and Down
-// walks to a row.
+// The keyboard legs reach the card and its rows as the owner does: an arrow
+// turns the deck away and back, which focuses the card, and Down walks to a
+// row.
 // A leg's precondition failing is reported as a precondition, apart from
 // the leg's own red.
 //
@@ -68,6 +72,8 @@ const EDIT = `button[aria-label="Edit config for ${DS_LABEL}"]`;
 const WS_WINDOW = `button[aria-label="New window of ${WS_LABEL}"]`;
 const WS_POWER = `button[aria-label="Turn off ${WS_LABEL} (o)"]`;
 const OUTSIDE = 'header.topbar button[aria-label="Select"]';
+const NEXT = 'button[aria-label="Next card"]';
+const PREVIOUS = 'button[aria-label="Previous card"]';
 
 /// The registry the launcher reads, and the routes its letters reach.
 function cardBackend(distRoot) {
@@ -218,6 +224,39 @@ async function focusOn(page, where) {
   precondition(reading.at === where && reading.front && reading.ring, `focus is not on the devserver's ${where} in front with its ring: ${JSON.stringify(reading)}`);
 }
 
+/// The front card as the selection reads: its key, whether its slot holds
+/// focus, the ring on its card, the slot's own outline, and how many cards
+/// on the deck draw a ring.
+function readFront() {
+  const slot = document.querySelector('.slot[aria-current="true"]');
+  const card = slot?.querySelector("section.card");
+  const style = card ? getComputedStyle(card) : null;
+  const active = document.activeElement;
+  return {
+    key: slot?.dataset.key ?? null,
+    focused: Boolean(slot) && active === slot,
+    active: active === document.body ? "body" : `${active?.tagName.toLowerCase()} ${active?.getAttribute("aria-label") ?? ""}`.trim(),
+    outlineStyle: style?.outlineStyle ?? null,
+    outlineWidth: style?.outlineWidth ?? null,
+    ring: Boolean(style) && style.outlineStyle !== "none" && style.outlineWidth === "2px",
+    slotOutline: slot ? getComputedStyle(slot).outlineStyle : null,
+    cardsWithRing: [...document.querySelectorAll(".slot section.card")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+  };
+}
+
+const oneRing = (front) => front.ring && front.slotOutline === "none" && front.cardsWithRing === 1;
+
+/// Wait for the deck to bring a card to the front, then two frames, so a
+/// focus the turn asks for has landed.
+async function waitFront(page, matches, label) {
+  try {
+    await page.waitForFunction(matches, { timeout: 10_000 });
+  } catch (error) {
+    throw new Precondition(`the deck did not turn ${label}: ${error.message}`);
+  }
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
 /// A point on the front card's body that is neither a row nor a control.
 function emptyCardPoint(disconnect) {
   const slot = document.querySelector(disconnect)?.closest(".slot");
@@ -278,11 +317,6 @@ export default {
       await page.evaluateOnNewDocument(() => {
         const native = window.fetch.bind(window);
         window.__asked318 = [];
-        // Capture runs before the deck's handler, so this is the reading the
-        // handler makes of the key's target.
-        window.addEventListener("keydown", (event) => {
-          window.__keydown318 = { key: event.key, ring: event.target instanceof Element && event.target.matches(":focus-visible") };
-        }, true);
         window.fetch = (input, init = {}) => {
           const method = (init.method ?? "GET").toUpperCase();
           if (method !== "GET") {
@@ -361,32 +395,50 @@ export default {
           surfaceInert: Boolean(document.querySelector(".launcher-surface")?.closest("[inert]")),
           dialog: Boolean(document.querySelector('[role="dialog"]')),
         }));
+        r.front = await page.evaluate(readFront);
         precondition(r.state.activeIsBody && r.state.surface && !r.state.surfaceInert && !r.state.dialog, `the page is not at rest with nothing focused: ${JSON.stringify(r.state)}`);
         r.asks.t = await press(page, "t");
         r.asks.o = await press(page, "o");
         r.stillConnected = Boolean(await page.$(DISCONNECT));
+        check(r.front.cardsWithRing === 0, `a card shows a ring with nothing selected: ${JSON.stringify(r.front)}`);
         check(r.asks.t.length === 0 && r.asks.o.length === 0, `t and o with nothing focused asked for ${JSON.stringify(r.asks)}`);
         check(r.stillConnected, "the devserver is not shown connected after o with nothing focused");
       });
 
       await leg("pointerCard", async (r) => {
-        r.presses = [];
-        // t first: if a letter acts, o changes the card and t would have no
-        // button left to press. Each letter gets a click of its own, because
-        // a key press can turn the ring on for the next one.
-        for (const letter of ["t", "o"]) {
-          await blur(page);
-          const point = await page.evaluate(emptyCardPoint, DISCONNECT);
-          precondition(point, "the front card has no point that is neither a row nor a control");
-          await page.mouse.click(point.x, point.y);
-          const before = await focusAt(page);
-          precondition(before.at === "card" && before.front, `the mouse click on ${point.element} did not focus the card: ${JSON.stringify(before)}`);
-          precondition(before.ring === false, `the slot matches :focus-visible after a mouse click: ${JSON.stringify(before)}`);
-          const asks = await press(page, letter);
-          r.presses.push({ letter, point, before, atKeydown: await page.evaluate(() => window.__keydown318), asks });
-        }
-        const acted = r.presses.filter((reading) => reading.asks.length > 0);
-        check(acted.length === 0, `a mouse-focused card took a letter: ${JSON.stringify(acted.map(({ letter, asks, atKeydown }) => ({ letter, asks, ringAtKeydown: atKeydown?.ring })))}`);
+        await blur(page);
+        r.point = await page.evaluate(emptyCardPoint, DISCONNECT);
+        precondition(r.point, "the front card has no point that is neither a row nor a control");
+        await page.mouse.click(r.point.x, r.point.y);
+        r.selected = await page.evaluate(readFront);
+        check(r.selected.focused, `the mouse click on ${r.point.element} did not select the card: ${JSON.stringify(r.selected)}`);
+        check(oneRing(r.selected), `the selected card does not paint one ring: ${JSON.stringify(r.selected)}`);
+        r.asks.t = await press(page, "t");
+        check(JSON.stringify(r.asks.t) === JSON.stringify([ASK_TERMINAL]), `t at the clicked card asked for ${JSON.stringify(r.asks.t)}, not a terminal on the devserver`);
+        r.asks.o = await press(page, "o");
+        check(JSON.stringify(r.asks.o) === JSON.stringify([ASK_DISCONNECT]), `o at the clicked card asked for ${JSON.stringify(r.asks.o)}, not a disconnect`);
+        await page.waitForSelector(CONNECT, { timeout: 15_000 });
+        r.focusAfter = await focusAt(page);
+        check(r.focusAfter.at === "card", `focus left the clicked card: ${JSON.stringify(r.focusAfter)}`);
+      });
+
+      await leg("mouseTurn", async (r) => {
+        r.own = await page.$eval(DISCONNECT, (button) => button.closest(".slot").dataset.key);
+        await page.click(PREVIOUS);
+        await waitFront(page, `document.querySelector('.slot[aria-current="true"]')?.dataset.key === "local"`, "to This machine");
+        r.afterPrevious = await page.evaluate(readFront);
+        check(r.afterPrevious.focused && oneRing(r.afterPrevious), `the Previous card button did not select This machine with its ring: ${JSON.stringify(r.afterPrevious)}`);
+        await page.click(NEXT);
+        await waitFront(page, `document.querySelector('.slot[aria-current="true"]')?.dataset.key === ${JSON.stringify(r.own)}`, "back to the devserver");
+        r.afterNext = await page.evaluate(readFront);
+        check(r.afterNext.focused && oneRing(r.afterNext), `the Next card button did not select the devserver's card with its ring: ${JSON.stringify(r.afterNext)}`);
+        r.asks.t = await press(page, "t");
+        check(JSON.stringify(r.asks.t) === JSON.stringify([ASK_TERMINAL]), `t after the turn asked for ${JSON.stringify(r.asks.t)}, not a terminal on the new front card`);
+        await page.$eval(NEXT, (button) => button.focus());
+        await page.keyboard.press("Enter");
+        await waitFront(page, `document.querySelector('.slot[aria-current="true"]')?.dataset.key !== ${JSON.stringify(r.own)}`, "from Enter on the Next card button");
+        r.afterEnter = await page.evaluate((selector) => ({ onButton: document.activeElement === document.querySelector(selector) }), NEXT);
+        check(r.afterEnter.onButton, "Enter on the Next card button took focus off the button");
       });
 
       await leg("headerRow", async (r) => {

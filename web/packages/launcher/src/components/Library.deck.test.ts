@@ -621,13 +621,6 @@ describe("the Computers deck's letter actions", () => {
     expect(library.windows.find((w) => w.window_id === "w-local-term-1")?.hidden).toBe(false);
   });
 
-  // jsdom never matches :focus-visible, even on the focused element, so this
-  // stubs that one reading on a slot. Check 318 reads the real ring in Chrome.
-  function ringOn(slot: HTMLElement, shown: boolean): void {
-    const matches = Element.prototype.matches.bind(slot);
-    slot.matches = (selector: string) => (selector === ":focus-visible" ? shown : matches(selector));
-  }
-
   // Browser check 318 drives a devserver's card. These are the other cards:
   // This machine, whose header has t but no o while its workspace row has
   // both, and All windows, which has no header row and stands for its first
@@ -642,7 +635,6 @@ describe("the Computers deck's letter actions", () => {
     const workspace = slot.querySelector<HTMLElement>(".ws-head")!;
     const power = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="Turn off"]')!);
     const opened = watchClick(workspace.querySelector<HTMLButtonElement>('[aria-label^="New window of"]')!);
-    ringOn(slot, true);
     slot.focus();
     expect(document.activeElement).toBe(slot);
     key("t", slot);
@@ -666,7 +658,6 @@ describe("the Computers deck's letter actions", () => {
     const all = target!.querySelector<HTMLElement>('.slot[data-key="all-windows"]')!;
     const first = all.querySelector<HTMLElement>("[data-window-id]")!;
     const toggle = watchClick(first.querySelector<HTMLButtonElement>('[aria-label^="Show window"], [aria-label^="Hide window"]')!);
-    ringOn(all, true);
     for (const letter of ["t", "o", "w"]) expect(key(letter, all).defaultPrevented).toBe(false);
     key("h", all);
     expect(toggle).toHaveBeenCalledOnce();
@@ -692,15 +683,7 @@ describe("the Computers deck's letter actions", () => {
     expect(key("o", next).defaultPrevented).toBe(false);
     expect(connection).not.toHaveBeenCalled();
     expect(terminal).not.toHaveBeenCalled();
-    // A card focused with no ring, as the mouse leaves it, takes no letter.
-    ringOn(slot, false);
     slot.focus();
-    expect(document.activeElement).toBe(slot);
-    expect(key("o", slot).defaultPrevented).toBe(false);
-    expect(key("t", slot).defaultPrevented).toBe(false);
-    expect(connection).not.toHaveBeenCalled();
-    expect(terminal).not.toHaveBeenCalled();
-    ringOn(slot, true);
     key("o", slot);
     expect(connection).toHaveBeenCalledOnce();
   });

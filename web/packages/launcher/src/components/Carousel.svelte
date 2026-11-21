@@ -98,6 +98,14 @@
     void tick().then(() => slotEls[activeIndex]?.focus({ preventScroll: true }));
   }
 
+  // A pointer press on a side button selects the card it brings in front, as
+  // a click on a side card or a dot does. Enter or Space (detail 0) leaves
+  // focus on the button, so the keyboard can keep turning from it.
+  function turnBy(delta: number, e: MouseEvent): void {
+    move(delta);
+    if (e.detail > 0) focusFront();
+  }
+
   // Keys typed into these belong to the field: a text caret, a select, a
   // radio group and a range all move on arrows.
   const KEYLESS_INPUTS = new Set(["checkbox", "button", "submit", "reset", "image", "color", "file"]);
@@ -187,10 +195,9 @@
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
     if (rowKey) {
       if (ownsArrows(target) || !(target instanceof Element) || target.closest("form, [role=dialog]")) return;
-      // A letter acts on the selection the user can see: the card's ring is
-      // the slot's :focus-visible, the same reading its stylesheet makes.
-      const selected = target === slot && slot.matches(":focus-visible");
-      const row = selected ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
+      // The card is selected while its slot holds focus, which its ring shows.
+      // With focus on the page nothing is selected and a letter does nothing.
+      const row = target === slot ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
       if (!row || !slot.contains(row)) return;
       const button = rowControls(row).find((control) =>
         control instanceof HTMLButtonElement && control.dataset.deckKey === letter);
@@ -285,7 +292,7 @@
         type="button"
         title="Previous"
         aria-label="Previous card"
-        onclick={() => move(-1)}>
+        onclick={(e) => turnBy(-1, e)}>
         <ChevronLeft size={18} />
       </button>
       <button
@@ -293,7 +300,7 @@
         type="button"
         title="Next"
         aria-label="Next card"
-        onclick={() => move(1)}>
+        onclick={(e) => turnBy(1, e)}>
         <ChevronRight size={18} />
       </button>
     {/if}
@@ -397,7 +404,7 @@
     transform: none;
   }
 
-  .slot.active:focus-visible :global(.card) {
+  .slot.active:focus :global(.card) {
     outline: 2px solid var(--launcher-focus-color, var(--brand));
     outline-offset: 2px;
   }
