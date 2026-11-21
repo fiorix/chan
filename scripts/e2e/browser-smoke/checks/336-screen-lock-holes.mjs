@@ -11,6 +11,10 @@
 //      the unlock asks for it back; a theme change under the lock, with the
 //      PIN's key as a live activation, does not put it back over the lock,
 //      and neither does a fullscreen request made while the lock is up;
+//      audio playing at lock time (the viewer's and the Details panel's)
+//      pauses, ignores a play under the lock, and stays paused at its
+//      position after unlock; a video opened under the lock does not play;
+//      a video in its own fullscreen is paused and the lock is on top;
 //   2. the editor's date popover open at lock time: arrows and Enter on the
 //      PIN commit no date, and it is still open after unlock;
 //   3. a dialog that opens under the lock (the import archive's confirm,
@@ -48,6 +52,13 @@ const NOTE = "lock336-note.md";
 const DECK_FILE = "lock336-deck.md";
 const IMAGE = "lock336.png";
 const AUDIO = "lock336.wav";
+const LONG_AUDIO = "lock336-long.wav";
+const VIDEO = "lock336.webm";
+const AUDIO_VIEWER = ".md-audio-viewer audio";
+const AUDIO_DETAILS = 'aside[aria-label="Details"] .audio-preview audio';
+const VIDEO_VIEWER = ".md-video-viewer video";
+// How far a paused element's clock may read apart between two reads.
+const CLOCK_EPSILON = 0.05;
 const NOTE_TEXT = "# Lock note\n\nDue 2026-03-14 please.\n\n```mermaid\ngraph LR\n  A --> B\n```\n\nThe end.\n";
 const DECK_TEXT = `---\nchan:\n  kind: slides\n  slides:\n    aspect_ratio: "16:9"\n---\n\n${["# One\n", "# Two\n", "# Three\n"].join('\n<hr class="chan-page-break">\n\n')}`;
 const PNG_BYTES = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==", "base64");
@@ -69,6 +80,55 @@ const WAV_BYTES = (() => {
   wav.writeUInt32LE(data, 40);
   return wav;
 })();
+
+// A 30 s square wave: audio that is really playing, with a clock to read.
+function longWav() {
+  const rate = 8000;
+  const frames = rate * 30;
+  const wav = Buffer.alloc(44 + frames * 2);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(36 + frames * 2, 4);
+  wav.write("WAVEfmt ", 8, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(rate, 24);
+  wav.writeUInt32LE(rate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(frames * 2, 40);
+  for (let frame = 0; frame < frames; frame++) wav.writeInt16LE(frame % 80 < 40 ? 4096 : -4096, 44 + frame * 2);
+  return wav;
+}
+
+// A real silent WebM recorded in the page from a canvas: no binary fixture,
+// and with no audio track the browser's autoplay policy lets it start.
+function recordWebm(page) {
+  return page.evaluate(() => new Promise((resolve, reject) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 160;
+    canvas.height = 90;
+    const g = canvas.getContext("2d");
+    let n = 0;
+    const draw = () => { g.fillStyle = `hsl(${(n += 12) % 360} 80% 50%)`; g.fillRect(0, 0, 160, 90); };
+    draw();
+    const timer = setInterval(draw, 66);
+    const recorder = new MediaRecorder(canvas.captureStream(15), { mimeType: "video/webm" });
+    const chunks = [];
+    recorder.ondataavailable = (event) => chunks.push(event.data);
+    recorder.onerror = (event) => reject(new Error(String(event.error)));
+    recorder.onstop = async () => {
+      clearInterval(timer);
+      const bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
+      let text = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      resolve(btoa(text));
+    };
+    recorder.start(250);
+    setTimeout(() => recorder.stop(), 9000);
+  }));
+}
 
 function deferred() {
   let resolve;
@@ -97,6 +157,12 @@ export default {
         if (path.startsWith("/api/graph")) lock.graphReads += 1;
         await request.continue();
       }
+    });
+    // Every start of a player, counted from the page's first script: a video
+    // stopped in the same task it started has a clock that barely moved.
+    await page.evaluateOnNewDocument(() => {
+      window.__plays336 = 0;
+      document.addEventListener("play", () => { window.__plays336 += 1; }, true);
     });
     const load = async () => {
       // A reload, not a goto: the page's URL carries a fragment, and a goto to
@@ -129,6 +195,7 @@ export default {
     writeFileSync(join(ctx.workspaceDir, DECK_FILE), DECK_TEXT);
     writeFileSync(join(ctx.workspaceDir, IMAGE), PNG_BYTES);
     writeFileSync(join(ctx.workspaceDir, AUDIO), WAV_BYTES);
+    writeFileSync(join(ctx.workspaceDir, LONG_AUDIO), longWav());
 
     // Open the deck's viewer by its chord from the top of the document. The
     // chord does nothing until the tab has parsed the deck, which a loaded
@@ -374,6 +441,108 @@ export default {
         }
       });
 
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const mediaState = (selector) => page.evaluate((query) => {
+        const media = document.querySelector(query);
+        return media && { paused: media.paused, time: media.currentTime, played: media.played.length, ready: media.readyState, error: media.error?.code ?? null };
+      }, selector);
+      const startMedia = (selector) => page.evaluate((query) => document.querySelector(query).play().then(() => "playing", (error) => String(error)), selector);
+      const advancing = (selector, past = 0.25) => until(`${selector} is playing past ${past}`, () => mediaState(selector),
+        (state) => state && !state.paused && state.time > past, 10_000);
+      let videoWritten = false;
+      const ensureVideo = async () => {
+        if (videoWritten) return;
+        writeFileSync(join(ctx.workspaceDir, VIDEO), Buffer.from(await recordWebm(page), "base64"));
+        videoWritten = true;
+      };
+
+      await leg("audioPlayingAtLock", async (r) => {
+        await shell(["open", LONG_AUDIO]);
+        await page.waitForSelector(AUDIO_VIEWER, { timeout: 20_000 });
+        await page.waitForSelector(AUDIO_DETAILS, { timeout: 20_000 });
+        r.started = [await startMedia(AUDIO_VIEWER), await startMedia(AUDIO_DETAILS)];
+        r.before = [await advancing(AUDIO_VIEWER), await advancing(AUDIO_DETAILS)];
+        await lockNow();
+        const bothPaused = async () => [await mediaState(AUDIO_VIEWER), await mediaState(AUDIO_DETAILS)];
+        r.underLock = await until("both players pause under the lock", bothPaused, (states) => states.every((state) => state.paused), 2000)
+          .catch(async () => bothPaused());
+        await ctx.shot("336-audio-under-lock");
+        assert.ok(r.underLock.every((state) => state.paused), `audio playing at lock time pauses: ${JSON.stringify(r.underLock)}`);
+        await pause(800);
+        r.stillUnderLock = await bothPaused();
+        r.underLock.forEach((state, i) => assert.ok(Math.abs(r.stillUnderLock[i].time - state.time) < CLOCK_EPSILON,
+          `a paused clock stands still under the lock: ${JSON.stringify([state, r.stillUnderLock[i]])}`));
+        // A play under the lock, as a race with it makes one.
+        r.playUnderLock = await startMedia(AUDIO_VIEWER);
+        await pause(500);
+        r.afterPlayUnderLock = await bothPaused();
+        assert.ok(r.afterPlayUnderLock[0].paused, `a play under the lock does not run: ${JSON.stringify(r.afterPlayUnderLock[0])}`);
+        await wake("audio");
+        await unlock("audio");
+        await pause(800);
+        r.afterUnlock = await bothPaused();
+        r.afterUnlock.forEach((state, i) => {
+          assert.ok(state.paused, `no player resumes after unlock: ${JSON.stringify(state)}`);
+          assert.ok(Math.abs(state.time - r.afterPlayUnderLock[i].time) < CLOCK_EPSILON,
+            `the position is kept: ${JSON.stringify([r.afterPlayUnderLock[i], state])}`);
+        });
+        r.resumed = await startMedia(AUDIO_VIEWER);
+        r.controlAfterUnlock = await advancing(AUDIO_VIEWER, r.afterUnlock[0].time + 0.2);
+      });
+
+      await leg("videoOpenedUnderLock", async (r) => {
+        await ensureVideo();
+        await lockNow();
+        await wake("video");
+        const playsBefore = await page.evaluate(() => window.__plays336);
+        await shell(["open", VIDEO]);
+        await page.waitForSelector(VIDEO_VIEWER, { timeout: 20_000 });
+        r.loaded = await until("precondition: the video has data to play", () => mediaState(VIDEO_VIEWER),
+          (state) => state && state.ready >= 2 && state.error === null, 10_000);
+        await pause(1200);
+        r.underLock = await mediaState(VIDEO_VIEWER);
+        r.startsUnderLock = await page.evaluate(() => window.__plays336) - playsBefore;
+        r.topUnderLock = await topAtCentre();
+        r.pinFocused = await pinFocused();
+        await ctx.shot("336-video-opened-under-lock");
+        assert.ok(r.underLock.paused && r.underLock.time < CLOCK_EPSILON, `a video opened under the lock does not play: ${JSON.stringify(r.underLock)}`);
+        assert.equal(r.startsUnderLock, 0, "the video never starts under the lock");
+        assert.equal(r.topUnderLock, "lock", "the lock paints over the video");
+        assert.ok(r.pinFocused, "the PIN keeps the keyboard as the video opens");
+        await unlock("video");
+        await pause(800);
+        r.afterUnlock = await mediaState(VIDEO_VIEWER);
+        assert.ok(r.afterUnlock.paused && r.afterUnlock.time < CLOCK_EPSILON, `it does not start after unlock: ${JSON.stringify(r.afterUnlock)}`);
+        r.started = await startMedia(VIDEO_VIEWER);
+        r.controlAfterUnlock = await advancing(VIDEO_VIEWER);
+      });
+
+      await leg("videoFullscreenAtLock", async (r) => {
+        const fullscreen = () => page.evaluate(() => document.fullscreenElement?.tagName ?? null);
+        await ensureVideo();
+        await shell(["open", VIDEO]);
+        await page.waitForSelector(VIDEO_VIEWER, { timeout: 20_000 });
+        r.before = await advancing(VIDEO_VIEWER);
+        r.entered = await page.evaluate((query) => document.querySelector(query).requestFullscreen().then(() => "entered", (error) => String(error)), VIDEO_VIEWER);
+        r.fullscreenBefore = await until("precondition: the video is in its own fullscreen", fullscreen, (now) => now === "VIDEO", 5000);
+        await lockNow();
+        r.fullscreenUnderLock = await until("the lock leaves the video's fullscreen", fullscreen, (now) => now === null, 3000)
+          .catch(async () => fullscreen());
+        r.topUnderLock = await topAtCentre();
+        r.underLock = await until("the video pauses under the lock", () => mediaState(VIDEO_VIEWER), (state) => state.paused, 2000)
+          .catch(async () => mediaState(VIDEO_VIEWER));
+        await ctx.shot("336-video-fullscreen-under-lock");
+        assert.equal(r.fullscreenUnderLock, null, "the lock is not left under the video's fullscreen");
+        assert.equal(r.topUnderLock, "lock", "the lock paints over the video");
+        assert.ok(r.underLock.paused, `the video pauses: ${JSON.stringify(r.underLock)}`);
+        await wake("video fullscreen");
+        await unlock("video fullscreen");
+        await pause(800);
+        r.afterUnlock = await mediaState(VIDEO_VIEWER);
+        assert.ok(r.afterUnlock.paused, `the video does not resume: ${JSON.stringify(r.afterUnlock)}`);
+        assert.ok(Math.abs(r.afterUnlock.time - r.underLock.time) < CLOCK_EPSILON, `its position is kept: ${JSON.stringify([r.underLock, r.afterUnlock])}`);
+      });
+
       await leg("datePopover", async (r) => {
         await openFileTab(NOTE);
         await page.waitForSelector(DATE_PILL, { timeout: 30_000 });
@@ -598,7 +767,7 @@ export default {
       await load().catch((error) => result.cleanupErrors.push(`reload: ${error.message}`));
       await closeEveryTerminal(page, "336 cleanup", token).catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
       await restoreTerminalPrefs(ctx, page, token, original).catch((error) => result.cleanupErrors.push(`terminal preferences: ${error.message}`));
-      for (const file of [NOTE, DECK_FILE, IMAGE, AUDIO]) rmSync(join(ctx.workspaceDir, file), { force: true });
+      for (const file of [NOTE, DECK_FILE, IMAGE, AUDIO, LONG_AUDIO, VIDEO]) rmSync(join(ctx.workspaceDir, file), { force: true });
       rmSync(directory, { recursive: true, force: true });
       for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
       writeFileSync(join(ctx.outDir, "336-screen-lock-holes.json"), `${JSON.stringify(result, null, 2)}\n`);
