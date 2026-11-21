@@ -2,9 +2,10 @@
 # Press the row letters on a Computers card of the native Linux desktop under
 # Xvfb, on a real connected devserver's card, with real input through XTEST:
 # a click on the card's empty body selects it and paints its ring, o
-# disconnects and connects the devserver, t opens a terminal on it, and with
-# nothing selected o does nothing. card-letters-native.mjs owns the devserver
-# and the verdicts.
+# disconnects and connects the devserver, with nothing selected o does
+# nothing, a click on a workspace row selects it with its ring and t acts on
+# that row, and t on the clicked card opens a terminal on the devserver.
+# card-letters-native.mjs owns the devserver and the verdicts.
 #
 # Prints PASS or FAIL per leg. Exit 0 when every leg held, 1 when one did not,
 # 2 when a step the legs rest on did not happen (the setup did not run), 3

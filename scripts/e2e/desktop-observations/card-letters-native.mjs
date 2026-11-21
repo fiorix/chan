@@ -12,6 +12,10 @@
 //   nothing     with nothing focused, a key that reaches the page as a trusted
 //               keydown on the body: o asks for nothing and the card stays
 //               connected, and no card shows a ring.
+//   row         a click on an empty point of a workspace row served on the
+//               devserver: the row holds focus and paints one ring, and t
+//               opens a window of that workspace, with no new terminal
+//               window, which is what the header's t would open.
 //   terminal    from a clicked card, t opens a terminal window on that
 //               devserver, read from the devserver's own windows feed. A new
 //               native X window is recorded beside it and decides nothing.
@@ -34,6 +38,7 @@ const run = promisify(execFile);
 const [inspector, work, chan] = process.argv.slice(2);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LABEL = "letters-native";
+const WORKSPACE = "letters-workspace";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const secrets = [];
 const mask = (text) => secrets.reduce((s, secret) => s.replaceAll(secret, "<token>"), String(text))
@@ -149,6 +154,36 @@ function pageEmptyPoint(findSlot) {
   return { none: true };
 }
 
+/// Runs in the page: the workspace row, whether its t is enabled, where a
+/// click on it lands outside its controls, and the rings on the deck.
+function pageRow(findSlot, name) {
+  const slot = findSlot();
+  if (!slot) return { skip: true };
+  const terminal = slot.querySelector(`button[aria-label="New terminal window of ${name}"]`);
+  const row = terminal?.closest("[data-deck-row]");
+  if (!row) return { missing: true };
+  const box = row.getBoundingClientRect();
+  const y = box.top + box.height / 2;
+  let point = null;
+  for (let x = box.left + 3; x < box.right - 3 && !point; x += 4) {
+    const element = document.elementFromPoint(x, y);
+    if (element && row.contains(element) && !element.closest("button, a, input, select, textarea, label")) {
+      point = { x, y, element: `${element.tagName.toLowerCase()}.${element.getAttribute("class") ?? ""}` };
+    }
+  }
+  const style = getComputedStyle(row);
+  return {
+    enabled: !terminal.disabled && terminal.dataset.deckKey === "t",
+    point,
+    focused: document.activeElement === row,
+    outlineStyle: style.outlineStyle,
+    outlineWidth: style.outlineWidth,
+    rowsWithRing: [...document.querySelectorAll(".slot [data-deck-row]")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+    cardsWithRing: [...document.querySelectorAll(".slot section.card")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+  };
+}
+
+const readRow = () => inPage(`(${pageRow.toString()})(() => ${SLOT}, ${JSON.stringify(WORKSPACE)})`);
 const readCard = () => inPage(`(${pageCard.toString()})(() => ${SLOT}, ${JSON.stringify(LABEL)})`);
 const blur = () => inPage("(document.activeElement instanceof HTMLElement && document.activeElement.blur(), true)");
 
@@ -231,6 +266,13 @@ async function setup() {
     return { ok: JSON.parse(stdout).devservers.some((d) => d.label === LABEL && d.status === "connected") };
   }, 60_000);
   if (!connected?.ok) throw new SetupNotRun("the desktop did not connect to the devserver");
+  const workspace = path.join(work, WORKSPACE);
+  fs.mkdirSync(workspace);
+  try {
+    await cli(["workspace", "serve", workspace, "--on", LABEL]);
+  } catch (error) {
+    throw new SetupNotRun(`the workspace was not served on the devserver: ${error.message}`);
+  }
 
   const hasCard = `(() => { const s = ${SLOT}; return s ? true : null; })()`;
   let shown = null;
@@ -269,11 +311,15 @@ async function clickCard() {
   if (!point || point.none) throw new SetupNotRun("the card has no point that is neither a row nor a control");
   const sx = Math.round(point.x + offset.dx);
   const sy = Math.round(point.y + offset.dy);
+  await clickScreen(sx, sy);
+  return point;
+}
+
+async function clickScreen(sx, sy) {
   await xdo("windowactivate", "--sync", host, "mousemove", sx, sy);
   await sleep(150);
   await xdo("click", "1");
   await sleep(250);
-  return point;
 }
 
 /// A real key, and the proof it reached the launcher's page.
@@ -290,13 +336,15 @@ async function press(letter) {
   return arrived.hit;
 }
 
-async function devserverTerminals() {
+async function devserverWindows() {
   const response = await fetch(`${devBase}/api/library/windows`, {
     headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000),
   });
   if (!response.ok) throw new SetupNotRun(`the devserver's windows route answered ${response.status}`);
-  return (await response.json()).filter((row) => row.kind === "terminal").map((row) => row.window_id);
+  return response.json();
 }
+
+const devserverTerminals = async () => (await devserverWindows()).filter((row) => row.kind === "terminal").map((row) => row.window_id);
 
 async function nativeWindows() {
   try { return (await xdo("search", "--onlyvisible", "--name", ".")).split("\n").filter(Boolean); }
@@ -348,6 +396,44 @@ async function nothingLeg() {
   return verdict(pass, pass ? { after } : { why: "o with nothing selected acted, or a card showed a ring", before, after });
 }
 
+async function rowLeg() {
+  await ensureConnected();
+  const ready = await until(async () => {
+    const row = await readRow();
+    return { ok: Boolean(row?.enabled && row.point), row };
+  }, 45_000);
+  if (!ready?.ok) throw new SetupNotRun(`the workspace row is not ready: ${mask(JSON.stringify(ready?.row ?? null))}`);
+  await blur();
+  const { point } = await readRow();
+  if (!point) throw new SetupNotRun("the workspace row has no point outside its controls");
+  await clickScreen(Math.round(point.x + offset.dx), Math.round(point.y + offset.dy));
+  const selected = await until(async () => {
+    const row = await readRow();
+    return { ok: Boolean(row?.focused), row };
+  }, 2_000);
+  const row = selected?.row ?? null;
+  if (!row?.focused) return verdict(false, { why: "the click did not put focus on the row", row });
+  if (!(row.outlineStyle !== "none" && row.outlineWidth === "1px" && row.rowsWithRing === 1 && row.cardsWithRing === 0)) {
+    return verdict(false, { why: "the clicked row does not paint one ring", row });
+  }
+  const before = (await devserverWindows()).map((window) => window.window_id);
+  const nativeBefore = await nativeWindows();
+  await press("t");
+  const opened = await until(async () => {
+    const fresh = (await devserverWindows()).filter((window) => !before.includes(window.window_id));
+    return { ok: fresh.length > 0, fresh };
+  }, 20_000);
+  if (!opened?.ok) return verdict(false, { why: "t on the clicked row opened no window on the devserver", row });
+  await sleep(1_500);
+  const settled = (await devserverWindows()).filter((window) => !before.includes(window.window_id));
+  const summary = settled.map((window) => ({ id: window.window_id, kind: window.kind, workspace: window.workspace_path ? path.basename(window.workspace_path) : null }));
+  const nativeNew = (await nativeWindows()).filter((id) => !nativeBefore.includes(id));
+  const ofRow = summary.some((window) => window.kind === "workspace" && window.workspace === WORKSPACE);
+  const terminal = summary.some((window) => window.kind === "terminal");
+  if (!ofRow || terminal) return verdict(false, { why: "t did not open a window of the clicked row's workspace alone", opened: summary });
+  return verdict(true, { row, opened: summary, nativeNew });
+}
+
 async function terminalLeg() {
   await ensureConnected();
   await clickCard();
@@ -364,7 +450,7 @@ async function terminalLeg() {
   return verdict(true, { window: opened.fresh, nativeNew });
 }
 
-const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["terminal", terminalLeg]];
+const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["row", rowLeg], ["terminal", terminalLeg]];
 let status = 3;
 try {
   await setup();
