@@ -120,6 +120,8 @@ export function installStreamProbe() {
         },
       });
     },
+    /// Cut the terminal's socket, as a dropped connection would.
+    drop: (name) => find(name).peer.close(),
     /// Stop the page's main thread for `ms`, recording what it had handled.
     stall(name, ms) {
       const entry = find(name);
