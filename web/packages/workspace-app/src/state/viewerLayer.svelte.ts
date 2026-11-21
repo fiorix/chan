@@ -14,6 +14,7 @@
 // on its own updates, which run under the lock, so anything that enters it
 // while the lock is up is taken out again.
 
+import { untrack } from "svelte";
 import { COVER_ROOT_ATTR } from "./paintLevel";
 import { screensaver } from "./screensaver.svelte";
 
@@ -24,9 +25,11 @@ export const VIEWER_LAYER = 38000;
 let left: Element | null = null;
 
 /// Note that `element` asked for fullscreen under the lock, so the lock's
-/// lift gives it fullscreen instead of the request that was withheld.
+/// lift gives it fullscreen instead of the request that was withheld. The
+/// read is untracked: a viewer's update runs inside its host's effect, which
+/// would otherwise rerun as the lock lifts and ask a second time.
 export function holdFullscreenFor(element: Element): void {
-  if (screensaver.locked) left = element;
+  if (untrack(() => screensaver.locked)) left = element;
 }
 
 /// `element` no longer wants fullscreen, so the lock's lift leaves it out.
