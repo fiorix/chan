@@ -7,7 +7,9 @@
 // preview discards the hydration completion promises by design.
 
 import { isTauriDesktop, setWindowFullscreen } from "../api/desktop";
+import { coverPaintsOver } from "./paintLevel";
 import { consumeKey } from "./shortcuts";
+import { forgetFullscreen, holdFullscreenFor, VIEWER_LAYER } from "./viewerLayer.svelte";
 import {
   contentStyle,
   cssNumber,
@@ -317,11 +319,13 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
   const dismiss = ({ notify = true }: { notify?: boolean } = {}): void => {
     if (closed) return;
     closed = true;
+    // Read while the backdrop is in the page: a detached element has no layer.
+    const covered = coverPaintsOver(backdrop);
     document.removeEventListener("keydown", onKey, true);
     exitSlideFullscreen(backdrop);
     backdrop.remove();
     if (notify) opts.onClose?.();
-    previouslyFocused?.focus({ preventScroll: true });
+    if (!covered) previouslyFocused?.focus({ preventScroll: true });
   };
 
   const onKey = (event: KeyboardEvent): void => {
@@ -330,7 +334,7 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
     // share the document node, so stopPropagation alone cannot keep
     // this one from stepping slides (or closing) underneath the
     // viewer; yield while one is up.
-    if (viewerAboveSlides()) return;
+    if (viewerAboveSlides() || coverPaintsOver(backdrop)) return;
     switch (event.key) {
       case "Escape":
         consumeKey(event);
@@ -359,7 +363,7 @@ export function openSlidePreview(opts: OpenSlidePreviewOptions): SlidePreviewHan
   opts.onSlideChange?.(state.index);
   document.body.appendChild(backdrop);
   if (state.mode === "play") requestSlideFullscreen(backdrop);
-  backdrop.focus({ preventScroll: true });
+  if (!coverPaintsOver(backdrop)) backdrop.focus({ preventScroll: true });
   return { update, close: dismiss };
 }
 
@@ -453,6 +457,12 @@ function requestSlideFullscreen(el: HTMLElement): void {
     void setWindowFullscreen(true);
     return;
   }
+  // Element fullscreen paints over every z-index, a cover's included. The
+  // native window above does not: a cover still paints inside it.
+  if (coverPaintsOver(el)) {
+    holdFullscreenFor(el);
+    return;
+  }
   const request = el.requestFullscreen?.bind(el);
   if (!request) return;
   try {
@@ -468,6 +478,7 @@ function exitSlideFullscreen(el: HTMLElement): void {
     void setWindowFullscreen(false);
     return;
   }
+  forgetFullscreen(el);
   if (document.fullscreenElement !== el) return;
   const exit = document.exitFullscreen?.bind(document);
   if (!exit) return;
@@ -521,7 +532,7 @@ function backdropStyle(theme: SlidePreviewTheme): string {
   // a two-tone horizontal/vertical seam. A solid fill reads as one clean stage.
   const bg = theme === "dark" ? "rgb(0,0,0)" : "rgb(238,241,245)";
   return (
-    "position:fixed;inset:0;z-index:40000;" +
+    `position:fixed;inset:0;z-index:${VIEWER_LAYER};` +
     `background:${bg};display:flex;align-items:center;` +
     "justify-content:center;cursor:zoom-out;overflow:hidden;"
   );

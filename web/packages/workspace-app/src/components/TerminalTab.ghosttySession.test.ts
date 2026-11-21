@@ -296,3 +296,185 @@ describe("a mouse filter holding an unfinished control sequence", () => {
     expect(ghosttyMouseTracking(second.term)).toBe(false);
   });
 });
+
+describe("the lossy recovery suffix on the Ghostty core", () => {
+  test("the normal-screen head leaves the cursor where the replay ended", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[24;40H");
+    await output(socket, "Q");
+    await output(socket, "\x18\x1b7\x1b[?1049;1047;47l");
+    await output(socket, "Z");
+    expect(ghosttyLineText(term, 0), "the head writes nothing on row 1").toBe("");
+    expect(ghosttyLineText(term, 23), "the byte after the head lands at the replay cursor").toBe("QZ");
+  });
+
+  test("the alternate-screen head leaves the terminal on the alternate screen", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    expect(ghosttyAlternateScreen(term), "the tab starts on the normal screen").toBe(false);
+    await output(socket, "\x18\x1b[?1047h");
+    expect(ghosttyAlternateScreen(term), "the alt head switches to the alternate screen").toBe(true);
+  });
+
+  // The core honors ?47h (this case stays green on it); the product keeps
+  // ?1047h, the switch the guest suite exercises on both backends.
+  test("the old ?47h head leaves the terminal on the alternate screen", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    expect(ghosttyAlternateScreen(term), "the tab starts on the normal screen").toBe(false);
+    await output(socket, "\x18\x1b[?47h");
+    expect(ghosttyAlternateScreen(term), "the core honors ?47h").toBe(true);
+  });
+});
+
+describe("acknowledging parsed output on Ghostty", () => {
+  function acks(socket: TerminalSocket) {
+    return sentFrames(socket).filter((frame) => frame.type === "ack");
+  }
+
+  test("a server that advertises no window hears no acknowledgement", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket } = await openGhostty(tab!);
+    expect(new URL(socket.url, "http://localhost").searchParams.get("ack")).toBe("1");
+    await output(socket, "A".repeat(4096));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(socket)).toEqual([]);
+  });
+
+  test("the position counts raw replay and live bytes, not the preludes", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket } = await openGhostty(tab!);
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 100, generation: 3, missed_bytes: 0, replay_bytes: 10, ack_window: 80,
+    });
+    await output(socket, "0123456789");
+    expect(acks(socket), "a tenth of the window reports at once").toEqual([
+      { type: "ack", generation: 3, seq: 100 },
+    ]);
+    // A mode reassert after the replay is not a stream byte.
+    await output(socket, "\x1b[?2004h");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(socket), "the prelude moves nothing").toHaveLength(1);
+    await output(socket, "abc");
+    expect(acks(socket), "a short tail waits for its timer").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(socket).at(-1)).toEqual({ type: "ack", generation: 3, seq: 103 });
+  });
+
+  test("after a reported loss the position is the server's and a redial repeats nothing", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 50, generation: 1, missed_bytes: 0, replay_bytes: 0, ack_window: 8,
+    });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await output(socket, "HEADHEAD");
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 500, generation: 1, missed_bytes: 400, replay_bytes: 8, ack_window: 8,
+    });
+    await output(socket, "TAILTAIL");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(acks(socket).at(-1), "the replay ends at the frame's seq").toEqual({
+      type: "ack", generation: 1, seq: 500,
+    });
+    const redialed = await reconnect(socket, SESSION);
+    expect(new URL(redialed.url, "http://localhost").searchParams.get("since")).toBe("500");
+    const body = Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "").join("\n");
+    expect(body.split("TAILTAIL").length - 1, "no byte repeats after the redial").toBe(1);
+    expect(body).toContain("terminal replay missed 400 bytes");
+  });
+});
+
+describe("same-socket stream recovery on Ghostty", () => {
+  function dialSince(socket: TerminalSocket): string | null {
+    return new URL(socket.url, "http://localhost").searchParams.get("since");
+  }
+
+  function missedLines(term: Terminal): string[] {
+    const lines: string[] = [];
+    for (let row = 0; row < term.rows; row += 1) {
+      const text = ghosttyLineText(term, row) ?? "";
+      if (text.includes("terminal replay missed")) lines.push(text.trim());
+    }
+    return lines;
+  }
+
+  test("cursor equals the frame seq, replay applies once, one missed line", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await output(socket, "A".repeat(90));
+
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 100, generation: 1, missed_bytes: 5, replay_bytes: 10,
+    });
+    await output(socket, "0123456789");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(missedLines(term)).toEqual(["terminal replay missed 5 bytes"]);
+
+    const redialed = await reconnect(socket, SESSION);
+    expect(dialSince(redialed), "the redial resumes from the server's endpoint").toBe("100");
+    await receive(redialed, { type: "ready", cols: 80, rows: 24 });
+    await output(redialed, "NEW");
+    const body = Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "").join("\n");
+    expect(body.split("0123456789").length - 1, "no byte repeats after the redial").toBe(1);
+    expect(missedLines(term), "no second missed line without a new loss").toEqual(["terminal replay missed 5 bytes"]);
+  });
+
+  test("zero loss stays silent and the cursor still equals the frame seq", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 40, generation: 1, missed_bytes: 0, replay_bytes: 0,
+    });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(missedLines(term), "zero loss prints nothing").toEqual([]);
+
+    const redialed = await reconnect(socket, SESSION);
+    expect(dialSince(redialed), "the redial still resumes from the server's endpoint").toBe("40");
+  });
+
+  test("an old server's lag error line prints and leaves the cursor alone", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await output(socket, "A".repeat(20));
+
+    await receive(socket, { type: "error", message: "terminal output lagged; reconnect to replay retained scrollback" });
+    const body = Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "").join("\n");
+    expect(body, "the old lag line keeps today's shape").toContain(
+      "terminal error: terminal output lagged; reconnect to replay retained scrollback",
+    );
+
+    const redialed = await reconnect(socket, SESSION);
+    expect(dialSince(redialed), "the error moves no cursor").toBe("20");
+  });
+
+  test("a replayed device query stays local during same-socket recovery", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket } = await openGhostty(tab!);
+    socket.sent.splice(0);
+
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 100, generation: 1, missed_bytes: 5, replay_bytes: 4,
+    });
+    await output(socket, "\x1b[6n");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(inputFrames(socket), "a replayed query is answered nowhere").toEqual([]);
+  });
+
+  test("a restart on the live socket answers the new shell's query", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket } = await openGhostty(tab!);
+    await output(socket, "\x1bc");
+    socket.sent.splice(0);
+
+    await receive(socket, {
+      type: "session", id: SESSION, seq: 4, generation: 2, missed_bytes: 0, replay_bytes: 4,
+    });
+    await output(socket, "\x1b[6n");
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(inputFrames(socket).map((frame) => frame.data).join(""), "the terminal never parsed this shell's output").toMatch(/\x1b\[\d+;\d+R/);
+  });
+});

@@ -33,6 +33,7 @@
   import { GRAPH_LINK_PREFIX, parseGraphLink } from "../state/tabs.svelte";
   import type { PathPromptMode } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
+  import { focusInDialog } from "./modalStack";
   import { displayPath, filesContext } from "../state/fileContext.svelte";
 
   let value = $state("");
@@ -50,7 +51,7 @@
       value = pathPromptState.defaultValue;
       highlightIdx = -1;
       void tick().then(() => {
-        inputEl?.focus();
+        const tookKeyboard = focusInDialog(inputEl);
         if (
           pathPromptState.kind === "file" &&
           pathPromptState.mode === "create" &&
@@ -88,8 +89,11 @@
           // user decides file-vs-dir from the trailing slash.
           const end = pathPromptState.defaultValue.length;
           inputEl?.setSelectionRange(end, end);
-        } else {
+        } else if (tookKeyboard) {
           inputEl?.select();
+        } else {
+          // select() also focuses, so a refused field only marks its range.
+          inputEl?.setSelectionRange(0, inputEl.value.length);
         }
       });
     }

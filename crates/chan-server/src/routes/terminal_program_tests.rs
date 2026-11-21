@@ -334,18 +334,77 @@ async fn terminal_program_watch_survives_output_lag() {
     });
     let (mut client, initial) = rig.attach("").await;
     assert_eq!(initial["program"]["title"], Value::Null);
+    let recovered = prelude(&mut client).await;
+    assert_eq!(recovered["id"], initial["id"]);
+    assert_eq!(recovered["generation"], initial["generation"]);
+    assert_eq!(recovered["missed_bytes"], 0);
+    assert_eq!(recovered["program"]["title"], "retained");
     tokio::time::advance(Duration::from_millis(150)).await;
     let frames = fence(&rig, &mut client).await;
     assert!(
-        frames.iter().any(|frame| frame["type"] == "error"
-            && frame["message"]
-                .as_str()
-                .is_some_and(|s| s.contains("lagged"))),
-        "fixture forces lag"
+        !frames.iter().any(|frame| frame["type"] == "error"),
+        "output lag recovers without an error frame: {frames:?}"
     );
+    assert!(
+        !frames.iter().any(|frame| frame["type"] == "session"),
+        "the enrolled receiver's forced lag produces no further recovery: {frames:?}"
+    );
+    assert!(
+        programs(&frames).is_empty(),
+        "recovery already sent the current pair: {frames:?}"
+    );
+    rig.title("after recovery");
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let frames = fence(&rig, &mut client).await;
     let updates = programs(&frames);
     assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0]["program"]["title"], "retained");
+    assert_eq!(updates[0]["program"]["title"], "after recovery");
+    assert_eq!(updates[0]["id"], initial["id"]);
+    assert_eq!(updates[0]["generation"], initial["generation"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_program_recovery_rebases_the_last_sent_pair() {
+    let rig = Rig::new().await;
+    rig.title("steady");
+    let registry = rig.state.terminal_sessions.clone();
+    let id = rig.handle.id().to_owned();
+    arm_attach_seam(&id.clone(), AttachSeam::AttachAfterRingLock, move || {
+        assert!(registry.inject_output(&id, b"\x1b]2;temporary\x07"));
+        for _ in 0..1100 {
+            assert!(registry.inject_output(&id, b"x"));
+        }
+        // The recovery snapshot exposes the temporary pair before the
+        // watch returns to the pair the socket sent before recovery.
+        arm_attach_seam(&id.clone(), AttachSeam::AttachAfterRingLock, move || {
+            assert!(registry.inject_output(&id, b"\x1b]2;steady\x07"));
+        });
+    });
+    let (mut client, initial) = rig.attach("").await;
+    assert_eq!(initial["program"]["title"], "steady");
+    let recovered = prelude(&mut client).await;
+    assert_eq!(recovered["id"], initial["id"]);
+    assert_eq!(recovered["generation"], initial["generation"]);
+    assert_eq!(recovered["missed_bytes"], 0);
+    assert_eq!(recovered["program"]["title"], "temporary");
+    assert_eq!(
+        rig.handle.program_rx.borrow().title.as_deref(),
+        Some("steady")
+    );
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let frames = fence(&rig, &mut client).await;
+    assert!(
+        !frames.iter().any(|frame| frame["type"] == "error"),
+        "output lag recovers without an error frame: {frames:?}"
+    );
+    let updates = programs(&frames);
+    assert_eq!(
+        updates.len(),
+        1,
+        "the live pair must replace the different pair sent in the recovery snapshot: {frames:?}"
+    );
+    assert_eq!(updates[0]["program"]["title"], "steady");
+    assert_eq!(updates[0]["generation"], recovered["generation"]);
 }
 
 #[tokio::test(start_paused = true)]

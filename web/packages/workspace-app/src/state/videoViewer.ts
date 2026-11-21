@@ -10,6 +10,7 @@
 // on a :global() block that could disappear during a refactor.
 
 import { fileUrl } from "../api/client";
+import { screensaver } from "./screensaver.svelte";
 import { openViewerOverlay } from "./viewerOverlay";
 
 /// Open the fullscreen viewer.
@@ -27,7 +28,8 @@ export function openVideoViewer(path: string): void {
 
   const video = document.createElement("video");
   video.controls = true;
-  video.autoplay = true;
+  // A video opened under the screen lock waits to be started by hand.
+  video.autoplay = !screensaver.locked;
   video.src = src;
   video.style.cssText =
     "max-width:92vw;max-height:92vh;" +

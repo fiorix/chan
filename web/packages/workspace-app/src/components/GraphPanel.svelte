@@ -47,6 +47,7 @@
     graphReloadSignal,
     indexStatus,
     openCommandLauncherFromMenu,
+    appInputBlocked,
     openGraphForContact,
     openGraphForLanguage,
     openGraphForMention,
@@ -820,6 +821,7 @@
   // active-surface gate and the acting graph agree.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
+      if (appInputBlocked()) return;
       const name = (e as CustomEvent).detail?.name;
       if (activeGraphTab()?.id !== tab.id) return;
       if (name === "app.graph.reload") reloadGraph();

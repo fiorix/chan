@@ -38,6 +38,7 @@ use crate::window_presence::{WindowHook, WindowPresence};
 mod bytes;
 #[cfg(target_os = "linux")]
 mod child_identity;
+mod pacing;
 mod platform;
 mod program_status;
 mod program_status_query;
@@ -53,6 +54,8 @@ mod tmux_gate;
 use bytes::{contains_subslice, VisibleScan};
 #[cfg(target_os = "linux")]
 pub use child_identity::{current_boot_id, process_start_time, RecordedChildIdentity};
+use pacing::Pacing;
+pub use pacing::{OutputFlow, OutputProgress};
 #[cfg(windows)]
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
@@ -132,9 +135,11 @@ const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 // Each session has a bounded logical FIFO. When the agent is IDLE (it has
 // stopped printing), the drainer delivers the largest safe batch at the head
 // and awaits the agent's generation-START before the next drain. The signal is
-// purely the quiescence of VISIBLE output (`last_output_at`): a TUI that
-// repaints an unchanged screen writes colour resets and cursor moves with no
-// text, and counting those would hold its queue for as long as it runs.
+// the quiescence of VISIBLE output (`last_output_at`): a TUI that repaints an
+// unchanged screen writes colour resets and cursor moves with no text, and
+// counting those would hold its queue for as long as it runs. A reader waiting
+// for a view's credit has the program blocked mid-output, so no delivery
+// happens during that wait and the quiet period counts from its end.
 const WRITE_QUEUE_CAP: usize = 100;
 /// Output-idle threshold: the agent is considered done generating when no
 /// visible output has arrived for this long. Conservative to ride over brief
@@ -1536,6 +1541,14 @@ pub enum SessionEvent {
     },
 }
 
+/// A terminal outcome retained independently of the bounded output channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLifecycle {
+    Exit(TerminalExit),
+    Closed(CloseReason),
+    Restarted,
+}
+
 /// A point where a test can pause one side of a session interleaving. OutputBeforeRingPush holds the output lock so the test can inspect admitted input commands before output becomes visible; the other ring points sit outside that lock. The directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
@@ -1564,6 +1577,8 @@ pub enum AttachSeam {
     /// In a PTY reader thread, between a read and recording its bytes: the
     /// output is out of the PTY and not yet in the ring.
     ReaderBeforeRecord,
+    /// The PTY reader is about to release the pacing mutex and wait for credit.
+    ReaderWaitingForProgress,
     /// In a PTY reader thread, when its wait for output returns with nothing
     /// to read and no stop request to act on.
     ReaderIdleWake,
@@ -1681,6 +1696,8 @@ impl Drop for ChildEndedOnReturn {
 enum Resume {
     /// After the `since` cursor, or the whole ring for `None`.
     Since(Option<u64>),
+    /// Raw delta for the same live view, including alternate-screen bytes.
+    Live(u64),
     /// The whole ring, for a client of the process a lossy restore came from
     /// whose cursor is `since`; see [`RingBuffer::snapshot_past`].
     #[cfg(target_os = "linux")]
@@ -1697,6 +1714,9 @@ pub struct AttachHandle {
     /// This attachment's last focus word, withdrawn even when its pump is cancelled.
     focus_epoch: std::sync::atomic::AtomicU64,
     pub rx: broadcast::Receiver<SessionEvent>,
+    /// Terminal outcome retained even if output evicts its broadcast event.
+    pub lifecycle_rx: watch::Receiver<Option<SessionLifecycle>>,
+    progress: Option<OutputProgress>,
     /// Status captured with the replay cursor and its subscription.
     pub initial_program_status: Arc<ProgramStatusSnapshot>,
     /// Publications after `initial_program_status`, independent of output lag.
@@ -1721,12 +1741,13 @@ pub struct AttachHandle {
     /// The exit this incarnation recorded before the attach subscribed. A
     /// consumer holding it delivers it and ends there: its event may still
     /// reach `rx`, broadcast after the record, and is not delivered again.
-    /// `None` means the exit, when it comes, arrives on `rx`.
+    /// `None` means a later exit arrives on `rx` and is retained by `lifecycle_rx`.
     pub exit: Option<TerminalExit>,
-    /// Bytes re-asserting the live tracked private-mode set (DECCKM + mouse +
-    /// bracketed-paste the foreground program had on) so a fresh client that
-    /// came up at defaults regains them. Empty for a plain shell. Sent by the
-    /// attach prelude after the alt-screen prelude, before the redraw nudge.
+    /// Private-mode bytes applied after replay and before the redraw nudge.
+    /// Fresh attaches re-assert enabled input modes; lossless live recovery
+    /// adds no bytes that could interrupt a split sequence. Recovery with
+    /// missed bytes cancels partial escapes, restores
+    /// the screen target without clearing it, and explicitly resets absent modes.
     pub mode_reassert: Vec<u8>,
 }
 
@@ -1734,6 +1755,38 @@ impl AttachHandle {
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The output lease, when this attachment is a tracked WebSocket.
+    pub fn output_progress(&self) -> Option<OutputProgress> {
+        self.progress.clone()
+    }
+
+    /// Recover this incarnation's raw output after `seq`, even after its registry
+    /// entry has gone. A live alternate screen keeps its raw delta here; callers
+    /// append it without the fresh-attach reset and transfer focus ownership.
+    pub fn replay_from(&self, seq: u64) -> Self {
+        let attached = self.session.clone().attach_resuming_with_progress(
+            Resume::Live(seq),
+            self.progress.as_ref().map(OutputProgress::flow),
+        );
+        attached.focus_epoch.store(
+            self.focus_epoch.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        attached
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn broadcast_for_test(&self, event: SessionEvent) {
+        self.session.broadcast(event);
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn drain_queue_for_test(&self, now_ms: i64) {
+        self.session.try_drain_batch(now_ms);
     }
 
     /// Answer the session's open tmux question. Any attached client may; the
@@ -2922,7 +2975,15 @@ impl Registry {
     /// Spawn a new session and attach to it. Reaps exited sessions first,
     /// refuses under fd pressure or at the session cap, and settles the tab
     /// name against the live ones.
-    pub fn create(&self, mut opts: CreateOptions) -> Result<AttachHandle, CreateError> {
+    pub fn create(&self, opts: CreateOptions) -> Result<AttachHandle, CreateError> {
+        self.create_with_flow(opts, None)
+    }
+
+    fn create_with_flow(
+        &self,
+        mut opts: CreateOptions,
+        flow: Option<OutputFlow>,
+    ) -> Result<AttachHandle, CreateError> {
         // Clear dead-process ghosts before minting: a killed session lingers in
         // the map (its controller thread records `exit` on exit but never
         // reaps the entry), so it would hold its tab name + occupy a
@@ -3015,7 +3076,7 @@ impl Registry {
         #[cfg(target_os = "linux")]
         self.park_if_windowed(&session);
         self.notify_roster_change();
-        Ok(session.attach(Some(0)))
+        Ok(session.attach_resuming_with_progress(Resume::Since(Some(0)), flow))
     }
 
     /// Add a session for one pane of a tmux connection, under the pane cap
@@ -3214,7 +3275,7 @@ impl Registry {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn attach(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
-        self.attach_for_ws(id, since)
+        self.attach_for_ws(id, since, None)
     }
 
     /// Feed `bytes` through a live session's output path as if its PTY had
@@ -3250,12 +3311,23 @@ impl Registry {
 
     /// Attach to live session `id`, replaying output after the `since` cursor
     /// (`None` replays the whole ring). `None` when the id is unknown or
-    /// closed.
-    pub fn attach_for_ws(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
-        self.attach_resuming(id, Resume::Since(since))
+    /// closed. `flow` is how a WebSocket's output is paced; `None` is an
+    /// attachment that takes no output lease.
+    pub fn attach_for_ws(
+        &self,
+        id: &str,
+        since: Option<u64>,
+        flow: Option<OutputFlow>,
+    ) -> Option<AttachHandle> {
+        self.attach_resuming(id, Resume::Since(since), flow)
     }
 
-    fn attach_resuming(&self, id: &str, resume: Resume) -> Option<AttachHandle> {
+    fn attach_resuming(
+        &self,
+        id: &str,
+        resume: Resume,
+        flow: Option<OutputFlow>,
+    ) -> Option<AttachHandle> {
         let session = self
             .sessions
             .lock()
@@ -3265,7 +3337,7 @@ impl Registry {
         if session.closed.load(Ordering::Relaxed) {
             return None;
         }
-        Some(session.attach_resuming(resume))
+        Some(session.attach_resuming_with_progress(resume, flow))
     }
 
     /// Where a client echoing `generation`, which is not live session `id`'s,
@@ -3301,7 +3373,7 @@ impl Registry {
         since: Option<u64>,
         opts: CreateOptions,
     ) -> Result<AttachHandle, CreateError> {
-        self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None)
+        self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None, None)
     }
 
     /// Reattach to session `id` when it is live, re-homing it to the attaching
@@ -3313,6 +3385,8 @@ impl Registry {
     /// ring's end also replays from the start, with a missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
+    /// The one attach this makes carries the WebSocket's `flow`, so its lease,
+    /// replay and subscription are captured together.
     pub fn get_or_create_for_ws(
         &self,
         id: Option<&str>,
@@ -3320,6 +3394,7 @@ impl Registry {
         opts: CreateOptions,
         placement: TerminalPlacement,
         client_generation: Option<u64>,
+        flow: Option<OutputFlow>,
     ) -> Result<AttachHandle, CreateError> {
         let TerminalPlacement {
             pane_id,
@@ -3342,7 +3417,7 @@ impl Registry {
                 // Not a resume attempt: pass `since` through unchanged.
                 None => Resume::Since(since),
             };
-            if let Some(handle) = self.attach_resuming(id, resume) {
+            if let Some(handle) = self.attach_resuming(id, resume, flow) {
                 // Move invariant: re-home the session to the attaching window.
                 // A cross-window terminal move re-binds it here, so a later
                 // `close_for_window(source)` reaps only sessions still bound to
@@ -3357,7 +3432,7 @@ impl Registry {
                 None => {}
             }
         }
-        let handle = self.create(opts)?;
+        let handle = self.create_with_flow(opts, flow)?;
         self.bind_session_layout(handle.id(), pane_id, side, tab_id);
         Ok(handle)
     }
@@ -4125,7 +4200,7 @@ impl Registry {
         {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
             for session in sessions.values().filter(|s| s.is_fdstore_parked()) {
-                session.reader_stop.request();
+                session.request_reader_stop();
             }
         }
         self.reader_wake.wake();
@@ -4966,6 +5041,8 @@ struct Session {
     master_fd: Option<OwnedFd>,
     command_tx: CommandSink,
     output_tx: broadcast::Sender<SessionEvent>,
+    lifecycle_tx: watch::Sender<Option<SessionLifecycle>>,
+    pacing: Arc<Pacing>,
     output: Mutex<SessionOutput>,
     program_refresh: OnceLock<Arc<Notify>>,
     last_activity: AtomicI64,
@@ -5343,6 +5420,8 @@ impl Session {
             child_start_time,
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            lifecycle_tx: watch::channel(None).0,
+            pacing: Pacing::new(config.terminal.ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(
                 RingBuffer::new(config.terminal.ring_bytes),
                 config.terminal.program_status,
@@ -5780,6 +5859,8 @@ impl Session {
             master_fd: Some(master_fd),
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            lifecycle_tx: watch::channel(None).0,
+            pacing: Pacing::new(config.terminal.ring_bytes, output.ring.end_seq()),
             output: Mutex::new(output),
             program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
@@ -5962,7 +6043,23 @@ impl Session {
             if !self.reader_may_read(&mut wait) {
                 break false;
             }
-            match reader.read(&mut buf) {
+            // A control session carries all its tmux panes. Those panes use
+            // bounded replay, so a slow view of the control terminal must not
+            // hold their shared protocol stream.
+            let control_mode = self
+                .tmux
+                .lock()
+                .expect("terminal tmux gate poisoned")
+                .in_control_mode();
+            let credit = if control_mode {
+                buf.len()
+            } else {
+                self.pacing.credit(buf.len(), || {
+                    #[cfg(any(test, feature = "test-util"))]
+                    fire_attach_seam(&self.id, AttachSeam::ReaderWaitingForProgress);
+                })
+            };
+            match reader.read(&mut buf[..credit]) {
                 Ok(0) => break imported,
                 Ok(n) => {
                     #[cfg(any(test, feature = "test-util"))]
@@ -5983,6 +6080,12 @@ impl Session {
         if ended {
             self.record_terminal_exit(TerminalExit::Unknown, registry_last_exit);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_reader_stop(&self) {
+        self.reader_stop.request();
+        self.pacing.bypass();
     }
 
     /// Wait until the PTY has output for the reader. False once a restart
@@ -6085,11 +6188,16 @@ impl Session {
         )
     }
 
+    #[cfg(any(test, feature = "test-util"))]
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
-        self.attach_resuming(Resume::Since(since))
+        self.attach_resuming_with_progress(Resume::Since(since), None)
     }
 
-    fn attach_resuming(self: Arc<Self>, resume: Resume) -> AttachHandle {
+    fn attach_resuming_with_progress(
+        self: Arc<Self>,
+        resume: Resume,
+        flow: Option<OutputFlow>,
+    ) -> AttachHandle {
         self.attach_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachBeforeRingLock);
@@ -6105,10 +6213,13 @@ impl Session {
         let (
             exit,
             rx,
+            lifecycle_rx,
+            progress,
             alt_screen,
             replay,
             missed_bytes,
             seq,
+            mode_reassert,
             initial_program_status,
             program_status_rx,
             initial_program,
@@ -6118,19 +6229,32 @@ impl Session {
             let mut output = self.output.lock().expect("terminal output poisoned");
             output.program_dirty = !output.program_ended;
             let ring = &output.ring;
-            let rx = self.output_tx.subscribe();
             let alt_screen = self.in_alt_screen.load(Ordering::Relaxed);
-            let (replay, missed_bytes) = if alt_screen {
+            let (replay, missed_bytes) = if alt_screen && !matches!(resume, Resume::Live(_)) {
                 (Vec::new(), 0)
             } else {
                 match resume {
                     Resume::Since(since) => ring.snapshot_since(since),
+                    Resume::Live(since) => ring.snapshot_since(Some(since)),
                     #[cfg(target_os = "linux")]
                     Resume::PastLossyRestore { since, restored } => {
                         ring.snapshot_past(since, restored)
                     }
                 }
             };
+            let mode_reassert = match resume {
+                Resume::Live(_) if missed_bytes > 0 => {
+                    self.private_mode_recovery_prelude(alt_screen)
+                }
+                Resume::Live(_) => Vec::new(),
+                _ => self.private_mode_prelude(),
+            };
+            let sent_seq = ring
+                .end_seq()
+                .saturating_sub(replay.iter().map(|chunk| chunk.len() as u64).sum::<u64>());
+            let ((rx, lifecycle_rx), progress) = self.pacing.subscribe(sent_seq, flow, || {
+                (self.output_tx.subscribe(), self.lifecycle_tx.subscribe())
+            });
             let mut program_status_rx = output.status.published.subscribe();
             let initial_program_status = program_status_rx.borrow_and_update().clone();
             let mut program_rx = output.program_tx.subscribe();
@@ -6138,10 +6262,13 @@ impl Session {
             (
                 exit.clone(),
                 rx,
+                lifecycle_rx,
+                progress,
                 alt_screen,
                 replay,
                 missed_bytes,
                 ring.end_seq(),
+                mode_reassert,
                 initial_program_status,
                 program_status_rx,
                 initial_program,
@@ -6152,7 +6279,6 @@ impl Session {
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
-        let mode_reassert = self.private_mode_prelude();
         let (initial_tmux_consent, tmux_consent_rx) = self
             .tmux
             .lock()
@@ -6163,6 +6289,8 @@ impl Session {
             session: self,
             focus_epoch: std::sync::atomic::AtomicU64::new(0),
             rx,
+            lifecycle_rx,
+            progress,
             initial_program_status,
             program_status_rx,
             initial_program,
@@ -6229,6 +6357,11 @@ impl Session {
             self.awaiting_gen.store(false, Ordering::Relaxed);
             return;
         }
+        // A program blocked behind a view prints nothing, so neither the
+        // generation gate below nor the quiet period can read its silence.
+        let Some(credit_wait_ended_at) = self.pacing.credit_wait_ended_at() else {
+            return;
+        };
         let last_output = self.last_output_at.load(Ordering::Relaxed);
         // After a deliver, hold the next message until the agent's generation
         // has STARTED (output advanced past the delivery) or the cap elapses
@@ -6246,7 +6379,7 @@ impl Session {
         }
         // Deliver only once the agent is idle (the previous turn, if any, has
         // quiesced).
-        if now_ms - last_output < WRITE_QUEUE_QUIET_MS {
+        if now_ms - last_output.max(credit_wait_ended_at) < WRITE_QUEUE_QUIET_MS {
             return;
         }
         // Select and pop under the queue mutex; frame and encode outside it.
@@ -6596,6 +6729,8 @@ impl Session {
                 tx: sink,
             },
             output_tx,
+            lifecycle_tx: watch::channel(None).0,
+            pacing: Pacing::new(config.terminal.ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(
                 RingBuffer::new(config.terminal.ring_bytes),
                 config.terminal.program_status,
@@ -6679,6 +6814,7 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.pacing.bypass();
         {
             let mut output = self.output.lock().expect("terminal output poisoned");
             output.status.clear_requests();
@@ -7028,6 +7164,7 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.pacing.bypass();
         self.output
             .lock()
             .expect("terminal output poisoned")
@@ -7046,6 +7183,7 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.pacing.bypass();
         {
             let mut output = self.output.lock().expect("terminal output poisoned");
             output.status.clear_requests();
@@ -7182,6 +7320,8 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
+        // The bounded final drain must not wait on a WebSocket's credit.
+        self.pacing.bypass();
         // A tmux connection this session carried ends with its process,
         // whatever tmux managed to say first.
         let connection_actions = self
@@ -7345,8 +7485,6 @@ impl Session {
             self.last_output_at
                 .store(now_unix_millis(), Ordering::Relaxed);
         }
-        let alt_screen_changed = self.update_alt_screen(bytes);
-        let private_modes_changed = self.update_private_modes(bytes);
         self.note_dsr_query(bytes);
         // Push and broadcast under one ring lock, the lock `attach` subscribes
         // and snapshots under, so an attaching client gets this chunk once: in
@@ -7354,6 +7492,10 @@ impl Session {
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::OutputBeforeRingLock);
         let mut output = self.output.lock().expect("terminal output poisoned");
+        // The attach's screen/mode suffix and the ring frontier describe the
+        // same committed bytes, including a live recovery after output loss.
+        let alt_screen_changed = self.update_alt_screen(bytes);
+        let private_modes_changed = self.update_private_modes(bytes);
         if !self.is_tmux_pane() && !self.closed.load(Ordering::Relaxed) && !output.program_ended {
             if output.program.feed(bytes, foreground) {
                 output.program_dirty = true;
@@ -7407,7 +7549,35 @@ impl Session {
     }
 
     fn broadcast(&self, event: SessionEvent) {
-        let _ = self.output_tx.send(event);
+        let bytes = match &event {
+            SessionEvent::Output(bytes) => bytes.len(),
+            _ => 0,
+        };
+        self.pacing.publish(bytes, || {
+            let lifecycle = match &event {
+                SessionEvent::Exit(exit) => Some(SessionLifecycle::Exit(exit.clone())),
+                SessionEvent::Closed(reason) => Some(SessionLifecycle::Closed(*reason)),
+                SessionEvent::Restarted => Some(SessionLifecycle::Restarted),
+                _ => None,
+            };
+            if let Some(lifecycle) = lifecycle {
+                self.lifecycle_tx.send_if_modified(|current| {
+                    let replace = match (&*current, &lifecycle) {
+                        (Some(SessionLifecycle::Restarted), _) => false,
+                        (_, SessionLifecycle::Restarted) => true,
+                        (Some(SessionLifecycle::Closed(_)), _) => false,
+                        (_, SessionLifecycle::Closed(_)) => true,
+                        (None, SessionLifecycle::Exit(_)) => true,
+                        _ => false,
+                    };
+                    if replace {
+                        *current = Some(lifecycle);
+                    }
+                    replace
+                });
+            }
+            let _ = self.output_tx.send(event);
+        });
     }
 
     /// Whether typed bytes may reach this session's PTY: not from a tmux
@@ -7706,6 +7876,43 @@ impl Session {
                 .expect("terminal private modes poisoned")
                 .clone(),
         }
+    }
+
+    /// Reconcile a live view after its raw stream lost bytes. CAN ends any
+    /// incomplete escape; the alternate-screen switch preserves its contents.
+    /// Every tracked mode is then authoritative, including missed resets.
+    /// The caller holds the output lock that also protects mode updates.
+    fn private_mode_recovery_prelude(&self, alt_screen: bool) -> Vec<u8> {
+        let modes = self
+            .private_modes
+            .lock()
+            .expect("terminal private modes poisoned");
+        // The normal-screen head saves the cursor first: the backend that
+        // restores unconditionally on ?1049l (xterm.js) would otherwise jump
+        // to a stale saved position instead of resuming where the replay
+        // ended. The alt head is ?1047h rather than ?1049h: xterm.js's
+        // ?1049h writes the alternate buffer's saved-cursor slot before its
+        // guarded switch, clobbering the program's slot. ?1047h switches
+        // screens on both shipped backends without touching any saved slot,
+        // and the guest suite exercises exactly that switch; ghostty's core
+        // also honors ?47h (shown by the ghostty recovery case), which the
+        // product does not use.
+        let mut out = if alt_screen {
+            b"\x18\x1b[?1047h".to_vec()
+        } else {
+            b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
+        };
+        // Mouse protocols and encodings can share renderer state: a reset
+        // of an absent mode must precede the enable that restores its peer.
+        for enabled in [false, true] {
+            let action = if enabled { 'h' } else { 'l' };
+            for mode in TRACKED_PRIVATE_MODES {
+                if modes.contains(mode) == enabled {
+                    out.extend_from_slice(format!("\x1b[?{mode}{action}").as_bytes());
+                }
+            }
+        }
+        out
     }
 
     /// Bytes that re-assert the live tracked private-mode set on reattach  --
@@ -8437,7 +8644,7 @@ mod tests {
         assert_eq!(sleeps, vec![gap, gap]);
     }
 
-    fn test_config(ring_bytes: usize, cap: usize, idle: u64) -> RegistryConfig {
+    pub(super) fn test_config(ring_bytes: usize, cap: usize, idle: u64) -> RegistryConfig {
         let tmp = tempfile::tempdir().unwrap();
         let workspace_root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
@@ -8548,7 +8755,7 @@ mod tests {
         test_session_with_commands(ring_bytes).0
     }
 
-    fn test_session_with_commands(
+    pub(super) fn test_session_with_commands(
         ring_bytes: usize,
     ) -> (Arc<Session>, std::sync::mpsc::Receiver<PtyCommand>) {
         test_agent_session(ring_bytes, "test-session", None, None, None, &[])
@@ -8608,6 +8815,8 @@ mod tests {
             master_fd: None,
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            lifecycle_tx: watch::channel(None).0,
+            pacing: Pacing::new(ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes), true)),
             program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
@@ -9344,6 +9553,36 @@ mod tests {
         assert_eq!(missed, 6);
         assert_eq!(replay.concat(), b"cdef");
         assert_eq!(ring.end_seq(), 10);
+    }
+
+    #[test]
+    fn restored_ring_keeps_a_position_inside_the_window_past_its_first_eviction() {
+        let cap = 4 * PTY_READ_BYTES;
+        let replay: Vec<u8> = (0..cap).map(|i| (i % 251) as u8).collect();
+        let end = replay.len() as u64;
+        let mut ring = RingBuffer::new_with_replay(cap, end, &replay);
+        let inside_window = end - cap as u64 / 2;
+
+        ring.push(b"x");
+
+        let (tail, missed) = ring.snapshot_since(Some(inside_window));
+        assert_eq!(missed, 0, "one push past capacity evicts one read's worth");
+        let mut expected = replay[inside_window as usize..].to_vec();
+        expected.push(b'x');
+        assert_eq!(tail.concat(), expected);
+    }
+
+    #[test]
+    fn restored_ring_keeps_its_whole_capacity_from_a_longer_tail() {
+        let cap = PTY_READ_BYTES + 10;
+        let replay: Vec<u8> = (0..2 * PTY_READ_BYTES).map(|i| (i % 251) as u8).collect();
+        let end = replay.len() as u64;
+
+        let ring = RingBuffer::new_with_replay(cap, end, &replay);
+
+        let (tail, missed) = ring.snapshot_since(Some(0));
+        assert_eq!(missed, end - cap as u64);
+        assert_eq!(tail.concat(), replay[replay.len() - cap..]);
     }
 
     #[test]
@@ -11222,7 +11461,7 @@ mod tests {
         }
     }
 
-    fn opts_with_command(command: &str) -> CreateOptions {
+    pub(super) fn opts_with_command(command: &str) -> CreateOptions {
         CreateOptions {
             size: test_size(),
             tab_name: None,
@@ -12044,6 +12283,7 @@ mod tests {
                     tab_id: Some("tab-3".to_string()),
                 },
                 None,
+                None,
             )
             .unwrap();
         let id = handle.id().to_string();
@@ -12065,6 +12305,7 @@ mod tests {
                     pane_id: Some("pane-9".to_string()),
                     ..TerminalPlacement::default()
                 },
+                None,
                 None,
             )
             .unwrap();
@@ -12421,7 +12662,7 @@ mod tests {
             "restart must broadcast Restarted on the old channel"
         );
         // The id still resolves to a live, relaunched session.
-        assert!(registry.attach_for_ws(&id, None).is_some());
+        assert!(registry.attach_for_ws(&id, None, None).is_some());
         registry.close_all(CloseReason::Shutdown);
     }
 
@@ -12481,6 +12722,7 @@ mod tests {
                 opts_with_window("win-gate"),
                 TerminalPlacement::default(),
                 Some(gen),
+                None,
             )
             .unwrap();
         // Mismatched generation: `since` ignored -> full ring replay. The full
@@ -12493,6 +12735,7 @@ mod tests {
                 opts_with_window("win-gate"),
                 TerminalPlacement::default(),
                 Some(gen + 1),
+                None,
             )
             .unwrap();
         assert!(
@@ -12520,6 +12763,7 @@ mod tests {
                 Some(0),
                 opts_with_window("win-b"),
                 TerminalPlacement::default(),
+                None,
                 None,
             )
             .expect("reattach");
@@ -12570,6 +12814,7 @@ mod tests {
                 Some(0),
                 opts_with_window("win-b"),
                 TerminalPlacement::default(),
+                None,
                 None,
             )
             .expect("the target attaches after the source window closed");
@@ -14756,6 +15001,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     None,
+                    None,
                 )
                 .unwrap();
             assert_eq!(handle.id(), id);
@@ -16239,6 +16485,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             let mut ring = early.clone();
@@ -16358,6 +16605,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             let mut ring = early.clone();
@@ -16413,6 +16661,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_ne!(
@@ -16468,6 +16717,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_eq!(
@@ -16582,6 +16832,7 @@ mod tests {
                     opts(Some("w1"), None),
                     TerminalPlacement::default(),
                     Some(generation),
+                    None,
                 )
                 .unwrap();
             assert_ne!(
@@ -16623,6 +16874,7 @@ mod tests {
                         opts(Some("w1"), None),
                         TerminalPlacement::default(),
                         Some(generation),
+                        None,
                     )
                     .unwrap()
             };

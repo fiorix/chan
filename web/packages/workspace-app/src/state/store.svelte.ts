@@ -168,7 +168,7 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
-import { paintLevel } from "./paintLevel";
+import { COVER_ROOT_ATTR, paintLevel } from "./paintLevel";
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
@@ -412,13 +412,7 @@ export function raisedCoverKeys(): string[] {
   return Object.keys(raisedCovers);
 }
 
-/// The attribute each cover puts on its root element, carrying its own name
-/// from `FULL_WINDOW_COVERS`. The window key guard reads it to tell a key
-/// typed into a cover's own text field (the lock's PIN) from one aimed at the
-/// app behind the cover, and the parity test looks for it on every raised
-/// cover, so a cover that forgets it is caught there rather than found as a
-/// field that takes no typing.
-export const COVER_ROOT_ATTR = "data-cover";
+export { COVER_ROOT_ATTR };
 
 /// True when `target` is a text-entry control on the surface of the cover
 /// that holds the keyboard: an input that takes text, a textarea or an

@@ -6,6 +6,7 @@
   import { appInputBlocked, promptState, resolvePrompt } from "../state/store.svelte";
   import { mayFocus } from "../state/keyboardOwner.svelte";
   import ModalShell from "./ModalShell.svelte";
+  import { focusInDialog } from "./modalStack";
 
   let value = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
@@ -18,8 +19,9 @@
       value = promptState.defaultValue;
       // Focus + select-all on the next tick so the user can overtype.
       queueMicrotask(() => {
-        inputEl?.focus();
-        inputEl?.select();
+        // select() also focuses, so a refused field only marks its range.
+        if (focusInDialog(inputEl)) inputEl?.select();
+        else inputEl?.setSelectionRange(0, inputEl.value.length);
       });
     }
   });

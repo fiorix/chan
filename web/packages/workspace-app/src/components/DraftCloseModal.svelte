@@ -3,6 +3,7 @@
   import { draftCloseState, resolveDraftClose } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
   import ModalShell from "./ModalShell.svelte";
+  import { focusInDialog } from "./modalStack";
 
   // A standalone window has no workspace to save into; its promote
   // targets are paths on the machine's disk. Workspace copy stays
@@ -20,11 +21,12 @@
     const unsavable = draftCloseState.unsavable !== null;
     queueMicrotask(() => {
       if (unsavable) {
-        cancelEl?.focus();
+        focusInDialog(cancelEl);
         return;
       }
-      inputEl?.focus();
-      inputEl?.select();
+      // select() also focuses, so a refused field only marks its range.
+      if (focusInDialog(inputEl)) inputEl?.select();
+      else inputEl?.setSelectionRange(0, inputEl.value.length);
     });
   });
 </script>

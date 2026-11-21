@@ -13,7 +13,9 @@
 // Inline styles keep the imperative overlay self-contained.
 
 import { resolveImageSrc } from "../editor/extensions/image";
+import { coverPaintsOver } from "./paintLevel";
 import { consumeKey } from "./shortcuts";
+import { VIEWER_LAYER } from "./viewerLayer.svelte";
 
 export interface ZoomImage {
   /// Markdown-style image src (workspace-rooted, source-relative, or a
@@ -55,7 +57,7 @@ export function openImageZoom(
   const backdrop = document.createElement("div");
   backdrop.className = "md-image-zoom";
   backdrop.style.cssText =
-    "position:fixed;inset:0;z-index:40000;" +
+    `position:fixed;inset:0;z-index:${VIEWER_LAYER};` +
     "background:rgba(0,0,0,0.92);" +
     "display:flex;align-items:center;justify-content:center;" +
     "cursor:zoom-out;";
@@ -107,6 +109,7 @@ export function openImageZoom(
   // The viewer answers Escape and, in a set, the arrows, unmodified; a chord
   // with Ctrl, Cmd or Alt held is the app's and travels on.
   const onKey = (ev: KeyboardEvent): void => {
+    if (coverPaintsOver(backdrop)) return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (ev.key === "Escape") {
       consumeKey(ev);
