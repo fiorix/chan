@@ -1,0 +1,34 @@
+# A queued message waits behind a stopped view of an idle program on macOS and Windows
+
+Status: accepted by the owner on 2026-11-21 as a follow-up that does not hold the stream row ("sure follow up", `dev/v0133/decisions.md`), for v0.134.0. Not started. It builds on the acknowledged stream pacing merged for v0.133.0.
+
+Record: the stream row paces the PTY reader by the bytes a view acknowledges, and its write queue does not deliver while the reader waits for credit, since a held program is mid-output and not idle. Found while that fix was built. On Linux the reader first polls for output, so it waits for credit only with bytes to read. On macOS and Windows it asks for credit before it blocks in `read`, so it can wait with nothing to read, and the queue reads that wait as a hold.
+
+## What is there now
+
+Read at `98a1c1871`, by reading; not run on macOS or Windows.
+
+- `reader_may_read` is `cfg(target_os = "linux")` (`crates/chan-library/src/terminal_sessions.rs:6102-6103`). The credit wait is `Pacing::credit` (`terminal_sessions/pacing.rs`).
+- Trigger: a program's last output leaves an acknowledging view a full window (or 512 events) behind, and the program then goes idle.
+- Worst case for a stopped view: the 5 s bound, the 800 ms quiet period and one 150 ms drain tick, about 5.95 s from the start of the wait.
+- A view still parsing: a byte-limited wait ends at its next acknowledgement. An event-limited wait can last longer, because each acknowledgement renews the 5 s clock while 512 events remain unsent.
+- The message is late, never early, and never stuck.
+- Linux has a narrower form: the reader waits only once it has seen pending bytes, but a small final write that is still pending can park it for up to 5 s and hold the queue about 5.8 s.
+
+## Desired contract
+
+1. On macOS and Windows, an idle program with no pending PTY output is not treated as held: a queued message is delivered at the normal quiet period. Decide while building whether the Linux form above should deliver sooner too.
+2. A program that is really blocked on a full PTY still receives nothing until it is idle.
+3. Pacing, its 5 s bound and the exit drain are unchanged.
+
+## Boundaries
+
+- The reader's wait and the write queue's idle test in `terminal_sessions.rs` and `terminal_sessions/pacing.rs`.
+- Not the acknowledgement protocol, the window or the bound.
+- Linux changes only if that decision says so.
+
+## Acceptance
+
+1. A native test on macOS and on Windows, with a real PTY: a view a full window behind an idle program, a queued message delivered within the quiet period. Red at the base on each platform.
+2. A test that a program really blocked on output still receives no queued message.
+3. Read on the local Windows VM and on the owner's Mac through `cs terminal write` to a real agent.

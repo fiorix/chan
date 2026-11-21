@@ -24,7 +24,7 @@ Read at `9d7b56c45`.
 ## Boundaries
 
 - `update_alt_screen`, `TRACKED_PRIVATE_MODES` and the private-mode parser beside them in `crates/chan-library/src/terminal_sessions.rs`, and their tests; one scan of the CSI parameters may serve both.
-- Built before the fast stream row ([streamlag](../v0.134.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md)), which changes the attach and replay path around it.
+- Built before the fast stream row ([streamlag](../v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md)), which changes the attach and replay path around it.
 - Not here: a replay that starts inside an escape sequence (the ring evicting whole chunks, entry T008), which the owner sent to a later release as a reading.
 
 ## Acceptance
