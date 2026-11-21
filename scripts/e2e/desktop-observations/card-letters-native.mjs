@@ -16,6 +16,9 @@
 //               devserver: the row holds focus and paints one ring, and t
 //               opens a window of that workspace, with no new terminal
 //               window, which is what the header's t would open.
+//   control     a press on a workspace row's button released off it, which
+//               activates nothing: the button holds focus with no ring of its
+//               own, and its row paints the one ring.
 //   terminal    from a clicked card, t opens a terminal window on that
 //               devserver, read from the devserver's own windows feed. A new
 //               native X window is recorded beside it and decides nothing.
@@ -183,6 +186,27 @@ function pageRow(findSlot, name) {
   };
 }
 
+/// Runs in the page: a row's button as the focused control, and the rings.
+function pageControl(findSlot, name) {
+  const slot = findSlot();
+  const button = slot?.querySelector(`button[aria-label="New terminal window of ${name}"]`);
+  const row = button?.closest("[data-deck-row]");
+  if (!row) return { missing: true };
+  const box = button.getBoundingClientRect();
+  const style = getComputedStyle(row);
+  return {
+    point: { x: box.left + box.width / 2, y: box.top + box.height / 2 },
+    focused: document.activeElement === button,
+    ownRing: button.matches(":focus-visible"),
+    outlineStyle: style.outlineStyle,
+    outlineWidth: style.outlineWidth,
+    rowsWithRing: [...document.querySelectorAll(".slot [data-deck-row]")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+    cardsWithRing: [...document.querySelectorAll(".slot section.card")].filter((el) => getComputedStyle(el).outlineStyle !== "none").length,
+    asked: window.__cardLetters.asked.length,
+  };
+}
+
+const readControl = () => inPage(`(${pageControl.toString()})(() => ${SLOT}, ${JSON.stringify(WORKSPACE)})`);
 const readRow = () => inPage(`(${pageRow.toString()})(() => ${SLOT}, ${JSON.stringify(WORKSPACE)})`);
 const readCard = () => inPage(`(${pageCard.toString()})(() => ${SLOT}, ${JSON.stringify(LABEL)})`);
 const blur = () => inPage("(document.activeElement instanceof HTMLElement && document.activeElement.blur(), true)");
@@ -434,6 +458,34 @@ async function rowLeg() {
   return verdict(true, { row, opened: summary, nativeNew });
 }
 
+async function controlLeg() {
+  await ensureConnected();
+  const ready = await until(async () => {
+    const row = await readRow();
+    return { ok: Boolean(row?.enabled && row.point), row };
+  }, 45_000);
+  if (!ready?.ok) throw new SetupNotRun(`the workspace row is not ready: ${mask(JSON.stringify(ready?.row ?? null))}`);
+  await blur();
+  const before = await readControl();
+  if (!before?.point) throw new SetupNotRun("the workspace row's button was not found");
+  const windows = (await devserverWindows()).map((window) => window.window_id);
+  await xdo("windowactivate", "--sync", host, "mousemove", Math.round(before.point.x + offset.dx), Math.round(before.point.y + offset.dy));
+  await sleep(150);
+  await xdo("mousedown", "1");
+  await sleep(120);
+  await xdo("mousemove", Math.round(ready.row.point.x + offset.dx), Math.round(ready.row.point.y + offset.dy));
+  await sleep(120);
+  await xdo("mouseup", "1");
+  await sleep(400);
+  const control = await readControl();
+  const opened = (await devserverWindows()).filter((window) => !windows.includes(window.window_id));
+  if (control?.asked !== before.asked || opened.length) throw new SetupNotRun("the press released off the button still activated it");
+  if (!control?.focused || control.ownRing) return verdict(false, { why: "the press did not leave the button focused with no ring of its own", control });
+  const pass = control.outlineStyle !== "none" && control.outlineWidth === "1px" && control.rowsWithRing === 1 && control.cardsWithRing === 0;
+  await blur();
+  return verdict(pass, pass ? { control } : { why: "the row around the focused control does not paint the one ring", control });
+}
+
 async function terminalLeg() {
   await ensureConnected();
   await clickCard();
@@ -450,7 +502,7 @@ async function terminalLeg() {
   return verdict(true, { window: opened.fresh, nativeNew });
 }
 
-const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["row", rowLeg], ["terminal", terminalLeg]];
+const LEGS = [["click", clickLeg], ["connection", connectionLeg], ["nothing", nothingLeg], ["row", rowLeg], ["control", controlLeg], ["terminal", terminalLeg]];
 let status = 3;
 try {
   await setup();
