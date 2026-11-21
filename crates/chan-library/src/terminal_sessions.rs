@@ -93,6 +93,494 @@ pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest, 
 
 const BROADCAST_CAP: usize = 1024;
 
+/// File tracing selected by `CHAN_TERMINAL_MEASURE_LOG`.
+pub mod measurement {
+    use std::fs::OpenOptions;
+    use std::io::{BufWriter, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+    use std::sync::{Arc, OnceLock};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use serde::{Serialize, Serializer};
+
+    // Reserve space for bursts while the writer is descheduled or flushing.
+    const CAPACITY: usize = 262_144;
+    const FLUSH_EVERY: Duration = Duration::from_millis(100);
+    static LOGGER: OnceLock<Option<Logger>> = OnceLock::new();
+    static SOCKET_IDS: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone)]
+    struct Logger {
+        tx: SyncSender<Event>,
+        dropped: Arc<AtomicU64>,
+        pid: u32,
+    }
+
+    #[derive(Serialize)]
+    struct Event {
+        kind: &'static str,
+        pid: u32,
+        #[serde(serialize_with = "serialize_nanos")]
+        t_ns: u128,
+        #[serde(serialize_with = "serialize_session")]
+        session: Arc<str>,
+        generation: u64,
+        socket: u64,
+        bytes: u64,
+        produced: u64,
+        sent: u64,
+        live_sent: u64,
+        replay_sent: u64,
+        sends: u64,
+        send_id: u64,
+        lagged: u64,
+        seq: Option<u64>,
+        source: &'static str,
+        #[serde(serialize_with = "serialize_nanos")]
+        elapsed_ns: u128,
+        dropped: u64,
+    }
+
+    // Reads dominate flood traces; socket-only fields add writer work per read.
+    #[derive(Serialize)]
+    struct PtyReadRecord<'a> {
+        kind: &'static str,
+        pid: u32,
+        #[serde(serialize_with = "serialize_nanos")]
+        t_ns: u128,
+        session: &'a str,
+        generation: u64,
+        bytes: u64,
+        produced: u64,
+        dropped: u64,
+    }
+
+    fn serialize_nanos<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+
+    fn serialize_session<S: Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value)
+    }
+
+    fn timestamp() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    }
+
+    fn write_event(
+        out: &mut impl Write,
+        mut event: Event,
+        dropped: &AtomicU64,
+    ) -> std::io::Result<()> {
+        event.dropped = dropped.load(Ordering::Relaxed);
+        if event.kind == "pty_read" {
+            serde_json::to_writer(
+                &mut *out,
+                &PtyReadRecord {
+                    kind: event.kind,
+                    pid: event.pid,
+                    t_ns: event.t_ns,
+                    session: &event.session,
+                    generation: event.generation,
+                    bytes: event.bytes,
+                    produced: event.produced,
+                    dropped: event.dropped,
+                },
+            )?;
+        } else {
+            serde_json::to_writer(&mut *out, &event)?;
+        }
+        out.write_all(b"\n")
+    }
+
+    fn logger() -> Option<&'static Logger> {
+        LOGGER
+            .get_or_init(|| {
+                let path = std::env::var_os("CHAN_TERMINAL_MEASURE_LOG")?;
+                let file = match OpenOptions::new().create(true).append(true).open(path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        eprintln!("terminal measurement log unavailable: {error}");
+                        return None;
+                    }
+                };
+                let (tx, rx) = mpsc::sync_channel::<Event>(CAPACITY);
+                let dropped = Arc::new(AtomicU64::new(0));
+                let writer_dropped = Arc::clone(&dropped);
+                let spawned = std::thread::Builder::new()
+                    .name("terminal-measurement".into())
+                    .spawn(move || {
+                        let mut out = BufWriter::with_capacity(256 * 1024, file);
+                        let mut written = 0u64;
+                        let mut flushed_at = Instant::now();
+                        let result = (|| -> std::io::Result<()> {
+                            writeln!(
+                                out,
+                                "{}",
+                                serde_json::json!({
+                                    "kind": "logger_start", "schema": 1,
+                                    "t_ns": timestamp().to_string(), "pid": std::process::id(),
+                                    "capacity": CAPACITY,
+                                    "event_inline_bytes": std::mem::size_of::<Event>(),
+                                    "queue_inline_bytes": CAPACITY * std::mem::size_of::<Event>(),
+                                    "pty_read_fields": [
+                                        "kind", "pid", "t_ns", "session", "generation",
+                                        "bytes", "produced", "dropped",
+                                    ],
+                                })
+                            )?;
+                            out.flush()?;
+                            loop {
+                                let flush = match rx.recv_timeout(FLUSH_EVERY) {
+                                    Ok(event) => {
+                                        let flush = event.kind == "socket_end";
+                                        write_event(&mut out, event, &writer_dropped)?;
+                                        written += 1;
+                                        flush
+                                    }
+                                    Err(RecvTimeoutError::Timeout) => true,
+                                    Err(RecvTimeoutError::Disconnected) => {
+                                        out.flush()?;
+                                        return Ok(());
+                                    }
+                                };
+                                if flush || flushed_at.elapsed() >= FLUSH_EVERY {
+                                    writeln!(
+                                        out,
+                                        "{}",
+                                        serde_json::json!({
+                                            "kind": "logger_flush", "t_ns": timestamp().to_string(),
+                                            "pid": std::process::id(),
+                                            "written": written,
+                                            "dropped": writer_dropped.load(Ordering::Relaxed),
+                                        })
+                                    )?;
+                                    out.flush()?;
+                                    flushed_at = Instant::now();
+                                }
+                            }
+                        })();
+                        if let Err(error) = result {
+                            eprintln!("terminal measurement writer failed: {error}");
+                        }
+                    });
+                if let Err(error) = spawned {
+                    eprintln!("terminal measurement writer unavailable: {error}");
+                    return None;
+                }
+                Some(Logger {
+                    tx,
+                    dropped,
+                    pid: std::process::id(),
+                })
+            })
+            .as_ref()
+    }
+
+    /// One reader or socket's counters. File I/O runs on a bounded writer queue.
+    pub struct Trace {
+        logger: Logger,
+        session: Arc<str>,
+        generation: u64,
+        socket: u64,
+        produced: u64,
+        sent: u64,
+        live_sent: u64,
+        replay_sent: u64,
+        sends: u64,
+        send_id: u64,
+    }
+
+    impl Trace {
+        /// Start tracing one reader or socket; absent env means no tracing.
+        pub fn new(session: &str, generation: u64, socket: bool) -> Option<Self> {
+            Some(Self::with_logger(
+                logger()?.clone(),
+                session,
+                generation,
+                socket,
+            ))
+        }
+
+        fn with_logger(logger: Logger, session: &str, generation: u64, socket: bool) -> Self {
+            Self {
+                logger,
+                session: Arc::from(session),
+                generation,
+                socket: if socket {
+                    SOCKET_IDS.fetch_add(1, Ordering::Relaxed)
+                } else {
+                    0
+                },
+                produced: 0,
+                sent: 0,
+                live_sent: 0,
+                replay_sent: 0,
+                sends: 0,
+                send_id: 0,
+            }
+        }
+
+        fn emit(&self, kind: &'static str, bytes: u64, source: &'static str, extra: Extra) {
+            let event = Event {
+                kind,
+                pid: self.logger.pid,
+                t_ns: timestamp(),
+                session: Arc::clone(&self.session),
+                generation: self.generation,
+                socket: self.socket,
+                bytes,
+                produced: self.produced,
+                sent: self.sent,
+                live_sent: self.live_sent,
+                replay_sent: self.replay_sent,
+                sends: self.sends,
+                send_id: self.send_id,
+                lagged: extra.lagged,
+                seq: extra.seq,
+                source,
+                elapsed_ns: extra.elapsed_ns,
+                dropped: 0,
+            };
+            if self.logger.tx.try_send(event).is_err() {
+                self.logger.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        /// Record raw PTY bytes before the tmux gate and ring publication.
+        pub fn read(&mut self, bytes: usize, produced: u64) {
+            self.produced = produced;
+            self.emit("pty_read", bytes as u64, "pty", Extra::default());
+        }
+
+        /// Record an attachment's replay cursor and production snapshot.
+        pub fn attach(&mut self, generation: u64, seq: u64, produced: u64) {
+            self.generation = generation;
+            self.produced = produced;
+            self.emit(
+                "socket_attach",
+                0,
+                "socket",
+                Extra {
+                    seq: Some(seq),
+                    ..Extra::default()
+                },
+            );
+        }
+
+        /// Mark a payload send attempt immediately before awaiting the socket.
+        pub fn send_start(&mut self, bytes: usize, source: &'static str, produced: u64) {
+            self.produced = produced;
+            self.send_id += 1;
+            self.emit("send_start", bytes as u64, source, Extra::default());
+        }
+
+        /// Record only completed sends in the cumulative counters.
+        pub fn send_end(
+            &mut self,
+            bytes: usize,
+            source: &'static str,
+            produced: u64,
+            elapsed: Duration,
+            ok: bool,
+        ) {
+            self.produced = produced;
+            if ok {
+                self.sent += bytes as u64;
+                self.sends += 1;
+                match source {
+                    "live" => self.live_sent += bytes as u64,
+                    "replay" => self.replay_sent += bytes as u64,
+                    _ => {}
+                }
+            }
+            self.emit(
+                if ok { "send_done" } else { "send_failed" },
+                bytes as u64,
+                source,
+                Extra {
+                    elapsed_ns: elapsed.as_nanos(),
+                    ..Extra::default()
+                },
+            );
+        }
+
+        /// Record missed broadcast events against current production and ring position.
+        pub fn lagged(&mut self, events: u64, produced: u64, seq: u64) {
+            self.produced = produced;
+            self.emit(
+                "lagged",
+                0,
+                "socket",
+                Extra {
+                    lagged: events,
+                    seq: Some(seq),
+                    ..Extra::default()
+                },
+            );
+        }
+    }
+
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            self.emit(
+                if self.socket == 0 {
+                    "pty_end"
+                } else {
+                    "socket_end"
+                },
+                0,
+                "end",
+                Extra::default(),
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct Extra {
+        lagged: u64,
+        seq: Option<u64>,
+        elapsed_ns: u128,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn trace(capacity: usize, socket: bool) -> (Trace, mpsc::Receiver<Event>, Arc<AtomicU64>) {
+            let (tx, rx) = mpsc::sync_channel(capacity);
+            let dropped = Arc::new(AtomicU64::new(0));
+            let logger = Logger {
+                tx,
+                dropped: Arc::clone(&dropped),
+                pid: std::process::id(),
+            };
+            (
+                Trace::with_logger(logger, "measured-session", 7, socket),
+                rx,
+                dropped,
+            )
+        }
+
+        #[test]
+        fn sends_count_successful_payloads_and_preserve_lag_positions() {
+            let (mut trace, rx, dropped) = trace(32, true);
+            trace.attach(7, 100, 100);
+            for (bytes, source, ok) in [
+                (12, "replay", true),
+                (5, "live", true),
+                (4, "control", true),
+                (7, "live", false),
+            ] {
+                trace.send_start(bytes, source, 120);
+                trace.send_end(bytes, source, 130, Duration::from_nanos(11), ok);
+            }
+            trace.lagged(9, 150, 155);
+            drop(trace);
+            let mut bytes = Vec::new();
+            for event in rx {
+                write_event(&mut bytes, event, &dropped).expect("write measurement");
+            }
+            let records: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let failed = records
+                .iter()
+                .find(|record| record["kind"] == "send_failed")
+                .unwrap();
+            assert_eq!(failed["send_id"], 4);
+            assert_eq!(failed["sends"], 3);
+            assert_eq!(failed["sent"], 21);
+            assert_eq!(failed["live_sent"], 5);
+            assert_eq!(failed["replay_sent"], 12);
+            assert_eq!(failed["elapsed_ns"], "11");
+            let lagged = records
+                .iter()
+                .find(|record| record["kind"] == "lagged")
+                .unwrap();
+            assert_eq!(lagged["lagged"], 9);
+            assert_eq!(lagged["produced"], 150);
+            assert_eq!(lagged["seq"], 155);
+            assert!(lagged["t_ns"].as_str().unwrap().parse::<u128>().unwrap() > 0);
+            assert_eq!(records.last().unwrap()["kind"], "socket_end");
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn pty_reads_keep_captured_observations_in_compact_records() {
+            // Captured from a PTY reader during a paused-page flood.
+            let original: serde_json::Value = serde_json::from_str(
+                r#"{"kind":"pty_read","pid":39705,"t_ns":"1794669747094970982","session":"5159d71a8e0edc6039e6f866538ac14f","generation":0,"socket":0,"bytes":945,"produced":1029,"sent":0,"live_sent":0,"replay_sent":0,"sends":0,"send_id":0,"lagged":0,"seq":null,"source":"pty","elapsed_ns":"0","dropped":0}"#,
+            )
+            .unwrap();
+            let (mut trace, rx, dropped) = trace(2, false);
+            trace.logger.pid = original["pid"].as_u64().unwrap() as u32;
+            trace.session = Arc::from(original["session"].as_str().unwrap());
+            trace.generation = original["generation"].as_u64().unwrap();
+            trace.read(
+                original["bytes"].as_u64().unwrap() as usize,
+                original["produced"].as_u64().unwrap(),
+            );
+            let mut event = rx.recv().unwrap();
+            event.t_ns = original["t_ns"].as_str().unwrap().parse().unwrap();
+            assert_eq!(serde_json::to_value(&event).unwrap(), original);
+
+            let mut expected = serde_json::Map::new();
+            for name in [
+                "kind",
+                "pid",
+                "t_ns",
+                "session",
+                "generation",
+                "bytes",
+                "produced",
+            ] {
+                expected.insert(name.into(), original[name].clone());
+            }
+            // Drops are sampled by the writer, after the read was queued.
+            dropped.store(7, Ordering::Relaxed);
+            expected.insert("dropped".into(), serde_json::json!(7));
+            let mut bytes = Vec::new();
+            write_event(&mut bytes, event, &dropped).unwrap();
+            assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::Value::Object(expected)
+            );
+        }
+
+        #[test]
+        fn queue_overflow_is_recorded_in_serialized_events() {
+            let (mut trace, rx, dropped) = trace(1, false);
+            trace.read(4, 4);
+            trace.read(8, 12);
+            drop(trace);
+            let mut bytes = Vec::new();
+            write_event(&mut bytes, rx.recv().unwrap(), &dropped).unwrap();
+            let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(record["kind"], "pty_read");
+            assert_eq!(record["bytes"], 4);
+            assert_eq!(record["produced"], 4);
+            assert_eq!(record["dropped"], 2);
+        }
+
+        #[test]
+        fn output_failure_is_returned_to_the_writer() {
+            let (mut trace, rx, dropped) = trace(2, false);
+            trace.read(4, 4);
+            let mut full = &mut [][..];
+            let error = write_event(&mut full, rx.recv().unwrap(), &dropped).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        }
+    }
+}
+
 /// The most one PTY read takes. Each read is one ring push and, while the
 /// ring is mirrored into its file, one append there, two to four `pwrite`
 /// calls whatever its size, so fewer, larger reads cost fewer calls. How
@@ -1756,6 +2244,26 @@ impl AttachHandle {
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Raw bytes read from this incarnation's PTY while measurement is enabled.
+    pub fn measurement_produced(&self) -> u64 {
+        self.session.measurement_produced.load(Ordering::Relaxed)
+    }
+
+    /// Read counter retained by a measured socket independently of its receiver.
+    pub fn measurement_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.session.measurement_produced)
+    }
+
+    /// Current published cursor for a lag measurement.
+    pub fn measurement_seq(&self) -> u64 {
+        self.session
+            .output
+            .lock()
+            .expect("terminal output poisoned")
+            .ring
+            .end_seq()
     }
 
     /// Opt this WebSocket into sent-byte pacing. Recapture the original replay
@@ -5039,6 +5547,7 @@ struct Session {
     master_fd: Option<OwnedFd>,
     command_tx: CommandSink,
     output_tx: broadcast::Sender<SessionEvent>,
+    measurement_produced: Arc<AtomicU64>,
     lifecycle_tx: watch::Sender<Option<SessionLifecycle>>,
     pacing: Arc<Pacing>,
     output: Mutex<SessionOutput>,
@@ -5418,6 +5927,7 @@ impl Session {
             child_start_time,
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            measurement_produced: Arc::new(AtomicU64::new(0)),
             lifecycle_tx: watch::channel(None).0,
             pacing: Pacing::new(config.terminal.ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(
@@ -5857,6 +6367,7 @@ impl Session {
             master_fd: Some(master_fd),
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            measurement_produced: Arc::new(AtomicU64::new(0)),
             lifecycle_tx: watch::channel(None).0,
             pacing: Pacing::new(config.terminal.ring_bytes, output.ring.end_seq()),
             output: Mutex::new(output),
@@ -6036,6 +6547,7 @@ impl Session {
         #[cfg(target_os = "linux")]
         let mut wait = ReaderWait::default();
         let mut buf = vec![0u8; PTY_READ_BYTES];
+        let mut measure = measurement::Trace::new(&self.id, self.generation, false);
         let ended = loop {
             #[cfg(target_os = "linux")]
             if !self.reader_may_read(&mut wait) {
@@ -6060,6 +6572,13 @@ impl Session {
             match reader.read(&mut buf[..credit]) {
                 Ok(0) => break imported,
                 Ok(n) => {
+                    if let Some(measure) = &mut measure {
+                        let produced = self
+                            .measurement_produced
+                            .fetch_add(n as u64, Ordering::Relaxed)
+                            + n as u64;
+                        measure.read(n, produced);
+                    }
                     #[cfg(any(test, feature = "test-util"))]
                     fire_attach_seam(&self.id, AttachSeam::ReaderBeforeRecord);
                     self.record_output(&buf[..n]);
@@ -6730,6 +7249,7 @@ impl Session {
                 tx: sink,
             },
             output_tx,
+            measurement_produced: Arc::new(AtomicU64::new(0)),
             lifecycle_tx: watch::channel(None).0,
             pacing: Pacing::new(config.terminal.ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(
@@ -8806,6 +9326,7 @@ mod tests {
             master_fd: None,
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
+            measurement_produced: Arc::new(AtomicU64::new(0)),
             lifecycle_tx: watch::channel(None).0,
             pacing: Pacing::new(ring_bytes, 0),
             output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes), true)),

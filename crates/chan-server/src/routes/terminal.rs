@@ -1287,6 +1287,7 @@ async fn terminal_ws(
         opts.declared_size,
         opts.size_if_unset,
     );
+    socket.attach_measured(&session);
     if socket.input.size_conditional {
         if let Some(size) = socket.input.size {
             session.fit_if_unsized(size);
@@ -1357,6 +1358,7 @@ async fn terminal_ws(
             };
             drop(progress);
             session = next;
+            socket.attach_measured(&session);
             // The subscription precedes this barrier: replies accepted before
             // the snapshot arrive before its queue reproof; newer requests are
             // represented on the new receiver.
@@ -1365,7 +1367,7 @@ async fn terminal_ws(
             }
             if restarting {
                 if socket
-                    .send(&session, Message::binary(RESET_TERMINAL))
+                    .send(&session, Message::binary(RESET_TERMINAL), "control")
                     .await
                     .is_err()
                 {
@@ -1469,7 +1471,7 @@ async fn terminal_ws(
                         match event {
                             SessionEvent::Output(data) => {
                                 let bytes = data.len();
-                                if socket.send(&session, Message::binary(data)).await.is_err() { break; }
+                                if socket.send(&session, Message::binary(data), "live").await.is_err() { break; }
                                 progress.sent_output(bytes);
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
@@ -1503,7 +1505,10 @@ async fn terminal_ws(
                         }
                         progress.sent_event();
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => recover = true,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(events)) => {
+                        socket.measure_lagged(events, &session);
+                        recover = true
+                    },
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -1578,7 +1583,7 @@ async fn send_attach_prelude(
     };
     for chunk in &session.replay {
         if socket
-            .send(session, Message::binary(chunk.clone()))
+            .send(session, Message::binary(chunk.clone()), "replay")
             .await
             .is_err()
         {
@@ -1591,7 +1596,7 @@ async fn send_attach_prelude(
     if !recovering
         && session.alt_screen
         && socket
-            .send(session, Message::binary(ALT_SCREEN_ATTACH_PRELUDE))
+            .send(session, Message::binary(ALT_SCREEN_ATTACH_PRELUDE), "replay")
             .await
             .is_err()
     {
@@ -1602,7 +1607,7 @@ async fn send_attach_prelude(
     // were lost and reconciles the alternate screen without a full reset.
     if !session.mode_reassert.is_empty()
         && socket
-            .send(session, Message::binary(session.mode_reassert.clone()))
+            .send(session, Message::binary(session.mode_reassert.clone()), "replay")
             .await
             .is_err()
     {

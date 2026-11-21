@@ -7,6 +7,11 @@ use futures::{SinkExt, StreamExt};
 
 use super::*;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use chan_library::terminal_sessions::measurement;
+
 const MAX_PENDING_REPLIES: usize = 32;
 // A complete queue preview can contain 100 bodies of 4096 bytes, plus JSON
 // escaping and prompt identities. Keep room for that ordinary response.
@@ -27,6 +32,12 @@ pub(super) struct TerminalSocket {
     pub(super) stream: SplitStream<WebSocket>,
     pub(super) input: InputState,
     state: Arc<AppState>,
+    measure: Option<MeasuredTrace>,
+}
+
+struct MeasuredTrace {
+    trace: measurement::Trace,
+    produced: Option<Arc<AtomicU64>>,
 }
 
 pub(super) struct InputState {
@@ -63,6 +74,7 @@ impl TerminalSocket {
                 cwd: None,
             },
             state,
+            measure: None,
         }
     }
 
@@ -70,6 +82,7 @@ impl TerminalSocket {
         &mut self,
         session: &AttachHandle,
         message: Message,
+        source: &'static str,
     ) -> Result<(), ()> {
         #[cfg(all(test, unix))]
         let (binary_bytes, text_bytes) = match &message {
@@ -77,13 +90,26 @@ impl TerminalSocket {
             Message::Text(text) => (0, text.len()),
             _ => (0, 0),
         };
+        let bytes = match &message {
+            Message::Text(text) => text.len(),
+            Message::Binary(data) | Message::Ping(data) | Message::Pong(data) => data.len(),
+            Message::Close(frame) => frame.as_ref().map_or(0, |frame| 2 + frame.reason.len()),
+        };
+        let started = std::time::Instant::now();
+        if let Some(measured) = &mut self.measure {
+            let produced = measured
+                .produced
+                .as_ref()
+                .map_or(0, |count| count.load(Ordering::Relaxed));
+            measured.trace.send_start(bytes, source, produced);
+        }
         let send = self.sink.send(message);
         tokio::pin!(send);
         let mut shutdown = self.state.shutdown_rx.clone();
-        loop {
+        let result = loop {
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => return Err(()),
+                _ = shutdown.changed() => break Err(()),
                 result = std::future::poll_fn(|cx| {
                     let result = std::future::Future::poll(send.as_mut(), cx);
                     #[cfg(all(test, unix))]
@@ -94,12 +120,54 @@ impl TerminalSocket {
                         }
                     }
                     result
-                }) => return result.map_err(|_| ()),
-                result = self.input.next_cwd() => self.input.complete_cwd(result)?,
+                }) => break result.map_err(|_| ()),
+                result = self.input.next_cwd() => {
+                    if self.input.complete_cwd(result).is_err() {
+                        break Err(());
+                    }
+                }
                 message = self.stream.next() => {
-                    self.input.receive(&self.state, session, message)?;
+                    if self.input.receive(&self.state, session, message).is_err() {
+                        break Err(());
+                    }
                 }
             }
+        };
+        if let Some(measured) = &mut self.measure {
+            let produced = measured
+                .produced
+                .as_ref()
+                .map_or(0, |count| count.load(Ordering::Relaxed));
+            measured.trace.send_end(bytes, source, produced, started.elapsed(), result.is_ok());
+        }
+        result
+    }
+
+    pub(super) fn attach_measured(&mut self, session: &AttachHandle) {
+        if self.measure.is_none() {
+            if let Some(trace) = measurement::Trace::new(session.id(), session.generation, true) {
+                let produced = session.measurement_counter();
+                let mut trace = trace;
+                trace.attach(session.generation, session.seq, session.measurement_produced());
+                self.measure = Some(MeasuredTrace {
+                    trace,
+                    produced: Some(produced),
+                });
+            }
+        } else if let Some(measured) = &mut self.measure {
+            measured.produced = Some(session.measurement_counter());
+            measured.trace.attach(session.generation, session.seq, session.measurement_produced());
+        }
+    }
+
+    /// Record missed broadcast events against current production and ring position.
+    pub(super) fn measure_lagged(&mut self, events: u64, session: &AttachHandle) {
+        if let Some(measured) = &mut self.measure {
+            measured.trace.lagged(
+                events,
+                session.measurement_produced(),
+                session.measurement_seq(),
+            );
         }
     }
 
@@ -108,7 +176,7 @@ impl TerminalSocket {
         session: &AttachHandle,
         frame: ServerFrame,
     ) -> Result<(), ()> {
-        self.send(session, frame_message(frame)).await
+        self.send(session, frame_message(frame), "control").await
     }
 
     pub(super) fn receive(
@@ -153,7 +221,7 @@ impl TerminalSocket {
                 break;
             };
             self.input.reply_bytes -= bytes;
-            self.send(session, message).await?;
+            self.send(session, message, "control").await?;
         }
         Ok(())
     }
