@@ -1,0 +1,161 @@
+// What a page's terminal socket carried, read from inside the page: bytes and
+// frames handed to the app, the session frames, error lines, acknowledgements
+// and the raw stream cursor the app should hold. It keeps counters, never
+// payloads, so a flood costs the page little.
+
+/// Runs in the page, before the app opens the socket it observes.
+export function installStreamProbe() {
+  if (globalThis.__streamProbe) return;
+  const Native = globalThis.WebSocket;
+  const setHandler = Object.getOwnPropertyDescriptor(Native.prototype, "onmessage").set;
+  const sockets = [];
+  const view = (entry) => ({
+    name: entry.name, askedAck: entry.askedAck, handled: entry.handled, frames: entry.frames,
+    acks: entry.acks, lastAck: entry.lastAck, sessions: entry.sessions, errors: entry.errors,
+    cursor: entry.cursor, ready: entry.ready, stalls: entry.stalls, verifier: entry.verifier?.state ?? null,
+  });
+  globalThis.WebSocket = class extends Native {
+    constructor(url, protocols) {
+      super(url, protocols);
+      const parsed = new URL(url, location.href);
+      if (!parsed.pathname.endsWith("/api/terminal/ws")) return;
+      const entry = {
+        peer: this, name: parsed.searchParams.get("tab_name"), askedAck: parsed.searchParams.get("ack"),
+        handled: 0, frames: 0, acks: 0, lastAck: null, sessions: [], errors: [], cursor: null, ready: false,
+        stalls: [], verifier: null,
+      };
+      sockets.push(entry);
+      const send = this.send.bind(this);
+      this.send = (data) => {
+        if (typeof data === "string" && data.startsWith('{"type":"ack"')) {
+          entry.acks += 1;
+          entry.lastAck = JSON.parse(data).seq;
+        }
+        return send(data);
+      };
+      let handler;
+      Object.defineProperty(this, "onmessage", {
+        configurable: true,
+        get: () => handler,
+        set: (value) => {
+          handler = value;
+          setHandler.call(this, typeof value !== "function" ? value : (event) => {
+            if (event.data instanceof ArrayBuffer) {
+              entry.handled += event.data.byteLength;
+              entry.frames += 1;
+              if (entry.ready) entry.cursor += event.data.byteLength;
+              entry.verifier?.push(new Uint8Array(event.data));
+            } else if (typeof event.data === "string") {
+              let frame = null;
+              try { frame = JSON.parse(event.data); } catch { /* not a control frame */ }
+              if (frame?.type === "session") {
+                entry.cursor = frame.seq;
+                entry.ready = false;
+                entry.sessions.push({
+                  id: frame.id, seq: frame.seq, missed: frame.missed_bytes ?? 0, replay: frame.replay_bytes ?? 0,
+                  window: frame.ack_window ?? null, handledBefore: entry.handled,
+                });
+              } else if (frame?.type === "ready") entry.ready = true;
+              else if (frame?.type === "error") entry.errors.push(String(frame.message ?? frame.reason));
+            }
+            return value.call(this, event);
+          });
+        },
+      });
+    }
+  };
+  const find = (name) => sockets.findLast((entry) => entry.name === name);
+  globalThis.__streamProbe = {
+    read: (name) => { const entry = find(name); return entry ? view(entry) : null; },
+    input: (name, data) => find(name).peer.send(JSON.stringify({ type: "input", data })),
+    /// Check the numbered stream `seq 1 count` prints between two markers.
+    verifySeq(name, begin, count, end) {
+      const encoder = new TextEncoder();
+      const state = { phase: "before", next: 1, lines: 0, mismatch: null, done: false };
+      const head = encoder.encode(`${begin}\r\n`);
+      const tail = encoder.encode(end);
+      let want = head, at = 0;
+      const line = () => encoder.encode(`${state.next}\r\n`);
+      find(name).verifier = {
+        state,
+        push(bytes) {
+          for (let index = 0; index < bytes.length && !state.done && !state.mismatch; index += 1) {
+            const byte = bytes[index];
+            if (byte === want[at]) {
+              at += 1;
+              if (at < want.length) continue;
+              at = 0;
+              if (state.phase === "before") {
+                state.phase = "lines";
+                want = line();
+              } else if (state.phase === "lines") {
+                state.lines += 1;
+                state.next += 1;
+                if (state.next > count) { state.phase = "end"; want = tail; } else want = line();
+              } else state.done = true;
+            } else if (state.phase === "before") {
+              at = byte === want[0] ? 1 : 0;
+            } else {
+              state.mismatch = { afterLine: state.lines, wanted: state.next, byte, offsetInLine: at };
+            }
+          }
+        },
+      };
+    },
+    /// Stop the page's main thread for `ms`, recording what it had handled.
+    stall(name, ms) {
+      const entry = find(name);
+      setTimeout(() => {
+        const record = { at: Date.now(), handled: entry.handled, sessions: entry.sessions.length };
+        entry.stalls.push(record);
+        const end = Date.now() + ms;
+        while (Date.now() < end) { /* the stall */ }
+        record.ended = Date.now();
+      }, 0);
+    },
+  };
+}
+
+/// Every ghostty-web Terminal the page opens from now on, kept in the page.
+export async function trackGhosttyTerminals(page) {
+  return page.evaluate(async () => {
+    for (const script of document.querySelectorAll('script[type="module"][src]')) {
+      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
+      if (!name) continue;
+      const { Terminal } = await import(new URL(name, script.src).href);
+      const open = Terminal.prototype.open;
+      globalThis.__ghosttyTerminals = [];
+      Terminal.prototype.open = function (...args) {
+        globalThis.__ghosttyTerminals.push(this);
+        return open.apply(this, args);
+      };
+      return true;
+    }
+    return false;
+  });
+}
+
+/// The whole text the newest Ghostty terminal retains, history and screen.
+export function readGhosttyText(page) {
+  return page.evaluate(() => {
+    const term = globalThis.__ghosttyTerminals.at(-1);
+    const history = term.getScrollbackLength();
+    const text = term.wasmTerm.plainText({
+      startRow: 0, startCol: 0, endRow: history + term.rows - 1, endCol: term.cols - 1,
+    }) ?? "";
+    return { history, rows: term.rows, text };
+  });
+}
+
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function until(label, read, accept, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  do {
+    last = await read();
+    if (accept(last)) return last;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error(`${label}: ${JSON.stringify(last)?.slice(0, 1200)}`);
+}
