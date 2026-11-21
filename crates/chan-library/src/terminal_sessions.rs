@@ -9572,6 +9572,19 @@ mod tests {
     }
 
     #[test]
+    fn restored_ring_keeps_its_whole_capacity_from_a_longer_tail() {
+        let cap = PTY_READ_BYTES + 10;
+        let replay: Vec<u8> = (0..2 * PTY_READ_BYTES).map(|i| (i % 251) as u8).collect();
+        let end = replay.len() as u64;
+
+        let ring = RingBuffer::new_with_replay(cap, end, &replay);
+
+        let (tail, missed) = ring.snapshot_since(Some(0));
+        assert_eq!(missed, end - cap as u64);
+        assert_eq!(tail.concat(), replay[replay.len() - cap..]);
+    }
+
+    #[test]
     fn restored_ring_without_replay_reports_pre_import_bytes_as_missed() {
         let ring = RingBuffer::new_with_replay(1024, 552, b"");
 
