@@ -630,16 +630,18 @@
 
   // Whether the press now ending began with a finger.
   let touchGesture = false;
-  let lastTapAt = -Infinity;
+  let folderEnteredAt = -Infinity;
   const DOUBLE_TAP_MS = 400;
 
-  // The second tap of a double tap lands on whatever row the first one's
-  // folder put under the finger, so a tap that soon after another opens
-  // nothing.
+  // Entering a folder puts a new row under the finger, so the second tap of
+  // a double tap on the folder opens nothing.
   function openFromTap(ev: MouseEvent, opens?: () => void): void {
-    const repeat = ev.timeStamp - lastTapAt < DOUBLE_TAP_MS;
-    lastTapAt = ev.timeStamp;
-    if (!repeat) opens?.();
+    if (ev.timeStamp - folderEnteredAt >= DOUBLE_TAP_MS) opens?.();
+  }
+
+  function enterFolderFromTap(path: string, ev: MouseEvent): void {
+    folderEnteredAt = ev.timeStamp;
+    onNavigate?.(path);
   }
 
   // A browser can make a double click of two taps. Where a tap opens its row
@@ -1438,7 +1440,7 @@
         style={rightDock
           ? `padding-right: ${depth * 12}px`
           : `padding-left: ${depth * 12}px`}
-        onclick={(e) => selectPath(node.path, e, () => { if (view === "list") onNavigate?.(node.path); else toggle(node.path); })}
+        onclick={(e) => selectPath(node.path, e, () => { if (view === "list") enterFolderFromTap(node.path, e); else toggle(node.path); })}
         ondblclick={() => openOnDoubleClick(() => { if (view === "list") onNavigate?.(node.path); })}
         oncontextmenu={(e) => showMenu(e, node.path, true)}
         role={view === "list" ? "option" : "treeitem"}
@@ -1498,7 +1500,7 @@
           class="name"
           onclick={(e) => {
             if (view === "tree" && !(e.shiftKey || e.metaKey || e.ctrlKey || selectionMode)) toggle(node.path);
-            selectPath(node.path, e, () => { if (view === "list") onNavigate?.(node.path); });
+            selectPath(node.path, e, () => { if (view === "list") enterFolderFromTap(node.path, e); });
           }}
           onkeydown={() => {}}
           role="button"
@@ -1718,7 +1720,9 @@
   .row-menu { display: none; }
   @media (hover: none) and (pointer: coarse) {
     .tree { --row-menu-column: 44px; }
-    .tree .row { min-height: 44px; }
+    /* WKWebView fires `click` on a non-button only with a pointer cursor,
+       and the row's background is most of its 44px. */
+    .tree .row { min-height: 44px; cursor: pointer; }
     .row-menu {
       display: inline-flex;
       flex: none;
@@ -1988,12 +1992,18 @@
     display: flex;
     flex-direction: column;
     min-width: 180px;
+    /* A phone in landscape is shorter than the menu, which scrolls there. */
+    max-height: calc(100vh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+    overflow-y: auto;
     /* easeOutBack bubble-pop matching the rest of the chrome
        (HamburgerMenu, tab-menu bubbles). */
     transform-origin: top left;
     animation: ctx-pop 260ms var(--ease-pop);
     transition: transform 200ms var(--ease-pop);
   }
+  .ctx > * { flex: none; }
   .ctx:hover {
     transform: scale(1.015);
   }

@@ -1,11 +1,9 @@
 // @vitest-environment jsdom
 //
-// While Details is closed, a tap from a touch screen opens the Files row it
-// lands on: a file opens in an editor tab, a folder is entered. A touch screen
-// has no double click, and with no Details a tap that only selected would show
-// nothing. With Details open a tap selects and the panel shows the row. A mouse
-// click still only selects, and a tap with a modifier still only adds to the
-// selection.
+// The tap rules a real touch session cannot pin: a press on a row outside its
+// name, the exact spacing of the taps after a folder is entered, the double
+// click a browser can make of two taps, and a modifier on a touch press. The
+// browser check `320-files-touch` drives the rest with real touch input.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -17,7 +15,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
-import { browserSelection } from "../state/store.svelte";
 import { layout, openBrowserInActivePane, type LeafNode } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -75,30 +72,12 @@ async function press(
 }
 
 describe("a tap on a Files row", () => {
-  test("opens a file in an editor tab", async () => {
-    await press(row("a.md")!.querySelector<HTMLElement>(".name")!, "touch");
-    await vi.waitFor(() => expect(openFileTabs()).toEqual(["a.md"]));
-  });
-
-  test("on the row outside its name opens it too", async () => {
+  test("on the row outside its name opens it", async () => {
     await press(row("b.md")!, "touch");
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["b.md"]));
   });
 
-  test("enters a folder", async () => {
-    expect(row("x.md")).toBeUndefined();
-    await press(row("docs")!.querySelector<HTMLElement>(".name")!, "touch");
-    await vi.waitFor(() => expect(row("x.md")).toBeDefined());
-  });
-
-  test("with Details open only selects", async () => {
-    await showDetails(true);
-    await press(row("a.md")!.querySelector<HTMLElement>(".name")!, "touch");
-    expect(browserSelection.path).toBe("a.md");
-    expect(openFileTabs()).toEqual([]);
-  });
-
-  test("the second of a double tap opens nothing under the finger", async () => {
+  test("right after entering a folder opens nothing, and a later one opens", async () => {
     await press(row("docs")!.querySelector<HTMLElement>(".name")!, "touch", {}, 1000);
     await vi.waitFor(() => expect(row("x.md")).toBeDefined());
     const name = row("x.md")!.querySelector<HTMLElement>(".name")!;
@@ -106,7 +85,7 @@ describe("a tap on a Files row", () => {
     name.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
     await settle();
     expect(openFileTabs()).toEqual([]);
-    await press(name, "touch", {}, 1799);
+    await press(name, "touch", {}, 1400);
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["docs/x.md"]));
   });
 
@@ -116,12 +95,6 @@ describe("a tap on a Files row", () => {
     await press(name, "touch");
     name.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["a.md"]));
-  });
-
-  test("from a mouse only selects", async () => {
-    await press(row("a.md")!.querySelector<HTMLElement>(".name")!, "mouse");
-    expect(browserSelection.path).toBe("a.md");
-    expect(openFileTabs()).toEqual([]);
   });
 
   test("with a modifier only adds to the selection", async () => {
