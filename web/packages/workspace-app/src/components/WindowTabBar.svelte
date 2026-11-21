@@ -474,9 +474,9 @@
      the pane tree and below every menu and overlay. */
   .window-tab-bar {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
+    top: env(safe-area-inset-top, 0px);
+    left: env(safe-area-inset-left, 0px);
+    right: env(safe-area-inset-right, 0px);
     z-index: 40;
     box-sizing: border-box;
     display: flex;

@@ -238,8 +238,8 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-    max-width: calc(100vw - 16px);
-    max-height: calc(100vh - 24px);
+    max-width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
+    max-height: calc(100vh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     overflow-y: auto;
     font-size: 13px;
     color: var(--text);

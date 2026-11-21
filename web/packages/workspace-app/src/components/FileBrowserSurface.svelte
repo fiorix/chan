@@ -439,7 +439,7 @@
         </div>
       {/if}
       <div class="tree-wrap" bind:this={treeWrapEl} onscroll={onScroll}>
-        <FileTree bind:this={treeRef} {instanceId} view={isTab ? "list" : "tree"} {directory} {filter} {sort} {descending} showHidden={viewState.showHidden} bind:selectionMode={() => viewState.selectionMode, (on) => setBrowserView(instanceId, { selectionMode: on })} dockSide={isTab ? undefined : side} onFlip={isTab ? onFlip : undefined} onNavigate={navigate} onPreview={isTab ? toggleDetails : openCurrentInFileBrowser} onFind={openFind} onCount={(count) => (itemCount = count)} />
+        <FileTree bind:this={treeRef} {instanceId} view={isTab ? "list" : "tree"} {directory} {filter} {sort} {descending} showHidden={viewState.showHidden} bind:selectionMode={() => viewState.selectionMode, (on) => setBrowserView(instanceId, { selectionMode: on })} dockSide={isTab ? undefined : side} tapOpens={!isTab || !browserState.inspectorOpen} onFlip={isTab ? onFlip : undefined} onNavigate={navigate} onPreview={isTab ? toggleDetails : openCurrentInFileBrowser} onFind={openFind} onCount={(count) => (itemCount = count)} />
         {#if isTab && tree.dirErrors[directory]}<button class="retry" onclick={() => { clearTreeDirError(directory); void loadTreeDir(directory).catch(() => {}); }}>Retry loading this folder</button>{/if}
       </div>
     </div>

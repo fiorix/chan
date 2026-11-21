@@ -31,12 +31,12 @@
 <style>
   .request-corner {
     position: fixed;
-    top: 5.5rem;
-    bottom: 2rem;
-    right: calc(var(--right-dock, 0px) + 0.6rem);
+    top: calc(5.5rem + env(safe-area-inset-top, 0px));
+    bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
+    right: calc(var(--right-dock, 0px) + 0.6rem + env(safe-area-inset-right, 0px));
     z-index: 41;
     width: 22rem;
-    max-width: calc(100vw - var(--right-dock, 0px) - 1.2rem);
+    max-width: calc(100vw - var(--right-dock, 0px) - 1.2rem - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
     display: flex;
     flex-direction: column;
     gap: 0.6rem;

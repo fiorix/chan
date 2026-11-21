@@ -196,8 +196,8 @@
        letterboxing. The padding here just guarantees a minimum
        gutter on phones / narrow windows where the width prop
        would otherwise hit 100vw. */
-    padding-left: 16px;
-    padding-right: 16px;
+    padding-left: max(env(safe-area-inset-left, 0px), 16px);
+    padding-right: max(env(safe-area-inset-right, 0px), 16px);
     /* z-index is bound inline from the overlay stack depth so a
        freshly-opened overlay paints above the one underneath. */
     box-sizing: border-box;

@@ -98,6 +98,14 @@
     void tick().then(() => slotEls[activeIndex]?.focus({ preventScroll: true }));
   }
 
+  // A pointer press on a side button selects the card it brings in front, as
+  // a click on a side card or a dot does. Enter or Space (detail 0) leaves
+  // focus on the button, so the keyboard can keep turning from it.
+  function turnBy(delta: number, e: MouseEvent): void {
+    move(delta);
+    if (e.detail > 0) focusFront();
+  }
+
   // Keys typed into these belong to the field: a text caret, a select, a
   // radio group and a range all move on arrows.
   const KEYLESS_INPUTS = new Set(["checkbox", "button", "submit", "reset", "image", "color", "file"]);
@@ -119,12 +127,25 @@
     target.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }
 
-  function navigateRows(e: KeyboardEvent, slot: HTMLElement): boolean {
-    // All windows wraps the shared WindowRow in a list item. The outer row
-    // owns navigation there; the same WindowRow owns it in a machine card.
-    const rows = [...slot.querySelectorAll<HTMLElement>("[data-deck-row]")]
+  // The rows a card's keys walk, in order. All windows wraps the shared
+  // WindowRow in a list item. The outer row owns navigation there; the same
+  // WindowRow owns it in a machine card.
+  function deckRows(slot: HTMLElement): HTMLElement[] {
+    return [...slot.querySelectorAll<HTMLElement>("[data-deck-row]")]
       .filter((row) => !row.parentElement?.closest("[data-deck-row]") && rowControls(row).length > 0);
-    if (!rows.length) return false;
+  }
+
+  // The row a card stands for: Enter and the row letters act on it from the
+  // card. That is the header of a machine or gateway card; All windows has no
+  // header row, so it is the first window.
+  function cardRow(rows: HTMLElement[]): HTMLElement | undefined {
+    return rows[0];
+  }
+
+  function navigateRows(e: KeyboardEvent, slot: HTMLElement): boolean {
+    const rows = deckRows(slot);
+    const fallback = cardRow(rows);
+    if (!fallback) return false;
     const target = e.target;
     const index = rows.findIndex((row) => target instanceof Node && row.contains(target));
     const atCard = target === document.body || target === document.documentElement || target === slot;
@@ -136,7 +157,7 @@
       focusRowTarget(rows[next]);
       return true;
     }
-    const row = rows[index < 0 ? 0 : index];
+    const row = index < 0 ? fallback : rows[index];
     const controls = rowControls(row);
     if (e.key === "Enter") {
       // Buttons and checkboxes retain native activation; Enter on the row
@@ -174,7 +195,9 @@
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
     if (rowKey) {
       if (ownsArrows(target) || !(target instanceof Element) || target.closest("form, [role=dialog]")) return;
-      const row = target.closest<HTMLElement>("[data-deck-row]");
+      // The card is selected while its slot holds focus, which its ring shows.
+      // With focus on the page nothing is selected and a letter does nothing.
+      const row = target === slot ? cardRow(deckRows(slot)) : target.closest<HTMLElement>("[data-deck-row]");
       if (!row || !slot.contains(row)) return;
       const button = rowControls(row).find((control) =>
         control instanceof HTMLButtonElement && control.dataset.deckKey === letter);
@@ -269,7 +292,7 @@
         type="button"
         title="Previous"
         aria-label="Previous card"
-        onclick={() => move(-1)}>
+        onclick={(e) => turnBy(-1, e)}>
         <ChevronLeft size={18} />
       </button>
       <button
@@ -277,7 +300,7 @@
         type="button"
         title="Next"
         aria-label="Next card"
-        onclick={() => move(1)}>
+        onclick={(e) => turnBy(1, e)}>
         <ChevronRight size={18} />
       </button>
     {/if}
@@ -381,12 +404,16 @@
     transform: none;
   }
 
-  .slot.active:focus-visible :global(.card) {
+  .slot.active:focus :global(.card) {
     outline: 2px solid var(--launcher-focus-color, var(--brand));
     outline-offset: 2px;
   }
 
-  .slot :global([data-deck-row]:focus-visible) {
+  /* A letter acts on the row around the focused control, and a control the
+     mouse focused draws no ring of its own, so the innermost row around it
+     draws the selection. A control with its own ring lights no row. */
+  .slot :global([data-deck-row]:focus),
+  .slot :global([data-deck-row]:has(:focus:not(:focus-visible)):not(:has([data-deck-row]:focus-within))) {
     outline: 1px solid var(--launcher-focus-color, var(--brand));
     outline-offset: -1px;
     border-radius: 8px;
