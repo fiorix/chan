@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# A 30 s main-thread stall under a fast stream on the native Linux desktop,
-# under Xvfb: the terminal must keep its socket and parse what WebKitGTK
+# A long main-thread stall under a fast stream on the native Linux desktop,
+# under Xvfb, in a window of the embedded server and in one of a direct
+# devserver: each terminal must keep its socket and parse what WebKitGTK
 # queued, whole and in order. See terminal-stall-native.mjs for the readings.
 #   terminal-stall-native.sh OUTPUT_DIR
 set -euo pipefail
