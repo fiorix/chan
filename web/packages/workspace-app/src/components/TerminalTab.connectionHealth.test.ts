@@ -332,6 +332,21 @@ describe("terminal connection in the tab", () => {
     }
   });
 
+  test("an interrupt key goes at once whatever bytes it encodes to", async () => {
+    const { target, term, first } = await wokenTerminal();
+    term.type("k");
+    expect(framesOfType(first, "input")).toEqual([]);
+    // Under the kitty keyboard protocol Ctrl+C need not be byte 0x03.
+    target.querySelector(".terminal-host")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
+    );
+    term.type("\x1b[99;5u");
+    expect(framesOfType(first, "input").map((frame) => frame.data)).toEqual(["k", "\x1b[99;5u"]);
+    await vi.advanceTimersByTimeAsync(0);
+    term.type("after");
+    expect(framesOfType(first, "input"), "the key press covers its own bytes only").toHaveLength(2);
+  });
+
   test("a terminal of the desktop's embedded server does no wake probe", async () => {
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     onTestFinished(() => {

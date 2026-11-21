@@ -421,8 +421,11 @@ async function slowLinkLeg(page, fixture, relay, name, selector) {
 async function interruptLeg(page, fixture, relay, name, selector, kitty) {
   await queryParsed(fixture, 20_000);
   const b64 = (text) => Buffer.from(text).toString("base64");
+  let kittyFlags = null;
   if (kitty) {
-    await fixture.send("bytes", { base64: b64("\x1b[>1u") });
+    await fixture.send("bytes", { base64: b64("\x1b[>1u\x1b[?u") });
+    await until("the terminal reports the kitty flags", async () => keysOf(fixture), (text) => /\x1b\[\?1u/.test(text), 10_000);
+    kittyFlags = 1;
     await queryParsed(fixture, 20_000);
   }
   await page.click(`${selector} .terminal-host`);
@@ -430,7 +433,9 @@ async function interruptLeg(page, fixture, relay, name, selector, kitty) {
   const socketsBefore = (await read(page, name)).sockets.length;
   const keysBefore = keysOf(fixture).length;
   const typedSince = () => keysOf(fixture).slice(keysBefore).replace(/\x1b\[\d+;\d+R/g, "");
-  const interrupt = kitty ? /\x1b\[99;5(:1)?u/ : /\x03/;
+  // Chan's key path sends Ctrl+C as 0x03 under these flags too; the hold reads
+  // the key press, so either encoding must pass it.
+  const interrupt = kitty ? /\x03|\x1b\[99;5(:1)?u/ : /\x03/;
   flow.pace(PACE_BYTES_PER_SECOND);
   try {
     await page.evaluate((ms) => window.__stall332.startStall(ms), SHORT_STALL_MS);
@@ -456,7 +461,7 @@ async function interruptLeg(page, fixture, relay, name, selector, kitty) {
     const typed = typedSince();
     const seen = await read(page, name);
     const observed = {
-      kitty, heldWhileUnproven, reachedMs, backlogLeft,
+      kitty, kittyFlags, heldWhileUnproven, reachedMs, backlogLeft,
       typed: JSON.stringify(typed), newSockets: seen.sockets.length - socketsBefore,
     };
     assert.ok(heldWhileUnproven, `a key was not held while the socket was unproven: ${JSON.stringify(observed)}`);
