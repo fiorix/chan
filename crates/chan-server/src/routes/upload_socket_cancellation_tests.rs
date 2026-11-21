@@ -266,6 +266,7 @@ async fn complete(socket: &mut TcpStream) {
 enum DeliveryOrder {
     EarlyRead,
     LateRead,
+    LateCrlf,
 }
 
 async fn experiment(buffered: bool, order: DeliveryOrder) {
@@ -335,6 +336,12 @@ async fn experiment(buffered: bool, order: DeliveryOrder) {
             probe.mark("target:ninth_crlf_withheld");
             probe.before("target:pending:9", "target:ninth_crlf_withheld");
             assert!(!probe.has("target:ninth_crlf_written"));
+        } else if matches!(order, DeliveryOrder::LateCrlf) {
+            chunk_data(&mut target, &vec![b'x'; 4096]).await;
+            probe.wait("target:pending:9").await;
+            target.write_all(b"\r\n").await.unwrap();
+            probe.mark("target:ninth_crlf_written");
+            probe.before("target:pending:9", "target:ninth_crlf_written");
         } else {
             chunk(&mut target, &vec![b'x'; 4096]).await;
             probe.mark("target:ninth_crlf_written");
@@ -374,15 +381,16 @@ async fn experiment(buffered: bool, order: DeliveryOrder) {
     } else {
         probe.before("target:body_stream_end", "target:client_aborted");
     }
+    // A chunk's CRLF can reach the socket after the read that took its data,
+    // and the server's next wake consumes it. Bytes it never reads time out.
     let mut peek = [0u8; 1];
-    let eof = tokio::time::timeout(GUARD, observer.peek(&mut peek))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        eof, 0,
-        "observer must prove transport EOF, not unread socket bytes"
-    );
+    tokio::time::timeout(GUARD, async {
+        while observer.peek(&mut peek).await.unwrap() != 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("observer must prove transport EOF, not unread socket bytes");
     probe.mark("target:transport_eof_observed");
     if buffered {
         probe.pulse.notify_one();
@@ -498,6 +506,16 @@ async fn a_buffered_disconnect_after_early_read_is_withdrawn_by_its_carrier() {
     tokio::time::timeout(
         Duration::from_secs(45),
         experiment(true, DeliveryOrder::EarlyRead),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_buffered_disconnect_with_a_late_crlf_is_withdrawn_by_its_carrier() {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        experiment(true, DeliveryOrder::LateCrlf),
     )
     .await
     .unwrap();
