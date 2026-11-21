@@ -21,7 +21,7 @@
   import { openMediaViewer } from "../state/mediaOpen";
   import { windowCaps } from "../state/windowCaps";
   import {
-    browserSelection, ensureFbTreeInstance, fbActivateInstance,
+    appInputBlocked, browserSelection, ensureFbTreeInstance, fbActivateInstance,
     fbTreeInstance, fbSelectSet, fbSelectSingle, clearTreeDirError, loadTreeDir,
     openCommandLauncherFromMenu, openFsGraphForDirectory, openFsGraphForFile, openGraphForContact, openGraphForLanguage,
     paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
@@ -136,7 +136,7 @@
   $effect(() => {
     const id = instanceId;
     const onCommand = (e: Event): void => {
-      if (commandSurfaceId() !== id) return;
+      if (appInputBlocked() || commandSurfaceId() !== id) return;
       const name = (e as CustomEvent).detail?.name;
       if (name === "app.browser.open") run("open");
       else if (name === "app.browser.newFsEntry") run("new");

@@ -732,8 +732,8 @@
   function onChanCommand(e: Event): void {
     if (viewLayout.activePaneId !== pane.id) return;
     // The reopen runs here rather than through App's command gate, so it
-    // keeps the gate's dialog rule itself: nothing acts under an open dialog.
-    if (modalDialogOpen()) return;
+    // keeps the gate's rule itself: nothing acts under a cover or a dialog.
+    if (appInputBlocked() || modalDialogOpen()) return;
     const detail = (e as CustomEvent<{ name?: string }>).detail;
     if (detail?.name !== "app.tab.reopenClosed") return;
     reopenClosedTab();

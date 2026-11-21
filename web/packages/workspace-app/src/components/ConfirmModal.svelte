@@ -7,6 +7,7 @@
   import { mayFocus } from "../state/keyboardOwner.svelte";
   import { appInputBlocked } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
+  import { focusInDialog } from "./modalStack";
 
   let okEl: HTMLButtonElement | undefined = $state();
   let cancelEl: HTMLButtonElement | undefined = $state();
@@ -19,7 +20,7 @@
       const destructive = confirmState.destructive;
       queueMicrotask(() => {
         if (confirmState.open && confirmState.resolve === request) {
-          (destructive ? cancelEl : okEl)?.focus();
+          focusInDialog(destructive ? cancelEl : okEl);
         }
       });
     }

@@ -33,6 +33,7 @@
   import { GRAPH_LINK_PREFIX, parseGraphLink } from "../state/tabs.svelte";
   import type { PathPromptMode } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
+  import { focusInDialog } from "./modalStack";
   import { displayPath, filesContext } from "../state/fileContext.svelte";
 
   let value = $state("");
@@ -50,7 +51,7 @@
       value = pathPromptState.defaultValue;
       highlightIdx = -1;
       void tick().then(() => {
-        inputEl?.focus();
+        focusInDialog(inputEl);
         if (
           pathPromptState.kind === "file" &&
           pathPromptState.mode === "create" &&
