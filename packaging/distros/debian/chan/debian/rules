@@ -2,10 +2,7 @@
 # Offline build from the vendored orig tarball: the in-tree
 # .cargo/config.toml redirects crates-io to vendor/, and CARGO_HOME below
 # keeps cargo state out of the builder's home. The versioned toolchain is
-# preferred when present (Ubuntu ships rust as rustc-1.XX packages);
-# --ignore-rust-version lets the archive toolchain trail the workspace MSRV
-# (rust-toolchain.toml) by a release or two -- drop it, and tighten
-# debian/control, once rustc-1.95 reaches the target series.
+# preferred when present (Ubuntu ships rust as rustc-1.XX packages).
 
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
 export CHAN_PACKAGED = deb
@@ -40,7 +37,7 @@ override_dh_clean:
 override_dh_update_autotools_config:
 
 override_dh_auto_build:
-	$(CARGO) build --release --frozen --ignore-rust-version -p chan
+	$(CARGO) build --release --frozen -p chan
 
 override_dh_auto_install:
 	install -Dm755 target/release/chan debian/chan/usr/bin/chan

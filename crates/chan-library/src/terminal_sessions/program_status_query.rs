@@ -23,7 +23,7 @@ pub(super) struct ReplySlots {
 impl ReplySlots {
     pub(super) fn reserve(&self, terminator: Terminator) -> Option<Reply> {
         self.pending
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
                 (pending < MAX_PENDING).then_some(pending + 1)
             })
             .ok()?;

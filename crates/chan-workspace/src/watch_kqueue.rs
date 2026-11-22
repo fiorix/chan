@@ -88,7 +88,7 @@ enum OpenError {
 impl Held {
     fn open(path: &Path, directory: bool, budget: u64) -> Result<Self, OpenError> {
         if HELD
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
                 (held < budget).then_some(held + 1)
             })
             .is_err()

@@ -1,7 +1,6 @@
 #!/usr/bin/make -f
 # Offline build from the vendored orig tarball; see the chan package's
-# debian/rules for the toolchain and --ignore-rust-version notes (drop it,
-# and tighten debian/control, once rustc-1.95 reaches the target series).
+# debian/rules for the toolchain notes.
 
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
 export CHAN_PACKAGED = deb
@@ -40,7 +39,7 @@ override_dh_clean:
 override_dh_update_autotools_config:
 
 override_dh_auto_build:
-	$(CARGO) build --release --frozen --ignore-rust-version -p chan-desktop
+	$(CARGO) build --release --frozen -p chan-desktop
 
 override_dh_auto_install:
 	install -Dm755 target/release/chan-desktop $(DESTROOT)/usr/bin/chan-desktop

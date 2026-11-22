@@ -75,7 +75,7 @@ def check_metadata(metadata: dict[str, Any], floor: str) -> tuple[list[str], int
                 seen.add(key)
                 package = packages[key]
                 required = package.get("rust_version")
-                # Debian deliberately ignores the workspace's own toolchain pin.
+                # Cargo enforces the workspace's own rust-version in the Debian builds.
                 if key not in members:
                     external.add(key)
                     if required is not None and version(required) > limit:

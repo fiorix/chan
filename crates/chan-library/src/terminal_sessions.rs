@@ -8009,7 +8009,7 @@ fn mint_lossy_generation(previous: u64) -> u64 {
         });
     let floor = previous.saturating_add(1).max(clock);
     let last = LAST
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
             Some(floor.max(last.saturating_add(1)))
         })
         .unwrap_or_else(|last| last);
