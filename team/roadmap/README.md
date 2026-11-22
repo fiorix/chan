@@ -21,17 +21,8 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-[tourrest]: v0.133.0/a-tour-part-the-pointer-crossed-stays-lit.md
-[tmuxcard]: v0.133.0/a-tmux-connections-card-lists-the-buried-terminal-that-ran-it.md
-[badgescroll]: v0.133.0/the-computers-badge-graph-sits-off-centre-and-moves-in-steps.md
-[termlinks]: v0.133.0/a-link-in-a-ghostty-terminal-underlines-on-hover-and-a-click-does-nothing.md
-[musebatch]: v0.133.0/messages-queued-for-a-muse-agent-arrive-one-per-turn.md
-[musecopy]: v0.133.0/a-command-a-muse-agent-prints-across-rows-copies-with-a-line-break-at-each-row.md
-[keybar]: v0.133.0/the-computers-keys-move-to-a-bar-at-the-bottom.md
-[cardkeys]: v0.133.0/a-row-letter-does-nothing-while-the-card-itself-is-selected.md
-[touchopen]: v0.133.0/a-tap-on-a-touch-screen-cannot-open-a-file-and-landscape-runs-under-the-notch.md
-[lockholes]: v0.133.0/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md
-[streamlag]: v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
+[lockholes]: done/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md
+[streamlag]: done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [ghosttyng]: v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.134.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [conpty]: v0.134.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
@@ -53,27 +44,9 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [ytlock]: v0.134.0/a-youtube-embed-keeps-playing-under-the-screen-lock.md
 [queuehold]: v0.134.0/a-queued-message-waits-behind-a-stopped-view-of-an-idle-program-on-macos-and-windows.md
 
-### v0.133.0
-
-Six rows the owner raised on 2026-11-20, each built that day, reviewed with end-to-end checks red at the base and green at the tip, and merged into the integration branch, with no release yet: a tour part the pointer crossed stays lit ([tourrest]), a tmux connection's card lists its control terminal ([tmuxcard]), the Computers badge graph sits off centre and moves in steps ([badgescroll]), a click on a ghostty terminal's link does nothing ([termlinks]), messages queued for a Muse agent arrive one per turn ([musebatch]) and a command a Muse agent prints across rows copies with a break at each row ([musecopy]). The same day the owner made them the base of v0.133.0 and moved every row the version held before them to v0.134.0. On 2026-11-21 the owner added three more, built and merged the same way: the Computers keys move to a bar at the bottom ([keybar]), a row letter acts from the selected card ([cardkeys]), and a tap opens a file on a touch screen with the window inside its safe areas ([touchopen], GitHub issue #9). He then took the screen lock's holes back from v0.134.0 and landed them ([lockholes]), and the owner landed the fast stream row from v0.134.0 with the wake fix it needs ([streamlag]). A merged row whose acceptance is all read reads `closed`; one with a reading or a question left for the owner reads `owner`.
-
-| Item | State | Next |
-| --- | --- | --- |
-| [a crossed tour part stays lit][tourrest] | merged | owner |
-| [a tmux card lists its control terminal][tmuxcard] | merged | closed |
-| [the badge graph off centre, in steps][badgescroll] | merged | closed |
-| [a ghostty link click does nothing][termlinks] | merged | owner |
-| [Muse messages arrive one per turn][musebatch] | merged | closed |
-| [a Muse command copies with breaks][musecopy] | merged | closed |
-| [the Computers keys in a bottom bar][keybar] | merged | closed |
-| [a row letter from the selected card][cardkeys] | merged | owner |
-| [a tap cannot open a file on touch][touchopen] | merged | owner |
-| [keys and viewers past the screen lock][lockholes] | merged | owner |
-| [a fast stream loses output][streamlag] | merged | owner |
-
 ### v0.134.0
 
-Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]), and accepted two follow-ups of rows landed in v0.133.0: a YouTube embed keeps playing under the screen lock ([ytlock]), and a queued message waits behind a stopped view of an idle program on macOS and Windows ([queuehold]).
+Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Two of the nineteen went back and shipped in v0.133.0: the screen lock's holes ([lockholes]) and the fast stream ([streamlag]). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]), and accepted two follow-ups of rows landed in v0.133.0: a YouTube embed keeps playing under the screen lock ([ytlock]), and a queued message waits behind a stopped view of an idle program on macOS and Windows ([queuehold]).
 
 In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved to v0.133.0, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands.
 
@@ -96,11 +69,44 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a hidden control terminal stops resizing][ctlresize] | not started | build |
 | [an unfocused survey takes Tab and keys][surveytab] | not started | build |
 | [the wake fix unread on macOS][wakemac] | not started | measure |
-| [a cs command takes the focus from its terminal][csfocus] | not started | build |
+| [a cs command takes its terminal's focus][csfocus] | not started | build |
 | [a YouTube embed plays under the lock][ytlock] | not started | build |
 | [a queued message behind a stopped view][queuehold] | not started | build |
 
 ## Completed
+
+### v0.133.0
+
+Shipped 2026-11-22; see [release-v0.133.0](../release/release-v0.133.0.md). A no-rc release by the owner's word ("if aur is the only blocker we can move to ga"): twelve `--no-ff` merges into the integration branch `v0133/int` over `main` at `793d86522`, with four roadmap commits between them, under twenty-eight rows. Two lanes the owner started, ui and muse, built six rows on 2026-11-20; the third, carry, never started. Merge sessions then landed the Computers key bar, the card letters, GitHub issue #9 on touch screens, the screen lock's holes, and the fast stream with its wake fix. Eleven shipped and are in [`done/`](done/), six of them with a reading or a question open for the owner. Seventeen moved to v0.134.0 on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Shipped without a row: the fixes to two server tests that failed CI on the integration branch (`v0133/acktest` and `v0133/uploadeof`).
+
+- [a-command-a-muse-agent-prints-across-rows-copies-with-a-line-break-at-each-row](done/a-command-a-muse-agent-prints-across-rows-copies-with-a-line-break-at-each-row.md) - A command a Muse agent prints across rows copies with a line break at each row.
+- [a-control-terminal-hidden-in-place-on-windows-stops-following-resizes](v0.134.0/a-control-terminal-hidden-in-place-on-windows-stops-following-resizes.md) - A control terminal hidden in place on Windows stops following resizes (moved to v0.134.0 on 2026-11-20, not started).
+- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.134.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.134.0 on 2026-11-20, partly built).
+- [a-link-in-a-ghostty-terminal-underlines-on-hover-and-a-click-does-nothing](done/a-link-in-a-ghostty-terminal-underlines-on-hover-and-a-click-does-nothing.md) - A link in a ghostty terminal underlines on hover and a click does nothing (shipped; its WKWebView walk open for the owner).
+- [a-row-letter-does-nothing-while-the-card-itself-is-selected](done/a-row-letter-does-nothing-while-the-card-itself-is-selected.md) - A row letter does nothing while the card itself is selected (shipped; its Mac reading open for the owner).
+- [a-survey-over-an-unfocused-pane-takes-tab-and-its-keys](v0.134.0/a-survey-over-an-unfocused-pane-takes-tab-and-its-keys.md) - A survey over an unfocused pane takes Tab and its keys (moved to v0.134.0 on 2026-11-20, not started).
+- [a-tap-on-a-touch-screen-cannot-open-a-file-and-landscape-runs-under-the-notch](done/a-tap-on-a-touch-screen-cannot-open-a-file-and-landscape-runs-under-the-notch.md) - A tap on a touch screen cannot open a file, and landscape runs under the notch (shipped; a real phone's reading and closing issue #9 open for the owner).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (shipped; its WKWebView, machine sleep and gateway readings open for the owner).
+- [a-tmux-connections-card-lists-the-buried-terminal-that-ran-it](done/a-tmux-connections-card-lists-the-buried-terminal-that-ran-it.md) - A tmux connection's card lists the buried terminal that ran it.
+- [a-tour-part-the-pointer-crossed-stays-lit](done/a-tour-part-the-pointer-crossed-stays-lit.md) - A tour part the pointer crossed stays lit (shipped; a touch scroll's rest and the walk open for the owner).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (moved to v0.134.0 on 2026-11-20, partly built).
+- [copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed](v0.134.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md) - Copy as HTML, the link preview, survey bodies and the table widget show wikilinks as typed (moved to v0.134.0 on 2026-11-20, partly built).
+- [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.134.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.134.0 on 2026-11-20, built and not merged).
+- [messages-queued-for-a-muse-agent-arrive-one-per-turn](done/messages-queued-for-a-muse-agent-arrive-one-per-turn.md) - Messages queued for a Muse agent arrive one per turn.
+- [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.134.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.134.0 on 2026-11-20, not started).
+- [the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last](v0.134.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md) - The attach prelude re-asserts every mouse mode a program set, where a terminal keeps only the last (moved to v0.134.0 on 2026-11-20, not started).
+- [the-computers-badge-graph-sits-off-centre-and-moves-in-steps](done/the-computers-badge-graph-sits-off-centre-and-moves-in-steps.md) - The Computers badge graph sits off centre and moves in steps.
+- [the-computers-keys-move-to-a-bar-at-the-bottom](done/the-computers-keys-move-to-a-bar-at-the-bottom.md) - The Computers keys move to a bar at the bottom.
+- [the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer](v0.134.0/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md) - The graph walks a workspace over the listing cap three times per load and shows no folder layer (moved to v0.134.0 on 2026-11-20, not started).
+- [the-half-scale-wake-fix-is-unread-on-macos](v0.134.0/the-half-scale-wake-fix-is-unread-on-macos.md) - The half-scale wake fix is unread on macOS (moved to v0.134.0 on 2026-11-20, not started).
+- [the-index-status-pill-covers-a-terminal-notices-dismiss-button](v0.134.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md) - The index status pill covers a terminal notice's Dismiss button (moved to v0.134.0 on 2026-11-20, built and not merged).
+- [the-minimized-window-raise-is-unread-on-windows](v0.134.0/the-minimized-window-raise-is-unread-on-windows.md) - The minimized-window raise is unread on Windows (moved to v0.134.0 on 2026-11-20, read in part).
+- [the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited](v0.134.0/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md) - The Rich Prompt says to try again over a terminal that has exited (moved to v0.134.0 on 2026-11-20, built and not merged).
+- [the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it](done/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md) - The screen lock lets keys, focus and viewers through to the window under it (shipped; its WKWebView walk open for the owner).
+- [the-terminal-regression-browser-checks-red-proofs](v0.134.0/the-terminal-regression-browser-checks-red-proofs.md) - The terminal regression browser checks' red proofs (moved to v0.134.0 on 2026-11-20, its kit drafted).
+- [the-tls-rows-windows-trust-readings](v0.134.0/the-tls-rows-windows-trust-readings.md) - The TLS rows' Windows trust readings (moved to v0.134.0 on 2026-11-20, its kit ready).
+- [the-windows-claims-two-account-and-compatibility-readings](v0.134.0/the-windows-claims-two-account-and-compatibility-readings.md) - The Windows claim's two-account and compatibility readings (moved to v0.134.0 on 2026-11-20, its kit ready).
+- [the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last](v0.134.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md) - The Workspace details command clears the selection of the file browser focused last, not the tab that shows the details (moved to v0.134.0 on 2026-11-20, built and not merged).
 
 ### v0.132.0
 
@@ -108,7 +114,7 @@ Shipped 2026-11-19; see [release-v0.132.0](../release/release-v0.132.0.md). A no
 
 - [a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes](done/a-fresh-shell-after-a-dead-full-screen-program-keeps-some-of-its-input-modes.md) - A fresh shell after a dead full-screen program keeps some of its input modes.
 - [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.134.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.133.0 at the cut on 2026-11-19, its client half not merged and its VM kit unsealed).
-- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.133.0 at the cut on 2026-11-19, its server stage and client half built and not merged).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.133.0 at the cut on 2026-11-19, its server stage and client half built and not merged).
 - [a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired](done/a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md) - A window on a lossy link freezes with no sign until its socket is retired.
 - [a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page](done/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md) - A workspace over the listing cap locks its windows, and a deep graph freezes the page.
 - [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 6's test net shipped; moved to v0.133.0 at the cut on 2026-11-19 with part 4's task 2 stage A built and not merged).
@@ -150,7 +156,7 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 - [a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved](done/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md) - A reloaded window can come back focused on another pane than it saved.
 - [a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing](done/a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing.md) - A second launch from a terminal gets no focus where the window manager prevents focus stealing.
 - [a-stale-workspace-read-reverts-a-preference-the-user-just-set](done/a-stale-workspace-read-reverts-a-preference-the-user-just-set.md) - A stale workspace read reverts a preference the user just set.
-- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.132.0 at the cut on 2026-11-15, its server stage built and not merged).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.132.0 at the cut on 2026-11-15, its server stage built and not merged).
 - [a-terminals-survey-takes-the-keyboard-from-another-pane](done/a-terminals-survey-takes-the-keyboard-from-another-pane.md) - A terminal's survey takes the keyboard from another pane.
 - [a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos](done/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md) - A warm chan-term launch opens its window without Chan coming forward on macOS.
 - [a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved](done/a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved.md) - A window that edits a shortcut erases the shortcuts another window saved.
@@ -186,7 +192,7 @@ Shipped 2026-11-14; see [release-v0.130.0](../release/release-v0.130.0.md). A no
 - [a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges](done/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md) - A pane keeps its margin and rounded corners on the window's own edges.
 - [a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early](done/a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early.md) - A pasted or delivered text holding `ESC[201~` ends its bracketed paste early.
 - [a-standalone-terminal-window-loads-no-saved-shortcut-overrides](done/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md) - A standalone terminal window loads no saved shortcut overrides.
-- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](v0.133.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.131.0 on 2026-11-14, not started).
+- [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (moved to v0.131.0 on 2026-11-14, not started).
 - [every-underline-style-in-a-ghostty-terminal-draws-one-straight-line](done/every-underline-style-in-a-ghostty-terminal-draws-one-straight-line.md) - Every underline style in a ghostty terminal draws one straight line.
 - [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.134.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.131.0 on 2026-11-14, not started).
 - [moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal](done/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) - Moving pane focus to a file browser leaves the keyboard in the terminal.
