@@ -330,7 +330,10 @@ export default {
               await entryAction(page, row, "Paste");
               await row.dispose();
             }
-            const landed = join(ctx.workspaceDir, dest, sourceName);
+            // A row menu's Paste goes to the clicked folder. The chord and the
+            // launcher keep the destination a list's other actions share.
+            const pasteDest = route === "row" && selected === "directory" ? `${directory}/sub` : dest;
+            const landed = join(ctx.workspaceDir, pasteDest, sourceName);
             workspaceLanded.push(landed);
             await poll(`${label}: Paste reaches ${landed}`, () => existsSync(landed) && readFileSync(landed, "utf8") === `paste ${label}\n`);
             await selectedPath(page, scope, landed);
