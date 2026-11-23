@@ -23,6 +23,10 @@ vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitA
 vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
+vi.mock("./terminal/backend", async (importOriginal) =>
+  (await import("./__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 const themeWatch = vi.hoisted(() => ({ opened: 0, closed: 0 }));
 const host = vi.hoisted(() => ({ desktop: false }));
@@ -50,6 +54,7 @@ import { api, sessionWindowId } from "./api/client";
 import { requestCloseWindow } from "./api/desktop";
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
+import { openedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { __testResetSessionDiscarded, __testSetBootstrapHydrated, clearRemoteApplyEmptyWindow, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
 import { hasAnyTab, openTerminalInActivePane } from "./state/tabs.svelte";
@@ -127,6 +132,7 @@ describe("a window with no workspace", () => {
     openTerminalInActivePane({});
     await settle();
     expect(ui.terminalArmed).toBe(true);
+    await openedGhostty();
   });
 
   test("an apply that empties a desktop window leaves it open and sends no DELETE", async () => {

@@ -16,9 +16,14 @@ vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitA
 vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
+vi.mock("./terminal/backend", async (importOriginal) =>
+  (await import("./__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { boardLoaded } from "./__tests__/excalidraw";
+import { openedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { closeConfirmState } from "./state/closeConfirm.svelte";
 import { confirmState } from "./state/confirm.svelte";
@@ -210,6 +215,7 @@ describe("Ctrl+D is left alone", () => {
 
   test("in a terminal, where the shell reads it as EOF", async () => {
     await seed(terminalTab({ id: "term" }));
+    await openedGhostty();
 
     const event = press(CTRL_D);
     await settle();
