@@ -283,7 +283,7 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     await vi.waitFor(() => expect(inputFrames(socket)).toEqual([{ type: "input", data: "from PRIMARY" }]));
     expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
     expect(middle.down.defaultPrevented, "the widget leaves a cancelled press to the embedder").toBe(true);
-    expect(middle.click.defaultPrevented, "the webview does not paste it too").toBe(true);
+    expect(middle.click.defaultPrevented, "the middle click's auxclick is default-prevented").toBe(true);
 
     socket.sent.splice(0);
     for (const button of [0, 2] as const) {
