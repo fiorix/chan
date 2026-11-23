@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
+import { CanvasRenderer } from './renderer';
 
 type Anchor = { col: number; absoluteRow: number };
 type Range = { start: Anchor; end: Anchor };
@@ -80,6 +81,194 @@ async function open(input: string, cols = 20, rows = 4, copy?: (text: string) =>
 }
 
 const range = (a: number, b: number, c: number, d: number): Range => ({ start: { col: a, absoluteRow: b }, end: { col: c, absoluteRow: d } });
+
+function trackedCells(term: Terminal) {
+  return (term.wasmTerm! as unknown as { trackedCells: Set<{ point(): unknown }> }).trackedCells;
+}
+
+// The core prunes whole pages. Detect the real boundary instead of assuming
+// the configured row limit is also a page boundary.
+async function selectionAtPrune(select: (term: Terminal, last: number) => void) {
+  const fixture = await open('', 80, 6);
+  const { term } = fixture;
+  for (let line = 0; line < 5000; line++) {
+    const before = term.getScrollbackLength();
+    if (before > 40) select(term, before + term.rows - 2);
+    term.write(`line ${line}\r\n`);
+    const after = term.getScrollbackLength();
+    if (after < before) {
+      expect(before - after, 'the fixture discarded multiple old rows').toBeGreaterThan(2);
+      const first = term.buffer.active.getLine(0)!.translateToString(true);
+      const firstLine = Number(/^line (\d+)$/.exec(first)![1]);
+      expect(firstLine).toBeGreaterThan(0);
+      return { ...fixture, line, firstLine };
+    }
+  }
+  throw new Error('the bounded real-core fixture never pruned history');
+}
+
+describe('tracked selection lifetime', () => {
+  test('selectAll survives history pruning without selecting later output', async () => {
+    const { term, line, firstLine } = await selectionAtPrune((term) => term.selectAll());
+    // Select All includes the blank cursor row, which the next write fills.
+    const expected = Array.from({ length: line - firstLine + 1 }, (_, i) => `line ${firstLine + i}`).join('\n');
+    expect(term.getSelection()).toBe(expected);
+    expect(term.hasSelection()).toBe(true);
+    expect(term.getSelectionRange()!.start).toEqual({ col: 0, absoluteRow: 0 });
+    term.write('later output\r\n');
+    expect(term.getSelection()).toBe(expected);
+  });
+
+  test.each([false, true])('a pruned earlier endpoint clamps while the later endpoint survives (reverse %s)', async (reverse) => {
+    const { term, line, firstLine } = await selectionAtPrune((term, last) => {
+      const selected = range(3, 0, 79, last);
+      term.setSelection(reverse ? { start: selected.end, end: selected.start } : selected);
+    });
+    const expected = Array.from({ length: line - firstLine }, (_, i) => `line ${firstLine + i}`).join('\n');
+    expect(term.getSelection()).toBe(expected);
+    const selected = term.getSelectionRange()!;
+    expect(reverse ? selected.end : selected.start).toEqual({ col: 0, absoluteRow: 0 });
+    expect(reverse ? selected.start : selected.end).toEqual({ col: 79, absoluteRow: line - firstLine - 1 });
+    expect(trackedCells(term).size).toBe(2);
+  });
+
+  test('pruning the later endpoint clears the selection and releases both references', async () => {
+    const { term } = await selectionAtPrune((term) => term.setSelection(range(0, 0, 4, 1)));
+    expect(term.hasSelection()).toBe(false);
+    expect(term.getSelectionRange()).toBeNull();
+    expect(term.getSelection()).toBe('');
+    expect(trackedCells(term).size).toBe(0);
+  });
+
+  test('narrowing and widening reflow preserve the selected text and endpoint columns', async () => {
+    const { term } = await open('0123456789abcdefghijklmnopqrstuvwxyz', 20, 6);
+    term.setSelection(range(2, 0, 7, 1));
+    const expected = '23456789abcdefghijklmnopqr';
+    expect(term.getSelection()).toBe(expected);
+    term.resize(12, 6);
+    expect(term.getSelection()).toBe(expected);
+    expect(term.getSelectionRange()).toEqual(range(2, 0, 3, 2));
+    term.resize(40, 6);
+    expect(term.getSelection()).toBe(expected);
+    expect(term.getSelectionRange()).toEqual(range(2, 0, 27, 0));
+  });
+
+  test('a pointer selection follows scrolling output and reflow', async () => {
+    const { term, pointer } = await open('hello world', 20, 4);
+    pointer('pointerdown', 6, 0);
+    pointer('pointermove', 10, 0);
+    pointer('pointerup', 10, 0);
+    term.write('\r\none\r\ntwo\r\nthree\r\nfour');
+    expect(term.getScrollbackLength()).toBeGreaterThan(0);
+    expect(term.getSelection()).toBe('world');
+    term.resize(8, 4);
+    expect(term.getSelection()).toBe('world');
+    expect(term.getSelectionRange()).toEqual(range(6, 0, 2, 1));
+  });
+
+  test.each([47, 1047, 1049])('screen mode %s clears selections in both directions before change observers', async (mode) => {
+    const { term } = await open('normal');
+    term.selectAll();
+    const observations: Array<Range | null> = [];
+    term.onChange(() => observations.push(term.getSelectionRange()));
+    term.write(`\x1b[?${mode}h`);
+    expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+    expect(term.getSelectionRange()).toBeNull();
+    expect(trackedCells(term).size).toBe(0);
+    term.write('alternate');
+    term.selectAll();
+    term.write(`\x1b[?${mode}l`);
+    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    expect(term.getSelectionRange()).toBeNull();
+    expect(trackedCells(term).size).toBe(0);
+    expect(observations).toEqual([null, null, null]);
+  });
+
+  test('a screen round trip within one write preserves the normal-screen selection', async () => {
+    const { term } = await open('normal');
+    term.selectAll();
+    const selected = term.getSelectionRange();
+    const text = term.getSelection();
+    expect(text).toBe('normal');
+    term.write('\x1b[?1049halternate\x1b[?1049l');
+    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    // The normal-screen cells remain valid and hold the same text. A
+    // screen switch observed between writes still clears the selection.
+    expect(term.getSelectionRange()).toEqual(selected);
+    expect(term.getSelection()).toBe(text);
+  });
+
+  test('replacement and repeated select/clear keep exactly two live references or none', async () => {
+    const { term } = await open('hello world');
+    const tracked = trackedCells(term);
+    expect(tracked.size).toBe(0);
+    for (let i = 0; i < 25; i++) {
+      term.selectAll();
+      expect(tracked.size).toBe(2);
+      const previous = [...tracked];
+      term.setSelection(range(1, 0, 3, 0));
+      expect(previous.map((cell) => cell.point())).toEqual([null, null]);
+      expect(tracked.size).toBe(2);
+      term.clearSelection();
+      expect(tracked.size).toBe(0);
+    }
+  });
+
+  test('dispose releases the selection before the core is freed', async () => {
+    const { term } = await open('hello');
+    term.selectAll();
+    const tracked = trackedCells(term);
+    expect(tracked.size).toBe(2);
+    const core = term.wasmTerm!;
+    const free = core.free.bind(core);
+    let atFree = -1;
+    vi.spyOn(core, 'free').mockImplementation(() => { atFree = tracked.size; free(); });
+    term.dispose();
+    expect(atFree).toBe(0);
+    expect(tracked.size).toBe(0);
+  });
+
+  test('a failed open releases selections made during initial rendering', async () => {
+    const term = await create();
+    const host = document.createElement('div');
+    document.body.append(host);
+    let selected = -1;
+    let atFree = -1;
+    vi.spyOn(CanvasRenderer.prototype, 'render').mockImplementationOnce(() => {
+      term.selectAll();
+      const core = term.wasmTerm!;
+      const tracked = trackedCells(term);
+      selected = tracked.size;
+      const free = core.free.bind(core);
+      vi.spyOn(core, 'free').mockImplementation(() => { atFree = tracked.size; free(); });
+      throw new Error('initial render failed');
+    });
+    expect(() => term.open(host)).toThrow('initial render failed');
+    expect(selected).toBe(2);
+    expect(atFree).toBe(0);
+    expect(term.getSelectionRange()).toBeNull();
+  });
+
+  test('find writes replace tracked endpoints, follow reflow and release on direct clear', async () => {
+    const { term } = await open('0123456789abcdefghijklmnopqrstuvwxyz', 20, 6);
+    term.selectAll();
+    const tracked = trackedCells(term);
+    const previous = [...tracked];
+    const manager = (term as unknown as { selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null } }).selectionManager;
+    manager.selectionStart = { col: 2, absoluteRow: 0 };
+    manager.selectionEnd = { col: 7, absoluteRow: 1 };
+    expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
+    term.resize(12, 6);
+    expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
+    expect(manager.selectionEnd).toEqual({ col: 3, absoluteRow: 2 });
+    expect(previous.map((cell) => cell.point())).toEqual([null, null]);
+    expect(tracked.size).toBe(2);
+    manager.selectionStart = null;
+    manager.selectionEnd = null;
+    expect(term.getSelectionRange()).toBeNull();
+    expect(tracked.size).toBe(0);
+  });
+});
 
 describe('public selection ranges', () => {
   test('ranges are inclusive, reversible snapshots and programmatic changes never copy', async () => {

@@ -13,7 +13,7 @@
 import { EventEmitter } from './event-emitter';
 import { copiedText } from '../vt/ghosttyCopy';
 import { drawnWrapAbove, scrollbackAcrossDrawnWraps, textAcrossDrawnWraps } from './drawn-wraps';
-import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { VtCells, type VtCell, type VtTerminal, type VtTrackedCell } from '../vt/ghosttyVt';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
 
@@ -62,10 +62,31 @@ export class SelectionManager {
   private wasmTerm: VtTerminal;
   private textarea: HTMLTextAreaElement;
 
-  // Find's adapter reads and writes these plain absolute-row anchors.
-  // Rendering and text reads must observe those writes without a setter.
-  private selectionStart: SelectionAnchor | null = null;
-  private selectionEnd: SelectionAnchor | null = null;
+  private startAnchor: SelectionAnchor | null = null;
+  private endAnchor: SelectionAnchor | null = null;
+  private startCell: VtTrackedCell | null = null;
+  private endCell: VtTrackedCell | null = null;
+  private selectionOnAlternateScreen = false;
+
+  // Find assigns these properties directly. Each assignment replaces that
+  // endpoint's reference; reads expose its current absolute coordinates.
+  private get selectionStart(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.startAnchor ? { ...this.startAnchor } : null;
+  }
+
+  private set selectionStart(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('start', anchor);
+  }
+
+  private get selectionEnd(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.endAnchor ? { ...this.endAnchor } : null;
+  }
+
+  private set selectionEnd(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('end', anchor);
+  }
   private isSelecting: boolean = false;
   private mouseDownX: number = 0;
   private mouseDownY: number = 0;
@@ -158,6 +179,75 @@ export class SelectionManager {
   // Public API
   // ==========================================================================
 
+  private replaceEndpoint(endpoint: 'start' | 'end', anchor: SelectionAnchor | null): void {
+    this.syncSelection();
+    const cell = anchor ? this.wasmTerm.trackCell(anchor.absoluteRow, anchor.col) : null;
+    if (endpoint === 'start') {
+      this.startCell?.free();
+      this.startCell = cell;
+      this.startAnchor = cell && anchor ? { ...anchor } : null;
+    } else {
+      this.endCell?.free();
+      this.endCell = cell;
+      this.endAnchor = cell && anchor ? { ...anchor } : null;
+    }
+    this.selectionOnAlternateScreen = this.wasmTerm.isAlternateScreen();
+  }
+
+  /** Resolve tracked endpoints before observers or paint read a changed grid. */
+  syncSelection(): void {
+    if (!this.startCell && !this.endCell) return;
+    if (this.selectionOnAlternateScreen !== this.wasmTerm.isAlternateScreen()) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    let start = this.startCell?.point() ?? null;
+    let end = this.endCell?.point() ?? null;
+    if (this.startAnchor && this.endAnchor) {
+      const forwards = this.startAnchor.absoluteRow < this.endAnchor.absoluteRow ||
+        (this.startAnchor.absoluteRow === this.endAnchor.absoluteRow && this.startAnchor.col <= this.endAnchor.col);
+      const first = forwards ? start : end;
+      const last = forwards ? end : start;
+      const firstCell = forwards ? this.startCell : this.endCell;
+      // Direction belongs to the gesture. Pruning belongs to text order:
+      // a backward drag loses its older endpoint just like a forward drag.
+      if (!last || (!first && !firstCell?.moveTo(0, 0))) {
+        this.invalidateSelectionRows();
+        this.releaseSelection();
+        return;
+      }
+      if (!first) {
+        if (forwards) start = { row: 0, col: 0 };
+        else end = { row: 0, col: 0 };
+      }
+    } else if ((this.startCell && !start) || (this.endCell && !end)) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    if (start?.row !== this.startAnchor?.absoluteRow || start?.col !== this.startAnchor?.col ||
+        end?.row !== this.endAnchor?.absoluteRow || end?.col !== this.endAnchor?.col) {
+      this.invalidateSelectionRows();
+    }
+    this.startAnchor = start ? { col: start.col, absoluteRow: start.row } : null;
+    this.endAnchor = end ? { col: end.col, absoluteRow: end.row } : null;
+  }
+
+  private invalidateSelectionRows(): void {
+    // A moved/pruned range can leave paint at its old viewport coordinates.
+    for (let row = 0; row < this.terminal.rows; row++) this.dirtySelectionRows.add(row);
+  }
+
+  private releaseSelection(): void {
+    this.startCell?.free();
+    this.endCell?.free();
+    this.startCell = this.endCell = null;
+    this.startAnchor = this.endAnchor = null;
+    this.isSelecting = false;
+    this.stopAutoScroll();
+  }
+
   /** Read complete clusters, joining wraps and filtering undrawn controls. */
   getSelection(): string {
     const range = this.getSelectionRange();
@@ -210,7 +300,8 @@ export class SelectionManager {
    * Check if there's an active selection
    */
   hasSelection(): boolean {
-    if (!this.selectionStart || !this.selectionEnd) return false;
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return false;
 
     // Don't report selection until drag threshold is met (prevents flash on click)
     if (this.isSelecting && !this.dragThresholdMet) return false;
@@ -237,7 +328,7 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.selectionStart && !this.selectionEnd) return;
+    if (!this.startAnchor && !this.endAnchor) return;
 
     // Mark current selection rows as dirty for redraw
     const coords = this.normalizeSelection();
@@ -247,9 +338,7 @@ export class SelectionManager {
       }
     }
 
-    this.selectionStart = null;
-    this.selectionEnd = null;
-    this.isSelecting = false;
+    this.releaseSelection();
 
     // Force redraw of previously selected lines to clear the overlay
     this.requestRender();
@@ -288,8 +377,9 @@ export class SelectionManager {
 
   /** Current coordinates, copied and widened to whole glyphs. */
   getSelectionRange(): SelectionRange | null {
-    if (!this.selectionStart || !this.selectionEnd) return null;
-    return this.clampRange({ start: this.selectionStart, end: this.selectionEnd });
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return null;
+    return this.clampRange({ start: this.startAnchor, end: this.endAnchor });
   }
 
   private clampRange(range: SelectionRange): SelectionRange | null {
@@ -418,6 +508,7 @@ export class SelectionManager {
     if (this.disposed) return;
     this.disposed = true;
     this.endPointer(false);
+    this.releaseSelection();
     this.resetTextarea();
     this.selectionChangedEmitter.dispose();
     const canvas = this.renderer.getCanvas();
