@@ -66,8 +66,8 @@ function pointer(term: Terminal, type: string, p: Pointer, extra: PointerEventIn
   }));
 }
 
-async function dispatchClick(term: Terminal, p: Pointer) {
-  term.element!.querySelector('canvas')!.dispatchEvent(new MouseEvent('click', {
+async function dispatchClick(term: Terminal, p: Pointer, target: Element = term.element!.querySelector('canvas')!) {
+  target.dispatchEvent(new MouseEvent('click', {
     bubbles: true, cancelable: true, button: 0, detail: p.detail ?? 1,
     clientX: p.x, clientY: p.y, shiftKey: p.shiftKey, ctrlKey: p.ctrlKey,
     metaKey: p.metaKey, altKey: p.altKey,
@@ -204,12 +204,13 @@ describe('link gesture completion through registered listeners', () => {
     expect(seen).toEqual([]);
   });
 
-  test('an outside release clears even a local link press', async () => {
-    const { term, seen } = await terminal();
-    term.write('https://example.com');
-    pointer(term, 'pointerdown', cell(3, 0));
-    pointer(term, 'pointerup', { x: -1, y: 1 });
-    await dispatchClick(term, cell(3, 0));
+  test('a release just above the grid cannot activate a link in hidden history', async () => {
+    const { term, seen, host } = await terminal();
+    term.write(Array.from({ length: 12 }, (_, i) => `https://example.com/${i}`).join('\r\n'));
+    expect(term.getScrollbackLength()).toBeGreaterThan(0);
+    pointer(term, 'pointerdown', { x: cell(3, 0).x, y: 1 });
+    pointer(term, 'pointerup', { x: cell(3, 0).x, y: -1 });
+    await dispatchClick(term, { x: cell(3, 0).x, y: -1 }, host);
     expect(seen).toEqual([]);
   });
 
