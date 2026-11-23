@@ -902,13 +902,14 @@ export class InputHandler {
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
-    // Determine which button to report (or 32 for motion with no button)
+    // Motion combines flag 32 with left/middle/right (0/1/2) or none (3).
     let button = 32; // Motion flag
     if (this.mouseButtonsPressed & 1)
       button += 0; // Left
     else if (this.mouseButtonsPressed & 2)
       button += 1; // Middle
     else if (this.mouseButtonsPressed & 4) button += 2; // Right
+    else button += 3; // No button
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
   }

@@ -851,6 +851,17 @@ export class Terminal {
   }
 
   /**
+   * Read a snapshot of the cursor's zero-based column and row on the active
+   * live screen, independent of viewport scrolling. Reflects writes and
+   * cursor moves synchronously; undefined before open and after disposal.
+   */
+  public getCursor(): Readonly<{ x: number; y: number }> | undefined {
+    if (!this.isOpen || !this.wasmTerm) return undefined;
+    const { x, y } = this.wasmTerm.getCursor();
+    return { x, y };
+  }
+
+  /**
    * Get the current viewport Y position.
    *
    * This is the number of lines scrolled back from the bottom of the
