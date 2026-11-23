@@ -29,10 +29,7 @@ async function waitFor(page, label, read, accept) {
 
 async function readViewport(page, hostQuery) {
   return page.evaluate((hostQuery) => {
-    const host = document.querySelector(hostQuery);
-    if (!host) throw new Error("Ghostty terminal host missing");
-    const term = window.__ghostty229.terminals.find((candidate) => candidate.element === host);
-    if (!term) throw new Error("the opened ghostty Terminal was not captured");
+    const term = window.__ghostty229.term(hostQuery);
     if (!term.core) throw new Error("Ghostty core unavailable");
     const history = term.getScrollbackLength();
     const offset = term.getViewportY();

@@ -101,13 +101,8 @@ export default {
       await cs(["write", "--tab-name", TAB,
         `PS1='$ '; printf '\\033[H\\033[2J\\033[3J'; seq 1 ${LAST}; printf '${MARK}%s\\n' DONE\n`]);
 
-      const term = await page.evaluateHandle((query) => {
-        const host = document.querySelector(query);
-        return window.__ghostty211.terminals.find((t) => t.core !== undefined && host && t.element === host) ?? null;
-      }, hostQuery);
-      if (!(await term.evaluate((t) => t !== null))) {
-        throw new Error(`no ghostty-web Terminal from ${chunk} holds this tab's terminal host`);
-      }
+      const term = await page.evaluateHandle((query) => window.__ghostty211.term(query), hostQuery);
+
 
       /// Observe find's active range separately from the user's selection.
       const state = () => term.evaluate((t) => {

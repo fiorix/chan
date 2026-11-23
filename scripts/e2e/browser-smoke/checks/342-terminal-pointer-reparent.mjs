@@ -3,20 +3,11 @@
 // An unavailable native trigger is a skip with its event trace retained.
 
 import assert from "node:assert/strict";
-import { drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerReports, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { beginPointerSelection, drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerReports, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "REPARENT342";
 const unavailable = (message) => Object.assign(new Error(message), { code: "POINTER_UNAVAILABLE" });
 
-async function begin(page, terminal, grid) {
-  await page.mouse.move(grid.x + grid.w * 0.2, grid.y + grid.h * 0.5);
-  await page.mouse.down();
-  await page.mouse.move(grid.x + grid.w * (TEXT.length - 0.2), grid.y + grid.h * 0.5, { steps: 6 });
-  assert.equal(await terminal.term.evaluate((t) => t.getSelection()), TEXT, "the held drag selected the fixture word");
-  const down = (await pointerEvents(terminal.trace)).findLast((event) => event.type === "pointerdown" && event.onCanvas);
-  assert.ok(down?.isPrimary && down.isTrusted && down.pointerType === "mouse", "the canvas received a trusted primary mouse press");
-  return down;
-}
 
 export default {
   name: "terminal-pointer-reparent",
@@ -136,7 +127,7 @@ export default {
           }
           result.writesBeforeSecondPress = (await pointerWrites(page)).slice(writes);
           assert.deepEqual(result.writesBeforeSecondPress, [], "detached pen release and reattachment never attempt a copy");
-          const mouse = result.secondPress = await begin(page, terminal, await pointerGrid(terminal.term));
+          const mouse = result.secondPress = await beginPointerSelection(page, terminal, await pointerGrid(terminal.term), TEXT);
           assert.notEqual(mouse.pointerId, pen.pointerId, "recovery uses another pointer id");
           await page.mouse.up();
           await settlePointer(page);

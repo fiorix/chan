@@ -13,7 +13,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
-import { capturePointerTerminals, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { capturePointerTerminals, copyPointerChord, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
@@ -419,13 +419,7 @@ export default {
         }
         ta.focus();
       });
-      await page.keyboard.down("Control");
-      await page.keyboard.down("Shift");
-      await page.keyboard.press("KeyC");
-      await page.keyboard.up("Shift");
-      await page.keyboard.up("Control");
-      await sleep(300);
-      const text = await page.evaluate(() => navigator.clipboard.readText());
+      const text = await copyPointerChord(page);
       return text === CLIPBOARD_SENTINEL ? "" : text;
     }
 

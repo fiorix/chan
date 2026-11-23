@@ -92,11 +92,7 @@ function standIn(dir) {
 /// The ghostty-web Terminal whose element is the host of the tab `row` names.
 async function terminalOf(page, row) {
   const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
-  const term = await page.evaluateHandle((query) => {
-    const host = document.querySelector(query);
-    return window.__ghostty330.terminals.find((t) => t.core !== undefined && host && t.element === host) ?? null;
-  }, hostQuery);
-  if (!(await term.evaluate((t) => t !== null))) throw new Error(`no ghostty-web Terminal holds the host ${hostQuery}`);
+  const term = await page.evaluateHandle((query) => window.__ghostty330.term(query), hostQuery);
   return term;
 }
 

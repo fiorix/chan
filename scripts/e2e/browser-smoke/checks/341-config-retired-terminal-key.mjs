@@ -58,7 +58,6 @@ export default {
   name: "config-retired-terminal-key",
   async run(ctx) {
     assert.ok(ctx.chanHome, "CLI checks require the runner's private CHAN_HOME");
-    assert.ok(Array.isArray(ctx.stderrLines), "runner exposes the live server stderr lines");
     const details = { chanBin: ctx.chanBin, chanHome: ctx.chanHome, arms: {} };
     const errors = [];
     const artifact = join(ctx.outDir, "341-config-retired-terminal-key.json");

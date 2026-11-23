@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyPointerSelection, drainPointerInput, pointerEvents, pointerGrid, pointerReports, POINTER_RESET_MODES, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { copyPointerSelection, drainPointerInput, pointerEvents, pointerReports, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "SELECTION337";
 const FIND = "FIND337TARGET";
@@ -65,14 +65,8 @@ export default {
         await settlePointer(page);
 
         async function prepare(result) {
-          result.setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[2J\x1b[H${TEXT}\r\n${FIND}\r\n`);
-          assert.equal(result.setup.reply, "\x1b[3;1R", "fixture text reached the terminal parser");
-          assert.equal(await term.evaluate((t) => t.getScrollbackLength()), 0,
-            "each exact-selection gesture starts with empty scrollback");
-          assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
-            [false, false, false, false], "each gesture starts without mouse tracking");
-          await settlePointer(page);
-          const grid = await pointerGrid(term);
+          const grid = await resource.prepare(`${TEXT}\r\n${FIND}`, { reply: "\x1b[3;1R" });
+          result.setup = resource.setup;
           // A real click makes the source pane active before keyboard chords.
           await page.mouse.click(grid.x + grid.w * 2.5, grid.y + grid.h * 3.5);
           await term.evaluate((t) => t.clearSelection());
@@ -270,8 +264,6 @@ export default {
         assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "buttonless-hover", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
       } finally {
         if (held) await page.mouse.up().catch((error) => details.failures.push(`mouse cleanup: ${error.message}`));
-        await resource.close().catch((error) => details.failures.push(`terminal cleanup: ${error.message}`));
-        details.records = fixture.records;
         if (otherPane) await shell(["pane", "close", otherPane, "--window", windowId, "--force"])
           .catch((error) => details.failures.push(`pane cleanup: ${error.message}`));
       }

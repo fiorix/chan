@@ -32,6 +32,12 @@ export async function captureGhosttyTerminals(page, key, { notices = false } = {
       const decoder = new TextDecoder();
       const state = window[key] = {
         terminals: [], notices: [],
+        term(query) {
+          const host = document.querySelector(query);
+          const term = host && state.terminals.find((candidate) => candidate.element === host);
+          if (!term) throw new Error("the attached Ghostty terminal was not captured");
+          return term;
+        },
         restore() {
           unwrap(Terminal.prototype, "open", open);
           for (const [term, wrapper] of writes) unwrap(term, "write", wrapper);
