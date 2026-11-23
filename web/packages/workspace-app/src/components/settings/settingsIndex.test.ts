@@ -85,14 +85,11 @@ describe("settings index entries", () => {
 });
 
 describe("settled words", () => {
-  test("the terminal engine is a choice of ghostty and xterm for new terminals", () => {
-    const engine = settingEntry("terminal.engine");
-    expect(engine.label).toBe("Terminal engine (new terminals)");
-    expect(engine.kind).toBe("choice");
-    expect(engine.options).toEqual([
-      { value: "ghostty", label: "ghostty" },
-      { value: "xterm", label: "xterm" },
-    ]);
+  test("no setting chooses the terminal engine", () => {
+    expect(() => settingEntry("terminal.engine")).toThrow("settings index has no entry terminal.engine");
+    const words = (entry: (typeof index)[number]) =>
+      [entry.label, ...(entry.keywords ?? []), ...(entry.options ?? []).map((option) => option.label)].join(" ");
+    expect(index.filter((entry) => /engine|xterm|ghostty/i.test(words(entry))).map((entry) => entry.id)).toEqual([]);
   });
 
   test("the two docks are toggles twinned with the dock commands", () => {
@@ -123,7 +120,6 @@ describe("settled words", () => {
   });
 
   test("a former word for a renamed field still finds it", () => {
-    expect(settingEntry("terminal.engine").keywords).toContain("Ghostty backend");
     expect(settingEntry("browser.leftDock").keywords).toContain("Left pane");
     expect(settingEntry("browser.rightDock").keywords).toContain("Side panes");
   });

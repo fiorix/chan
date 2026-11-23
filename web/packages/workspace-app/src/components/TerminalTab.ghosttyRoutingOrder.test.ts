@@ -57,7 +57,7 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
     return this.classList.contains("terminal-host") ? 384 : 0;
   });
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true, secret_masking: true }));
+  __testSetStandalonePreferences(terminalPreferences({ secret_masking: true }));
 });
 
 afterEach(async () => {

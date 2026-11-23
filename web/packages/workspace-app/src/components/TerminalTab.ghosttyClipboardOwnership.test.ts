@@ -52,7 +52,7 @@ beforeEach(() => {
   writeText.mockClear();
   installSoftwareCanvas();
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true, secret_masking: false }));
+  __testSetStandalonePreferences(terminalPreferences({ secret_masking: false }));
 });
 
 afterEach(async () => {

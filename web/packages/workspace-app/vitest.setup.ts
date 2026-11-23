@@ -18,10 +18,12 @@
 // a Storage where it has none, so the suite reads the same under every Node
 // the gate runs on.
 //
-// The second shim, at the end, ends each file's timers with its page.
+// The second shim ends each file's timers with its page, and the guard at
+// the end fails a test whose mounted terminal could not initialize.
 
-import { afterAll } from "vitest";
+import { afterAll, afterEach } from "vitest";
 
+import { XtermStandInRequested } from "./src/__tests__/xterm";
 import { trackTimers } from "./src/demo/timers";
 
 /// The Storage surface the SPA actually uses: `getItem`, `setItem`,
@@ -105,4 +107,46 @@ for (const name of ["localStorage", "sessionStorage"] as const) {
 const fileTimers = trackTimers();
 afterAll(() => {
   fileTimers.release();
+  failOnTerminalInitFailures();
 });
+
+// TerminalTab reports a Ghostty load that failed on the console and falls
+// back to xterm.js, so a test that opens a terminal without the shared widget
+// fixture would pass against a terminal it never chose. The report is matched
+// by its prefix, recorded, and fails the test it came from once the test's
+// own teardown has run (a setup file's `afterEach` runs last); one that
+// arrives after the last test fails the file, once its timers are released.
+// A test that replaces console.warn itself has taken charge of what it hears.
+//
+// The one report it lets through is a load failed with XtermStandInRequested,
+// matched by its class: a file on the transitional stand-in route in
+// src/__tests__/xterm.ts asks for that failure to run its terminals on the
+// xterm stand-in. The exception goes with the route.
+const TERMINAL_INIT_FAILURE = "[chan] ghostty-web failed to load";
+const terminalInitFailures: string[] = [];
+const environmentWarn = console.warn;
+console.warn = function (this: Console, ...args: unknown[]) {
+  if (
+    typeof args[0] === "string" &&
+    args[0].startsWith(TERMINAL_INIT_FAILURE) &&
+    !(args[1] instanceof XtermStandInRequested)
+  ) {
+    terminalInitFailures.push(args.map((arg) => String(arg)).join(" "));
+  }
+  return environmentWarn.apply(this, args);
+};
+
+/// Throw for the terminal initialization failures reported since the last
+/// call, naming the fixture that opens a terminal in a mounted test.
+export function failOnTerminalInitFailures(): void {
+  const failures = terminalInitFailures.splice(0);
+  if (failures.length === 0) return;
+  throw new Error(
+    "a mounted terminal failed to initialize: open it on the real widget through the shared fixture in " +
+      'src/__tests__/ghosttyTab.ts (vi.mock "../terminal/backend" with ghosttyBackendModule and ' +
+      '"../terminal/ghosttyCompat" with ghosttyCompatModule). Reported: ' +
+      failures.join(" | "),
+  );
+}
+
+afterEach(failOnTerminalInitFailures);

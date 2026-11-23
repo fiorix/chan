@@ -45,17 +45,19 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [queuehold]: v0.134.0/a-queued-message-waits-behind-a-stopped-view-of-an-idle-program-on-macos-and-windows.md
 [noxterm]: v0.134.0/chan-carries-xterm-js-as-a-second-terminal-backend.md
 [rejectkey]: v0.134.0/the-retired-terminal-ghostty-key-is-accepted-with-a-warning.md
+[macrepeat]: v0.134.0/a-held-key-in-a-macos-terminal-opens-the-accent-picker-instead-of-repeating.md
+[redialmodes]: v0.134.0/a-redialed-terminal-keeps-a-dead-programs-modes-and-a-short-ack-wedges-a-view.md
 
 ### v0.134.0
 
-Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Two of the nineteen went back and shipped in v0.133.0: the screen lock's holes ([lockholes]) and the fast stream ([streamlag]). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]), and accepted two follow-ups of rows landed in v0.133.0: a YouTube embed keeps playing under the screen lock ([ytlock]), and a queued message waits behind a stopped view of an idle program on macOS and Windows ([queuehold]). On 2026-11-23 the owner took the Ghostty-only plan: xterm.js leaves chan with the `terminal.ghostty` key retired under a warning period ([noxterm]), the key's later rejection is a row of its own that waits for that period ([rejectkey]), and the mouse-mode prelude is deferred until the core's mouse state is measured ([mousefamily]).
+Opened on 2026-11-20, when the owner made the six merged rows the base of v0.133.0 and moved here the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Two of the nineteen went back and shipped in v0.133.0: the screen lock's holes ([lockholes]) and the fast stream ([streamlag]). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]), and accepted two follow-ups of rows landed in v0.133.0: a YouTube embed keeps playing under the screen lock ([ytlock]), and a queued message waits behind a stopped view of an idle program on macOS and Windows ([queuehold]). On 2026-11-23 the owner took the Ghostty-only plan: xterm.js leaves chan with the `terminal.ghostty` key retired under a warning period ([noxterm]), the key's later rejection is a row of its own that waits for that period ([rejectkey]), and the mouse-mode prelude was deferred until the core's mouse state was measured, then withdrawn on that reading ([mousefamily]). The same day the owner accepted a held key in a macOS terminal opening the accent picker ([macrepeat]) and two inherited stream findings, a redial keeping a dead program's modes and a short ack wedging a view ([redialmodes]).
 
 In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well"). On 2026-11-19 the owner took the graph's walks over the listing cap ([capwalks]) and the screen lock's remaining holes ([lockholes]), and at the v0.132.0 cut ("move them and cut") the twelve rows still open there moved to v0.133.0, with a control terminal that stops resizing after a hide in place on Windows ([ctlresize]); under that word the lead split the keyboard-owner row's unbuilt amendment into a row of its own ([surveytab]) and carried the wake fix's macOS reading ([wakemac]). A row built and not merged reads `review`: its branch is read again before it lands.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [the prelude re-asserts every mouse mode][mousefamily] | deferred | measure |
+| [the prelude re-asserts every mouse mode][mousefamily] | withdrawn | closed |
 | [cap: three walks, no folder layer][capwalks] | not started | build |
 | [AppImage children get its environment][appenv] | built | review |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | review |
@@ -76,6 +78,8 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a queued message behind a stopped view][queuehold] | not started | build |
 | [xterm.js as a second backend][noxterm] | not started | build |
 | [the retired key is still accepted][rejectkey] | not started | later |
+| [a held macOS key opens accents][macrepeat] | not started | measure |
+| [a redial keeps dead modes][redialmodes] | not started | build |
 
 ## Completed
 
@@ -93,13 +97,15 @@ Shipped 2026-11-22; see [release-v0.133.0](../release/release-v0.133.0.md). A no
 - [a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it](done/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md) - A terminal that falls behind a fast stream loses part of it (shipped; its WKWebView, machine sleep and gateway readings open for the owner).
 - [a-tmux-connections-card-lists-the-buried-terminal-that-ran-it](done/a-tmux-connections-card-lists-the-buried-terminal-that-ran-it.md) - A tmux connection's card lists the buried terminal that ran it.
 - [a-tour-part-the-pointer-crossed-stays-lit](done/a-tour-part-the-pointer-crossed-stays-lit.md) - A tour part the pointer crossed stays lit (shipped; a touch scroll's rest and the walk open for the owner).
+- [a-held-key-in-a-macos-terminal-opens-the-accent-picker-instead-of-repeating](v0.134.0/a-held-key-in-a-macos-terminal-opens-the-accent-picker-instead-of-repeating.md) - A held key in a macOS terminal opens the accent picker instead of repeating (accepted on 2026-11-23, not started).
+- [a-redialed-terminal-keeps-a-dead-programs-modes-and-a-short-ack-wedges-a-view](v0.134.0/a-redialed-terminal-keeps-a-dead-programs-modes-and-a-short-ack-wedges-a-view.md) - A redialed terminal keeps a dead program's modes, and a short ack wedges a view (accepted on 2026-11-23, not started).
 - [chan-carries-xterm-js-as-a-second-terminal-backend](v0.134.0/chan-carries-xterm-js-as-a-second-terminal-backend.md) - chan carries xterm.js as a second terminal backend (accepted on 2026-11-23, not started).
 - [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.134.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (moved to v0.134.0 on 2026-11-20, partly built).
 - [copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed](v0.134.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md) - Copy as HTML, the link preview, survey bodies and the table widget show wikilinks as typed (moved to v0.134.0 on 2026-11-20, partly built).
 - [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.134.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.134.0 on 2026-11-20, built and not merged).
 - [messages-queued-for-a-muse-agent-arrive-one-per-turn](done/messages-queued-for-a-muse-agent-arrive-one-per-turn.md) - Messages queued for a Muse agent arrive one per turn.
 - [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.134.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.134.0 on 2026-11-20, not started).
-- [the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last](v0.134.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md) - The attach prelude re-asserts every mouse mode a program set, where a terminal keeps only the last (moved to v0.134.0 on 2026-11-20, deferred by the owner on 2026-11-23 until the core's mouse state is measured).
+- [the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last](v0.134.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md) - The attach prelude re-asserts every mouse mode a program set, where a terminal keeps only the last (moved to v0.134.0 on 2026-11-20, withdrawn by the owner on 2026-11-23 on the core's mouse-state reading).
 - [the-computers-badge-graph-sits-off-centre-and-moves-in-steps](done/the-computers-badge-graph-sits-off-centre-and-moves-in-steps.md) - The Computers badge graph sits off centre and moves in steps.
 - [the-computers-keys-move-to-a-bar-at-the-bottom](done/the-computers-keys-move-to-a-bar-at-the-bottom.md) - The Computers keys move to a bar at the bottom.
 - [the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer](v0.134.0/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md) - The graph walks a workspace over the listing cap three times per load and shows no folder layer (moved to v0.134.0 on 2026-11-20, not started).

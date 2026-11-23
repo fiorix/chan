@@ -21,6 +21,7 @@
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -32,6 +33,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { terminalPreferences } from "../__tests__/standalone";
+import { engineClick, mousePointer } from "../__tests__/pointer";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import {
@@ -71,6 +73,7 @@ const ghostty = vi.hoisted(() => ({
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("@chan/ghostty-web-ng");
+  const { modelPointerCapture } = await import("../__tests__/pointer");
   class Terminal {
     cols = 80;
     rows = 24;
@@ -111,6 +114,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
         scrollbackLimit: this.options.scrollback,
       });
+      modelPointerCapture(this.canvas);
       this.selectionManager = new SelectionManager(
         this as never,
         this.renderer as never,
@@ -195,10 +199,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm?.free();
     }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...actual,
     loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: Terminal as never }),
-  };
+  });
 });
 // Renderer hooks the stand-in has no renderer for.
 vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
@@ -207,7 +211,6 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 
 installTerminalDom();
@@ -231,7 +234,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(LINUX);
   vi.stubGlobal("ClipboardItem", class {
     constructor(readonly items: Record<string, Blob>) {}
@@ -251,6 +254,7 @@ afterEach(() => {
   TerminalSocket.all.splice(0);
   ghostty.terminals.splice(0);
   xterm.terminals.splice(0);
+  useXtermStandIn(false);
   __testSetStandalonePreferences(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -283,12 +287,13 @@ async function renderGhostty(command = COMMAND) {
 }
 
 /// The user's drag from one screen cell to another, handled by
-/// ghostty-web's own mouse code; its release copies.
+/// ghostty-web's own pointer code; its release copies.
 function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }): void {
+  vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
   const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
-  term.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
-  term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1, ...at(to) }));
-  term.canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+  mousePointer(term.canvas, "pointerdown", at(from));
+  mousePointer(term.canvas, "pointermove", at(to));
+  mousePointer(term.canvas, "pointerup", at(to));
 }
 
 /// Where chan's writer puts a copy on each platform, and what reads it back.
@@ -438,12 +443,7 @@ describe("the Linux desktop PRIMARY selection", () => {
   }
 
   function middle(host: HTMLElement): MouseEvent {
-    for (const type of ["mousedown", "mouseup"]) {
-      host.dispatchEvent(new MouseEvent(type, { button: 1, bubbles: true, cancelable: true }));
-    }
-    const event = new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true });
-    host.dispatchEvent(event);
-    return event;
+    return engineClick(host, 1).click;
   }
 
   function inputs(): string[] {
@@ -504,7 +504,8 @@ describe("the Linux desktop PRIMARY selection", () => {
   });
 
   async function renderXterm() {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: false }));
+    useXtermStandIn();
+    __testSetStandalonePreferences(terminalPreferences());
     const [tab] = seatTerminals([terminalTab()]);
     const target = document.createElement("div");
     document.body.append(target);

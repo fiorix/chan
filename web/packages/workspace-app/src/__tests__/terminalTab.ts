@@ -1,16 +1,19 @@
-// Mounting TerminalTab in jsdom over a stand-in xterm and WebSocket. The
-// xterm modules are replaced with the recorders in `./xterm`, re-exported
-// here, so a test reads what the component configured and wrote, and drives
-// the key handler it registered the way xterm would. This module imports no
-// component: a test file mocks the xterm modules with those factories,
-// imports TerminalTab itself and hands it to mountTerminal.
+// Mounting TerminalTab in jsdom over a stand-in WebSocket. A file that
+// declares the shared fixture in `./ghosttyTab` mounts it on the real widget
+// over the vendored core. A file that does not still runs it on the stand-in
+// xterm: the xterm modules are replaced with the recorders in `./xterm`,
+// re-exported here, so a test reads what the component configured and
+// wrote, and drives the key handler it registered the way xterm would. This
+// module imports no component: a test file declares its mocks, imports
+// TerminalTab itself and hands it to mountTerminal.
 
+import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { mount, tick, unmount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 
 import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { xterm, type FakeTerminal } from "./xterm";
+import { FakeTerminal, useXtermStandIn, xterm } from "./xterm";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { resetLayout } from "./tabs";
 
@@ -74,16 +77,78 @@ export class TerminalSocket {
   }
 }
 
+/// The widget side of the shared fixture, registered by its backend factory
+/// when a test file declares it. Kept behind this slot because `./ghosttyTab`
+/// imports this module.
+export type GhosttyFixture = {
+  opened(within: Node): Promise<GhosttyTerminal>;
+  reset(): void;
+};
+
+let ghostty: GhosttyFixture | null = null;
+
+export function useGhosttyFixture(fixture: GhosttyFixture): void {
+  ghostty = fixture;
+}
+
+/// Frames and their cancel; an immediate frame has run by the time it could
+/// be cancelled, so it leaves the environment's cancel in place.
+type Frames = { request: typeof requestAnimationFrame; cancel?: typeof cancelAnimationFrame };
+
 const immediateFrame = ((cb: FrameRequestCallback) => {
   cb(0);
   return 0;
 }) as typeof requestAnimationFrame;
 
+const immediateFrames: Frames = { request: immediateFrame };
+
+/// Frames that each run one task after they are requested, as in a browser,
+/// never inside the call that asked: the widget's render loop requests its
+/// next frame from inside each one, which an immediate frame would run
+/// without end. The task comes from the setTimeout in place when the frames
+/// are made. A default `vi.useFakeTimers()` installed after that fakes
+/// `requestAnimationFrame` itself, so until `vi.useRealTimers()` frames run
+/// on the fake clock, as its timers do.
+export function taskFrames(): Required<Frames> {
+  const nextTask = globalThis.setTimeout;
+  const cancelTask = globalThis.clearTimeout;
+  const pending = new Map<number, ReturnType<typeof setTimeout>>();
+  let last = 0;
+  return {
+    request: ((callback: FrameRequestCallback) => {
+      const id = ++last;
+      pending.set(
+        id,
+        nextTask(() => {
+          pending.delete(id);
+          callback(performance.now());
+        }, 0),
+      );
+      return id;
+    }) as typeof requestAnimationFrame,
+    cancel: ((id: number) => {
+      const task = pending.get(id);
+      pending.delete(id);
+      if (task !== undefined) cancelTask(task);
+    }) as typeof cancelAnimationFrame,
+  };
+}
+
+/// The frames `installTerminalDom` chose for this file.
+let frames: Frames = immediateFrames;
+
+function installFrames(): void {
+  globalThis.requestAnimationFrame = frames.request;
+  if (frames.cancel) globalThis.cancelAnimationFrame = frames.cancel;
+}
+
 /// Every ResizeObserver the component made, with its callback and targets.
 export const resizeObservers: Array<{ callback: () => void; targets: Element[] }> = [];
 
 /// The DOM a mounted TerminalTab reads: observers, sockets, frames, canvas,
-/// font loading and media queries.
+/// font loading and media queries. Frames run at once for the stand-in and
+/// one task later under the shared fixture; the fixture serves the widget's
+/// canvases itself.
 export function installTerminalDom(): void {
   globalThis.ResizeObserver = class {
     record: { callback: () => void; targets: Element[] };
@@ -98,7 +163,8 @@ export function installTerminalDom(): void {
     disconnect() {}
   } as unknown as typeof ResizeObserver;
   globalThis.WebSocket = TerminalSocket as unknown as typeof WebSocket;
-  globalThis.requestAnimationFrame = immediateFrame;
+  frames = ghostty ? taskFrames() : immediateFrames;
+  installFrames();
   HTMLCanvasElement.prototype.getContext = (() => ({})) as unknown as HTMLCanvasElement["getContext"];
   Object.defineProperty(document, "fonts", {
     configurable: true,
@@ -131,7 +197,16 @@ export function seatTerminals(tabs: TerminalTabState[]): TerminalTabState[] {
 
 const mounted: Array<Record<string, unknown>> = [];
 
-/// Mount `TerminalTab` for a seated tab and wait for its socket.
+/// Whether the file declared the shared widget fixture.
+export function ghosttyFixtureDeclared(): boolean {
+  return ghostty !== null;
+}
+
+/// Mount `TerminalTab` for a seated tab and wait for its terminal and its
+/// socket: the widget under the shared fixture, the stand-in otherwise.
+/// `term` is the stand-in. Under the fixture reading it throws: a file that
+/// reads the widget mounts it with `mountGhosttyTerminal` in `./ghosttyTab`,
+/// which refuses a file that did not declare the fixture.
 export async function mountTerminal(
   TerminalTab: Component<any>,
   tab: TerminalTabState,
@@ -152,9 +227,25 @@ export async function mountTerminal(
   mounted.push(component);
   await tick();
   await tick();
+  if (ghostty) {
+    // The widget dials only once it has loaded and opened, so its own wait
+    // bounds the load, and the socket follows.
+    await ghostty.opened(target);
+    await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
+    expect(xterm.terminals, "the shared fixture opened no stand-in xterm").toHaveLength(0);
+    // Not enumerable, so a caller that spreads the result reads nothing.
+    const opened: { target: HTMLElement; component: Record<string, unknown> } = { target, component };
+    return Object.defineProperty(opened, "term", {
+      get(): never {
+        throw new Error("this terminal is the widget: mount it with mountGhosttyTerminal in ./ghosttyTab to read it");
+      },
+    }) as typeof opened & { term: FakeTerminal };
+  }
   await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
   await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
-  return { target, component, term: xterm.terminals.at(-1)! };
+  const term = xterm.terminals.at(-1);
+  if (!(term instanceof FakeTerminal)) throw new Error("the stand-in xterm opened no FakeTerminal");
+  return { target, component, term };
 }
 
 export function openSocket(): TerminalSocket {
@@ -164,9 +255,11 @@ export function openSocket(): TerminalSocket {
   return socket;
 }
 
-/// Hand `init` to the key handler the component registered with xterm, as
-/// xterm does before it processes a key; returns the handler's answer (false
-/// tells xterm to skip the key).
+/// Type a key into the stand-in and return whether xterm goes on to handle
+/// it (false: the component consumed it): `init` goes straight to the
+/// handler the component registered, as xterm hands it a key before it
+/// processes one. A key typed into the widget is `pressInGhostty` in
+/// `./ghosttyTab`, read by what the terminal sent.
 export function pressInTerminal(term: FakeTerminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
   if (!term.keyHandler) throw new Error("no key handler registered");
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
@@ -267,9 +360,11 @@ export function resetTerminals(): void {
   xterm.webgl.splice(0);
   xterm.webLinks.splice(0);
   xterm.webglThrows = false;
+  useXtermStandIn(false);
   xterm.textareaFocus = false;
+  ghostty?.reset();
   resizeObservers.splice(0);
-  globalThis.requestAnimationFrame = immediateFrame;
+  installFrames();
   document.body.innerHTML = "";
   seatTerminals([]);
   // Every attach schedules a session save. With no server standing in, the

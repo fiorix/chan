@@ -148,7 +148,7 @@ pub use routes::{build_id, set_build_id};
 
 use crate::terminal_sessions::{
     ControlSocketEnv, Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
-    TerminalBackendResolver, TerminalProfilePrefs, TerminalProfilesResolver,
+    TerminalProfilePrefs, TerminalProfilesResolver,
 };
 use auth::{auth_middleware, load_or_create_token, load_or_create_token_at, random_token};
 use bus::{make_progress_broadcast, make_watch_bridge};
@@ -949,23 +949,17 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     terminal_sessions.install_window_presence(window_presence.clone());
     if matches!(tenant, TenantKind::Terminal { .. }) {
         // A terminal-only tenant is long-lived but has neither the workspace
-        // settings route nor its config-change push path. Pull the preference at
-        // each PTY spawn instead. `ServerConfig::load` reads the same
+        // settings route nor its config-change push path. Pull the user's
+        // declared profiles at each PTY spawn instead. Without it this tenant
+        // spawns from the boot-time snapshot while `GET /api/terminal/shells`
+        // answers from the live config, so the picker offers a profile that
+        // clicking it does not open. `ServerConfig::load` reads the same
         // `config::default_path()` that the workspace PATCH persists through
         // `ServerConfig::save`; that path has one authority,
         // `chan_workspace::paths::config_dir()`, including its CHAN_HOME override.
         // A malformed or unreadable store returns None, so the registry keeps its
         // last good value and creation stays available (possibly stale until the
         // store becomes readable again).
-        terminal_sessions.install_terminal_backend_resolver(TerminalBackendResolver::new(|| {
-            ServerConfig::load()
-                .ok()
-                .map(|config| config.terminal.ghostty)
-        }));
-        // The same pull for the user's declared profiles. Without it this tenant
-        // spawns from the boot-time snapshot while `GET /api/terminal/shells`
-        // answers from the live config, so the picker offers a profile that
-        // clicking it does not open.
         terminal_sessions.install_terminal_profiles_resolver(TerminalProfilesResolver::new(|| {
             ServerConfig::load()
                 .ok()
@@ -3173,9 +3167,9 @@ mod terminal_router_tests {
     };
     use portable_pty::PtySize;
 
-    const HOSTED_BACKEND_CHILD: &str = "CHAN_TEST_HOSTED_TERMINAL_BACKEND_CHILD";
-    const HOSTED_BACKEND_TEST: &str =
-        "terminal_router_tests::hosted_terminal_registry_resolves_backend_on_each_spawn";
+    const HOSTED_ENGINE_CHILD: &str = "CHAN_TEST_HOSTED_TERMINAL_ENGINE_CHILD";
+    const HOSTED_ENGINE_TEST: &str =
+        "terminal_router_tests::a_hosted_terminal_spawns_ghostty_over_a_stored_false";
 
     fn terminal_create_options(command: Option<&str>) -> CreateOptions {
         CreateOptions {
@@ -3433,7 +3427,7 @@ mod terminal_router_tests {
         artifacts.tasks.shutdown().await;
     }
 
-    async fn run_hosted_backend_child() {
+    async fn run_hosted_engine_child() {
         // Match the repository-wide real-PTY/FS timing gate used by the route
         // and workspace tests. This child is its own process, so an in-process
         // mutex would not keep the shell probe out of their critical sections.
@@ -3447,14 +3441,18 @@ mod terminal_router_tests {
 
         let chan_home = std::env::var_os("CHAN_HOME").expect("isolated CHAN_HOME");
         let chan_home = std::path::PathBuf::from(chan_home);
-        let mut stored = ServerConfig::default();
-        stored.terminal.ghostty = false;
-        stored.save().expect("save initial xterm preference");
         assert_eq!(
             crate::config::default_path(),
             chan_home.join("server.toml"),
-            "the hosted resolver test must use its isolated config store"
+            "the hosted engine test must use its isolated config store"
         );
+        // What an install that chose xterm.js holds; the tenant loads the file
+        // at startup and again at each spawn for the declared profiles.
+        std::fs::write(
+            crate::config::default_path(),
+            "[terminal]\nghostty = false\n",
+        )
+        .expect("store the retired engine choice");
 
         let library = Library::open_at(chan_home.join("library.toml")).expect("open library");
         let config = ServeConfig {
@@ -3492,29 +3490,26 @@ mod terminal_router_tests {
             .expect("create original hosted terminal");
         let original_id = original.id().to_owned();
 
-        stored.terminal.ghostty = true;
-        stored.save().expect("flip stored preference to ghostty");
-
         original.send_input(b"printf 'EXISTING=<%s>\\n' \"$CHAN_TERMINAL\"\n");
         let existing =
-            collect_terminal_output(&mut original, "EXISTING=<xterm>", Duration::from_secs(30))
+            collect_terminal_output(&mut original, "EXISTING=<ghostty>", Duration::from_secs(30))
                 .await;
         assert!(
-            existing.contains("EXISTING=<xterm>"),
-            "config flip changed an already-running hosted child: {existing:?}"
+            existing.contains("EXISTING=<ghostty>"),
+            "a hosted shell does not carry CHAN_TERMINAL=ghostty: {existing:?}"
         );
 
         let mut created = registry
             .create(terminal_create_options(Some(
                 "printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"",
             )))
-            .expect("create hosted terminal after config flip");
+            .expect("create a second hosted terminal");
         let created_out =
             collect_terminal_output(&mut created, "CREATED=<ghostty>", Duration::from_secs(30))
                 .await;
         assert!(
             created_out.contains("CREATED=<ghostty>"),
-            "new hosted child did not resolve the stored preference: {created_out:?}"
+            "a hosted command does not carry CHAN_TERMINAL=ghostty: {created_out:?}"
         );
 
         assert!(
@@ -3535,7 +3530,7 @@ mod terminal_router_tests {
         .await;
         assert!(
             restarted_out.contains("RESTARTED=<ghostty>"),
-            "hosted restart did not resolve the stored preference: {restarted_out:?}"
+            "a restarted hosted shell does not carry CHAN_TERMINAL=ghostty: {restarted_out:?}"
         );
 
         registry.close(created.id(), CloseReason::Explicit);
@@ -3544,9 +3539,9 @@ mod terminal_router_tests {
     }
 
     #[tokio::test]
-    async fn hosted_terminal_registry_resolves_backend_on_each_spawn() {
-        if std::env::var_os(HOSTED_BACKEND_CHILD).is_some() {
-            run_hosted_backend_child().await;
+    async fn a_hosted_terminal_spawns_ghostty_over_a_stored_false() {
+        if std::env::var_os(HOSTED_ENGINE_CHILD).is_some() {
+            run_hosted_engine_child().await;
             return;
         }
 
@@ -3561,11 +3556,11 @@ mod terminal_router_tests {
         let home = tempfile::tempdir().expect("isolated chan home");
         let output = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
             .arg("--exact")
-            .arg(HOSTED_BACKEND_TEST)
+            .arg(HOSTED_ENGINE_TEST)
             .arg("--nocapture")
             .arg("--test-threads=2")
             .arg("--color=never")
-            .env(HOSTED_BACKEND_CHILD, "1")
+            .env(HOSTED_ENGINE_CHILD, "1")
             .env("CHAN_HOME", home.path())
             .output()
             .await

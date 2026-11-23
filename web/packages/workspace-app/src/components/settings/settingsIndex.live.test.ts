@@ -211,18 +211,6 @@ describe("a machine preference, with the overlay closed", () => {
     expect(body.read()).toBe("inherit");
   });
 
-  test("the terminal engine reads the stored engine and writes the other", async () => {
-    const preferences = settingsPreferences();
-    const config = serve({ ...preferences, terminal: { ...preferences.terminal, ghostty: true } });
-    const engine = settingEntry("terminal.engine");
-    expect(engine.read()).toBe("ghostty");
-
-    await engine.write!("xterm");
-
-    expect(config.writes).toEqual([{ terminal: { ...TERMINAL, ghostty: false } }]);
-    expect(engine.read()).toBe("xterm");
-  });
-
   test("a dock writes its side and keeps the other", async () => {
     const preferences = settingsPreferences();
     const config = serve({ ...preferences, browser_side_panes: { left: false, right: true } });

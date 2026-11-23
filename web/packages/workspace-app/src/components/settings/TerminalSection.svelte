@@ -53,7 +53,6 @@
   const TERM = settingEntry("terminal.term");
   const MCP_ENV = settingEntry("terminal.mcpEnv");
   const MOUSE_CAPTURE = settingEntry("terminal.mouseCapture");
-  const ENGINE = settingEntry("terminal.engine");
   const PROGRAM_STATUS = settingEntry("terminal.programStatus");
   const TMUX = settingEntry("terminal.tmux");
   const SECRET_MASKING = settingEntry("terminal.secretMasking");
@@ -200,20 +199,6 @@
     label={MOUSE_CAPTURE.caption}
     checked={toggledIn(MOUSE_CAPTURE, prefs)}
     ontoggle={(on) => commitSetting(commit, MOUSE_CAPTURE, on)}
-  />
-</SettingField>
-
-<SettingField
-  setting={ENGINE}
-  pref="terminal.ghostty"
-  hint="What parses and renders new terminals: Ghostty's WASM engine, the default on every platform, or xterm.js. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
->
-  <PillRadio
-    name="settings-terminal-engine"
-    ariaLabel="Terminal engine"
-    value={chosenIn(ENGINE, prefs)}
-    options={optionsOf(ENGINE)}
-    onselect={(engine) => commitSetting(commit, ENGINE, engine)}
   />
 </SettingField>
 

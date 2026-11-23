@@ -33,7 +33,6 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
@@ -67,7 +66,7 @@ beforeEach(() => {
   // The widget's render loop asks for a frame from every frame.
   vi.stubGlobal("requestAnimationFrame", () => 0);
   vi.stubGlobal("cancelAnimationFrame", () => {});
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
 });
 
 const mounted: Array<Record<string, unknown>> = [];

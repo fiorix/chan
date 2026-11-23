@@ -174,14 +174,12 @@
   import { trackUserInput, type UserInputTracker } from "../terminal/xtermUserInput";
   import {
     loadGhosttyKit,
-    terminalBackendFromPrefs,
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import {
     alignGhosttyRendererToXterm,
-    gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
@@ -485,8 +483,9 @@
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
   let receivedSeq = 0;
-  // Reports what the ghostty core has parsed; xterm.js queues its writes, so
-  // that backend never dials with `ack` and never paces the program.
+  // Reports each frame as the ghostty core takes it, in the same task as its
+  // parse; xterm.js queues its writes, so that backend never dials with `ack`
+  // and never paces the program.
   const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -607,9 +606,8 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend (Settings: terminal.ghostty, on by default).
-  // Read once in start() under the same spawn-time-only contract as the
-  // scrollback / mouse_capture settings above it. The ghostty backend
+  // Terminal backend: set in start(), Ghostty unless its load failed and
+  // the terminal fell back to xterm.js. The ghostty backend
   // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
   // addons (search, serialize, web-links, WebGL) and xterm-internal
   // hooks (OSC guards, keyboard-protocol tracking, Shift-selection
@@ -643,10 +641,6 @@
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   let primarySelectionCleanup: (() => void) | null = null;
-  // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
-  // clicks on the content beneath it while it is invisible. Non-null ONLY on
-  // the ghostty backend, and only while the gate is installed.
-  let ghosttyScrollbarClickGate: (() => void) | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -1294,35 +1288,29 @@
         readyFont.error,
       );
     }
-    // Backend honors the Settings toggle under the same spawn-time
-    // contract (read once here; flipping it affects only newly opened
-    // terminals). An absent field (a server older than the key) means
-    // xterm.js, which such a server can still drive. The ghostty
-    // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
-    // terminal gets its own WASM instance (see backend.ts); a failed load
-    // falls back to xterm.js rather than breaking the spawn (fail-open,
-    // matching the mouse filter's philosophy).
-    backend = terminalBackendFromPrefs(terminalPrefs);
+    // Every terminal opens on Ghostty.
+    // The kit lazy-loads on the first spawn and each terminal gets its own
+    // WASM instance (see backend.ts). A failed load falls back to xterm.js
+    // rather than breaking the spawn.
+    backend = "ghostty";
     let ghosttyKit: GhosttyKit | null = null;
     let ghosttyInstance: GhosttyVt | null = null;
-    if (backend === "ghostty") {
-      try {
-        ghosttyKit = await loadGhosttyKit();
-        ghosttyInstance = await ghosttyKit.instantiate({
-          cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
-          onResizeReply: sendGeneratedTerminalInput,
-        });
-      } catch (err) {
-        console.warn(
-          "[chan] ghostty-web failed to load; falling back to xterm.js:",
-          err,
-        );
-        backend = "xterm";
-      }
-      // The wasm fetch yields: a teardown (or a restart racing it) may
-      // have disposed this component while the load was in flight.
-      if (!host || term) return;
+    try {
+      ghosttyKit = await loadGhosttyKit();
+      ghosttyInstance = await ghosttyKit.instantiate({
+        cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
+        onResizeReply: sendGeneratedTerminalInput,
+      });
+    } catch (err) {
+      console.warn(
+        "[chan] ghostty-web failed to load; falling back to xterm.js:",
+        err,
+      );
+      backend = "xterm";
     }
+    // The wasm fetch yields: a teardown (or a restart racing it) may
+    // have disposed this component while the load was in flight.
+    if (!host || term) return;
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -1523,12 +1511,6 @@
       if (!ghosttyClickExtents) {
         console.warn(
           "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
-        );
-      }
-      ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
-      if (!ghosttyScrollbarClickGate) {
-        console.warn(
-          "[chan] ghostty-web mousedown hook unavailable; its overlay scrollbar claims clicks while hidden.",
         );
       }
     }
@@ -1848,6 +1830,19 @@
       wakeProbe.frameReceived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
+        // Count the frame before the terminal takes it. The core parses a
+        // write before anything it then runs (replies, change listeners, a
+        // render), so code inside the write sees the position the core
+        // reached, and a throw from any of it cannot leave the position
+        // short: a short ack stops the server once its window fills, and a
+        // short cursor makes a redial replay what the screen already shows.
+        // It precedes the reset and notice below, whose writes run the same
+        // listeners.
+        streamAck.parsed(bytes.length, attachReplayActive);
+        // Advance the server byte cursor only for LIVE output: replay chunks
+        // (between the `session` and `ready` frames) reconstruct history up to
+        // the prelude `seq` we already adopted, so counting them would double.
+        if (!attachReplayActive) receivedSeq += bytes.length;
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
           const terminal = term;
@@ -1866,11 +1861,6 @@
           }
         }
         writePtyOutput(bytes, attachPtyWriteOrigin());
-        streamAck.parsed(bytes.length, attachReplayActive);
-        // Advance the server byte cursor only for LIVE output: replay chunks
-        // (between the `session` and `ready` frames) reconstruct history up to
-        // the prelude `seq` we already adopted, so counting them would double.
-        if (!attachReplayActive) receivedSeq += bytes.length;
         recordOutputActivity();
         maybeSeedPrompt();
         return;
@@ -2028,6 +2018,12 @@
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0 && !resetBeforeReplay) {
+          // The lost bytes can end inside a sequence whose rest never comes.
+          // CAN on the output path ends it in the core and in every stream
+          // observer, as the server's own recovery suffix does after the
+          // replay, so neither this line nor the replay is read as part of
+          // it. A reset replay starts with RIS, which ends it too.
+          writePtyOutput(Uint8Array.of(0x18), "replay");
           writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
         // A replacement socket has attached to the same session: what waited
@@ -2856,8 +2852,6 @@
     host?.removeEventListener("keydown", noteInterruptKey, true);
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
-    ghosttyScrollbarClickGate?.();
-    ghosttyScrollbarClickGate = null;
     if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
     resizeScanTimer = null;
     secretMasker?.dispose();
@@ -3658,16 +3652,12 @@
         </div>
       {:else if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
-             body): the live engine and the masking toggle, Find + Copy
+             body): the masking toggle, Find + Copy
              (selection or scrollback) + Paste + Copy scrollback, the Rich
              Prompt rows, then the window's command launcher. Each action
              row is worded by its catalog command. Name / Group / broadcast
              / MCP / spawn config lives on the tab-name menu. -->
         <div class="action-list">
-          <div class="terminal-backend-label" data-terminal-backend={backend}>
-            <span>Terminal engine</span>
-            <span class="terminal-backend-value">{backend}</span>
-          </div>
           {@render toggleRow("app.terminal.secretMasking.toggle", toggleSecretMaskingFromMenu)}
           <div class="msep" role="separator"></div>
           <button class="mbtn" role="menuitem" onclick={openFind}>
@@ -3892,14 +3882,7 @@
     </div>
   {/if}
   {#if findOpen}
-    <!-- ghostty-web drops its selection on a click anywhere in the page
-         outside its canvas, and on ghostty find's highlight is that
-         selection, so a click in the bar (to place the caret) would take the
-         highlight away. The bar is the terminal's own, so its clicks stop
-         here; the menus close on pointerdown and the panes activate on
-         mousedown, which still bubble. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()}>
+    <div class="terminal-find" role="search" aria-label="find in terminal">
       <input
         bind:this={searchInput}
         class="find"
@@ -4403,19 +4386,6 @@
   }
   .broadcast-section-label .mbtn-icon {
     color: var(--text-secondary);
-  }
-  .terminal-backend-label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 4px 8px 6px;
-    color: var(--text-secondary);
-    font-size: 12px;
-  }
-  .terminal-backend-value {
-    color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .terminal-link-target {
     display: flex;

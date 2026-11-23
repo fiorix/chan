@@ -197,13 +197,6 @@ export type TerminalPreferences = {
   /// SPA treats `undefined` as true. Applies to newly opened
   /// terminals.
   mouse_capture?: boolean;
-  /// Whether newly opened terminals use the ghostty-web backend
-  /// (Ghostty's WASM VT parser) instead of xterm.js. The server defaults
-  /// it to true on every platform. Optional on the wire so a server older
-  /// than the key (no field) deserializes cleanly; the SPA treats
-  /// `undefined` as false, since such a server drives xterm.js only.
-  /// Applies to newly opened terminals.
-  ghostty?: boolean;
   /// Whether OSC 7501 program and chan status reports are enabled for all
   /// terminal sessions. On by default; changes apply to existing sessions.
   program_status?: boolean;

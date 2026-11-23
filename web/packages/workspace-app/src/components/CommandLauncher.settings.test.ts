@@ -231,16 +231,16 @@ describe("the Settings scope over the settings index", () => {
 
   test("a choice lists the field's own option words with a check on the current one", async () => {
     serve(settingsPreferences());
-    const engine = settingEntry("terminal.engine");
-    expect(engine.label).toBe("Terminal engine (new terminals)");
+    const font = settingEntry("terminal.font");
+    expect(font.label).toBe("Terminal font");
     await openSettingsScope();
-    expect(row(engine.label).dataset).toMatchObject({ kind: "choice", value: "xterm" });
+    expect(row(font.label).dataset).toMatchObject({ kind: "choice", value: "OS default (mono)" });
 
-    row(engine.label).click();
+    row(font.label).click();
     await flush();
     expect(rows().map((r) => [r.textContent, r.dataset.checked])).toEqual([
-      ["ghostty", "false"],
-      ["xterm", "true"],
+      ["OS default (mono)", "true"],
+      ["Source Code Pro", "false"],
     ]);
   });
 });

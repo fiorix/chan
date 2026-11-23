@@ -1,53 +1,495 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
-// Execute the runner's actual verdict handler without starting its server
-// or Chrome. Error details must survive serialization into results.json.
-const runner = readFileSync(new URL("../run.mjs", import.meta.url), "utf8");
-const start = runner.indexOf("    } catch (e) {\n      if (e.smokeSkip) {");
-const end = runner.indexOf("    } finally {", start);
-assert.ok(start >= 0 && end > start, "runner check-result handler is present");
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const handle = new AsyncFunction("e", "currentCheck", "console", "maskTokens", "ctx",
-  `let failed = 0; ${runner.slice(start + "    } catch (e) {".length, end)}; return failed;`);
-
-async function verdict(error) {
-  const currentCheck = { ok: false, skipped: false };
-  const messages = [], shots = [];
-  const failed = await handle(error, currentCheck, {
-    log: (line) => messages.push(line), error: (line) => messages.push(line),
-  }, (text) => text, { shot: async (name) => shots.push(name) });
-  return { check: JSON.parse(JSON.stringify(currentCheck)), failed, messages, shots };
+// Run the production entry point with inert browser/server dependencies. No
+// chan process, browser, network, build or package installation is involved.
+function run(t, { body = "return { observed: true };", bodies = [body], before = "", only = "00", mode = "", startup = "", args = [], interrupted = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "smoke-verdict-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const suite = join(root, "scripts/e2e/browser-smoke");
+  const put = (name, text) => {
+    const path = join(suite, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  };
+  mkdirSync(join(suite, "lib"), { recursive: true });
+  copyFileSync(new URL("../run.mjs", import.meta.url), join(suite, "run.mjs"));
+  copyFileSync(new URL("./token-mask.mjs", import.meta.url), join(suite, "lib/token-mask.mjs"));
+  const packages = { "": { dependencies: { "puppeteer-core": "1.0.0" } }, "node_modules/puppeteer-core": { version: "1.0.0" } };
+  put("package-lock.json", JSON.stringify({ packages }));
+  put("node_modules/.package-lock.json", JSON.stringify({ packages }));
+  put("node_modules/puppeteer-core/package.json", JSON.stringify({ name: "puppeteer-core", version: "1.0.0", type: "module", main: "index.mjs" }));
+  put("node_modules/puppeteer-core/index.mjs", `
+    ${startup}
+    const mode = process.env.CONTROL_MODE;
+    const page = { on() {}, async goto() {}, async waitForSelector() {}, async screenshot() { console.log("CONTROL_SHOT"); } };
+    const context = {
+      async newPage() { return page; }, async overridePermissions() {}, async pages() { return [page]; },
+      async close() {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        console.log("CONTROL_CLEANUP");
+        if (mode === "cleanup") throw new Error("CONTROL_CLEANUP_ERROR");
+      },
+    };
+    const browser = {
+      connected: true, async newPage() { return page; },
+      defaultBrowserContext() { return { async pages() { return []; } }; },
+      async createBrowserContext() { return context; },
+      async close() { if (mode === "fatal-and-teardown") throw new Error("CONTROL_BROWSER_TEARDOWN"); },
+      process() { return { kill(signal) { console.log("CONTROL_BROWSER_KILL " + signal); } }; },
+    };
+    page.browser = () => browser;
+    export default { async launch() { return browser; } };
+  `);
+  put("lib/server.mjs", `
+    export function defaultChrome() { return process.execPath; }
+    export function findControlSocket() { return null; }
+    export function seedWorkspace() {
+      if (process.env.CONTROL_MODE === "seed") throw new Error("CONTROL_SEED_ERROR");
+      return "fixture-workspace";
+    }
+    export function launchServer() {
+      return { child: { pid: 1, kill(signal) { console.log("CONTROL_SERVER_KILL " + signal); } }, url: Promise.resolve("http://127.0.0.1:1/?t=fixture"), chanHome: "fixture-home", stderrLines: ["CONTROL_STDERR"] };
+    }
+    export async function teardownServer() {
+      console.log("CONTROL_TEARDOWN");
+      if (process.env.CONTROL_MODE === "empty-teardown-crash") {
+        setTimeout(() => { throw ""; }, 5);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (process.env.CONTROL_MODE === "teardown") throw new Error("CONTROL_TEARDOWN_ERROR");
+    }
+  `);
+  put("lib/pdf.mjs", "export const assertPdf = () => {}; export const assertNoDuplicateBands = () => {};");
+  put("lib/delay-proxy.mjs", "export const startDelayProxy = () => {};");
+  put("lib/failure-record.mjs", `
+    import { writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    export class FailureRecord {
+      constructor(name, out) { this.path = join(out, name + ".timeline.json"); }
+      startResources() { if (process.env.CONTROL_MODE === "fatal-and-teardown") throw new Error("CONTROL_FIRST_FATAL"); } mark() {} async observePage() {}
+      write() {
+        if (process.env.CONTROL_MODE === "timeline") throw new Error("CONTROL_TIMELINE_ERROR");
+        writeFileSync(this.path, "{}");
+        console.log("CONTROL_TIMELINE");
+        return this.path;
+      }
+    }
+  `);
+  for (const [index, checkBody] of bodies.entries()) {
+    put(`checks/${String(index + 1).padStart(3, "0")}-control.mjs`,
+      `${before}\nexport default { name: "control-${index + 1}", async run(ctx) { ${checkBody} } };`);
+  }
+  mkdirSync(join(root, "runtime"), { mode: 0o700 });
+  const child = spawnSync(process.execPath, [join(suite, "run.mjs"), ...args], {
+    cwd: root, encoding: "utf8", timeout: 5000,
+    env: { PATH: dirname(process.execPath), HOME: root, TMPDIR: root,
+      CHAN_BIN: process.execPath, CHROME_BIN: process.execPath,
+      SMOKE_SKIP_BUILD: "1", SMOKE_ONLY: only, SMOKE_OUT_DIR: join(root, "out"),
+      XDG_RUNTIME_DIR: join(root, "runtime"), CONTROL_MODE: mode },
+  });
+  assert.ifError(child.error);
+  assert.equal(child.signal, null);
+  const log = child.stdout + child.stderr;
+  if (args.includes("--deps-only")) {
+    assert.equal(existsSync(join(root, "out/results.json")), false);
+    return { log, rc: child.status };
+  }
+  const results = JSON.parse(readFileSync(join(root, "out/results.json"), "utf8"));
+  if (interrupted) {
+    assert.equal(results.status, "running");
+    assert.equal(results.exitCode, null);
+    assert.equal(results.finishedAt, undefined);
+  } else {
+    assert.equal(results.exitCode, child.status);
+  }
+  if (child.status !== 0) {
+    assert.equal(results.ok, false);
+    assert.doesNotMatch(log, /ALL GREEN/);
+  } else {
+    assert.equal(results.status, "passed");
+    assert.ok(results.passed > 0);
+    assert.equal(results.passed, results.selectedChecks.length);
+  }
+  assert.equal((log.match(/\[smoke\]   PASS:/g) ?? []).length,
+    results.checks.filter((check) => check.status === "passed").length);
+  return { results, log, rc: child.status };
 }
 
-test("a skipped check retains passed arms and unavailable traces in its serialized result", async () => {
+test("PASS follows both page cleanup and timeline persistence", (t) => {
+  const { results: r, log, rc } = run(t);
+  assert.equal(rc, 0);
+  assert.equal(r.status, "passed");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.equal(r.checks[0].status, "passed");
+  assert.ok(log.indexOf("CONTROL_CLEANUP") < log.indexOf("[smoke]   PASS"));
+  assert.ok(log.indexOf("CONTROL_TIMELINE") < log.indexOf("[smoke]   PASS"));
+  assert.match(log, /ALL GREEN/);
+});
+
+test("an assertion red preserves its stack and exits 1", (t) => {
+  const { results: r, log, rc } = run(t, { body: 'throw new Error("CONTROL_RED");' });
+  assert.equal(rc, 1);
+  assert.equal(r.status, "failed");
+  assert.equal(r.failed, 1);
+  assert.match(r.checks[0].error, /Error: CONTROL_RED\n\s+at/);
+  assert.match(log, /\[smoke\]   FAIL:.*CONTROL_RED/);
+});
+
+test("a skip is incomplete and exits 2", (t) => {
+  const { results: r, log, rc } = run(t, { body: 'ctx.skip("CONTROL_SKIP");' });
+  assert.equal(rc, 2);
+  assert.equal(r.status, "skipped");
+  assert.equal(r.skipped, 1);
+  assert.equal(r.failed, 0);
+  assert.equal(r.checks[0].reason, "CONTROL_SKIP");
+  assert.match(log, /\[smoke\]   SKIP: CONTROL_SKIP/);
+  assert.match(log, /INCOMPLETE/);
+});
+
+for (const body of ['ctx.skip("CONTROL_SKIP");', 'return null;']) {
+  for (const mode of ["cleanup", "timeline"]) {
+    test(`${mode} failure overrides ${body.startsWith("ctx.skip") ? "skip" : "pass"}`, (t) => {
+      const { results: r, log, rc } = run(t, { body, mode });
+      assert.equal(rc, 2);
+      assert.equal(r.status, "error");
+      assert.equal(r.errors, 1);
+      assert.equal(r.skipped, 0);
+      assert.equal(r.checks[0].errors[0].phase, mode);
+      assert.match(r.checks[0].error, new RegExp(`CONTROL_${mode.toUpperCase()}_ERROR`));
+      assert.match(log, /\[smoke\]   ERROR:/);
+      assert.doesNotMatch(log, /\[smoke\]   SKIP:/);
+      if (body.startsWith("ctx.skip")) assert.equal(r.checks[0].skipReason, "CONTROL_SKIP");
+    });
+  }
+}
+
+for (const only of ["missing-", "001-,missing-", " , "]) {
+  test(`unmatched selection ${JSON.stringify(only)} fails before setup`, (t) => {
+    const { results: r, log, rc } = run(t, { only });
+    assert.equal(rc, 2);
+    assert.equal(r.status, "selection-error");
+    assert.deepEqual(r.checks, []);
+    assert.match(log, /SELECTION ERROR/);
+    assert.doesNotMatch(log, /seeding workspace|puppeteer-core=/);
+  });
+}
+
+for (const [name, options, phase] of [
+  ["check import", { before: 'import "./CONTROL_MISSING_MODULE.mjs";' }, "import"],
+  ["explicit environment tag", { body: 'throw Object.assign(new Error("CONTROL_ENVIRONMENT"), { smokeEnvironment: true });' }, "check"],
+  ["crashed browser", { body: 'ctx.page.browser().connected = false; throw new Error("CONTROL_CRASH");' }, "check"],
+  ["dependency import", { startup: 'import "./CONTROL_MISSING_DRIVER.mjs";' }, "startup"],
+  ["seed fixture", { mode: "seed" }, "startup"],
+  ["server teardown", { mode: "teardown" }, "server cleanup"],
+]) {
+  test(`${name} is an environment error, not an assertion red`, (t) => {
+    const { results: r, log, rc } = run(t, options);
+    assert.equal(rc, 2);
+    assert.equal(r.status, "error");
+    assert.equal(r.failed, 0);
+    assert.match(r.fatal ?? r.checks[0].error, /CONTROL_/);
+    assert.equal(r.errorPhase ?? r.checks[0].errors[0].phase, phase);
+    assert.match(log, /ERROR/);
+    assert.doesNotMatch(log, /FAILURE\(S\)/);
+  });
+}
+
+for (const [name, body] of [
+  ["broken fixture", 'await import("node:fs").then(fs => fs.readFileSync("CONTROL_MISSING_FIXTURE"));'],
+  ["timeout", 'throw Object.assign(new Error("CONTROL_TIMEOUT"), { name: "TimeoutError" });'],
+  ["access", 'throw Object.assign(new Error("CONTROL_ACCESS"), { code: "EACCES" });'],
+]) {
+  test(`${name} thrown in a check body is FAIL`, (t) => {
+    const { results: r, log, rc } = run(t, { body });
+    assert.equal(rc, 1);
+    assert.equal(r.failed, 1);
+    assert.equal(r.errors, 0);
+    assert.equal(r.checks[0].errors[0].phase, "check");
+    assert.match(log, /\[smoke\]   FAIL:/);
+  });
+}
+
+const checkBodies = {
+  fail: 'throw new Error("CONTROL_RED");',
+  pass: 'return { observed: true };',
+  skip: 'ctx.skip("CONTROL_SKIP");',
+  error: 'throw Object.assign(new Error("CONTROL_ENVIRONMENT"), { smokeEnvironment: true });',
+};
+for (const names of [["fail", "pass"], ["pass", "fail"], ["fail", "skip"], ["fail", "error"]]) {
+  test(`aggregate retains every row in ${names.join(", ")}`, (t) => {
+    const { results: r, log, rc } = run(t, { bodies: names.map((name) => checkBodies[name]) });
+    const statuses = { fail: "failed", pass: "passed", skip: "skipped", error: "error" };
+    assert.deepEqual(r.checks.map((c) => c.status), names.map((name) => statuses[name]));
+    assert.equal(rc, names.includes("error") ? 2 : 1);
+    assert.equal(r.failed, 1);
+    assert.equal(r.passed, names.includes("pass") ? 1 : 0);
+    assert.equal(r.skipped, names.includes("skip") ? 1 : 0);
+    assert.equal(r.errors, names.includes("error") ? 1 : 0);
+    assert.match(log, new RegExp(`${r.passed} passed, ${r.failed} failed, ${r.skipped} skipped, ${r.errors} errors`));
+  });
+}
+
+test("a check-1 timer that throws during check 2 revokes aggregate success", (t) => {
+  const { results: r, log, rc } = run(t, { bodies: [
+    `setTimeout(function crashDuringSecond() {
+      if (!globalThis.secondCheckStarted) return setTimeout(crashDuringSecond, 5);
+      throw new Error("CONTROL_LATE_CRASH");
+    }, 5); return null;`,
+    'globalThis.secondCheckStarted = true; await new Promise((resolve) => setTimeout(resolve, 1000));',
+  ] });
+  assert.equal(rc, 2);
+  assert.equal(r.status, "error");
+  assert.deepEqual(r.checks.map((c) => c.status), ["passed", "error"]);
+  assert.match(r.fatal, /CONTROL_LATE_CRASH/);
+  assert.equal(r.errorPhase, "uncaught exception");
+  assert.equal(r.currentCheck, null);
+  assert.match(log, /ERROR/);
+});
+
+test("completed rows are persisted as running before the next body", (t) => {
+  const { results: r, rc } = run(t, { bodies: [checkBodies.fail, `
+    const fs = await import("node:fs");
+    const partial = JSON.parse(fs.readFileSync(ctx.outDir + "/results.json", "utf8"));
+    const assert = (await import("node:assert/strict")).default;
+    assert.equal(partial.status, "running");
+    assert.equal(partial.ok, false);
+    assert.equal(partial.exitCode, null);
+    assert.equal(partial.finishedAt, undefined);
+    assert.deepEqual(partial.selectedChecks, ["001-control.mjs", "002-control.mjs"]);
+    assert.equal(partial.currentCheck, "002-control.mjs");
+    assert.equal(partial.checks.length, 1);
+    assert.equal(partial.checks[0].status, "failed");
+    return { partialRead: true };
+  `] });
+  assert.equal(rc, 1);
+  assert.deepEqual(r.checks.map((c) => c.status), ["failed", "passed"]);
+  assert.equal(r.checks[1].details.partialRead, true);
+});
+
+for (const body of [
+  'return { value: 1n };',
+  'const cycle = {}; cycle.self = cycle; return cycle;',
+  'throw Object.assign(new Error("CONTROL_RED"), { smokeDetails: { value: 1n } });',
+]) {
+  test(`nonserializable details fail only their row: ${body}`, (t) => {
+    const { results: r, rc } = run(t, { bodies: [body, checkBodies.pass] });
+    assert.equal(rc, 1);
+    assert.deepEqual(r.checks.map((c) => c.status), ["failed", "passed"]);
+    assert.match(r.checks[0].error, /TypeError/);
+    assert.equal(r.fatal, undefined);
+  });
+}
+
+test("details are snapshotted before later checks can mutate them", (t) => {
+  const { results: r, rc } = run(t, { bodies: [
+    'globalThis.details = { value: "original" }; return globalThis.details;',
+    'globalThis.details.value = 1n; return null;',
+  ] });
+  assert.equal(rc, 0);
+  assert.deepEqual(r.checks[0].details, { value: "original" });
+});
+
+test("the first fatal cause survives a later teardown error", (t) => {
+  const { results: r, log, rc } = run(t, {
+    mode: "fatal-and-teardown",
+  });
+  assert.equal(rc, 2);
+  assert.equal(r.errorPhase, "runtime");
+  assert.match(r.fatal, /CONTROL_FIRST_FATAL/);
+  assert.match(log, /CONTROL_BROWSER_TEARDOWN/);
+});
+
+test("an import failure does not count as a body that ran", (t) => {
+  const { results: r, log } = run(t, { before: 'import "./CONTROL_MISSING_MODULE.mjs";' });
+  assert.equal(r.ran, 0);
+  assert.equal(r.checks[0].ran, false);
+  assert.match(log, /0 ran/);
+});
+
+test("dependency-only success exits 0 without a smoke verdict", (t) => {
+  const { log, rc } = run(t, { args: ["--deps-only"] });
+  assert.equal(rc, 0);
+  assert.match(log, /puppeteer-core=1\.0\.0/);
+  assert.doesNotMatch(log, /ALL GREEN|CONTROL_SERVER_KILL|CONTROL_BROWSER_KILL/);
+});
+
+test("dependency-only failure emits one cause without a results-path TypeError", (t) => {
+  const { log, rc } = run(t, { args: ["--deps-only"], startup: 'import "./CONTROL_MISSING_DRIVER.mjs";' });
+  assert.equal(rc, 2);
+  assert.match(log, /CONTROL_MISSING_DRIVER/);
+  assert.doesNotMatch(log, /ERROR \(results\)|TypeError|ALL GREEN/);
+});
+
+for (const startup of ['throw "";', 'throw Object.assign(new Error("empty stack"), { stack: "" });']) {
+  test(`empty fatal detail is still an error: ${startup}`, (t) => {
+    const { results: r, rc } = run(t, { startup });
+    assert.equal(rc, 2);
+    assert.equal(r.status, "error");
+    assert.equal(r.errorPhase, "startup");
+    assert.equal(r.fatal, "");
+  });
+}
+
+test("an empty timer throw during teardown revokes success", (t) => {
+  const { results: r, log, rc } = run(t, { mode: "empty-teardown-crash" });
+  assert.equal(rc, 2);
+  assert.equal(r.errorPhase, "uncaught exception");
+  assert.equal(r.fatal, "");
+  assert.equal(r.passed, 1);
+  assert.match(log, /CONTROL_TEARDOWN/);
+});
+
+for (const mode of ["cleanup", "timeline"]) {
+  test(`${mode} error preserves a failed body`, (t) => {
+    const { results: r, log, rc } = run(t, { body: checkBodies.fail, mode });
+    assert.equal(rc, 1);
+    assert.equal(r.failed, 1);
+    assert.equal(r.errors, 0);
+    assert.deepEqual(r.checks[0].errors.map(({ phase, status }) => [phase, status]),
+      [["check", "failed"], [mode, "error"]]);
+    assert.match(log, /1 failed/);
+  });
+}
+
+test("unserializable environment details retain the error verdict", (t) => {
+  const { results: r, rc } = run(t, {
+    body: 'throw Object.assign(new Error("CONTROL_ENVIRONMENT"), { smokeEnvironment: true, smokeDetails: { value: 1n } });',
+  });
+  assert.equal(rc, 2);
+  assert.equal(r.errors, 1);
+  assert.equal(r.failed, 0);
+  assert.deepEqual(r.checks[0].errors.map((e) => e.status), ["error", "failed"]);
+});
+
+test("process.exit(0) in a check cannot report success", (t) => {
+  const { results: r, log, rc } = run(t, { body: "process.exit(0);", interrupted: true });
+  assert.equal(rc, 2);
+  assert.equal(r.currentCheck, "001-control.mjs");
+  assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.deepEqual(r.checks, []);
+  assert.match(log, /CONTROL_SERVER_KILL SIGKILL/);
+  assert.match(log, /CONTROL_BROWSER_KILL SIGKILL/);
+});
+
+test("process.exit(1) before finalization is incomplete, not an assertion red", (t) => {
+  const { results: r, rc } = run(t, { body: "process.exit(1);", interrupted: true });
+  assert.equal(rc, 2);
+  assert.equal(r.currentCheck, "001-control.mjs");
+  assert.deepEqual(r.checks, []);
+});
+
+test("selection is persisted before importing dependencies", (t) => {
+  const { rc } = run(t, { startup: `
+    import fs from "node:fs";
+    import assert from "node:assert/strict";
+    const partial = JSON.parse(fs.readFileSync(process.env.SMOKE_OUT_DIR + "/results.json", "utf8"));
+    assert.equal(partial.status, "running");
+    assert.deepEqual(partial.selectedChecks, ["001-control.mjs"]);
+    assert.equal(partial.currentCheck, null);
+  ` });
+  assert.equal(rc, 0);
+});
+
+test("an interrupted snapshot write preserves the previous readable file", (t) => {
+  const { results: r, rc } = run(t, { interrupted: true, body: `
+    const fs = (await import("node:fs")).default;
+    const { syncBuiltinESMExports } = await import("node:module");
+    const write = fs.writeFileSync;
+    fs.writeFileSync = (path, data, ...args) => {
+      if (String(path).includes("results.json")) {
+        write(path, String(data).slice(0, 20), ...args);
+        process.exit(23);
+      }
+      return write(path, data, ...args);
+    };
+    syncBuiltinESMExports();
+    return null;
+  ` });
+  assert.equal(rc, 23);
+  assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.equal(r.currentCheck, "001-control.mjs");
+  assert.deepEqual(r.checks, []);
+});
+
+
+test("a skipped check retains passed arms and unavailable traces in its serialized result", (t) => {
   const smokeDetails = {
     legs: { connected: { status: "passed" }, reparent: { status: "unavailable", events: [{ type: "lostpointercapture" }] } },
     failures: ["reparent (unavailable): native loss reached the canvas"],
   };
-  const result = await verdict(Object.assign(new Error("native loss reached the canvas"), { smokeSkip: true, smokeDetails }));
-  assert.deepEqual(result.check, { ok: false, skipped: true, reason: "native loss reached the canvas", details: smokeDetails });
-  assert.equal(result.failed, 0);
-  assert.deepEqual(result.shots, []);
-  assert.deepEqual(result.messages, ["[smoke]   SKIP: native loss reached the canvas"]);
+  const { results: r, log, rc } = run(t, {
+    body: `throw Object.assign(new Error("native loss reached the canvas"), { smokeSkip: true, smokeDetails: ${JSON.stringify(smokeDetails)} });`,
+  });
+  assert.equal(rc, 2);
+  assert.equal(r.failed, 0);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, true);
+  assert.equal(r.checks[0].reason, "native loss reached the canvas");
+  assert.deepEqual(r.checks[0].details, smokeDetails);
+  assert.match(log, /\[smoke\]   SKIP: native loss reached the canvas/);
+  assert.doesNotMatch(log, /CONTROL_SHOT|\[smoke\]   FAIL:/);
 });
 
-test("a product failure retains its evidence and counts as failure", async () => {
+test("a product failure retains its evidence and counts as failure", (t) => {
   const smokeDetails = { legs: { connected: { status: "failed" } } };
-  const result = await verdict(Object.assign(new Error("copy was lost"), { smokeDetails }));
-  assert.equal(result.check.ok, false);
-  assert.equal(result.check.skipped, false);
-  assert.match(result.check.error, /copy was lost/);
-  assert.deepEqual(result.check.details, smokeDetails);
-  assert.equal(result.failed, 1);
-  assert.deepEqual(result.shots, ["failure"]);
-  assert.deepEqual(result.messages, ["[smoke]   FAIL: copy was lost"]);
+  const { results: r, log, rc } = run(t, {
+    body: `throw Object.assign(new Error("copy was lost"), { smokeDetails: ${JSON.stringify(smokeDetails)} });`,
+  });
+  assert.equal(rc, 1);
+  assert.equal(r.failed, 1);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, false);
+  assert.match(r.checks[0].error, /copy was lost/);
+  assert.deepEqual(r.checks[0].details, smokeDetails);
+  assert.match(log, /CONTROL_SHOT/);
+  assert.match(log, /\[smoke\]   FAIL:.*copy was lost/);
 });
 
-test("a plain skip does not fabricate evidence or a pass", async () => {
-  const result = await verdict(Object.assign(new Error("device absent"), { smokeSkip: true }));
-  assert.deepEqual(result.check, { ok: false, skipped: true, reason: "device absent" });
-  assert.equal(result.failed, 0);
-  assert.deepEqual(result.messages, ["[smoke]   SKIP: device absent"]);
+test("a plain skip does not fabricate evidence or a pass", (t) => {
+  const { results: r, log, rc } = run(t, { body: 'ctx.skip("device absent");' });
+  assert.equal(rc, 2);
+  assert.equal(r.failed, 0);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, true);
+  assert.equal(r.checks[0].reason, "device absent");
+  assert.equal(Object.hasOwn(r.checks[0], "details"), false);
+  assert.match(log, /\[smoke\]   SKIP: device absent/);
+  assert.doesNotMatch(log, /CONTROL_SHOT/);
+});
+
+test("skip details are snapshotted before a later check changes them", (t) => {
+  const { results: r, rc } = run(t, { bodies: [
+    'globalThis.details = { value: "original" }; throw Object.assign(new Error("device absent"), { smokeSkip: true, smokeDetails: globalThis.details });',
+    'globalThis.details.value = 1n; return null;',
+  ] });
+  assert.equal(rc, 2);
+  assert.deepEqual(r.checks.map((row) => row.status), ["skipped", "passed"]);
+  assert.deepEqual(r.checks[0].details, { value: "original" });
+});
+
+test("unserializable skip details fail their row without hiding later results", (t) => {
+  const { results: r, rc } = run(t, { bodies: [
+    'throw Object.assign(new Error("device absent"), { smokeSkip: true, smokeDetails: { value: 1n } });',
+    'return null;',
+  ] });
+  assert.equal(rc, 1);
+  assert.deepEqual(r.checks.map((row) => row.status), ["failed", "passed"]);
+  assert.equal(r.checks[0].skipReason, "device absent");
+  assert.match(r.checks[0].error, /TypeError/);
+});
+
+test("checks receive the server stderr lines", (t) => {
+  const { results: r, rc } = run(t, { body: `
+    const assert = (await import("node:assert/strict")).default;
+    assert.deepEqual(ctx.stderrLines, ["CONTROL_STDERR"]);
+    return { stderr: ctx.stderrLines };
+  ` });
+  assert.equal(rc, 0);
+  assert.deepEqual(r.checks[0].details.stderr, ["CONTROL_STDERR"]);
 });

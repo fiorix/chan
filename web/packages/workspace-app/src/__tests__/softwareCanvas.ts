@@ -313,3 +313,18 @@ function parseCanvasColor(style: string): Rgba {
   // here than a failure: these tests exist to compare colors.
   throw new Error(`unsupported canvas color: ${style}`);
 }
+
+/// A `getContext` that answers "2d" with one software context per canvas,
+/// made at the canvas's first ask and kept in `contexts`, and hands any
+/// other context id to `other`, the environment's own `getContext`.
+export function softwareGetContext(
+  contexts: WeakMap<HTMLCanvasElement, SoftwareCanvasContext>,
+  other: typeof HTMLCanvasElement.prototype.getContext,
+): typeof HTMLCanvasElement.prototype.getContext {
+  return function (this: HTMLCanvasElement, id: string, ...options: unknown[]) {
+    if (id !== "2d") return (other as (this: HTMLCanvasElement, ...args: unknown[]) => unknown).call(this, id, ...options);
+    let context = contexts.get(this);
+    if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
+    return context;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext;
+}

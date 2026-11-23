@@ -6,8 +6,8 @@
 //
 //   vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
 //
-// `./terminalTab` re-exports all of it beside its TerminalTab mounting
-// harness. This module imports nothing from the app, so a mock factory can
+// `./terminalTab` re-exports the stand-in beside its TerminalTab mounting
+// harness; the stand-in route at the end is imported from here. This module imports nothing from the app, so a mock factory can
 // load it while the app's own imports are still resolving.
 
 /// What the stand-in xterm recorded.
@@ -259,5 +259,47 @@ export function webglAddonModule() {
         this.record.disposed = true;
       }
     },
+  };
+}
+
+// The stand-in route. A file that still asserts on the stand-in opens its
+// terminals on it through TerminalTab's own fallback: the file's Ghostty load
+// fails with `XtermStandInRequested`, TerminalTab falls back to xterm.js, and
+// the file's `@xterm/xterm` mock serves the stand-in. The setup file's
+// terminal initialization guard lets that one failure through, by its class.
+// The route is transitional: a file leaves it when its assertions move to the
+// widget fixture (`./ghosttyTab`), and the route goes with the last file.
+
+/// The load failure a file on the stand-in route asks for.
+export class XtermStandInRequested extends Error {
+  constructor() {
+    super("this terminal runs on the xterm stand-in");
+    this.name = "XtermStandInRequested";
+  }
+}
+
+/// The `vi.mock("../terminal/backend", ...)` factory of a file whose every
+/// terminal runs on the stand-in.
+export async function xtermStandInBackendModule(importOriginal: <T>() => Promise<T>) {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, loadGhosttyKit: (): Promise<never> => Promise.reject(new XtermStandInRequested()) };
+}
+
+const standIn = { on: false };
+
+/// For a file whose own backend mock serves a Ghostty kit, per case: the
+/// terminals opened after `useXtermStandIn()` run on the stand-in, and after
+/// `useXtermStandIn(false)` on the file's kit. `resetTerminals` turns it off.
+export function useXtermStandIn(on = true): void {
+  standIn.on = on;
+}
+
+/// Wraps the module a file's own backend mock returns, so `useXtermStandIn`
+/// decides each load.
+export function xtermStandInSwitch<T extends { loadGhosttyKit: () => Promise<unknown> }>(module: T): T {
+  const load = module.loadGhosttyKit;
+  return {
+    ...module,
+    loadGhosttyKit: (() => (standIn.on ? Promise.reject(new XtermStandInRequested()) : load())) as T["loadGhosttyKit"],
   };
 }

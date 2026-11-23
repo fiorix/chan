@@ -296,10 +296,6 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         kind: ConfigValueKind::ProgramList(32),
     },
     ConfigKeySpec {
-        key: "server.terminal.ghostty",
-        kind: ConfigValueKind::Bool,
-    },
-    ConfigKeySpec {
         key: "server.terminal.secret_masking",
         kind: ConfigValueKind::OptionalBool,
     },
@@ -323,8 +319,45 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
 ];
 
+/// The retired terminal engine choice. Every terminal is Ghostty, so `get`
+/// answers `true` and `set` writes nothing, each with
+/// [`RETIRED_ENGINE_WARNING`], and listings leave the key out. Both are
+/// answered before any config file is read, so neither loads or saves one.
+const RETIRED_ENGINE_KEY: &str = "server.terminal.ghostty";
+
+const RETIRED_ENGINE_WARNING: &str = "warning: `server.terminal.ghostty` is deprecated and \
+     has no effect: every terminal uses Ghostty. Remove it from scripts and server.toml; a \
+     future release will reject it.";
+
+/// `chan config get server.terminal.ghostty`: the value every terminal has.
+fn get_retired_engine_key(
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Result<()> {
+    writeln!(err, "{RETIRED_ENGINE_WARNING}")?;
+    writeln!(out, "true")?;
+    Ok(())
+}
+
+/// `chan config set server.terminal.ghostty <bool>`: the value keeps the type
+/// check it had, and nothing is written.
+fn set_retired_engine_key(raw: &str, err: &mut impl std::io::Write) -> Result<()> {
+    let spec = ConfigKeySpec {
+        key: RETIRED_ENGINE_KEY,
+        kind: ConfigValueKind::Bool,
+    };
+    parse_config_scalar(spec, raw)?;
+    writeln!(err, "{RETIRED_ENGINE_WARNING}")?;
+    Ok(())
+}
+
 pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
     match action {
+        ConfigAction::Get { key: Some(key), .. }
+            if canonical_config_key(&key) == RETIRED_ENGINE_KEY =>
+        {
+            get_retired_engine_key(&mut std::io::stdout(), &mut std::io::stderr())
+        }
         ConfigAction::Get { key, json } => {
             let editor = EditorPrefs::load().context("loading editor preferences")?;
             let server = ServerConfig::load().context("loading server config")?;
@@ -352,6 +385,9 @@ pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
         ConfigAction::Set { key, value } => {
             let (key, raw_value) = split_assignment(&key, value.as_deref())?;
             let key = canonical_config_key(&key);
+            if key == RETIRED_ENGINE_KEY {
+                return set_retired_engine_key(&raw_value, &mut std::io::stderr());
+            }
             if key.starts_with("server.") {
                 let mut cfg = ServerConfig::load().context("loading server config")?;
                 write_server_config_key(&mut cfg, &key, &raw_value)?;
@@ -927,6 +963,124 @@ mod tests {
         assert!(write_error
             .to_string()
             .contains("unknown key `server.attachments_dir`"));
+    }
+
+    #[test]
+    fn retired_engine_key_set_warns_and_writes_nothing() {
+        let env = test_env::ChanTestEnv::new();
+        let path = env.home().join("server.toml");
+        for (key, value) in [
+            ("server.terminal.ghostty", Some("true")),
+            ("terminal.ghostty", Some("false")),
+            ("terminal.ghostty=true", None),
+        ] {
+            cmd_config(ConfigAction::Set {
+                key: key.into(),
+                value: value.map(Into::into),
+            })
+            .unwrap_or_else(|error| panic!("{key} {value:?}: {error:#}"));
+        }
+        assert!(
+            !path.exists(),
+            "a set of the retired key created server.toml"
+        );
+
+        // A file that holds the key keeps every byte, and so does one that
+        // does not load: the set reads no file.
+        for body in [
+            "[terminal]\nghostty = false\nfont_size = 12\n",
+            "terminal = = =\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            for value in ["true", "false"] {
+                cmd_config(ConfigAction::Set {
+                    key: "terminal.ghostty".into(),
+                    value: Some(value.into()),
+                })
+                .unwrap();
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            }
+        }
+
+        let mut err = Vec::new();
+        set_retired_engine_key("false", &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!("{RETIRED_ENGINE_WARNING}\n")
+        );
+        for word in ["deprecated", "no effect", "Remove it", "will reject"] {
+            assert!(RETIRED_ENGINE_WARNING.contains(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn retired_engine_key_set_refuses_a_non_boolean() {
+        let env = test_env::ChanTestEnv::new();
+        let error = cmd_config(ConfigAction::Set {
+            key: "terminal.ghostty".into(),
+            value: Some("maybe".into()),
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expected true|false"),
+            "{error:#}"
+        );
+        assert!(!env.home().join("server.toml").exists());
+        let mut err = Vec::new();
+        assert!(set_retired_engine_key("maybe", &mut err).is_err());
+        assert!(err.is_empty(), "a refused value also warned");
+    }
+
+    #[test]
+    fn retired_engine_key_get_reads_true_with_the_warning() {
+        let env = test_env::ChanTestEnv::new();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        get_retired_engine_key(&mut out, &mut err).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "true\n");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!("{RETIRED_ENGINE_WARNING}\n")
+        );
+
+        // Answered before any config file is read: a file that does not load
+        // is no error.
+        std::fs::write(env.home().join("server.toml"), "terminal = = =\n").unwrap();
+        for (key, json) in [
+            ("server.terminal.ghostty", false),
+            ("terminal.ghostty", true),
+        ] {
+            cmd_config(ConfigAction::Get {
+                key: Some(key.into()),
+                json,
+            })
+            .unwrap_or_else(|error| panic!("{key}: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn retired_engine_key_is_left_out_of_listings() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nghostty = false\nfont_size = 12\n").unwrap();
+        let dump = serde_json::to_value(ConfigOutput {
+            editor: EditorPrefs::default(),
+            server: ServerConfig::load_from(&path).unwrap(),
+        })
+        .unwrap();
+        validate_config_dump(&dump).unwrap();
+        assert!(
+            dump["server"]["terminal"].get("ghostty").is_none(),
+            "{dump}"
+        );
+        assert_eq!(dump["server"]["terminal"]["font_size"], 12);
+
+        assert!(config_key_spec(RETIRED_ENGINE_KEY).is_err());
+        let Err(listing) = config_key_spec("server.nope") else {
+            panic!("an unknown key resolved");
+        };
+        let listing = listing.to_string();
+        assert!(listing.contains("server.terminal.font_size"), "{listing}");
+        assert!(!listing.contains("ghostty"), "{listing}");
     }
 
     #[test]

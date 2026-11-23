@@ -3,8 +3,8 @@
 // Closing a terminal asks only while its session runs. The confirm guards the
 // closes that kill a session; a mounted terminal registers its sinks whether
 // or not it has one, and a terminal whose shell exited, or whose socket never
-// connected, runs nothing. A TerminalTab is mounted over the stand-in xterm
-// and socket and closed as its tab's X closes it.
+// connected, runs nothing. A TerminalTab is mounted on the real widget, over
+// a stand-in socket, and closed as its tab's X closes it.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -14,14 +14,18 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { closeTab, layout, type LeafNode } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   receive,
   resetTerminals,
   seatTerminals,
@@ -42,7 +46,7 @@ const paneTabs = () => (layout.nodes[TERMINAL_PANE] as LeafNode).tabs;
 /// Mount a terminal tab and return it with its socket.
 async function mounted() {
   const [tab] = seatTerminals([terminalTab()]);
-  await mountTerminal(TerminalTab, tab!);
+  await mountGhosttyTerminal(TerminalTab, tab!);
   return { tab: tab!, socket: TerminalSocket.all.at(-1)! };
 }
 

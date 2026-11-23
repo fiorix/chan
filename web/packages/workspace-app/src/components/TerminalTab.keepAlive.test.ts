@@ -17,6 +17,8 @@ vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { FakeTerminal, xterm } from "../__tests__/xterm";
