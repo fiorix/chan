@@ -8,6 +8,7 @@ import { mount, tick, unmount } from "svelte";
 import type { Terminal as XtermTerminal } from "@xterm/xterm";
 import { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 const runtime = vi.hoisted(() => ({
   terminals: [] as unknown[],
@@ -30,14 +31,14 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 vi.mock("../terminal/backend", async (original) => {
   const actual = await original<typeof import("../terminal/backend")>();
   const { Terminal } = await import("@chan/ghostty-web-ng");
-  return { ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(runtime.module!, {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({ ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(runtime.module!, {
     Terminal: class extends Terminal {
       constructor(options: ConstructorParameters<typeof Terminal>[0]) {
         super(options);
         runtime.terminals.push(this);
       }
     },
-  }) };
+  }) });
 });
 vi.mock("../api/desktop", async (original) => ({
   ...(await original<typeof import("../api/desktop")>()),
@@ -101,7 +102,8 @@ function inputFrames(socket: TerminalSocket): unknown[] {
   return sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data);
 }
 async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false, broadcast = false) {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false, mouse_capture: mouseCapture }));
+  useXtermStandIn(backend === "xterm");
+  __testSetStandalonePreferences(terminalPreferences({ secret_masking: false, mouse_capture: mouseCapture }));
   const [tab, sibling] = seatTerminals(broadcast ? [
     terminalTab({ broadcastEnabled: true, group: "input-scroll" }),
     terminalTab({ id: "term-sibling", broadcastEnabled: true, group: "input-scroll" }),

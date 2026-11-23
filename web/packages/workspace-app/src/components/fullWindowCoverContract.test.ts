@@ -88,6 +88,8 @@ vi.mock("@xterm/addon-serialize", () => ({
   },
 }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
 
 globalThis.ResizeObserver = TestResizeObserver as any;
 globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {

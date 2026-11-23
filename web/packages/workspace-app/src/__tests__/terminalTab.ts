@@ -13,7 +13,7 @@ import { expect, vi } from "vitest";
 
 import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { FakeTerminal, xterm } from "./xterm";
+import { FakeTerminal, useXtermStandIn, xterm } from "./xterm";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { resetLayout } from "./tabs";
 
@@ -348,6 +348,7 @@ export function resetTerminals(): void {
   xterm.webgl.splice(0);
   xterm.webLinks.splice(0);
   xterm.webglThrows = false;
+  useXtermStandIn(false);
   xterm.textareaFocus = false;
   ghostty?.reset();
   resizeObservers.splice(0);

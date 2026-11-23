@@ -8,7 +8,8 @@
 // to `onBinary` with no user-input mark.
 
 import type { Terminal } from "@xterm/xterm";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 /// What xterm.js's mouse service takes: a zero-based cell, a button and an action.
 type Click = { col: number; row: number; x: number; y: number; button: number; action: number };
@@ -92,10 +93,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       return mode === 1006 ? this.sgr : fallback;
     }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...(await importOriginal<typeof import("../terminal/backend")>()),
     loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  };
+  });
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
@@ -169,6 +170,9 @@ const click = (): Click => ({ col: 150, row: 3, x: 0, y: 0, button: 0, action: 1
 const REPORT = `\x1b[M${String.fromCharCode(32 + 0, 32 + 151, 32 + 4)}`;
 
 const cleanups: Array<() => void> = [];
+
+// Every case runs on the xterm stand-in unless it names ghostty.
+beforeEach(() => useXtermStandIn());
 
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
@@ -268,6 +272,7 @@ type GhosttyStandIn = FakeTerminal & {
 };
 
 async function attachedGhostty() {
+  useXtermStandIn(false);
   __testSetStandalonePreferences(terminalPreferences());
   const [tab, member] = seatTerminals([
     terminalTab({ broadcastEnabled: true }),

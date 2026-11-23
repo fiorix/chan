@@ -8,6 +8,7 @@
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 import type { VtHost } from "@chan/ghostty-web-ng/vt";
 
 const ghostty = vi.hoisted(() => {
@@ -167,7 +168,7 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (importOriginal) => ({
+vi.mock("../terminal/backend", async (importOriginal) => (await import("../__tests__/xterm")).xtermStandInSwitch({
   ...(await importOriginal<typeof import("../terminal/backend")>()),
   loadGhosttyKit: vi.fn(async () => {
     ghostty.record.kitLoads += 1;
@@ -970,7 +971,8 @@ describe("focus reports", () => {
   });
 
   test("on xterm the component adds no report: xterm.js sends its own", async () => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: false, font_size: 15 }));
+    useXtermStandIn();
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
     const [tab] = seatTerminals([terminalTab()]);
     const { target } = await mountTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;

@@ -14,6 +14,7 @@
 import type { Terminal } from "@xterm/xterm";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 vi.mock("@xterm/xterm", async () => {
   HTMLCanvasElement.prototype.getContext = (() => ({
@@ -101,10 +102,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.element?.blur();
     }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...(await importOriginal<typeof import("../terminal/backend")>()),
     loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  };
+  });
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
@@ -159,7 +160,8 @@ afterEach(() => {
 type Engine = "xterm" | "ghostty";
 
 async function attached(engine: Engine) {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: engine === "ghostty" }));
+  useXtermStandIn(engine === "xterm");
+  __testSetStandalonePreferences(terminalPreferences());
   const [tab] = seatTerminals([terminalTab()]);
   const { target } = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;

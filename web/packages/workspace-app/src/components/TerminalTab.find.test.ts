@@ -49,6 +49,7 @@
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
@@ -365,10 +366,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm?.free();
     }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...actual,
     loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: Terminal as never }),
-  };
+  });
 });
 // Renderer hooks the stand-in has no renderer for.
 vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
@@ -408,6 +409,9 @@ HTMLCanvasElement.prototype.getContext = (() => ({
   dispatchEvent: () => false,
 });
 
+// Every case runs on the xterm stand-in unless it names ghostty.
+beforeEach(() => useXtermStandIn());
+
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   terminalOptions.splice(0);
@@ -431,6 +435,8 @@ async function renderTerminal(tab: TerminalTabState, focused: boolean) {
     props: { tab, paneId: "pane-1", active: true, focused },
   });
   mounted.push(component);
+  // The terminal is built once its engine's load settles, on either engine.
+  await vi.waitFor(() => expect(terminalOptions.length + ghostty.terminals.length).toBeGreaterThan(0));
   await tick();
   await tick();
   return { component, target };
@@ -1135,6 +1141,7 @@ describe("terminal find on the ghostty backend", () => {
   });
 
   beforeEach(() => {
+    useXtermStandIn(false);
     __testSetStandalonePreferences(terminalPreferences());
   });
 

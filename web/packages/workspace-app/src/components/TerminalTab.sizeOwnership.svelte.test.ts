@@ -7,6 +7,7 @@
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 const measurement = vi.hoisted(() => ({
   grid: { cols: 132, rows: 41 } as { cols: number; rows: number } | null,
@@ -39,10 +40,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     selectAll() {}
     clearSelection() {}
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...(await importOriginal<typeof import("../terminal/backend")>()),
     loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  };
+  });
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
@@ -160,7 +161,8 @@ function cleanup() {
 describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
   beforeEach(async () => {
     vi.useFakeTimers();
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", font_size: 15 }));
+    useXtermStandIn(backend === "xterm");
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
     hostGrid(132, 41);
     measurement.fits = 0;
 
