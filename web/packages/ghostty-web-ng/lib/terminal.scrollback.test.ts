@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
 import type { ITerminalOptions } from './interfaces';
 import { Terminal } from './terminal';
@@ -17,6 +17,7 @@ let module: WebAssembly.Module;
 let data: Record<string, number>;
 let memoryLayout: { size: number; fields: Record<string, Field> };
 const terminals: Terminal[] = [];
+const measurements: Record<string, number | string>[] = [];
 const BUDGET = 2 * 1024 * 1024;
 const ASCII = 'A'.repeat(80);
 const CLUSTERS = ('\u754ce\u0301').repeat(26) + 'ab';
@@ -48,6 +49,10 @@ afterEach(() => {
   document.body.replaceChildren();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+afterAll(() => {
+  const path = process.env.GHOSTTY_SCROLLBACK_MEASUREMENTS;
+  if (path) writeFileSync(path, JSON.stringify(measurements, null, 2) + '\n');
 });
 
 async function open(options: Options = {}) {
@@ -168,8 +173,8 @@ describe('real core byte pruning', () => {
       expect(previous).toBeGreaterThan(0);
       expect(previous).toBeLessThan(12032);
       retained.push(previous);
-      console.info(JSON.stringify({ shape, budget: BUDGET, baseline: baseline.resident,
-        maxResident, historyBound: BUDGET + baseline.resident, retained: previous, prunes }));
+      measurements.push({ shape, budget: BUDGET, baseline: baseline.resident,
+        maxResident, historyBound: BUDGET + baseline.resident, retained: previous, prunes });
     }
     expect(retained[1]).toBeLessThan(retained[0]);
   });
@@ -183,8 +188,8 @@ describe('real core byte pruning', () => {
     expect(memory.resident - baseline.resident).toBeLessThanOrEqual(1 + baseline.resident);
     expect(rig.term.core!.getScrollbackLength()).toBeLessThan(4000);
     expect(rig.term.core!.plainText()).toContain(line);
-    console.info(JSON.stringify({ budget: 1, baseline: baseline.resident, resident: memory.resident,
-      retained: rig.term.core!.getScrollbackLength() }));
+    measurements.push({ shape: line === ASCII ? 'ascii' : 'clusters', budget: 1,
+      baseline: baseline.resident, resident: memory.resident, retained: rig.term.core!.getScrollbackLength() });
   });
 
   test('history stays contiguous and readable through narrow and wide reflow after pruning', async () => {
@@ -215,7 +220,7 @@ describe('real core byte pruning', () => {
       expect(text.slice(text.indexOf(`row-${String(first).padStart(5, '0')}:`)).trimEnd())
         .toBe(Array.from({ length: 8000 - first }, (_, i) => line(first + i)).join('\n'));
       expect(history).toBeGreaterThan(0);
-      console.info(JSON.stringify({ cols, retained: history, first, resident: rig.memory().resident }));
+      measurements.push({ cols, retained: history, first, resident: rig.memory().resident });
     }
   });
 

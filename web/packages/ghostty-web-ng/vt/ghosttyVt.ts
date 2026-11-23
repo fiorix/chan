@@ -530,7 +530,7 @@ class VtWasm {
   }
 }
 
-/// Terminal construction colors. Omitted colors use the built-in defaults;
+/// Terminal construction limits and colors. Omitted colors use the built-in defaults;
 /// zero is explicit black, including in a partially specified palette.
 export type VtTerminalConfig = {
   scrollbackLimit?: number;
