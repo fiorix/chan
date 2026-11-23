@@ -224,10 +224,36 @@ describe('widget search', () => {
     });
     term.write('more');
     frame();
-    search.step('needle', 'newer');
     settle(search);
+    expect(search.state).toEqual({ index: 2000, total: 2000, partial: false });
+    expect(active(term)).toEqual([range(0, 0)]);
+    search.step('needle', 'newer');
     expect(search.state).toEqual({ index: 1999, total: 2000, partial: false });
     expect(active(term)).toEqual([range(1, 0)]);
+  });
+
+  test('a queued step waits for placement of its active index but still honors its deadline', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    const read = VtSearch.prototype.readMatches;
+    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
+      const batch = read.apply(this, args);
+      now += 600;
+      return batch;
+    });
+    term.write('more');
+    frame();
+    search.step('needle', 'older');
+    expect(search.state.index).toBeNull();
+    expect(active(term)).toEqual([range(0, 0)]);
+    now += 1000;
+    frame();
+    expect(search.state.partial).toBe(true);
+    expect(search.state.index).toBe(1);
+    expect(active(term)).toEqual([range(1999, 0)]);
   });
 
   test('publishes partial results and queues wrapping steps in press order', async () => {

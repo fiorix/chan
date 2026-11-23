@@ -305,13 +305,14 @@ export class SearchOwner {
   }
 
   private applyWaiting(): boolean {
-    if (this.restoreAt !== null || (this.kept !== null && this.index === null && !this.complete)) return false;
+    if (this.restoreAt !== null) return false;
     let selected = false;
     while (this.waiting.length) {
       const { direction, at } = this.waiting[0];
       const total = this.total;
-      const lands = direction === 'newer' ? this.index !== null && this.index > 0
-        : this.index === null ? total > 0 : this.index < total - 1;
+      const restoring = this.kept !== null && this.index === null;
+      const lands = !restoring && (direction === 'newer' ? this.index !== null && this.index > 0
+        : this.index === null ? total > 0 : this.index < total - 1);
       const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
       if (!this.complete && !lands && !capped) break;
       this.waiting.shift();
