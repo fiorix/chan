@@ -158,6 +158,29 @@ describe('link gesture completion through registered listeners', () => {
     expect(canvas.hasPointerCapture(7)).toBe(false);
   });
 
+  test.each([{ pointerId: 8 }, { pointerType: 'pen' }])('a second primary pointer %j preserves a held link press', async (other) => {
+    const { term, seen } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointerdown', at, other);
+    pointer(term, 'pointerup', at, other);
+    pointer(term, 'pointerup', at);
+    await dispatchClick(term, at);
+    expect(seen.map((link) => link.target)).toEqual(['https://example.com']);
+  });
+
+  test.each([{ pointerId: 8 }, { pointerType: 'pen' }])('a second pointer %j click cannot activate a still-held link press', async (other) => {
+    const { term, seen } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointerdown', at, other);
+    pointer(term, 'pointerup', at, other);
+    await dispatchClick(term, at);
+    expect(seen).toEqual([]);
+  });
+
   test('a drag returning to its start cannot become a link click', async () => {
     const { term, seen } = await terminal();
     term.write('https://example.com');
@@ -234,7 +257,7 @@ describe('link gesture completion through registered listeners', () => {
     pointer(term, 'pointerdown', cell(3, 0));
     pointer(term, 'pointerup', cell(3, 0));
     const registrations = add.mock.calls.map((args, i) => ({ args, target: add.mock.contexts[i] }))
-      .filter(({ args: [type], target }) => (target === host || target === canvas) && /^(pointer|lostpointer|click|mouse)/.test(type));
+      .filter(({ args: [type], target }) => (target === host || target === canvas) && /^(pointer|lostpointer|click|mouse|contextmenu|touchend)/.test(type));
     expect(registrations.length).toBeGreaterThan(5);
     term.dispose();
     for (const { args: [name, handler, options], target } of registrations) {

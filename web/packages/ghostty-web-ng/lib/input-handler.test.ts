@@ -1114,14 +1114,9 @@ describe('InputHandler', () => {
     function dispatchMouse(event: ReturnType<typeof mouseEvent>) {
       if (event.type === 'wheel') container.dispatchEvent(event);
       else {
-        const input = handler as unknown as {
-          handleMouseDown(event: MouseEvent): void;
-          handleMouseMove(event: MouseEvent): void;
-          handleMouseUp(event: MouseEvent): void;
-        };
         const method = event.type === 'mousedown' ? 'handleMouseDown'
           : event.type === 'mousemove' ? 'handleMouseMove' : 'handleMouseUp';
-        input[method](event as unknown as MouseEvent);
+        handler[method](event as unknown as MouseEvent);
       }
     }
     function mouseConfig(sgr: boolean) {

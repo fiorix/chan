@@ -471,10 +471,10 @@ export class Terminal {
         this.wasmTerm,
         this.textarea,
         {
-          accepts: (event) => !this.claimScrollbarPress(event),
-          press: (event) => {
-            this.handleLinkPress(event);
-            this.inputHandler?.handleMouseDown(event);
+          claimScrollbarPress: (event) => this.claimScrollbarPress(event),
+          press: (event, reported) => {
+            this.handleLinkPress(event, reported);
+            this.inputHandler?.handleMouseDown(event, reported);
           },
           move: (event) => {
             if (this.scrollbarDrag) return;
@@ -1483,7 +1483,7 @@ export class Terminal {
   }
 
   // Record disposition before synchronous input listeners can change tracking.
-  private handleLinkPress = (e: PointerEvent): void => {
+  private handleLinkPress = (e: PointerEvent, reported: boolean): void => {
     this.linkPress =
       e.button === 0
         ? {
@@ -1492,7 +1492,7 @@ export class Terminal {
             id: e.pointerId,
             type: e.pointerType,
             released: false,
-            reported: !e.shiftKey && (this.wasmTerm?.hasMouseTracking() ?? false),
+            reported,
           }
         : undefined;
   };
@@ -1510,12 +1510,6 @@ export class Terminal {
     // The second click of a double click selects a word, and a click whose
     // press went to the program is the program's.
     if (e.button !== 0 || e.detail > 1 || !press?.released || press.reported) return;
-    // A press that moved as far as the selection manager's drag threshold
-    // made a selection, not a link click.
-    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
-    const dx = e.clientX - press.x;
-    const dy = e.clientY - press.y;
-    if (dx * dx + dy * dy >= threshold * threshold) return;
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();
@@ -1649,7 +1643,6 @@ export class Terminal {
 
     // Selection sees the claim, while the page still receives menu-closing presses.
     event.preventDefault();
-    this.linkPress = undefined;
     if (y >= top && y <= top + thumb) {
       const canvas = this.canvas;
       try {

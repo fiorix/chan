@@ -805,15 +805,16 @@ export class InputHandler {
   /**
    * Report a press forwarded by the captured pointer owner.
    */
-  handleMouseDown(event: MouseEvent): void {
+  handleMouseDown(event: MouseEvent, reported?: boolean): void {
     if (this.isDisposed) return;
+    reported ??= !!this.mouseConfig?.hasMouseTracking() && !event.shiftKey;
     // A press starts a fresh gesture, whatever became of the last one's
     // release.
     this.mouseButtonsBypassed &= ~(1 << event.button);
     this.mouseButtonsPressed &= ~(1 << event.button);
     // Shift bypasses mouse reporting, as in xterm.js and native terminals:
     // the press, its drag and its release stay with the terminal.
-    if (!this.mouseConfig?.hasMouseTracking() || event.shiftKey) {
+    if (!reported) {
       this.mouseButtonsBypassed |= 1 << event.button;
       return;
     }

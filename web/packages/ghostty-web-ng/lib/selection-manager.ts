@@ -119,8 +119,8 @@ export class SelectionManager {
     wasmTerm: VtTerminal,
     textarea: HTMLTextAreaElement,
     private mouseInput?: {
-      accepts: (event: PointerEvent) => boolean;
-      press: (event: PointerEvent) => void;
+      claimScrollbarPress: (event: PointerEvent) => boolean;
+      press: (event: PointerEvent, reported: boolean) => void;
       move: (event: MouseEvent) => void;
       release: (event: MouseEvent) => void;
       end: (event?: MouseEvent) => void;
@@ -391,7 +391,7 @@ export class SelectionManager {
     this.endPointer(false);
     this.resetTextarea();
     this.clickSelects = false;
-    if (this.mouseInput && !this.mouseInput.accepts(event)) return;
+    if (this.mouseInput?.claimScrollbarPress(event)) return;
     const canvas = this.renderer.getCanvas();
     // No selection is changed until capture is known to have succeeded.
     try {
@@ -401,10 +401,10 @@ export class SelectionManager {
       return;
     }
     this.activePointer = { id: event.pointerId, type: event.pointerType, buttons: event.buttons, lastEvent: event };
-    this.clickSelects = !this.wasmTerm.hasMouseTracking() || event.shiftKey;
-    this.mouseInput?.press(event);
+    const reported = this.wasmTerm.hasMouseTracking() && !event.shiftKey;
+    this.clickSelects = !reported;
+    this.mouseInput?.press(event, reported);
     if (event.button !== 0 || !this.clickSelects) return;
-    canvas.parentElement?.focus();
     const rect = canvas.getBoundingClientRect();
     const cell = this.pixelToCell(event.clientX - rect.left, event.clientY - rect.top);
     this.clearSelection();
@@ -436,7 +436,7 @@ export class SelectionManager {
       const mask = [1, 4, 2][event.button];
       if ((pointer.buttons & mask) !== (event.buttons & mask)) {
         buttonChanged = true;
-        if (event.buttons & mask) this.mouseInput?.press(event);
+        if (event.buttons & mask) this.mouseInput?.press(event, this.wasmTerm.hasMouseTracking() && !event.shiftKey);
         else this.mouseInput?.release(event);
       }
     }

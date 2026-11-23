@@ -236,6 +236,8 @@ describe('captured selection lifecycle', () => {
     vi.advanceTimersByTime(50);
     expect(term.viewport.offset).toBe(5);
     if (end === 'dispose') term.dispose(); else pointer(canvas, end);
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+    if (end === 'dispose') expect(vi.getTimerCount()).toBe(0);
     pointer(canvas, 'lostpointercapture'); pointer(canvas, 'pointerup');
     vi.advanceTimersByTime(150);
     expect(term.viewport.offset).toBe(5);
@@ -351,7 +353,7 @@ describe('report and bypass completion', () => {
     term.write('\x1b[?1003h\x1b[?1006h');
     pointer(canvas, 'pointerdown', 1, 1, { button, buttons: [1, 4, 2][button], shiftKey: true });
     pointer(canvas, 'pointermove', 33, 1, { buttons: [1, 4, 2][button] });
-    pointer(canvas, 'pointerup', 33, 1, { button });
+    pointer(canvas, 'pointerup', 999, 999, { button });
     expect(reports).toEqual([]);
     expect(write).toHaveBeenCalledTimes(button === 0 ? 1 : 0);
     pointer(canvas, 'pointermove', 1, 1, { buttons: 0 });
@@ -747,6 +749,7 @@ describe('captured scrollbar lifecycle', () => {
     capture.mockImplementation(() => { if (failure === 'throw') throw new Error('unavailable'); return captured; });
     rawPointer(canvas, 'pointerdown', x, y);
     expect(capture).toHaveBeenCalledExactlyOnceWith(7);
+    expect(canvas.style.userSelect).not.toBe('none');
     rawPointer(canvas, 'pointermove', x, y - 10);
     rawPointer(canvas, 'pointerup', x, y - 10);
     expect(term.viewport.offset).toBe(before);
@@ -792,7 +795,10 @@ describe('captured scrollbar lifecycle', () => {
     rawPointer(canvas, 'pointermove', x, overshoot);
     const bound = end === 'top' ? term.getScrollbackLength() : 0;
     expect(term.viewport.offset).toBe(bound);
-    rawPointer(canvas, 'pointermove', x, overshoot + (end === 'top' ? 2 : -2));
+    const further = overshoot + (end === 'top' ? -100 : 100);
+    rawPointer(canvas, 'pointermove', x, further);
+    expect(term.viewport.offset).toBe(bound);
+    rawPointer(canvas, 'pointermove', x, further + (end === 'top' ? 2 : -2));
     expect(term.viewport.offset).toBeCloseTo(bound + (end === 'top' ? -2 : 2) * rowsPerPixel);
   });
 
