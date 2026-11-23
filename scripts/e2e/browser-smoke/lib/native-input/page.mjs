@@ -15,11 +15,14 @@ export const INSTALL_SRC = `(() => {
     return path.some((n) => n && pred(n));
   };
   const inHost = (e) => pathHas(e, (n) => n.classList && n.classList.contains("terminal-host"));
+  const inPaneTree = (e) => pathHas(e, (n) => n.classList && n.classList.contains("pane-tree"));
   const inTextarea = (e) => pathHas(e, (n) => n.tagName === "TEXTAREA");
   const seen = new WeakMap();
   const putCapture = (e) => {
-    if (!inHost(e)) return;
-    const row = { t: stamp(), target: inTextarea(e) ? "textarea" : "host",
+    // The pane-tree chord moves focus before its keyup reaches the page.
+    const treeKey = (e.type === "keydown" || e.type === "keyup") && inPaneTree(e);
+    if (!inHost(e) && !treeKey) return;
+    const row = { t: stamp(), target: treeKey ? "pane-tree" : inTextarea(e) ? "textarea" : "host",
       defaultPrevented: false, gotThrough: false };
     for (const f of ["type", "key", "code", "keyCode", "location",
       "ctrlKey", "altKey", "shiftKey", "metaKey", "repeat", "isComposing",
@@ -132,6 +135,7 @@ export const READ_SRC = `(() => {
     hookError: rec.hookError,
     composing: rec.composing,
     focused: ae ? { tag: ae.tagName, aria: ae.getAttribute && ae.getAttribute("aria-label"), inHost: !!ae.closest(".terminal-host") } : null,
+    paneTreeFocused: !!ae && ae.tagName === "INPUT" && ae.getAttribute("aria-label") === "Filter tabs" && !!ae.closest(".pane-tree"),
     textareaPresent: !!document.querySelector(".terminal-host textarea"),
   };
 })()`;

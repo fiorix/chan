@@ -55,11 +55,11 @@ export const CASES = [
     expect: { dom: ["keydown", "keyup"], widget: null, pty: "\t\r\x1b" },
   },
   {
-    source: "scripts/e2e/README.md#native-input-contracts",
-    id: "ctrl-shift-a", family: "keys", title: "Ctrl+Shift+A is left to the browser",
+    source: "web/packages/workspace-app/src/state/shortcuts.ts#app.pane.tree",
+    id: "ctrl-shift-a", family: "keys", title: "Ctrl+Shift+A opens the pane tree without terminal input",
     chrome: { steps: [FOCUS, { op: "down", keys: ["Control", "Shift"] }, K("a"), { op: "up", keys: ["Shift", "Control"] }] },
     webkit: { steps: [FOCUS, { op: "xdo", args: ["key", "ctrl+shift+a"] }] },
-    expect: { dom: ["keydown", "keyup"], widget: null, pty: null },
+    expect: { dom: ["keydown", "keyup"], paneTreeFocused: true, widget: null, pty: null },
   },
   {
     source: "scripts/e2e/README.md#native-input-contracts",

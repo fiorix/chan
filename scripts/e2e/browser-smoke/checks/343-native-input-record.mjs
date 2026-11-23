@@ -200,8 +200,13 @@ export default {
             verdict.status = "unavailable";
             verdict.reason = unavailable;
           } else if (missing.length > 0) {
-            fail(`missing DOM event types: ${missing.join(",")}`, "property");
-            continue;
+            verdict.status = "failed";
+            verdict.reason = `missing DOM event types: ${missing.join(",")}`;
+            fail(verdict.reason, "property");
+          } else if (c.expect.paneTreeFocused && !snap.paneTreeFocused) {
+            verdict.status = "failed";
+            verdict.reason = "the pane tree filter did not take focus";
+            fail(verdict.reason, "property");
           } else if (c.expect.exploratory) {
             const committed = snap.events.some((e) => e.type === "compositionend");
             if (!committed) {
@@ -236,7 +241,7 @@ export default {
               injected: ["key", "code", "keyCode", "location", "modifiers", "text"],
               isTrustedAll: true,
             },
-            setup: { program: c.program ?? "", programReply: programSetup.input, programBarrier: programSetup.reply, barrier: drained.reply, focused: snap.focused, textareaPresent: snap.textareaPresent, terms: snap.terms, ptyOffset: offset },
+            setup: { program: c.program ?? "", programReply: programSetup.input, programBarrier: programSetup.reply, barrier: drained.reply, focused: snap.focused, paneTreeFocused: snap.paneTreeFocused, textareaPresent: snap.textareaPresent, terms: snap.terms, ptyOffset: offset },
             steps: c.chrome.steps,
             domEvents: snap.events,
             observed: { widget: widgetBytes, pty: ptyBytes },
@@ -251,6 +256,7 @@ export default {
           writeFileSync(join(outDir, `${c.id}.json`), `${JSON.stringify(fixture, null, 2)}\n`);
           summary.cases[c.id] = verdict.status;
         } finally {
+          if (c.expect.paneTreeFocused) await page.keyboard.press("Escape");
           if (c.restore) await drainPointerInput(transport, c.restore);
           if (c.family === "composition") {
             await page.keyboard.press("Escape");

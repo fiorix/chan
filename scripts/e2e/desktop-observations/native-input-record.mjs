@@ -250,8 +250,13 @@ try {
       const widgetBytes = emitted.endsWith(drained.reply) ? emitted.slice(0, -drained.reply.length) : emitted;
       const verdict = { status: "ok", reason: "" };
       if (missing.length > 0) {
-        fail(`missing DOM event types: ${missing.join(",")}`, "property");
-        continue;
+        verdict.status = "failed";
+        verdict.reason = `missing DOM event types: ${missing.join(",")}`;
+        fail(verdict.reason, "property");
+      } else if (c.expect.paneTreeFocused && !snap.paneTreeFocused) {
+        verdict.status = "failed";
+        verdict.reason = "the pane tree filter did not take focus";
+        fail(verdict.reason, "property");
       } else if (c.expect.exploratory) {
         const committed = snap.events.some((e) => e.type === "compositionend");
         if (!committed) {
@@ -285,7 +290,7 @@ try {
           layout: await guestLayout(),
           isTrustedAll: true,
         },
-        setup: { program: c.program ?? "", programReply: programSetup.input, programBarrier: programSetup.reply, barrier: drained.reply, terms: snap.terms, ptyOffset: offset },
+        setup: { program: c.program ?? "", programReply: programSetup.input, programBarrier: programSetup.reply, barrier: drained.reply, focused: snap.focused, paneTreeFocused: snap.paneTreeFocused, terms: snap.terms, ptyOffset: offset },
         steps: c.webkit.steps,
         domEvents: snap.events,
         observed: { widget: widgetBytes, pty: ptyBytes },
@@ -300,6 +305,7 @@ try {
       writeFileSync(`${a.out}/${c.id}.json`, `${JSON.stringify(fixture, null, 2)}\n`);
       summary.cases[c.id] = verdict.status;
     } finally {
+      if (c.expect.paneTreeFocused) await xdo(["key", "Escape"]);
       if (c.restore) await drainPointerInput(transport, c.restore);
       }
   }
