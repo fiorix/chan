@@ -4,15 +4,17 @@
 // names the shared widget fixture (the guard in vitest.setup.ts). This file
 // opens a Ghostty terminal without that fixture on purpose: in jsdom the real
 // loader cannot fetch the core, TerminalTab reports the failed load and
-// falls back, and the guard has recorded the report by the time the terminal
-// is up. The first case takes the failure from the guard itself, so it passes
-// while the guard still fails any other test that does the same; the second
-// leaves it to the guard and is expected to fail. The runner settles an
-// expected failure after the test's hooks, so that case passes only while the
-// guard's own hook fails it.
+// falls back, and the guard has recorded the report and the stand-in nothing
+// paid for by the time the terminal is up. The first case takes the failure
+// from the guard itself, so it passes while the guard still fails any other
+// test that does the same; the second leaves it to the guard and is expected
+// to fail. The runner settles an expected failure after the test's hooks, so
+// that case passes only while the guard's own hook fails it.
 //
-// A load that fails with the stand-in route's own error is the one report the
-// guard lets through, by its class: an error that only reads like it fails.
+// A load the stand-in route asks for is the one the guard lets through: its
+// report by its class, so an error that only reads like it still fails, and
+// its terminal by the route's own request. A test that silences the console
+// still fails on the stand-in.
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -23,18 +25,23 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
-// A case may replace the real loader's failure with an error of its own.
-const injected = vi.hoisted(() => ({ error: null as Error | null }));
+// A case may replace the real loader's failure with an error of its own, or
+// ask for the stand-in the way the route does.
+const injected = vi.hoisted(() => ({ error: null as Error | null, route: false }));
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
+  const { requestXtermStandIn } = await import("../__tests__/xterm");
   return {
     ...actual,
-    loadGhosttyKit: () => (injected.error ? Promise.reject(injected.error) : actual.loadGhosttyKit()),
+    loadGhosttyKit: () => {
+      if (injected.route) return requestXtermStandIn();
+      return injected.error ? Promise.reject(injected.error) : actual.loadGhosttyKit();
+    },
   };
 });
 
 import TerminalTab from "./TerminalTab.svelte";
-import { failOnTerminalInitFailures } from "../../vitest.setup";
+import { failOnTerminalInitFailures, takeStandInReports } from "../../vitest.setup";
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
@@ -49,8 +56,10 @@ beforeEach(() => {
 
 afterEach(() => {
   injected.error = null;
+  injected.route = false;
   resetTerminals();
   __testSetStandalonePreferences(null);
+  vi.restoreAllMocks();
 });
 
 test("a terminal opened without the shared widget fixture fails its test, naming the fixture", async () => {
@@ -68,18 +77,30 @@ test.fails("a terminal opened without the shared widget fixture, its report left
   await mountTerminal(TerminalTab, tab!);
 });
 
+test("a terminal opened with neither fixture nor route fails its test under a silenced console", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const [tab] = seatTerminals([terminalTab()]);
+  await mountTerminal(TerminalTab, tab!);
+
+  expect(xterm.terminals, "the terminal fell back to the stand-in").toHaveLength(1);
+  expect(() => failOnTerminalInitFailures()).toThrowError(
+    /failed to initialize: .*In .*TerminalTab\.initGuard\.test\.ts\. 1 opened on the xterm stand-in with no route request$/,
+  );
+});
+
 test("the widget's checked mount refuses a file that did not declare the fixture", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await expect(mountGhosttyTerminal(TerminalTab, tab!)).rejects.toThrow(/needs the shared fixture/);
   expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
 });
 
-test("a load that fails with the stand-in route's error is let through", async () => {
-  injected.error = new XtermStandInRequested();
+test("a load the stand-in route asks for is let through, its report counted and not recorded", async () => {
+  injected.route = true;
   const [tab] = seatTerminals([terminalTab()]);
   await mountTerminal(TerminalTab, tab!);
 
   expect(xterm.terminals, "the terminal fell back to the stand-in").toHaveLength(1);
+  expect(takeStandInReports(), "the route's report").toBe(1);
   expect(() => failOnTerminalInitFailures()).not.toThrow();
 });
 
