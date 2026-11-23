@@ -44,6 +44,8 @@ export interface TerminalTestHooks {
 }
 
 export interface ITheme {
+  /** Cell ink contrast before faint/antialiasing; default 1, invalid values use 1. */
+  minimumContrastRatio?: number;
   foreground?: string;
   background?: string;
   cursor?: string;

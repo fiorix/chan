@@ -8,6 +8,7 @@ export default defineConfig({
       "lib/input-handler.test.ts",
       "lib/terminal.focus.test.ts",
       "lib/terminal.core.test.ts",
+      "lib/terminal.theme.test.ts",
       "lib/terminal.selection.test.ts",
       "lib/highlights.test.ts",
       "lib/paint-layers.test.ts",

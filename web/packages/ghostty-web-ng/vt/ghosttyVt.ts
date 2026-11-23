@@ -530,14 +530,14 @@ class VtWasm {
   }
 }
 
-/// The subset of ghostty-web's terminal config this binding honors; zero
-/// means "keep the default", as in ghostty-web's own binding.
+/// Terminal construction colors. Omitted colors use the built-in defaults;
+/// zero is explicit black, including in a partially specified palette.
 export type VtTerminalConfig = {
   scrollbackLimit?: number;
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
-  palette?: number[];
+  palette?: (number | undefined)[];
 };
 
 /// Renderer measurements and delivery for replies generated outside a write.
@@ -1271,8 +1271,7 @@ export class VtTerminal {
     this.writeColors(config);
   }
 
-  /// Writes `config`'s colors as the core's defaults; zero keeps the
-  /// built-in default, as in ghostty-web's binding.
+  /// Writes the configured defaults, clearing any omitted override.
   private writeColors(config?: VtTerminalConfig): void {
     const fn = this.wasm.fn;
     const s = this.scratch;
@@ -1284,22 +1283,22 @@ export class VtTerminal {
       view.setUint8(s + SCRATCH.rgb + 2, rgb & 0xff);
       fn.ghostty_terminal_set(this.handle, option, s + SCRATCH.rgb);
     };
-    setColor(O.COLOR_FOREGROUND, config?.fgColor || DEFAULT_FG);
-    setColor(O.COLOR_BACKGROUND, config?.bgColor || DEFAULT_BG);
+    setColor(O.COLOR_FOREGROUND, config?.fgColor ?? DEFAULT_FG);
+    setColor(O.COLOR_BACKGROUND, config?.bgColor ?? DEFAULT_BG);
     // A null value clears the cursor color and puts the built-in palette
-    // back, so on a live terminal a color the config leaves at zero takes
+    // back, so on a live terminal a color the config omits takes
     // upstream's default rather than the one an earlier config wrote.
-    if (config?.cursorColor) setColor(O.COLOR_CURSOR, config.cursorColor);
+    if (config?.cursorColor !== undefined) setColor(O.COLOR_CURSOR, config.cursorColor);
     else fn.ghostty_terminal_set(this.handle, O.COLOR_CURSOR, 0);
     fn.ghostty_terminal_set(this.handle, O.COLOR_PALETTE, 0);
     const overrides = config?.palette ?? [];
-    if (overrides.some((c) => c)) {
+    if (overrides.some((c) => c !== undefined)) {
       const palette = this.wasm.alloc(768);
       try {
         fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.COLOR_PALETTE_DEFAULT, palette);
         const bytes = this.wasm.bytes();
         overrides.slice(0, 16).forEach((rgb, i) => {
-          if (!rgb) return;
+          if (rgb === undefined) return;
           bytes[palette + i * 3] = (rgb >> 16) & 0xff;
           bytes[palette + i * 3 + 1] = (rgb >> 8) & 0xff;
           bytes[palette + i * 3 + 2] = rgb & 0xff;

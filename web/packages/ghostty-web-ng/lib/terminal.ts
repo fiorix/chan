@@ -18,12 +18,14 @@
 
 import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig, type VtTrackedCell } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
+import { parseColor } from './color';
 import { EventEmitter } from './event-emitter';
 import { HighlightsManager } from './highlights';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
   IBufferNamespace,
   IEvent,
+  ITheme,
   ITerminalOptions,
   TerminalChange,
   TerminalCore,
@@ -146,7 +148,7 @@ export class Terminal {
       rows: options.rows ?? 24,
       cursorBlink: options.cursorBlink ?? false,
       cursorStyle: options.cursorStyle ?? 'block',
-      theme: options.theme ?? {},
+      theme: { ...options.theme },
       scrollback: options.scrollback ?? 10000,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
@@ -217,9 +219,9 @@ export class Terminal {
         break;
 
       case 'theme':
-        if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
-        }
+        this.wasmTerm!.setColors(this.buildWasmConfig());
+        this.renderer!.setTheme(this.options.theme);
+        this.refresh();
         break;
 
       case 'fontSize':
@@ -263,33 +265,10 @@ export class Terminal {
     this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
   }
 
-  /**
-   * Parse a CSS color string to 0xRRGGBB format.
-   * Returns 0 if the color is undefined or invalid.
-   */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
-
-    // Handle hex colors (#RGB, #RRGGBB)
-    if (color.startsWith('#')) {
-      let hex = color.slice(1);
-      if (hex.length === 3) {
-        hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-      }
-      const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
-    }
-
-    // Handle rgb(r, g, b) format
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (match) {
-      const r = Number.parseInt(match[1], 10);
-      const g = Number.parseInt(match[2], 10);
-      const b = Number.parseInt(match[3], 10);
-      return (r << 16) | (g << 8) | b;
-    }
-
-    return 0;
+  private parseColorToHex(color?: string): number | undefined {
+    const parsed = parseColor(color);
+    if (!parsed) return undefined;
+    return (Math.round(parsed[0]) << 16) | (Math.round(parsed[1]) << 8) | Math.round(parsed[2]);
   }
 
   /**
@@ -307,7 +286,7 @@ export class Terminal {
     // Build palette array from theme colors
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
     //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
+    const palette = [
       this.parseColorToHex(theme?.black),
       this.parseColorToHex(theme?.red),
       this.parseColorToHex(theme?.green),
@@ -876,6 +855,16 @@ export class Terminal {
   public refresh(): void {
     if (!this.isOpen) return;
     this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+  }
+
+  /**
+   * Replace the theme with a copy and repaint the complete widget synchronously.
+   * Before open, only the held theme changes; after disposal, nothing changes.
+   * A paint callback requesting a theme change gets a full next frame.
+   */
+  public setTheme(theme: ITheme): void {
+    if (this.isDisposed) return;
+    this.options.theme = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
   }
 
   /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */

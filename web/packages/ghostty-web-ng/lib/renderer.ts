@@ -12,6 +12,7 @@
 
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import { drawBoxGlyph, isCustomGlyph } from './box-glyphs';
+import { compositeColor, contrastingColor, parseColor, rgbColor, type Color } from './color';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { HighlightsManager, HighlightSpan, HighlightStyle } from './highlights';
@@ -70,6 +71,7 @@ type RendererTheme = Required<Omit<ITheme, 'selectionForeground'>> &
   Pick<ITheme, 'selectionForeground'>;
 
 export const DEFAULT_THEME: RendererTheme = {
+  minimumContrastRatio: 1,
   foreground: '#d4d4d4',
   background: '#1e1e1e',
   cursor: '#ffffff',
@@ -106,6 +108,8 @@ export class CanvasRenderer {
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: RendererTheme;
+  private readonly contrastCache = new Map<string, string>();
+  private readonly backgroundCache = new Map<string, Color | undefined>();
   private devicePixelRatio: number;
   private readonly followsDevicePixelRatio: boolean;
   private readonly lineHeight: number;
@@ -174,7 +178,7 @@ export class CanvasRenderer {
     this.fontFamily = options.fontFamily ?? 'monospace';
     this.cursorStyle = options.cursorStyle ?? 'block';
     this.cursorBlink = options.cursorBlink ?? false;
-    this.theme = { ...DEFAULT_THEME, ...options.theme };
+    this.theme = this.resolveTheme(options.theme ?? {});
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
     this.followsDevicePixelRatio = options.devicePixelRatio === undefined;
     const lineHeight = options.lineHeight ?? 1;
@@ -696,7 +700,20 @@ export class CanvasRenderer {
     } else {
       // Extract colors and handle inverse: when inverted, foreground
       // becomes background
-      this.ctx.fillStyle = this.rgbToCSS(cell.flags & VtFlag.INVERSE ? cell.bg : cell.fg);
+      const inverse = (cell.flags & VtFlag.INVERSE) !== 0;
+      const foreground = inverse ? cell.bg : cell.fg;
+      let background: Color | undefined;
+      if (this.theme.minimumContrastRatio > 1) {
+        const rowBackground = this.backgroundColor(this.theme.background);
+        if (isSelected || highlight) {
+          const overlay = this.backgroundColor(isSelected ? this.theme.selectionBackground
+            : highlight!.background ?? this.theme.selectionBackground);
+          if (overlay) background = compositeColor(overlay, rowBackground);
+        } else {
+          background = inverse ? rgbColor(cell.fg) : cell.defaultBg ? rowBackground : rgbColor(cell.bg);
+        }
+      }
+      this.ctx.fillStyle = this.cellForeground(foreground, background);
     }
 
     // Apply faint effect
@@ -935,7 +952,38 @@ export class CanvasRenderer {
    * Update theme colors
    */
   public setTheme(theme: ITheme): void {
-    this.theme = { ...DEFAULT_THEME, ...theme };
+    this.theme = this.resolveTheme(theme);
+    this.contrastCache.clear();
+    this.backgroundCache.clear();
+    this.repaintAll = true;
+  }
+
+  private resolveTheme(theme: ITheme): RendererTheme {
+    const supplied = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
+    const ratio = theme.minimumContrastRatio ?? 1;
+    return { ...DEFAULT_THEME, ...supplied,
+      minimumContrastRatio: Number.isFinite(ratio) && ratio >= 1 ? ratio : 1 };
+  }
+
+  private backgroundColor(css: string): Color | undefined {
+    if (!this.backgroundCache.has(css)) {
+      if (this.backgroundCache.size >= 256) this.backgroundCache.clear();
+      this.backgroundCache.set(css, parseColor(css));
+    }
+    return this.backgroundCache.get(css);
+  }
+
+  private cellForeground(foreground: number, background: Color | undefined): string {
+    // A transparent canvas has no known backdrop against which to measure.
+    if (this.theme.minimumContrastRatio <= 1 || !background || background[3] < 1) return this.rgbToCSS(foreground);
+    const key = `${foreground}:${background}`;
+    let color = this.contrastCache.get(key);
+    if (color === undefined) {
+      color = this.rgbToCSS(contrastingColor(foreground, background, this.theme.minimumContrastRatio));
+      if (this.contrastCache.size >= 1024) this.contrastCache.clear();
+      this.contrastCache.set(key, color);
+    }
+    return color;
   }
 
   /**
