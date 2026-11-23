@@ -100,6 +100,7 @@ function instrument() {
     if (sample) sample.lookups++;
     return timed('paint', call, args);
   });
+  wrap(CanvasRenderer.prototype, 'cacheHighlights', (call, args) => timed('paint', call, args));
 }
 
 function animationFrame() {

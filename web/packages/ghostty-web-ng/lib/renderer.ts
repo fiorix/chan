@@ -149,7 +149,7 @@ export class CanvasRenderer {
   } | null = null;
 
   private highlightSource?: HighlightsManager;
-  private currentHighlightSpans: HighlightSpan[] = [];
+  private currentHighlightRows: HighlightSpan[][] = [];
 
   // Link rendering state
   private hoveredHyperlinkId: number = 0;
@@ -408,7 +408,7 @@ export class CanvasRenderer {
     this.currentSelectionCoords = this.selectionManager?.hasSelection()
       ? this.selectionManager.getSelectionCoords() : null;
     const highlights = this.highlightSource?.frame(scrollbackLength - historyRows, dims.rows, dims.cols);
-    this.currentHighlightSpans = highlights?.spans ?? [];
+    this.cacheHighlights(highlights?.spans ?? []);
 
     const cursorRows = new Set<number>();
     const cursorShown = cursor.visible && this.cursorVisible;
@@ -1119,11 +1119,22 @@ export class CanvasRenderer {
     this.highlightSource = source;
   }
 
+  private cacheHighlights(spans: HighlightSpan[]): void {
+    const rows: HighlightSpan[][] = [];
+    for (const span of spans) {
+      for (let row = span.startRow; row <= span.endRow; row++) {
+        (rows[row] ??= []).push(span);
+      }
+    }
+    this.currentHighlightRows = rows;
+  }
+
   /** Last covering span wins; a wide glyph includes either of its cells. */
   private highlightAt(x: number, y: number, width: number): Readonly<HighlightStyle> | null {
-    for (let i = this.currentHighlightSpans.length - 1; i >= 0; i--) {
-      const span = this.currentHighlightSpans[i];
-      if (y < span.startRow || y > span.endRow) continue;
+    const spans = this.currentHighlightRows[y];
+    if (!spans) return null;
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const span = spans[i];
       if (y === span.startRow && x + width - 1 < span.startCol) continue;
       if (y === span.endRow && x > span.endCol) continue;
       return span.style;
