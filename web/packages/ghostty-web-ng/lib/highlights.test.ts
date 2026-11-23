@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
+import { HighlightsManager } from './highlights';
 import type { ITheme } from './interfaces';
 import { Terminal } from './terminal';
 
@@ -104,6 +105,30 @@ async function open(input = 'abcdefghij', theme: ITheme = {}) {
 
 const range = (startRow: number, startCol: number, endRow: number, endCol: number): Range => ({
   start: { col: startCol, absoluteRow: startRow }, end: { col: endCol, absoluteRow: endRow },
+});
+
+test('incremental highlight blocks visit only visible ranges at either end of history', () => {
+  const manager = new HighlightsManager(false);
+  let visited = 0;
+  const ranges = Array.from({ length: 10_000 }, (_, row) => ({
+    get start() { visited++; return { absoluteRow: row, col: 2 }; },
+    get end() { visited++; return { absoluteRow: row, col: 4 }; },
+  }));
+  for (let i = 0; i < ranges.length; i += 256) {
+    manager.append('search-all', ranges.slice(i, i + 256), { background: '#123456' });
+  }
+  for (const top of [0, 5000, 9976]) {
+    visited = 0;
+    const frame = manager.frame(top, 24, 80);
+    expect(frame.spans).toHaveLength(24);
+    expect(frame.spans[0]).toMatchObject({ startRow: 0, endRow: 0, startCol: 2, endCol: 4 });
+    expect(visited).toBeLessThan(2048);
+  }
+  expect(manager.get('search-all')?.ranges).toHaveLength(10_000);
+  visited = 0;
+  manager.clear('search-all');
+  expect(visited).toBe(0);
+  expect(manager.frame(9976, 24, 80).dirtyRows.size).toBe(24);
 });
 
 describe('named highlight snapshots', () => {

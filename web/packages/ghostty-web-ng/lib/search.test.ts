@@ -190,6 +190,46 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(0, 1, 0, 2)]);
   });
 
+  test('settled navigation and repaint reuse placed results, including the oldest match', async () => {
+    const { term } = await create(long());
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    const read = vi.spyOn(VtSearch.prototype, 'readMatches');
+    const whole = vi.spyOn(VtSearch.prototype, 'matchesBetween');
+    search.step('needle', 'newer');
+    frame();
+    expect(search.state.index).toBe(300);
+    expect(active(term)).toEqual([range(5, 0)]);
+    term.refresh();
+    search.step('needle', 'older');
+    expect(search.state.index).toBe(1);
+    expect(read).not.toHaveBeenCalled();
+    expect(whole).not.toHaveBeenCalled();
+    expect(all(term)).toHaveLength(300);
+  });
+
+  test('ordinary output retains the tracked oldest result while incremental placement is delayed', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    const read = VtSearch.prototype.readMatches;
+    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
+      const batch = read.apply(this, args);
+      now += 600;
+      return batch;
+    });
+    term.write('more');
+    frame();
+    search.step('needle', 'newer');
+    settle(search);
+    expect(search.state).toEqual({ index: 1999, total: 2000, partial: false });
+    expect(active(term)).toEqual([range(1, 0)]);
+  });
+
   test('publishes partial results and queues wrapping steps in press order', async () => {
     const { term } = await create(long());
     const search = searchOf(term);

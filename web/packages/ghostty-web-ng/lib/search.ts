@@ -1,12 +1,12 @@
-import type { MatchRange } from '../vt/ghosttyVt';
+import type { MatchRange, VtSearch } from '../vt/ghosttyVt';
 import { EventEmitter } from './event-emitter';
-import type { HighlightRange } from './highlights';
+import type { HighlightRange, HighlightsManager } from './highlights';
 import type {
-  TerminalChange, TerminalCore, TerminalCoreSearch, TerminalCoreTrackedCell,
-  TerminalHighlights, TerminalSearchState, TerminalViewport,
+  TerminalChange, TerminalCore, TerminalCoreTrackedCell, TerminalSearchState, TerminalViewport,
 } from './interfaces';
 
 const SCAN_BUDGET_MS = 4;
+const PLACEMENT_BUDGET_MS = 4;
 const FRAME_BUDGET_MS = 12;
 const WAIT_CAP_MS = 1000;
 const COST_PRIORS = { read: 4e-6, check: 2e-11, complete: 3e-11 } as const;
@@ -16,12 +16,18 @@ const STEP_FLOOR_MS = 1;
 const EMPTY: TerminalSearchState = Object.freeze({ index: 0, total: 0, partial: false });
 type Direction = 'older' | 'newer';
 type Waiting = { direction: Direction; at: number; newest?: boolean };
+type MatchIndex = Map<number, number | number[]>;
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
 export class SearchOwner {
-  private search: TerminalCoreSearch | null = null;
+  private search: VtSearch | null = null;
   private needle = '';
-  private matches: MatchRange[] = [];
+  private matches: HighlightRange[][] = [];
+  private total = 0;
+  // Shard the index and chunk the list so growth never rehashes or copies
+  // every known match in one animation frame.
+  private indices: MatchIndex[] = Array.from({ length: 256 }, () => new Map());
+  private readCursor = 0;
   private index: number | null = null;
   private complete = true;
   private waiting: Waiting[] = [];
@@ -47,10 +53,11 @@ export class SearchOwner {
 
   constructor(
     private readonly core: TerminalCore,
-    private readonly highlights: TerminalHighlights,
+    private readonly highlights: HighlightsManager,
     private readonly viewport: TerminalViewport,
     private alternateScreen: boolean,
     private readonly selection: () => HighlightRange | null,
+    private readonly createSearch: () => VtSearch,
   ) {
     this.stopResizing = core.beforeResize(({ rows }) => {
       const start = this.keptStart?.point();
@@ -75,9 +82,10 @@ export class SearchOwner {
   step(query: string, direction: Direction): void {
     if (this.disposed) return;
     if (!query) return this.close();
+    const deadline = performance.now() + PLACEMENT_BUDGET_MS;
     if (this.prepare(query)) this.search!.feed();
     else this.catchUp();
-    this.readResults();
+    this.readResults(deadline);
     this.waiting.push({ direction, at: performance.now() });
     this.askedOver = this.selection();
     const reveal = this.applyWaiting();
@@ -106,6 +114,9 @@ export class SearchOwner {
     this.dirty = true;
     this.resized ||= kind === 'resize';
     this.matches = [];
+    this.total = 0;
+    this.indices = Array.from({ length: 256 }, () => new Map());
+    this.readCursor = 0;
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
@@ -127,7 +138,7 @@ export class SearchOwner {
   private prepare(query: string): boolean {
     if (this.search && query === this.needle) return false;
     this.release();
-    this.search = this.core.createSearch();
+    this.search = this.createSearch();
     this.search.setNeedle(query);
     this.needle = query;
     this.complete = false;
@@ -146,6 +157,9 @@ export class SearchOwner {
     this.highlights.clear('search-all');
     this.needle = '';
     this.matches = [];
+    this.total = 0;
+    this.indices = Array.from({ length: 256 }, () => new Map());
+    this.readCursor = 0;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -218,53 +232,84 @@ export class SearchOwner {
     const completion = this.checked() * this.completeMs;
     const left = FRAME_BUDGET_MS - (performance.now() - started) - completion;
     const budget = completion >= FRAME_BUDGET_MS ? SCAN_BUDGET_MS : Math.min(SCAN_BUDGET_MS, Math.max(STEP_FLOOR_MS, left));
-    const running = search.step(budget) === 'running';
+    // Drain discovered results before scanning further. Placement and
+    // publication have their own budget, shared across every batch.
+    const pending = this.readCursor < search.state().total;
+    const running = pending || performance.now() - started >= SCAN_BUDGET_MS
+      ? scanning : search.step(budget) === 'running';
     if (scanning && !running && search.completingUnitMs) {
       this.held = search.state().total;
       const checked = this.checked();
       if (checked >= LEARN_CHECK) this.completeMs = learned(this.completeMs, search.completingUnitMs / checked, COST_PRIORS.complete);
     }
-    this.readResults();
+    this.readResults(Math.min(started + SCAN_BUDGET_MS + PLACEMENT_BUDGET_MS, performance.now() + PLACEMENT_BUDGET_MS));
     const reveal = this.applyWaiting();
     // Schedule before notifying: a subscriber can close or replace the query.
-    if (running || this.waiting.length > 0 || this.restoreAt !== null) this.schedule();
+    if (!this.complete || this.waiting.length > 0 || this.restoreAt !== null) this.schedule();
     this.show(reveal && this.askStands());
   }
 
-  private readResults(): void {
+  private readResults(deadline: number): void {
     const search = this.search!;
     const state = search.state();
-    this.complete = state.complete;
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
-    const seen = new Set<string>();
-    // Canonicalize the complete cell range, preserving the core's first
-    // occurrence in newest-first order and distinct overlapping matches.
-    this.matches = search.matchesBetween(0, Number.MAX_SAFE_INTEGER, Infinity).filter(range => {
-      const key = `${range.startRow}:${range.startCol}:${range.endRow}:${range.endCol}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    while (this.readCursor < state.total && performance.now() < deadline) {
+      const batch = search.readMatches(this.readCursor, deadline - performance.now());
+      this.readCursor = batch.next;
+      const added: HighlightRange[] = [];
+      // The canonical index persists across scan pumps, but never across a
+      // terminal mutation: rows and the core's result order may then change.
+      for (const range of batch.ranges) {
+        if (this.indexOf(range) !== undefined) continue;
+        const key = startKey(range);
+        const indices = this.indexFor(range);
+        const previous = indices.get(key);
+        if (previous === undefined) indices.set(key, this.total);
+        else if (typeof previous === 'number') indices.set(key, [previous, this.total]);
+        else previous.push(this.total);
+        const painted = highlight(range);
+        if (this.total % 256 === 0) this.matches.push([]);
+        this.matches.at(-1)!.push(painted);
+        this.total++;
+        added.push(painted);
+      }
+      this.highlights.append('search-all', added, { background: '#806d36' });
+      if (performance.now() >= deadline) break;
+    }
+    this.complete = state.complete && this.readCursor >= state.total;
     const range = this.keptRange();
-    const index = range ? this.matches.findIndex(match => sameRange(match, range)) : -1;
-    this.index = index < 0 ? null : index;
+    const index = range ? this.indexOf(range) : undefined;
+    this.index = index ?? null;
     if (range) {
       this.kept = range;
       if (this.restoreAt !== null && performance.now() - this.restoreAt >= WAIT_CAP_MS) this.forget();
-      else if (index >= 0) this.restoreAt = null;
+      else if (index !== undefined) this.restoreAt = null;
       else if (this.complete) this.forget();
-      else this.restoreAt ??= performance.now();
     } else if (this.kept) {
       this.forget();
     }
   }
 
+  private indexFor(range: MatchRange): MatchIndex {
+    return this.indices[(Math.imul(range.startRow, 31) + range.startCol) & 255];
+  }
+
+  private indexOf(range: MatchRange): number | undefined {
+    const found = this.indexFor(range).get(startKey(range));
+    const sameEnd = (index: number) => {
+      const end = this.matches[Math.floor(index / 256)][index % 256].end;
+      return end.absoluteRow === range.endRow && end.col === range.endCol;
+    };
+    if (typeof found === 'number') return sameEnd(found) ? found : undefined;
+    return found?.find(sameEnd);
+  }
+
   private applyWaiting(): boolean {
-    if (this.restoreAt !== null) return false;
+    if (this.restoreAt !== null || (this.kept !== null && this.index === null && !this.complete)) return false;
     let selected = false;
     while (this.waiting.length) {
       const { direction, at } = this.waiting[0];
-      const total = this.matches.length;
+      const total = this.total;
       const lands = direction === 'newer' ? this.index !== null && this.index > 0
         : this.index === null ? total > 0 : this.index < total - 1;
       const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
@@ -274,7 +319,9 @@ export class SearchOwner {
       this.index = direction === 'newer'
         ? this.index === null ? total - 1 : (this.index + total - 1) % total
         : this.index === null ? 0 : (this.index + 1) % total;
-      this.keep(this.matches[this.index]);
+      const range = this.matches[Math.floor(this.index / 256)][this.index % 256];
+      this.keep({ startRow: range.start.absoluteRow, startCol: range.start.col,
+        endRow: range.end.absoluteRow, endCol: range.end.col });
       selected = true;
     }
     return selected;
@@ -325,14 +372,13 @@ export class SearchOwner {
   }
 
   private show(reveal: boolean): void {
-    this.highlights.set('search-all', this.matches.map(highlight), { background: '#806d36' });
     this.highlightActive();
     if (reveal && this.kept) this.viewport.reveal(this.kept.startRow);
     this.publish();
   }
 
   private publish(): void {
-    const total = this.matches.length;
+    const total = this.total;
     const next: TerminalSearchState = Object.freeze({
       index: total === 0 ? 0 : this.index === null ? null : this.index + 1,
       total,
@@ -347,8 +393,9 @@ export class SearchOwner {
 function highlight(range: MatchRange): HighlightRange {
   return { start: { absoluteRow: range.startRow, col: range.startCol }, end: { absoluteRow: range.endRow, col: range.endCol } };
 }
-function sameRange(a: MatchRange, b: MatchRange): boolean {
-  return a.startRow === b.startRow && a.startCol === b.startCol && a.endRow === b.endRow && a.endCol === b.endCol;
+function startKey(range: MatchRange): number {
+  // Core rows are u32 and columns u16, fitting exactly in a JS number.
+  return range.startRow * 0x1_0000 + range.startCol;
 }
 function learned(estimate: number, measured: number, floor: number): number {
   return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);

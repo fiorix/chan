@@ -1684,6 +1684,9 @@ export class VtSearch {
   /// first rather than resolve a stale snapshot.
   private fed: number;
   private needle = "";
+  private matchBuffer = 0;
+  private matchCapacity = 0;
+  private matchCount = -1;
   /// Milliseconds the unit of `step` that last completed a scan took, on
   /// the clock `step` was given; null until a scan completes in `step`. The
   /// core checks every match it holds against the terminal's pages as a
@@ -1729,6 +1732,7 @@ export class VtSearch {
   /// complete.
   setNeedle(needle: string): void {
     if (!this.live()) return;
+    this.matchCount = -1;
     const S = LAYOUT.GhosttyString;
     const bytes = new TextEncoder().encode(needle);
     // One block: the `GhosttyString` header, then the bytes it points at,
@@ -1793,6 +1797,7 @@ export class VtSearch {
   /// `step` finishes it.
   feed(): void {
     if (!this.live()) return;
+    this.matchCount = -1;
     this.fed = this.terminal.changes();
     this.check("feeding", this.wasm.fn.ghostty_search_feed(this.handle));
   }
@@ -1862,6 +1867,47 @@ export class VtSearch {
     return found;
   }
 
+  /// Places a bounded batch from a newest-first result snapshot. Continue at
+  /// `next` while the terminal and needle are unchanged; a write, resize or
+  /// restart requires starting at zero. Scanning may append older matches.
+  /// The core only exports whole selection buffers, so a changed count still
+  /// copies that buffer once; endpoint placement visits only this batch.
+  /// No result is dropped when the time or batch boundary is reached.
+  readMatches(start: number, budgetMs: number): { ranges: MatchRange[]; next: number; total: number } {
+    if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('Invalid match offset');
+    const ranges: MatchRange[] = [];
+    if (!this.live()) return { ranges, next: 0, total: 0 };
+    const deadline = performance.now() + Math.max(0, budgetMs);
+    this.catchUp();
+    const total = this.count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
+    const S = LAYOUT.GhosttySelection;
+    if (total !== this.matchCount) {
+      if (total > this.matchCapacity) {
+        const capacity = Math.max(total, this.matchCapacity * 2, 256);
+        const buffer = this.wasm.alloc(capacity * S.size);
+        if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * S.size);
+        this.matchBuffer = buffer;
+        this.matchCapacity = capacity;
+      }
+      const B = LAYOUT.GhosttySelectionBuffer.fields;
+      const buf = this.scratch + SEARCH_SCRATCH.buffer;
+      const view = this.wasm.view();
+      view.setUint32(buf + B.ptr, this.matchBuffer, true);
+      view.setUint32(buf + B.cap, this.matchCapacity, true);
+      view.setUint32(buf + B.len, 0, true);
+      this.check('listing incremental matches', this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf));
+      this.matchCount = this.wasm.view().getUint32(buf + B.len, true);
+    }
+    let next = Math.min(start, this.matchCount);
+    const end = Math.min(next + 256, this.matchCount);
+    while (next < end) {
+      const range = this.range(this.matchBuffer + next++ * S.size);
+      if (range) ranges.push(range);
+      if (performance.now() >= deadline) break;
+    }
+    return { ranges, next, total: this.matchCount };
+  }
+
   /// The index of the match that starts at SCREEN row `row` and column
   /// `col`, counted as `SearchState.index` is (0 the newest) among the
   /// matches found so far; null when none starts there. Feeds first when the
@@ -1887,6 +1933,8 @@ export class VtSearch {
   /// after itself.
   free(): void {
     if (!this.handle) return;
+    if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * LAYOUT.GhosttySelection.size);
+    this.matchBuffer = this.matchCapacity = 0;
     this.wasm.fn.ghostty_search_free(this.handle);
     this.wasm.free(this.scratch, SEARCH_SCRATCH.size);
     this.handle = 0;

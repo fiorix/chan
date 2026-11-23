@@ -157,3 +157,55 @@ describe.each(cases)("soft-wrap search: $name", ({ first, needle, expected }) =>
     expect(readings.get(name)).toEqual({ core: correct, binding: correct });
   });
 });
+
+describe('incremental raw search reads', () => {
+  test('resumes every batch without dropping overlaps and refreshes equal-count snapshots', async () => {
+    const vt = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+    const term = vt.createTerminal(40, 4, { scrollbackLimit: 5000 });
+    const search = term.createSearch();
+    const read = () => {
+      for (let i = 0; search.step(0) !== 'complete'; i++) {
+        if (i > 1000) throw new Error('search did not settle');
+      }
+      const ranges: MatchRange[] = [];
+      let next = 0;
+      let calls = 0;
+      do {
+        const batch = search.readMatches(next, 0);
+        expect(batch.next).toBeGreaterThan(next);
+        next = batch.next;
+        ranges.push(...batch.ranges);
+        calls++;
+      } while (next < search.state().total);
+      expect(calls).toBeGreaterThan(1);
+      expect(ranges).toEqual(search.matchesBetween(0, Number.MAX_SAFE_INTEGER, Infinity));
+      return ranges;
+    };
+    try {
+      term.write('aaaa\r\n'.repeat(1200));
+      search.setNeedle('aa');
+      const first = read();
+      expect(first.length).toBeGreaterThan(3000);
+      expect(first.slice(-3)).toEqual([
+        { startRow: 0, startCol: 2, endRow: 0, endCol: 3 },
+        { startRow: 0, startCol: 1, endRow: 0, endCol: 2 },
+        { startRow: 0, startCol: 0, endRow: 0, endCol: 1 },
+      ]);
+      term.write('\x1b[2;1Hxxaaaa');
+      search.feed();
+      const changed = read();
+      expect(changed).toHaveLength(first.length);
+      expect(changed).not.toEqual(first);
+      search.setNeedle('a');
+      expect(read().length).toBeGreaterThan(changed.length);
+      search.restart();
+      expect(read().length).toBeGreaterThan(changed.length);
+      search.free();
+      expect(search.readMatches(0, 1)).toEqual({ ranges: [], next: 0, total: 0 });
+      expect(() => search.readMatches(-1, 1)).toThrow(RangeError);
+    } finally {
+      search.free();
+      term.free();
+    }
+  });
+});
