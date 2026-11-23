@@ -30,6 +30,7 @@ import {
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 import { ghosttyCellMetrics, mountGhosttyTerminal, typeInGhostty } from "../__tests__/ghosttyTab";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import {
   attach,
   installTerminalDom,
@@ -128,18 +129,13 @@ function canvasOf(term: Terminal): HTMLCanvasElement {
   return canvas;
 }
 
-/// A left-button press in the middle of the one-based cell (151, 4).
+/// A left-button press in the middle of the one-based cell (151, 4), as the
+/// pointer event the widget reads presses from.
 function press(term: Terminal): void {
   const cell = ghosttyCellMetrics(term);
-  canvasOf(term).dispatchEvent(
-    new MouseEvent("mousedown", {
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-      clientX: 150.5 * cell.width,
-      clientY: 3.5 * cell.height,
-    }),
-  );
+  const canvas = canvasOf(term);
+  modelPointerCapture(canvas);
+  mousePointer(canvas, "pointerdown", { clientX: 150.5 * cell.width, clientY: 3.5 * cell.height });
 }
 
 /// A wheel over the canvas laid out as 8 by 16 pixel cells: the one-based

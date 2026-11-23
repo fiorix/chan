@@ -95,7 +95,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   canvas = installSoftwareCanvas();
   hostSize = { cols: 100, rows: 30 };
-  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+  // The software canvas measures 8 by 19 CSS pixels before the 1.2 line height.
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19 * 1.2]] as const) {
     const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
     vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
       return this.classList.contains("terminal-host") ? hostSize[axis] * cell : original.call(this);
@@ -426,8 +427,9 @@ describe("output and scrolling", () => {
   test("on the alternate screen a trackpad swipe sends one arrow per row it adds up to", async () => {
     const { term, socket } = await mountGhostty();
     await output(socket, "\x1b[?1049h");
-    // 10 px on a 19 px row, scaled by 0.3: twenty events cross three rows.
-    const claimed = Array.from({ length: 20 }, () =>
+    // 10 px on a 22.8 px row, scaled by 0.3: twenty-four events cross three
+    // rows.
+    const claimed = Array.from({ length: 24 }, () =>
       wheel(term, { deltaY: 10 }).defaultPrevented,
     );
     expect(claimed.every(Boolean)).toBe(true);
@@ -569,7 +571,7 @@ test("the VT reads current renderer metrics and sends a resize reply to its own 
   const { term, socket } = await mountGhostty();
   expect(observed.hosts).toHaveLength(1);
   const host = observed.hosts[0]!;
-  expect(host.cellSize?.()).toMatchObject({ width: 8, height: 19 });
+  expect(host.cellSize?.()).toMatchObject({ width: 8, height: 19 * 1.2 });
   vi.spyOn(term.renderer!, "getMetrics").mockReturnValue({ ...term.renderer!.getMetrics(), width: 10, height: 20 });
   expect(host.cellSize?.()).toMatchObject({ width: 10, height: 20 });
   host.onResizeReply?.("\x1b[48;30;100;600;1000t");

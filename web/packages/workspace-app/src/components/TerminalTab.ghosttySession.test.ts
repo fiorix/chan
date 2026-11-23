@@ -322,6 +322,8 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
     modelPointerCapture(canvas);
     const { width, height } = ghosttyCellMetrics(term);
+    // The widget finds a click's cell in the canvas's laid-out box.
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * width, term.rows * height));
     const afterWrap = { clientX: 0.5 * width, clientY: 1.5 * height };
     socket.sent.splice(0);
     invoke.mockClear();
