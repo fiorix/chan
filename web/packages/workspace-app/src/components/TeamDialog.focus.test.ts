@@ -9,7 +9,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 const completion = vi.hoisted(() => ({
   arrived: false,
@@ -30,8 +32,9 @@ vi.mock("../state/teamOrchestrator.svelte", async (importOriginal) => {
 });
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
-import { xterm } from "../__tests__/xterm";
 import { api } from "../api/client";
 import {
   closeTeamDialog,
@@ -49,7 +52,6 @@ let finishBootstrap = () => {};
 beforeEach(async () => {
   completion.arrived = false;
   completion.wait = new Promise<void>((resolve) => { finishBootstrap = resolve; });
-  xterm.textareaFocus = true;
   await mountApp();
   vi.spyOn(api, "writeTeamConfig").mockResolvedValue();
   vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
@@ -64,14 +66,16 @@ afterEach(async () => {
   closeTeamDialog();
   await unmountApp();
   vi.restoreAllMocks();
-  xterm.terminals.splice(0);
-  xterm.textareaFocus = false;
 });
 
-function rendererFor(tabId: string) {
-  const root = document.querySelector<HTMLElement>(`[data-terminal-tab-id="${tabId}"]`);
-  return xterm.terminals.find((terminal) =>
-    !terminal.disposed && terminal.textarea && root?.contains(terminal.textarea));
+/// The widget open in this tab's terminal, once the tab has mounted it.
+async function rendererFor(tabId: string): Promise<Terminal> {
+  const root = await vi.waitFor(() => {
+    const found = document.querySelector<HTMLElement>(`[data-terminal-tab-id="${tabId}"]`);
+    expect(found, `the terminal of ${tabId} mounted`).not.toBeNull();
+    return found!;
+  });
+  return seatedGhostty(root);
 }
 
 describe("Team Bootstrap keyboard focus", () => {
@@ -105,9 +109,7 @@ describe("Team Bootstrap keyboard focus", () => {
     const terminals = allTerminalTabs();
     expect(terminals.map((tab) => tab.title).sort()).toEqual(["@@Lead", "@@Worker"]);
     expect(Object.values(layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(kind === "tabs" ? 1 : 2);
-    await vi.waitFor(() => {
-      for (const tab of terminals) expect(rendererFor(tab.id)?.textarea?.isConnected).toBe(true);
-    });
+    for (const tab of terminals) await rendererFor(tab.id);
     await settle();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(teamDialogState.request, "the dialog still owns the keyboard while Bootstrap is pending").not.toBeNull();
@@ -118,13 +120,13 @@ describe("Team Bootstrap keyboard focus", () => {
     const selected = pane.tabs.find((tab) => tab.id === pane.activeTabId)!;
     expect(selected.kind).toBe("terminal");
     expect(selected.kind === "terminal" && selected.title).toBe(kind === "tabs" ? "@@Worker" : "@@Lead");
-    const textarea = rendererFor(selected.id)!.textarea!;
-    expect(textarea.isConnected).toBe(true);
+    const term = await rendererFor(selected.id);
+    expect(ghosttyHasFocus(term), "the dialog's button holds the keyboard, not the terminal").toBe(false);
 
     finishBootstrap();
     await vi.waitFor(() => expect(document.querySelector(".team-dialog")).toBeNull());
     await settle();
     expect(teamDialogState.request).toBeNull();
-    expect(document.activeElement, "Bootstrap returns the keyboard to the active terminal").toBe(textarea);
+    expect(ghosttyHasFocus(term), "Bootstrap returns the keyboard to the active terminal").toBe(true);
   });
 });

@@ -7,7 +7,8 @@
 // Copy scrollback, and ends with the command launcher, which
 // opens from this terminal as its chord does. Every row that offers a catalog
 // action takes its words from the catalog, and a toggle's row its check. A
-// TerminalTab is mounted over the stand-in xterm and socket.
+// TerminalTab is mounted on the real widget through the shared fixture, over
+// the stand-in socket.
 
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -19,11 +20,14 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import type { TerminalPreferences, TerminalRosterEntry } from "../api/types";
+import { ghosttyHasFocus, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { allCommands, commandContext, commandState } from "../state/commands";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
@@ -44,7 +48,6 @@ import {
   terminalTab,
   TERMINAL_PANE,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -60,7 +63,6 @@ afterEach(() => {
   privacy.mask_terminal_secrets = false;
   __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
-  xterm.textareaFocus = false;
   delete tauri.__TAURI_INTERNALS__;
   vi.restoreAllMocks();
 });
@@ -68,7 +70,7 @@ afterEach(() => {
 async function attached(prefs: Partial<TerminalPreferences> | null = null) {
   if (prefs) __testSetStandalonePreferences(terminalPreferences(prefs));
   const [tab] = seatTerminals([terminalTab()]);
-  const mounted = await mountTerminal(TerminalTab, tab!);
+  const mounted = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
@@ -163,6 +165,8 @@ describe("the tab menu", () => {
     openTabMenu(tab.id, { left: 5000, top: 10, right: 5000, bottom: 20 });
     await tick();
     await tick();
+    // The clamp places the bubble on the next frame, one task later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const bubble = document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
     expect(bubble.parentElement).toBe(document.body);
     expect(bubble.style.position).toBe("fixed");
@@ -310,14 +314,20 @@ describe("the body menu", () => {
   test("the row leaves the keyboard on the terminal and the launcher's command leaves it alone", async () => {
     const { target, term } = await attached();
     await openBodyMenu(target);
-    const focused = term.focusCount;
-    menuRow(title(MASKING)).click();
+    // A pointer press on the row moves focus there before its click.
+    const row = menuRow(title(MASKING));
+    row.focus();
+    expect(ghosttyHasFocus(term), "the row holds the keyboard").toBe(false);
+    row.click();
     await tick();
-    expect(term.focusCount, "the row hands the keyboard back").toBe(focused + 1);
+    expect(ghosttyHasFocus(term), "the row hands the keyboard back").toBe(true);
 
+    // The launcher's query holds the keyboard as its command runs.
+    const query = document.body.appendChild(document.createElement("input"));
+    query.focus();
     allCommands().find((command) => command.id === MASKING)!.run();
     await tick();
-    expect(term.focusCount, "the command moves no focus").toBe(focused + 1);
+    expect(document.activeElement, "the command moves no focus").toBe(query);
   });
 });
 
@@ -383,26 +393,24 @@ describe("the body menu's launcher row", () => {
   });
 
   test("opens the launcher from this terminal, which holds focus as it opens, and closes the menu", async () => {
-    xterm.textareaFocus = true;
-    const { target } = await attached();
-    const seen: Array<{ name: string; focus: Element | null }> = [];
+    const { target, term } = await attached();
+    const seen: Array<{ name: string; terminalFocused: boolean }> = [];
     const listener = (e: Event) =>
-      seen.push({ name: (e as CustomEvent<{ name: string }>).detail.name, focus: document.activeElement });
+      seen.push({ name: (e as CustomEvent<{ name: string }>).detail.name, terminalFocused: ghosttyHasFocus(term) });
     window.addEventListener("chan:command", listener);
     try {
       await openBodyMenu(target);
       // A pointer press on the row moves focus there before its click.
       const row = menuRow(LAUNCHER);
       row.focus();
+      expect(ghosttyHasFocus(term), "the row holds the keyboard").toBe(false);
       row.click();
       await tick();
     } finally {
       window.removeEventListener("chan:command", listener);
     }
-    const screen = target.querySelector(".terminal-tab textarea");
-    expect(screen, "the stand-in terminal opened its textarea").not.toBeNull();
     expect(seen.map((s) => s.name)).toEqual(["app.launcher.toggle"]);
-    expect(seen[0]!.focus, "the launcher opens with the terminal focused").toBe(screen);
+    expect(seen[0]!.terminalFocused, "the launcher opens with the terminal focused").toBe(true);
     expect(document.body.querySelector(".terminal-tab-menu-bubble")).toBeNull();
   });
 });

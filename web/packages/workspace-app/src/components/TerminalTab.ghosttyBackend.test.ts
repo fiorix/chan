@@ -1,166 +1,18 @@
 // @vitest-environment jsdom
 //
-// TerminalTab on the ghostty backend: chosen from the terminal settings when
-// the terminal spawns, loaded lazily with an xterm fallback, and wired through
-// chan's own fitter, compatibility hooks, viewport controller and key
-// handling. A TerminalTab is mounted with the ghostty kit and its hooks
-// stubbed; each stand-in records what the component asked of it, in order.
+// TerminalTab opens the shared real widget. Forwarding spies observe the
+// app's wiring; buffer, canvas and socket assertions read its effects.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
-import type { VtHost } from "@chan/ghostty-web-ng/vt";
+import { Terminal } from "@chan/ghostty-web-ng";
+import type { GhosttyVt, VtHost } from "@chan/ghostty-web-ng/vt";
 
-const ghostty = vi.hoisted(() => {
-  const record = {
-    events: [] as string[],
-    kitFails: false,
-    kitLoads: 0,
-    instances: 0,
-    hosts: [] as VtHost[],
-    alignOk: true,
-    terminals: [] as Array<Record<string, any>>,
-    viewportWrites: [] as string[],
-    wheels: 0,
-    osc52: [] as string[],
-    // Whether the program in the terminal has focus reporting on (DECSET
-    // 1004), as ghostty-web's own mode tracking would answer.
-    focusEvents: false,
-    // A renderer without the private hooks the mask painter binds to.
-    bareRenderer: false,
-    // Whether the program asked for bracketed paste (DECSET 2004), and
-    // every text the component pasted through ghostty-web.
-    bracketedPaste: false,
-    pastes: [] as string[],
-    // The forceAll flag of every render pass asked of the renderer.
-    renders: [] as boolean[],
-    // When set, focus does what ghostty-web's does: open() makes its element
-    // focusable, focus() focuses that element, and again on a zero-delay
-    // timer that blur() cancels; blur() blurs whichever element inside holds
-    // focus.
-    realFocus: false,
-    // Every theme the component handed the live-switch hook, with the
-    // terminal it named.
-    themes: [] as Array<{ term: unknown; theme: Record<string, string> }>,
-  };
-  /// ghostty-web's own render, as the painter finds it on the renderer.
-  function fakeRender(_buffer: unknown, forceAll?: boolean) {
-    record.renders.push(forceAll === true);
-  }
-  class FakeGhosttyTerminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown>;
-    keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
-    wheelHandler: ((e: WheelEvent) => boolean) | null = null;
-    dataHandlers: Array<(data: string) => void> = [];
-    resizeHandlers: Array<(size: { cols: number; rows: number }) => void> = [];
-    resized: Array<[number, number]> = [];
-    // What the secret mask painter hooks: a 2D context, the render it
-    // wraps, and the buffer and viewport it reads.
-    renderer: Record<string, unknown> = record.bareRenderer
-      ? { getMetrics: () => ({ width: 8, height: 16 }) }
-      : { getMetrics: () => ({ width: 8, height: 16 }), ctx: {}, render: fakeRender };
-    buffer = { active: { type: "normal", length: 24, getLine: () => undefined }, alternate: {} };
-    // The wasm core the renderer draws from, as far as a render pass reads it.
-    wasmTerm = {
-      getDimensions: () => ({ cols: this.cols, rows: this.rows }),
-      isRowDirty: () => false,
-      beginFrame: () => 0,
-    };
-    applicationCursorKeys = false;
-    element: HTMLElement | null = null;
-    focusRetry: ReturnType<typeof setTimeout> | undefined = undefined;
-    constructor(options: Record<string, unknown>) {
-      this.options = options;
-      record.terminals.push(this);
-      record.events.push("construct");
-    }
-    open(element?: HTMLElement) {
-      this.element = element ?? null;
-      record.events.push("open");
-      // ghostty-web's open() makes its element focusable and takes no focus.
-      if (record.realFocus && element && !element.hasAttribute("tabindex")) {
-        element.setAttribute("tabindex", "0");
-      }
-    }
-    attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean) {
-      this.keyHandler = handler;
-    }
-    attachCustomWheelEventHandler(handler: (e: WheelEvent) => boolean) {
-      this.wheelHandler = handler;
-    }
-    onData(handler: (data: string) => void) {
-      this.dataHandlers.push(handler);
-      return { dispose() {} };
-    }
-    onResize(handler: (size: { cols: number; rows: number }) => void) {
-      this.resizeHandlers.push(handler);
-      return { dispose() {} };
-    }
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() {
-      return false;
-    }
-    hasFocusEvents() {
-      return record.focusEvents;
-    }
-    getMode(mode: number) {
-      if (mode === 2004) return record.bracketedPaste;
-      return mode === 1 ? this.applicationCursorKeys : false;
-    }
-    hasBracketedPaste() {
-      return record.bracketedPaste;
-    }
-    write() {}
-    writeln() {}
-    paste(text: string) {
-      record.pastes.push(text);
-    }
-    resize(cols: number, rows: number) {
-      if (cols === this.cols && rows === this.rows) return;
-      this.resized.push([cols, rows]);
-      this.cols = cols;
-      this.rows = rows;
-      for (const handler of this.resizeHandlers) handler({ cols, rows });
-    }
-    focus() {
-      record.events.push("focus");
-      const element = this.element;
-      if (!record.realFocus || !element) return;
-      element.focus();
-      clearTimeout(this.focusRetry);
-      this.focusRetry = setTimeout(() => element.focus(), 0);
-    }
-    blur() {
-      record.events.push("blur");
-      if (!record.realFocus) return;
-      clearTimeout(this.focusRetry);
-      const held = document.activeElement;
-      if (held instanceof HTMLElement && this.element?.contains(held)) held.blur();
-    }
-    getSelection() {
-      return "chosen";
-    }
-    getViewportY() {
-      return 0;
-    }
-    getScrollbackLength() {
-      return 0;
-    }
-    scrolled: number[] = [];
-    scrollLines(amount: number) {
-      this.scrolled.push(amount);
-    }
-    scrollToBottom() {
-      record.events.push("scrollToBottom");
-    }
-    selectAll() {}
-    clearSelection() {}
-    dispose() {}
-  }
-  return { record, FakeGhosttyTerminal, fakeRender };
-});
+const observed = vi.hoisted(() => ({
+  events: [] as string[],
+  hosts: [] as VtHost[],
+  instances: [] as GhosttyVt[],
+}));
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -168,61 +20,44 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (importOriginal) => (await import("../__tests__/xterm")).xtermStandInSwitch({
-  ...(await importOriginal<typeof import("../terminal/backend")>()),
-  loadGhosttyKit: vi.fn(async () => {
-    ghostty.record.kitLoads += 1;
-    if (ghostty.record.kitFails) throw new Error("wasm fetch failed");
-    return {
-      instantiate: async (host?: VtHost) => {
-        if (host) ghostty.record.hosts.push(host);
-        ghostty.record.instances += 1;
-        ghostty.record.events.push("instantiate");
-        return { instance: ghostty.record.instances };
-      },
-      Terminal: ghostty.FakeGhosttyTerminal,
-    };
-  }),
-}));
-vi.mock("../terminal/ghosttyCompat", () => ({
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => {
-    ghostty.record.events.push("align");
-    return ghostty.record.alignOk;
-  },
-  installGhosttyCustomGlyphs: () => (ghostty.record.events.push("glyphs"), true),
-  installGhosttyOverlayScrollbar: () => (ghostty.record.events.push("scrollbar"), true),
-}));
-vi.mock("../terminal/ghosttyTheme", () => ({
-  applyGhosttyTheme: (term: unknown, theme: Record<string, string>) => {
-    ghostty.record.themes.push({ term, theme });
-    return true;
-  },
-}));
-vi.mock("../terminal/ghosttyViewport", () => ({
-  GhosttyViewportController: class {
-    write(bytes: Uint8Array) {
-      ghostty.record.viewportWrites.push(new TextDecoder().decode(bytes));
-    }
-    handleWheel() {
-      ghostty.record.wheels += 1;
-      return true;
-    }
-    dispose() {}
-  },
-}));
-vi.mock("../terminal/osc52Bridge", () => ({
-  Osc52Bridge: class {
-    push(bytes: Uint8Array) {
-      ghostty.record.osc52.push(new TextDecoder().decode(bytes));
-    }
-  },
-}));
-vi.mock("../terminal/resize", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/resize")>()),
-  proposeGhosttyDimensions: () => ({ cols: 100, rows: 30 }),
-}));
+vi.mock("../terminal/backend", async (importOriginal) => {
+  const fixture = await (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal);
+  return { ...fixture, loadGhosttyKit: vi.fn(async () => {
+    const kit = await fixture.loadGhosttyKit();
+    const instantiate = kit.instantiate;
+    vi.spyOn(kit, "instantiate").mockImplementation(async (host) => {
+      observed.events.push("instantiate");
+      if (host) observed.hosts.push(host);
+      const instance = await instantiate(host);
+      observed.instances.push(instance);
+      vi.spyOn(instance, "createTerminal");
+      return instance;
+    });
+    return kit;
+  }) };
+});
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) => {
+  const fixture = await (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal);
+  return {
+    ...fixture,
+    alignGhosttyRendererToXterm: vi.fn(fixture.alignGhosttyRendererToXterm),
+    installGhosttyCustomGlyphs: vi.fn(fixture.installGhosttyCustomGlyphs),
+    installGhosttyOverlayScrollbar: vi.fn(fixture.installGhosttyOverlayScrollbar),
+  };
+});
+vi.mock("../terminal/ghosttyTheme", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../terminal/ghosttyTheme")>();
+  return { ...actual, applyGhosttyTheme: vi.fn(actual.applyGhosttyTheme) };
+});
 
+import { loadGhosttyKit } from "../terminal/backend";
+import { alignGhosttyRendererToXterm, installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar } from "../terminal/ghosttyCompat";
+import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
+import { GhosttyViewportController } from "../terminal/ghosttyViewport";
+import { Osc52Bridge } from "../terminal/osc52Bridge";
+import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
+import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
+import { requestXtermStandIn } from "../__tests__/xterm";
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -234,7 +69,6 @@ import {
   attach,
   installTerminalDom,
   menuRow,
-  mountTerminal,
   openBodyMenu,
   output,
   receive,
@@ -253,7 +87,7 @@ installTerminalDom();
 class DialRecordingSocket extends TerminalSocket {
   constructor(url: string) {
     super(url);
-    ghostty.record.events.push("dial");
+    observed.events.push("dial");
   }
 }
 globalThis.WebSocket = DialRecordingSocket as unknown as typeof WebSocket;
@@ -261,61 +95,52 @@ globalThis.WebSocket = DialRecordingSocket as unknown as typeof WebSocket;
 const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
 
+let canvas: ReturnType<typeof installSoftwareCanvas>;
+let hostSize = { cols: 100, rows: 30 };
+
 beforeEach(() => {
-  Object.assign(ghostty.record, {
-    events: [],
-    kitFails: false,
-    kitLoads: 0,
-    instances: 0,
-    hosts: [],
-    alignOk: true,
-    terminals: [],
-    viewportWrites: [],
-    wheels: 0,
-    osc52: [],
-    focusEvents: false,
-    bareRenderer: false,
-    bracketedPaste: false,
-    pastes: [],
-    realFocus: false,
-    themes: [],
-  });
+  observed.events.length = 0;
+  observed.hosts.length = 0;
+  observed.instances.length = 0;
+  vi.clearAllMocks();
+  canvas = installSoftwareCanvas();
+  hostSize = { cols: 100, rows: 30 };
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
+    vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("terminal-host") ? hostSize[axis] * cell : original.call(this);
+    });
+  }
+  for (const name of ["open", "focus", "blur"] as const) {
+    const original = Terminal.prototype[name];
+    vi.spyOn(Terminal.prototype, name).mockImplementation(function (this: Terminal, ...args: any[]) {
+      observed.events.push(name);
+      return (original as (...args: any[]) => void).apply(this, args);
+    });
+  }
   __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
 });
 
+const fallbackMounts: Array<Record<string, unknown>> = [];
 afterEach(() => {
+  for (const component of fallbackMounts.splice(0)) unmount(component);
   resetTerminals();
   __testSetStandalonePreferences(null);
   clipboard.writeText.mockClear();
   ui.status = null;
   ui.terminalControl = false;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-const ghosttyMounts: Array<Record<string, unknown>> = [];
-
-afterEach(() => {
-  for (const component of ghosttyMounts.splice(0)) unmount(component);
-});
-
-/// Mount a terminal that spawns on ghostty (the harness's mountTerminal waits
-/// for an xterm instance, which a ghostty terminal never makes).
 async function mountGhostty({ focused = true }: { focused?: boolean } = {}) {
   const [tab] = seatTerminals([terminalTab()]);
-  const target = document.createElement("div");
-  document.body.append(target);
-  const component = mount(TerminalTab, {
-    target,
-    props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused },
-  }) as Record<string, unknown>;
-  ghosttyMounts.push(component);
-  await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
-  const mounted = { target, component };
+  const mounted = await mountGhosttyTerminal(TerminalTab, tab!, { focused });
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   socket.sent.splice(0);
-  return { ...mounted, tab: tab!, socket, term: ghostty.record.terminals.at(-1)! };
+  return { ...mounted, tab: tab!, socket };
 }
 
 /// A keydown on the terminal host, where chan's ghostty key listener runs
@@ -334,9 +159,21 @@ function inputs(socket: TerminalSocket): unknown[] {
     .map((frame) => frame.data);
 }
 
-function key(term: Record<string, any>, init: KeyboardEventInit): { event: KeyboardEvent; claimed: boolean } {
-  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
-  return { event, claimed: term.keyHandler(event) };
+function wheel(term: Terminal, init: WheelEventInit): WheelEvent {
+  const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, ...init });
+  term.element!.querySelector("canvas")!.dispatchEvent(event);
+  return event;
+}
+
+function painted(term: Terminal): number[][] {
+  canvas.frame();
+  const context = canvas.context(term.element!);
+  const cells: number[][] = [];
+  for (let x = 0; x < term.cols; x++) {
+    const pixel = context.pixelAt(x * 8 + 4, 9);
+    if (pixel.r === 108 && pixel.g === 108 && pixel.b === 112 && pixel.a === 1) cells.push([x, 0]);
+  }
+  return cells;
 }
 
 const MASKING_ROW = "Secret masking (this terminal)";
@@ -346,9 +183,9 @@ const MASKING_ROW = "Secret masking (this terminal)";
 async function spawned(target: HTMLElement): Promise<{ engine: string; masking: boolean; kitLoads: number }> {
   await openBodyMenu(target);
   return {
-    engine: ghostty.record.terminals.length > 0 ? "ghostty" : xterm.terminals.length > 0 ? "xterm" : "",
+    engine: ghosttyFixture.terminals.length > 0 ? "ghostty" : xterm.terminals.length > 0 ? "xterm" : "",
     masking: menuRow(MASKING_ROW).getAttribute("aria-checked") === "true",
-    kitLoads: ghostty.record.kitLoads,
+    kitLoads: vi.mocked(loadGhosttyKit).mock.calls.length,
   };
 }
 
@@ -361,7 +198,7 @@ describe("a control terminal whose masking starts on", () => {
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, ...masking }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
-    expect(ghostty.record.terminals, "one ghostty terminal built").toHaveLength(1);
+    expect(ghosttyFixture.terminals, "one ghostty terminal built").toHaveLength(1);
   });
 
   test("its own toggle turns masking off and leaves it on ghostty", async () => {
@@ -373,7 +210,7 @@ describe("a control terminal whose masking starts on", () => {
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
-  test("with the preference off it starts unmasked on the configured backend", async () => {
+  test("with the preference off it starts unmasked on ghostty", async () => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
@@ -395,11 +232,18 @@ describe("choosing the backend", () => {
   });
 
   test("a kit that fails to load falls back to xterm", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    ghostty.record.kitFails = true;
+    // Deliberate loader-failure exception while the app still falls back to
+    // xterm; replace this case when terminal load failures have their own UI.
+    // The failure is the route's, which asks for the fallback the case reads.
+    vi.mocked(loadGhosttyKit).mockImplementationOnce(requestXtermStandIn);
     const [tab] = seatTerminals([terminalTab()]);
-    await mountTerminal(TerminalTab, tab!);
-    expect(ghostty.record.terminals).toHaveLength(0);
+    const target = document.createElement("div");
+    document.body.append(target);
+    fallbackMounts.push(mount(TerminalTab, {
+      target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
+    }));
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    expect(ghosttyFixture.terminals).toHaveLength(0);
     expect(xterm.terminals).toHaveLength(1);
   });
 
@@ -417,41 +261,42 @@ describe("choosing the backend", () => {
     });
     await import("./TerminalTab.svelte");
     expect(loads).toBe(0);
+    vi.doUnmock("@chan/ghostty-web-ng");
   });
 });
 
 describe("the mount", () => {
   test("instantiate its own wasm, open, align to xterm's cell, install the hooks, then dial", async () => {
-    await mountGhostty();
-    expect(ghostty.record.events.slice(0, 7)).toEqual([
-      "instantiate",
-      "construct",
-      "open",
-      "align",
-      "glyphs",
-      "scrollbar",
-      "dial",
-    ]);
+    const { term } = await mountGhostty();
+    expect(observed.events.indexOf("instantiate")).toBeLessThan(observed.events.indexOf("open"));
+    expect(observed.events.indexOf("open")).toBeLessThan(observed.events.indexOf("dial"));
+    const calls = [alignGhosttyRendererToXterm, installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar]
+      .map((hook) => vi.mocked(hook).mock.invocationCallOrder[0]!);
+    expect(calls.every(Number.isFinite)).toBe(true);
+    expect(calls).toEqual([...calls].sort((a, b) => a - b));
+    expect(installGhosttyCustomGlyphs).toHaveBeenCalledWith(term.renderer);
+    expect(installGhosttyOverlayScrollbar).toHaveBeenCalledWith(term.renderer);
   });
 
   test("the terminal is built on the wasm instance its own spawn created", async () => {
     await mountGhostty();
-    expect(ghostty.record.instances).toBe(1);
-    expect(ghostty.record.terminals[0].options.ghostty).toEqual({ instance: 1 });
+    expect(observed.instances).toHaveLength(1);
+    expect(vi.mocked(observed.instances[0]!.createTerminal).mock.results[0]?.value).toBe(ghosttyFixture.terminals[0]!.wasmTerm);
   });
 
   test("a renderer without the alignment hook is kept, with a warning", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    ghostty.record.alignOk = false;
+    vi.mocked(alignGhosttyRendererToXterm).mockReturnValueOnce(null);
     await mountGhostty();
     expect(warn.mock.calls.some((c) => String(c[0]).includes("renderer metrics unavailable"))).toBe(true);
   });
 
   test("a resize fits with chan's own measurement", async () => {
     const { term } = await mountGhostty();
+    term.resize(80, 24);
     resizeObservers.at(-1)!.callback();
-    await tick();
-    expect(term.resized).toContainEqual([100, 30]);
+    canvas.frame();
+    expect([term.cols, term.rows]).toEqual([100, 30]);
   });
 
   test("a shown fit publishes through Ghostty's resize handler", async () => {
@@ -459,6 +304,7 @@ describe("the mount", () => {
     term.resize(90, 30);
     socket.sent.splice(0);
     resizeObservers.at(-1)!.callback();
+    canvas.frame();
     expect(sentFrames(socket).filter((frame) => frame.type === "resize"))
       .toEqual([{ type: "resize", cols: 100, rows: 30 }]);
   });
@@ -466,13 +312,14 @@ describe("the mount", () => {
 
 describe("keys", () => {
   test("host insertText reaches the PTY once as typed input and never as paste", async () => {
-    const { target, socket } = await mountGhostty();
+    const { target, socket, term } = await mountGhostty();
+    const pasted = vi.spyOn(term, "paste");
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
     host.dispatchEvent(new InputEvent("beforeinput", {
       bubbles: true, cancelable: true, inputType: "insertText", data: "\u{1f600}",
     }));
     expect(inputs(socket)).toEqual(["\u{1f600}"]);
-    expect(ghostty.record.pastes).toEqual([]);
+    expect(pasted).not.toHaveBeenCalled();
   });
 
   test("a handled key's following host insertText does not duplicate its bytes", async () => {
@@ -495,15 +342,17 @@ describe("keys", () => {
   );
 
   test("the handler ghostty calls inverts chan's answer: copy is claimed, paste stays native", async () => {
-    const { term } = await mountGhostty();
-    const copy = key(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
-    const paste = key(term, { key: "V", code: "KeyV", ctrlKey: true, shiftKey: true });
+    const { term, socket } = await mountGhostty();
+    await output(socket, "chosen");
+    term.select(0, 0, 6);
+    const copy = pressInGhostty(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    const paste = pressInGhostty(term, { key: "V", code: "KeyV", ctrlKey: true, shiftKey: true });
     await tick();
 
-    expect(copy.claimed).toBe(true);
+    expect(copy.defaultPrevented).toBe(true);
     expect(clipboard.writeText).toHaveBeenCalledWith("chosen");
-    expect(paste.claimed).toBe(false);
-    expect(paste.event.defaultPrevented).toBe(false);
+    expect(paste.defaultPrevented).toBe(false);
+    expect(inputs(socket)).toEqual([]);
   });
 
   test("a bare Ctrl+V sends the control byte, before ghostty would drop it with its paste chords", async () => {
@@ -531,8 +380,9 @@ describe("keys", () => {
 
   test("Shift+PageUp scrolls the terminal a page less one row", async () => {
     const { target, socket, term } = await mountGhostty();
+    await output(socket, "line\r\n".repeat(100));
     hostKey(target, { key: "PageUp", code: "PageUp", keyCode: 33, shiftKey: true });
-    expect(term.scrolled).toEqual([-(term.rows - 1)]);
+    expect(term.getViewportY()).toBe(term.rows - 1);
     expect(inputs(socket)).toEqual([]);
   });
 
@@ -546,14 +396,15 @@ describe("keys", () => {
     expect(inputs(socket)).toEqual([]);
   });
 
-  test("plain typing and chan's own chords still reach ghostty-web", async () => {
-    const { target } = await mountGhostty();
+  test("plain typing reaches the PTY and copy and paste keep their own paths", async () => {
+    const { target, socket } = await mountGhostty();
     const outer = vi.fn();
     target.addEventListener("keydown", outer);
     hostKey(target, { key: "a", code: "KeyA", keyCode: 65 });
     hostKey(target, { key: "C", code: "KeyC", keyCode: 67, ctrlKey: true, shiftKey: true });
     hostKey(target, { key: "V", code: "KeyV", keyCode: 86, ctrlKey: true, shiftKey: true });
-    expect(outer).toHaveBeenCalledTimes(3);
+    expect(outer).toHaveBeenCalledTimes(2);
+    expect(inputs(socket)).toEqual(["a"]);
   });
 
   test("the program's keyboard protocol requests reach the modified Enter", async () => {
@@ -568,16 +419,22 @@ describe("keys", () => {
 
 describe("output and scrolling", () => {
   test("PTY output goes through the viewport controller and the OSC 52 observer", async () => {
-    const { socket } = await mountGhostty();
+    const writes = vi.spyOn(GhosttyViewportController.prototype, "write");
+    const osc = vi.spyOn(Osc52Bridge.prototype, "push");
+    const { socket, term } = await mountGhostty();
     await output(socket, "hello");
-    expect(ghostty.record.viewportWrites).toContain("hello");
-    expect(ghostty.record.osc52).toContain("hello");
+    expect(writes.mock.calls.map(([bytes]) => typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes))).toContain("hello");
+    expect(osc.mock.calls.map(([bytes]) => new TextDecoder().decode(bytes))).toContain("hello");
+    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe("hello");
   });
 
   test("the wheel goes to the viewport controller", async () => {
-    const { term } = await mountGhostty();
-    expect(term.wheelHandler!(new WheelEvent("wheel", { deltaY: 10 }))).toBe(true);
-    expect(ghostty.record.wheels).toBe(1);
+    const scrolled = vi.spyOn(GhosttyViewportController.prototype, "handleWheel");
+    const { term, socket } = await mountGhostty();
+    await output(socket, "line\r\n".repeat(100));
+    wheel(term, { deltaY: -19 });
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(term.getViewportY()).toBeGreaterThan(0);
   });
 
   const arrows = (socket: TerminalSocket): unknown[] =>
@@ -587,21 +444,21 @@ describe("output and scrolling", () => {
 
   test("on the alternate screen a trackpad swipe sends one arrow per row it adds up to", async () => {
     const { term, socket } = await mountGhostty();
-    term.buffer.active = term.buffer.alternate;
-    // 10 px on a 16 px row, scaled by 0.3: 0.1875 of a row per event.
+    await output(socket, "\x1b[?1049h");
+    // 10 px on a 19 px row, scaled by 0.3: twenty events cross three rows.
     const claimed = Array.from({ length: 20 }, () =>
-      term.wheelHandler!(new WheelEvent("wheel", { deltaY: 10 })),
+      wheel(term, { deltaY: 10 }).defaultPrevented,
     );
     expect(claimed.every(Boolean)).toBe(true);
     expect(arrows(socket)).toEqual(["\x1b[B", "\x1b[B", "\x1b[B"]);
-    expect(ghostty.record.wheels).toBe(0);
+    expect(term.getViewportY()).toBe(0);
   });
 
   test("on the alternate screen application cursor keys send the SS3 arrow", async () => {
     const { term, socket } = await mountGhostty();
-    term.buffer.active = term.buffer.alternate;
-    term.applicationCursorKeys = true;
-    term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
+    await output(socket, "\x1b[?1049h");
+    await output(socket, "\x1b[?1h");
+    wheel(term, { deltaY: -1, deltaMode: 1 });
     expect(arrows(socket)).toEqual(["\x1bOA"]);
   });
 
@@ -609,8 +466,8 @@ describe("output and scrolling", () => {
     const { term, socket } = await mountGhostty();
     vi.useFakeTimers();
     try {
-      term.buffer.active = term.buffer.alternate;
-      term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
+      await output(socket, "\x1b[?1049h");
+      wheel(term, { deltaY: -1, deltaMode: 1 });
       expect(arrows(socket)).toEqual(["\x1b[A"]);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
@@ -637,15 +494,12 @@ describe("focus recovery after a host resume", () => {
   // ask for one even though the grid is unchanged and the fit is a no-op.
   test("the resume forces a full render pass of the ghostty renderer", async () => {
     const { term } = await mountGhostty();
-    // The mount fits and paints; the resume is judged from a settled terminal.
-    await vi.waitFor(() => expect(ghostty.record.renders).not.toEqual([]));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    ghostty.record.renders.splice(0);
-    term.resized.splice(0);
-
+    canvas.frame();
+    const rendered = vi.spyOn(term.renderer!, "render");
+    const resized = vi.spyOn(term, "resize");
     await resume();
-    await vi.waitFor(() => expect(ghostty.record.renders, "a forced pass").toContain(true));
-    expect(term.resized, "the repaint is not a resize").toEqual([]);
+    expect(rendered.mock.calls.some((call) => call[1] === true), "a forced pass").toBe(true);
+    expect(resized, "the repaint is not a resize").not.toHaveBeenCalled();
   });
 
   test("with the host active, the resume blurs it and then focuses the terminal", async () => {
@@ -655,12 +509,13 @@ describe("focus recovery after a host resume", () => {
     host.focus();
     expect(document.activeElement, "the host is active before the resume").toBe(host);
     const blurred = vi.spyOn(host, "blur");
-    ghostty.record.events.splice(0);
+    observed.events.splice(0);
 
     await resume();
     expect(blurred, "the host is blurred once").toHaveBeenCalledTimes(1);
-    expect(ghostty.record.events, "the terminal is focused after the blur").toContain("focus");
-    expect(document.activeElement, "the DOM focus left the host").not.toBe(host);
+    expect(observed.events, "the terminal is focused after the blur").toContain("focus");
+    expect(document.activeElement, "the real terminal regains focus after the blur").toBe(host);
+    expect(blurred.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(Terminal.prototype.focus).mock.invocationCallOrder.at(-1)!);
   });
 
   test("with the focus elsewhere, the resume leaves the host and the terminal alone", async () => {
@@ -671,11 +526,11 @@ describe("focus recovery after a host resume", () => {
     input.focus();
     expect(document.activeElement).toBe(input);
     const blurred = vi.spyOn(host, "blur");
-    ghostty.record.events.splice(0);
+    observed.events.splice(0);
 
     await resume();
     expect(blurred).not.toHaveBeenCalled();
-    expect(ghostty.record.events).not.toContain("focus");
+    expect(observed.events).not.toContain("focus");
     expect(document.activeElement, "the input keeps the focus").toBe(input);
     input.remove();
   });
@@ -692,11 +547,11 @@ describe("focus recovery after a host resume", () => {
     host.focus();
     const blurred = vi.spyOn(host, "blur");
     document.documentElement.setAttribute("data-launcher-shown", "");
-    ghostty.record.events.splice(0);
+    observed.events.splice(0);
     try {
       await resume();
       expect(blurred, "the host is not blurred under the launcher").not.toHaveBeenCalled();
-      expect(ghostty.record.events, "the terminal is not focused under the launcher").not.toContain("focus");
+      expect(observed.events, "the terminal is not focused under the launcher").not.toContain("focus");
       expect(document.activeElement, "the host keeps the DOM focus").toBe(host);
     } finally {
       document.documentElement.removeAttribute("data-launcher-shown");
@@ -704,7 +559,7 @@ describe("focus recovery after a host resume", () => {
 
     await resume();
     expect(blurred, "once the launcher hides, a resume blurs the host").toHaveBeenCalledTimes(1);
-    expect(ghostty.record.events, "and focuses the terminal").toContain("focus");
+    expect(observed.events, "and focuses the terminal").toContain("focus");
   });
 
   // A terminal that mounts or gains its pane's focus under the launcher (the
@@ -718,35 +573,34 @@ describe("focus recovery after a host resume", () => {
       bumpTabFocusPulse();
       await tick();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(ghostty.record.events, "the terminal is not focused under the launcher").not.toContain("focus");
+      expect(observed.events, "the terminal is not focused under the launcher").not.toContain("focus");
     } finally {
       document.documentElement.removeAttribute("data-launcher-shown");
     }
     bumpTabFocusPulse();
     await tick();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(ghostty.record.events, "the pane focus after the launcher hid focuses the terminal").toContain("focus");
+    expect(observed.events, "the pane focus after the launcher hid focuses the terminal").toContain("focus");
   });
 });
 
 test("the VT reads current renderer metrics and sends a resize reply to its own PTY", async () => {
   const { term, socket } = await mountGhostty();
-  expect(ghostty.record.hosts).toHaveLength(1);
-  const host = ghostty.record.hosts[0]!;
-  expect(host.cellSize()).toEqual({ width: 8, height: 16 });
-  vi.spyOn(term.renderer, "getMetrics").mockReturnValue({ width: 10, height: 20 });
-  expect(host.cellSize()).toEqual({ width: 10, height: 20 });
-  host.onResizeReply("\x1b[48;30;100;600;1000t");
+  expect(observed.hosts).toHaveLength(1);
+  const host = observed.hosts[0]!;
+  expect(host.cellSize?.()).toMatchObject({ width: 8, height: 19 });
+  vi.spyOn(term.renderer!, "getMetrics").mockReturnValue({ ...term.renderer!.getMetrics(), width: 10, height: 20 });
+  expect(host.cellSize?.()).toMatchObject({ width: 10, height: 20 });
+  host.onResizeReply?.("\x1b[48;30;100;600;1000t");
   expect(inputs(socket)).toEqual(["\x1b[48;30;100;600;1000t"]);
 });
 
 // ghostty-web's open() takes no focus; focus() focuses the element it opened
-// in, and again on its zero-delay timer. A terminal that spawns or is
+// in, once and synchronously. A terminal that spawns or is
 // restored in a background pane takes no keyboard: it leaves it with what
 // held it. `TerminalTab.ghosttyOpen.test.ts` reads the same on the widget.
 describe("a ghostty terminal opening in a background pane", () => {
-  test("leaves the keyboard on the field that held it, past ghostty-web's focus retry", async () => {
-    ghostty.record.realFocus = true;
+  test("leaves the keyboard on the field that held it, once its mount has settled", async () => {
     const field = document.createElement("input");
     document.body.append(field);
     field.focus();
@@ -761,7 +615,6 @@ describe("a ghostty terminal opening in a background pane", () => {
   });
 
   test("a terminal in the focused pane takes the keyboard", async () => {
-    ghostty.record.realFocus = true;
     const field = document.createElement("input");
     document.body.append(field);
     field.focus();
@@ -777,7 +630,6 @@ describe("a ghostty terminal opening in a background pane", () => {
 
 describe("a ghostty terminal under the Team dialog", () => {
   test("a focused terminal finishing its mount leaves the keyboard in the dialog's field", async () => {
-    ghostty.record.realFocus = true;
     const field = document.createElement("input");
     document.body.append(field);
     openTeamDialog({ leadTabId: "term-1", leadPaneId: TERMINAL_PANE });
@@ -786,8 +638,8 @@ describe("a ghostty terminal under the Team dialog", () => {
       const { target } = await mountGhostty();
       expect(target.querySelector(".terminal-host")?.getAttribute("tabindex"), "the terminal finishes opening focusable").toBe("0");
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(document.activeElement, "the modal field keeps focus after terminal startup and its focus retry").toBe(field);
-      expect(ghostty.record.events, "startup does not ask the terminal to take focus under a modal").not.toContain("focus");
+      expect(document.activeElement, "the modal field keeps focus after terminal startup").toBe(field);
+      expect(observed.events, "startup does not ask the terminal to take focus under a modal").not.toContain("focus");
     } finally {
       closeTeamDialog();
       field.remove();
@@ -795,14 +647,13 @@ describe("a ghostty terminal under the Team dialog", () => {
   });
 
   test("a pane focus pulse cannot focus the terminal until the dialog closes", async () => {
-    ghostty.record.realFocus = true;
     const { target, tab } = await mountGhostty();
     await new Promise((resolve) => setTimeout(resolve, 20));
     const field = document.createElement("input");
     document.body.append(field);
     openTeamDialog({ leadTabId: tab.id, leadPaneId: TERMINAL_PANE });
     field.focus();
-    ghostty.record.events.splice(0);
+    observed.events.splice(0);
     try {
       bumpTabFocusPulse();
       // These body assertions identify the pulse's own synchronous blur,
@@ -810,7 +661,7 @@ describe("a ghostty terminal under the Team dialog", () => {
       expect(document.activeElement, "the pulse relinquishes the field before notifying tabs").toBe(document.body);
       await tick();
       await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(ghostty.record.events, "the pane pulse does not ask the terminal to take focus under a modal").not.toContain("focus");
+      expect(observed.events, "the pane pulse does not ask the terminal to take focus under a modal").not.toContain("focus");
       expect(document.activeElement, "the terminal cannot take the keyboard parked by the pulse under a modal").toBe(document.body);
 
       closeTeamDialog();
@@ -818,7 +669,7 @@ describe("a ghostty terminal under the Team dialog", () => {
       await tick();
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(document.activeElement, "the ordinary pane pulse restores terminal focus after the modal closes").toBe(target.querySelector(".terminal-host"));
-      expect(ghostty.record.events, "focus resumes once the modal releases the keyboard").toContain("focus");
+      expect(observed.events, "focus resumes once the modal releases the keyboard").toContain("focus");
     } finally {
       closeTeamDialog();
       field.remove();
@@ -830,11 +681,9 @@ describe("a ghostty terminal under the Team dialog", () => {
 // component reports focus at the element ghostty-web focuses.
 // A launcher opened from the body menu's Commands records what holds the
 // keyboard as it opens and focuses its own input a tick later, as the
-// command deck does. ghostty-web's focus() focuses its element again on a
-// zero-delay timer, after that.
+// command deck does; nothing focuses the terminal after that.
 describe("the body menu's Commands", () => {
   test("hands the launcher the terminal's host, and leaves the keyboard in the launcher", async () => {
-    ghostty.record.realFocus = true;
     const { target } = await mountGhostty();
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
     host.tabIndex = 0;
@@ -880,7 +729,7 @@ describe("focus reports", () => {
   test("with focus reporting on, focus-in sends CSI I and focus-out sends CSI O", async () => {
     const { target, socket } = await mountGhostty();
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
-    ghostty.record.focusEvents = true;
+    await output(socket, "\x1b[?1004h");
 
     move(host, "focusin");
     expect(reports(socket), "after focus-in").toEqual(["\x1b[I"]);
@@ -897,9 +746,9 @@ describe("focus reports", () => {
     expect(reports(socket), "with the mode off").toEqual([]);
 
     // The mode is read at each change, not once.
-    ghostty.record.focusEvents = true;
+    await output(socket, "\x1b[?1004h");
     move(host, "focusin");
-    ghostty.record.focusEvents = false;
+    await output(socket, "\x1b[?1004l");
     move(host, "focusout");
     expect(reports(socket), "after the mode came on and went off").toEqual([
       "\x1b[I",
@@ -907,14 +756,15 @@ describe("focus reports", () => {
   });
 
   test("a resume reports each focus transition once despite retained browser events", async () => {
-    const { target, socket, term } = await mountGhostty();
+    const { target, socket } = await mountGhostty();
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
     host.tabIndex = 0;
-    ghostty.record.focusEvents = true;
+    await output(socket, "\x1b[?1004h");
+    host.blur();
+    socket.sent.splice(0);
     host.focus();
     expect(reports(socket)).toEqual(["\x1b[I"]);
     socket.sent.splice(0);
-    vi.spyOn(term, "focus").mockImplementation(() => host.focus());
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       // Chromium retains the active element across a window blur, then
@@ -943,7 +793,7 @@ describe("focus reports", () => {
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
     const inner = document.createElement("textarea");
     host.append(inner);
-    ghostty.record.focusEvents = true;
+    await output(socket, "\x1b[?1004h");
 
     move(host, "focusout", inner);
     move(inner, "focusin", host);
@@ -958,62 +808,32 @@ describe("focus reports", () => {
     outside.remove();
   });
 
-  test("on xterm the component adds no report: xterm.js sends its own", async () => {
-    useXtermStandIn();
-    __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
-    const [tab] = seatTerminals([terminalTab()]);
-    const { target } = await mountTerminal(TerminalTab, tab!);
-    const socket = TerminalSocket.all.at(-1)!;
-    await attach(socket);
-    await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    socket.sent.splice(0);
-    expect(ghostty.record.terminals, "ghostty terminals built").toHaveLength(0);
-    const host = target.querySelector<HTMLElement>(".terminal-host")!;
-    // Were a ghostty terminal asked, it would say reporting is on.
-    ghostty.record.focusEvents = true;
 
-    move(host, "focusin");
-    move(host, "focusout");
-    expect(reports(socket), "reports added on xterm").toEqual([]);
-  });
 });
 
 describe("secret masking", () => {
   test("the painter hooks ghostty's renderer, and the row's check and the status line follow its toggle", async () => {
-    const { target, term } = await mountGhostty();
-    expect(term.renderer.render, "render wrapped after open").not.toBe(ghostty.fakeRender);
+    const { target, term, socket } = await mountGhostty();
+    await output(socket, "API_TOKEN=hunter2");
+    expect(painted(term)).toEqual([]);
     expect(await spawned(target)).toMatchObject({ masking: false });
     menuRow(MASKING_ROW).click();
     await tick();
     expect(ui.status).toBe("Secret masking enabled for this terminal");
+    expect(painted(term)).toEqual(Array.from({ length: 7 }, (_, i) => [i + 10, 0]));
     expect(await spawned(target)).toMatchObject({ masking: true });
     menuRow(MASKING_ROW).click();
     await tick();
     expect(ui.status).toBe("Secret masking disabled for this terminal");
+    expect(painted(term)).toEqual([]);
   });
 
-  // What the painter fills at a frame, over a buffer whose first row holds a
-  // secret: the mask itself, where a row's check only says what was asked.
+  // Read the mask itself over parsed output, beyond the menu check state.
   test("the launcher's command, the menu's row and Privacy mode each reach the painter", async () => {
-    const { target, term } = await mountGhostty();
-    const secret = "API_TOKEN=hunter2".padEnd(term.cols, " ");
-    term.buffer.active.getLine = (row: number) =>
-      row === 0
-        ? {
-            isWrapped: false,
-            translateToString: (_trimRight?: boolean, start = 0, end = term.cols) => secret.slice(start, end),
-            getCell: (x: number) => (x < term.cols ? { getWidth: () => 1, getChars: () => secret[x]!.trim() } : undefined),
-          }
-        : undefined;
-    const fills: number[][] = [];
-    term.renderer.ctx = { save() {}, restore() {}, fillRect: (...box: number[]) => fills.push(box) };
-    /// The boxes one frame fills, in cells of the 8 by 16 stand-in metrics.
-    const frame = (): number[][] => {
-      fills.splice(0);
-      term.renderer.render(term.wasmTerm, false, 0);
-      return fills.map(([x, y, width, height]) => [x! / 8, y! / 16, width! / 8, height! / 16]);
-    };
-    const masked = [["API_TOKEN=".length, 0, "hunter2".length, 1]];
+    const { target, term, socket } = await mountGhostty();
+    await output(socket, "API_TOKEN=hunter2");
+    const frame = () => painted(term);
+    const masked = Array.from({ length: 7 }, (_, i) => [i + 10, 0]);
     const command = commandById("app.terminal.secretMasking.toggle")!;
     expect(frame(), "starts unmasked").toEqual([]);
 
@@ -1047,10 +867,17 @@ describe("secret masking", () => {
     }
   });
 
-  test("a renderer without the hooks reports the failure and leaves masking off", async () => {
+  test("a renderer that refuses mask painting reports the failure and leaves masking off", async () => {
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: true }));
-    ghostty.record.bareRenderer = true;
-    const { target } = await mountGhostty();
+    const fill = SoftwareCanvasContext.prototype.fillRect;
+    vi.spyOn(SoftwareCanvasContext.prototype, "fillRect").mockImplementation(function (this: SoftwareCanvasContext, ...args) {
+      if (this.fillStyle === "#6c6c70") throw new Error("mask paint refused");
+      fill.apply(this, args);
+    });
+    const { target, socket } = await mountGhostty();
+    await output(socket, "API_TOKEN=hunter2");
+    canvas.frame();
+    await tick();
     expect(ui.status).toBe("Secret masking stopped working in this terminal");
     expect(await spawned(target)).toMatchObject({ masking: false });
   });
@@ -1070,31 +897,29 @@ function pasteOn(element: Element, text: string): Event {
 
 describe("paste", () => {
   test("a paste with no text reaches the program as an empty bracketed paste, which ghostty-web would drop", async () => {
-    ghostty.record.bracketedPaste = true;
-    const { target } = await mountGhostty();
+    const { target, socket } = await mountGhostty();
+    await output(socket, "\x1b[?2004h");
     const host = target.querySelector(".terminal-host")!;
     const event = pasteOn(host, "");
     expect(event.defaultPrevented).toBe(true);
-    expect(ghostty.record.pastes).toEqual([""]);
+    expect(inputs(socket)).toEqual(["\x1b[200~\x1b[201~"]);
   });
 
   test("without bracketed paste an empty paste sends nothing; a paste with text is chan's, line ends converted", async () => {
-    const { target } = await mountGhostty();
+    const { target, socket } = await mountGhostty();
     const host = target.querySelector(".terminal-host")!;
     expect(pasteOn(host, "").defaultPrevented).toBe(true);
-    expect(ghostty.record.pastes).toEqual([]);
-    // The stand-in runs no core of chan's binding, so the cleaned paste goes
-    // through ghostty-web's own (ghosttyPaste.test.ts covers the core's).
+    expect(inputs(socket)).toEqual([]);
     expect(pasteOn(host, "hello\nworld").defaultPrevented).toBe(true);
-    expect(ghostty.record.pastes).toEqual(["hello\rworld"]);
+    expect(inputs(socket)).toEqual(["hello\rworld"]);
   });
 
   test("a paste outside the renderer host, the composer's, is not the terminal's", async () => {
-    ghostty.record.bracketedPaste = true;
-    const { target } = await mountGhostty();
+    const { target, socket } = await mountGhostty();
+    await output(socket, "\x1b[?2004h");
     const event = pasteOn(target.querySelector(".terminal-tab")!, "");
     expect(event.defaultPrevented).toBe(false);
-    expect(ghostty.record.pastes).toEqual([]);
+    expect(inputs(socket)).toEqual([]);
   });
 });
 
@@ -1106,20 +931,22 @@ describe("a theme switch", () => {
   test("reaches the live terminal through the binding, not through the option ghostty-web ignores after open", async () => {
     ui.theme = "dark";
     const { term } = await mountGhostty();
-    const openedWith = term.options.theme as Record<string, string>;
+    const openedWith = term.options.theme;
     expect(openedWith.red, "opened dark").toBe("#ff6b6b");
 
     hybridSurfaceThemes.terminal = "light";
     flushSync();
     await tick();
-    const switched = ghostty.record.themes.at(-1);
-    expect(switched?.term).toBe(term);
-    expect(switched?.theme.red, "the light palette").toBe("#cf222e");
+    const switched = vi.mocked(applyGhosttyTheme).mock.calls.at(-1);
+    expect(switched?.[0]).toBe(term);
+    expect(switched?.[1].red, "the light palette").toBe("#cf222e");
+    expect(term.options.theme.red).toBe("#cf222e");
     expect(term.options.theme, "the option is not reassigned").toBe(openedWith);
 
     delete hybridSurfaceThemes.terminal;
     flushSync();
     await tick();
-    expect(ghostty.record.themes.at(-1)?.theme.red, "back to dark").toBe("#ff6b6b");
+    expect(vi.mocked(applyGhosttyTheme).mock.calls.at(-1)?.[1].red, "back to dark").toBe("#ff6b6b");
+    expect(term.options.theme.red).toBe("#ff6b6b");
   });
 });

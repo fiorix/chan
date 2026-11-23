@@ -7,20 +7,21 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
+import type { Terminal } from "@chan/ghostty-web-ng";
 import TerminalTab from "../components/TerminalTab.svelte";
+import { mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
-  pressInTerminal,
   resetTerminals,
   seatTerminals,
   sentFrames,
   terminalTab,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 import { currentOS, currentPlatform, shouldEscapeTerminal } from "./shortcuts";
 import { persistStateToHash } from "./store.svelte";
@@ -45,21 +46,19 @@ describe.each([
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue(userAgent);
   });
 
-  async function focusedTerminal(native: boolean) {
+  /// A focused terminal on the widget, attached, with nothing sent yet. What
+  /// a key did is what reached its socket: the widget's own encoding when the
+  /// key stays with the terminal, chan's bytes when chan claims it, nothing
+  /// when it leaves the terminal for the app.
+  async function focusedTerminal(native: boolean): Promise<{ term: Terminal; socket: TerminalSocket }> {
     if (native) {
       vi.stubGlobal("__TAURI_INTERNALS__", { invoke: vi.fn(async () => undefined) });
     }
-    xterm.textareaFocus = true;
     const [tab] = seatTerminals([terminalTab()]);
-    const { target, term } = await mountTerminal(TerminalTab, tab!);
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect(currentOS()).toBe(os);
     expect(currentPlatform()).toBe(native ? "native" : "web");
     expect(target.querySelector(".terminal-tab.active")?.contains(document.activeElement)).toBe(true);
-    return term;
-  }
-
-  async function attachedTerminal(native: boolean) {
-    const term = await focusedTerminal(native);
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     socket.sent.splice(0);
@@ -70,28 +69,52 @@ describe.each([
     return sentFrames(socket).filter((frame) => frame.type === "input").map((frame) => frame.data);
   }
 
+  /// The control byte a terminal encodes for Ctrl with this key.
+  const CONTROL: Record<string, string> = { "[": "\x1b", "]": "\x1d" };
+
+  /// The key code a browser sets for the physical key, which the widget's
+  /// encoder reads.
+  const KEY_CODES: Record<string, number> = { BracketLeft: 219, BracketRight: 221, Slash: 191 };
+
+  /// A keydown typed into the widget, with its key code.
+  function press(term: Terminal, init: KeyboardEventInit): KeyboardEvent {
+    return pressInGhostty(term, { keyCode: KEY_CODES[init.code ?? ""], ...init });
+  }
+
+  /// Whether a keydown typed into the widget bubbled to the document, where
+  /// the app's chord listener reads it. The widget prevents the default of
+  /// a key the app takes from it, so its default says nothing here.
+  function reachesDocument(term: Terminal, init: KeyboardEventInit): { event: KeyboardEvent; reached: boolean } {
+    let reached = false;
+    const record = () => { reached = true; };
+    document.addEventListener("keydown", record);
+    try {
+      return { event: press(term, init), reached };
+    } finally {
+      document.removeEventListener("keydown", record);
+    }
+  }
+
   describe.each([
     ["[", "BracketLeft", "{"],
     ["]", "BracketRight", "}"],
     ["/", "Slash", "?"],
   ] as const)("%s", (key, code, shiftedKey) => {
-    if (key !== "/") test("native Ctrl reaches xterm without preventing its default", async () => {
-      const term = await focusedTerminal(true);
-      const { event, handled } = pressInTerminal(term, { key, code, ctrlKey: true });
+    if (key !== "/") test("native Ctrl reaches the widget, which sends its control byte", async () => {
+      const { term, socket } = await focusedTerminal(true);
+      const event = press(term, { key, code, ctrlKey: true });
 
-      // True asks xterm to encode the key; the stand-in does not encode it.
-      expect(handled).toBe(true);
-      expect(event.defaultPrevented).toBe(false);
+      expect(inputs(socket), "the widget encodes the key").toEqual([CONTROL[key]]);
       expect(shouldEscapeTerminal(event)).toBe(false);
     });
 
     if (os === "mac" || key !== "/") test("the native platform command with Shift still leaves the terminal", async () => {
-      const term = await focusedTerminal(true);
-      const { event, handled } = pressInTerminal(term, {
+      const { term, socket } = await focusedTerminal(true);
+      const event = press(term, {
         key: shiftedKey, code, shiftKey: true,
         ...(os === "mac" ? { metaKey: true } : { ctrlKey: true }),
       });
-      expect(handled).toBe(false);
+      expect(inputs(socket)).toEqual([]);
       expect(shouldEscapeTerminal(event)).toBe(true);
     });
 
@@ -100,79 +123,85 @@ describe.each([
         ["/", false],
         ["?", true],
       ] as const)("native Ctrl+Alt+%s leaves the terminal as a split", async (typed, shiftKey) => {
-        const term = await focusedTerminal(true);
-        const { event, handled } = pressInTerminal(term, {
+        const { term, socket } = await focusedTerminal(true);
+        const event = press(term, {
           key: typed, code, ctrlKey: true, altKey: true, shiftKey,
         });
-        expect(handled).toBe(false);
+        expect(inputs(socket)).toEqual([]);
         expect(shouldEscapeTerminal(event)).toBe(true);
       });
 
       test("native Ctrl+Shift+/ stays out of command escape", async () => {
-        const term = await focusedTerminal(true);
-        const { event } = pressInTerminal(term, { key: "?", code, ctrlKey: true, shiftKey: true });
+        const { term } = await focusedTerminal(true);
+        const event = press(term, { key: "?", code, ctrlKey: true, shiftKey: true });
         expect(shouldEscapeTerminal(event)).toBe(false);
       });
     }
 
     if (os !== "mac" && key !== "/") {
       test("native Alt leaves the terminal as pane navigation", async () => {
-        const term = await focusedTerminal(true);
-        const { event, handled } = pressInTerminal(term, { key, code, altKey: true });
-        expect(handled).toBe(false);
+        const { term, socket } = await focusedTerminal(true);
+        const event = press(term, { key, code, altKey: true });
+        expect(inputs(socket)).toEqual([]);
         expect(shouldEscapeTerminal(event)).toBe(true);
       });
     }
 
     if (os === "mac") {
       test("native Command still leaves the terminal", async () => {
-        const term = await focusedTerminal(true);
-        const { event, handled } = pressInTerminal(term, { key, code, metaKey: true });
-        expect(handled).toBe(false);
+        const { term, socket } = await focusedTerminal(true);
+        const event = press(term, { key, code, metaKey: true });
+        expect(inputs(socket)).toEqual([]);
         expect(shouldEscapeTerminal(event)).toBe(true);
       });
     }
 
     test("the browser chord still leaves the terminal", async () => {
-      const term = await focusedTerminal(false);
-      const { event, handled } = pressInTerminal(term, {
+      const { term, socket } = await focusedTerminal(false);
+      const event = press(term, {
         key, code, altKey: true, ctrlKey: key === "/",
       });
-      expect(handled).toBe(false);
+      expect(inputs(socket)).toEqual([]);
       expect(shouldEscapeTerminal(event)).toBe(true);
     });
 
     test("a user-assigned Ctrl chord still leaves the native terminal", async () => {
-      const term = await focusedTerminal(true);
+      const { term, socket } = await focusedTerminal(true);
       assignOverride("app.search.toggle", `Ctrl+${key}`);
-      const { event, handled } = pressInTerminal(term, { key, code, ctrlKey: true });
-      expect(handled).toBe(false);
+      const { event, reached } = reachesDocument(term, { key, code, ctrlKey: true });
+      expect(inputs(socket)).toEqual([]);
       expect(shouldEscapeTerminal(event)).toBe(true);
-      expect(event.defaultPrevented).toBe(false);
+      expect(reached, "the app's chord listener gets the key").toBe(true);
     });
   });
 
   test("native Ctrl slash stays out of command escape", async () => {
-    const term = await focusedTerminal(true);
-    const { event } = pressInTerminal(term, { key: "/", code: "Slash", ctrlKey: true });
+    const { term } = await focusedTerminal(true);
+    const event = press(term, { key: "/", code: "Slash", ctrlKey: true });
     expect(shouldEscapeTerminal(event)).toBe(false);
   });
 
-  test.each([true, false])("Ctrl slash sends one byte and suppresses xterm (native=%s)", async (native) => {
-    const { term, socket } = await attachedTerminal(native);
-    for (const code of ["Slash", "BracketLeft"]) {
-      socket.sent.splice(0);
-      const { event, handled } = pressInTerminal(term, { key: "/", code, ctrlKey: true });
-      expect(inputs(socket)).toEqual(["\x1f"]);
-      expect(handled, "xterm must not also encode the key").toBe(false);
-      expect(event.defaultPrevented).toBe(true);
-      expect(event.cancelBubble).toBe(true);
-      expect(shouldEscapeTerminal(event)).toBe(false);
+  test.each([true, false])("Ctrl slash sends one byte and suppresses the widget's own encoding (native=%s)", async (native) => {
+    const { term, socket } = await focusedTerminal(native);
+    const bubbled: KeyboardEvent[] = [];
+    const record = (event: KeyboardEvent) => bubbled.push(event);
+    document.addEventListener("keydown", record);
+    try {
+      for (const code of ["Slash", "BracketLeft"]) {
+        socket.sent.splice(0);
+        const event = press(term, { key: "/", code, ctrlKey: true });
+        expect(inputs(socket), "one Unit Separator, and nothing more from the widget").toEqual(["\x1f"]);
+        expect(event.defaultPrevented).toBe(true);
+        expect(bubbled, "the key stops at the terminal").not.toContain(event);
+        expect(shouldEscapeTerminal(event)).toBe(false);
+      }
+    } finally {
+      document.removeEventListener("keydown", record);
     }
   });
 
   test.each([true, false])("Ctrl slash fallback ignores other keys, modifiers and event types (native=%s)", async (native) => {
-    const { term, socket } = await attachedTerminal(native);
+    const { term, socket } = await focusedTerminal(native);
     const cases: Array<[string, KeyboardEventInit]> = [
       ["keydown", { key: "/", code: "Slash" }],
       ["keydown", { key: "/", code: "Slash", ctrlKey: true, shiftKey: true }],
@@ -186,19 +215,18 @@ describe.each([
       ["keyup", { key: "/", code: "Slash", ctrlKey: true }],
     ];
     for (const [type, init] of cases) {
-      const event = new KeyboardEvent(type, { cancelable: true, ...init });
-      term.keyHandler!(event);
-      expect(inputs(socket), `${type} ${JSON.stringify(init)}`).toEqual([]);
+      socket.sent.splice(0);
+      term.element!.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, keyCode: KEY_CODES.Slash, ...init }));
+      expect(inputs(socket), `${type} ${JSON.stringify(init)}`).not.toContain("\x1f");
     }
   });
 
   test("a user-assigned Ctrl slash still leaves the browser terminal", async () => {
-    const { term, socket } = await attachedTerminal(false);
+    const { term, socket } = await focusedTerminal(false);
     assignOverride("app.search.toggle", "Ctrl+/");
-    const { event, handled } = pressInTerminal(term, { key: "/", code: "Slash", ctrlKey: true });
+    const { event, reached } = reachesDocument(term, { key: "/", code: "Slash", ctrlKey: true });
     expect(inputs(socket)).toEqual([]);
-    expect(handled).toBe(false);
-    expect(event.defaultPrevented).toBe(false);
+    expect(reached, "the app's chord listener gets the key").toBe(true);
     expect(shouldEscapeTerminal(event)).toBe(true);
   });
 });

@@ -8,7 +8,8 @@
 // chord being captured. TerminalTab is mounted on ghostty-web's own Terminal
 // over the binding on the vendored core, so what the open does to the
 // keyboard is the widget's; only the renderer hooks a software canvas cannot
-// serve are stubbed. Each reading waits past focus()'s zero-delay retry.
+// serve are stubbed. Each reading waits 20 ms, so a focus that lands after
+// the open would be seen.
 
 import { readFileSync } from "node:fs";
 import { flushSync, mount, tick, unmount } from "svelte";
@@ -80,7 +81,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-const pastRetry = () => new Promise((resolve) => setTimeout(resolve, 20));
+const pastLateFocus = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 /// Mount a ghostty terminal, attached and ready, in a pane that is the
 /// focused one or not.
@@ -115,7 +116,7 @@ describe("a ghostty terminal opening in a background pane", () => {
   test("moves no focus: the field holding the keyboard sees no blur and keeps it", async () => {
     const { field, seen } = fieldHoldingTheKeyboard();
     const host = await openGhostty(false);
-    await pastRetry();
+    await pastLateFocus();
     expect(seen, "the field saw no focus change").toEqual([]);
     expect(document.activeElement).toBe(field);
     expect(host.contains(document.activeElement)).toBe(false);
@@ -134,7 +135,7 @@ describe("a ghostty terminal opening in a background pane", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
     await openGhostty(false);
-    await pastRetry();
+    await pastLateFocus();
     await tick();
     expect(target.querySelector("td input"), "the edit is still open").toBe(input);
     expect(input.value).toBe("plums");
@@ -146,7 +147,7 @@ describe("a ghostty terminal opening in the focused pane", () => {
   test("takes the keyboard", async () => {
     const { field, seen } = fieldHoldingTheKeyboard();
     const host = await openGhostty(true);
-    await pastRetry();
+    await pastLateFocus();
     expect(document.activeElement).toBe(host);
     expect(seen).toEqual(["blur"]);
     expect(field.isConnected).toBe(true);

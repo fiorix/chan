@@ -8,8 +8,8 @@
 // (the keyboard's owner, and a survey over this terminal), and while one does
 // none of those moves focus into the composer; once it lets go, the next
 // pulse lands in the composer again.
-// A TerminalTab is mounted over the stand-in xterm and socket, so the
-// phases arrive as the server's frames.
+// A TerminalTab is mounted on the real widget through the shared fixture,
+// over the stand-in socket, so the phases arrive as the server's frames.
 
 import { EditorView } from "@codemirror/view";
 import { mount, tick, unmount } from "svelte";
@@ -22,7 +22,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 const draft = vi.hoisted(() => ({ content: "run the tests" }));
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();

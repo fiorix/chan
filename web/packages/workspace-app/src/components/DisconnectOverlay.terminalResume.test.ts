@@ -8,9 +8,9 @@
 // microtasks a listener queues run before the next listener does (HTML's
 // clean-up after running a callback); a script's dispatchEvent runs them only
 // once every listener has. This test delivers the focus as the engine does.
-// ghostty's focus() focuses again on a zero-delay timer, after the cover's
-// hand-back, so the keyboard stays the cover's only where the terminal
-// refuses to take it under a raised cover.
+// ghostty's focus() runs once, inside the terminal's listener, and nothing
+// focuses the terminal later, so what the cover's hand-back leaves is what
+// the case reads.
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());

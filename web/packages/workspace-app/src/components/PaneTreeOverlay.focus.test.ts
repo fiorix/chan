@@ -5,7 +5,8 @@
 // the surface of the newly focused tab takes the keyboard, in another pane
 // and on the other side of a pane alike. The pane tree (Workspace, which
 // draws the panes and docks their terminals) is mounted over the demo
-// workspace with a terminal (the stand-in xterm) and real editors.
+// workspace with a terminal on the real widget (the shared fixture) and real
+// editors.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -17,7 +18,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import Workspace from "./Workspace.svelte";
 import PaneTreeOverlay from "./PaneTreeOverlay.svelte";
@@ -28,8 +31,10 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { closePaneTree, openPaneTree, paneTree } from "../state/paneTree.svelte";
 import { layout, type FileTab, type LeafNode, type Node } from "../state/tabs.svelte";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
-import { installTerminalDom, resetTerminals, terminalTab, xterm, type FakeTerminal } from "../__tests__/terminalTab";
+import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 
 installTerminalDom();
 Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
@@ -84,7 +89,7 @@ function focusedEditor(): string {
 
 /// A terminal pane on the left (active) beside an editor pane on the right
 /// that shows the rich document and keeps the source-mode one on side B.
-async function mountWindow(): Promise<FakeTerminal> {
+async function mountWindow(): Promise<Terminal> {
   const nodes: Record<string, Node> = {
     root: { id: "root", kind: "split", direction: "row", a: "term-pane", b: "doc-pane", ratio: 0.5 },
     "term-pane": { kind: "leaf", id: "term-pane", tabs: [terminalTab({ id: "shell" })], activeTabId: "shell" },
@@ -103,9 +108,9 @@ async function mountWindow(): Promise<FakeTerminal> {
   const target = (): HTMLElement => document.body.appendChild(document.createElement("div"));
   mounted.push(mount(Workspace, { target: target() }));
   mounted.push(mount(PaneTreeOverlay, { target: target() }));
-  await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
+  const term = await seatedGhostty();
   await settle();
-  return xterm.terminals.at(-1)!;
+  return term;
 }
 
 function filter(): HTMLInputElement {
@@ -127,14 +132,15 @@ async function pick(query: string): Promise<void> {
 describe("a pick in the pane tree", () => {
   test("moves the keyboard from the terminal into the picked editor in another pane", async () => {
     const term = await mountWindow();
-    const blurs = term.blurCount;
+    expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true);
+    const blur = vi.spyOn(term, "blur");
 
     await pick("plan");
 
     expect(paneTree.open).toBe(false);
     expect(layout.activePaneId).toBe("doc-pane");
     expect(focusedEditor()).toContain("wysiwyg body");
-    expect(term.blurCount, "the terminal lets go of its xterm").toBeGreaterThan(blurs);
+    expect(blur, "the terminal lets go of its widget").toHaveBeenCalled();
   });
 
   test("turns a pane to the picked tab's side and focuses that tab's editor", async () => {
@@ -164,12 +170,11 @@ describe("a pick in the pane tree", () => {
     const term = await mountWindow();
     await pick("plan");
     expect(focusedEditor()).toContain("wysiwyg body");
-    const focuses = term.focusCount;
 
     await pick("terminal");
 
     expect(layout.activePaneId).toBe("term-pane");
     expect(focusedEditor(), "the editor gives up the keyboard").toBe("");
-    expect(term.focusCount, "the terminal takes it").toBeGreaterThan(focuses);
+    expect(ghosttyHasFocus(term), "the terminal takes it").toBe(true);
   });
 });

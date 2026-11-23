@@ -231,7 +231,7 @@ const ghostty = vi.hoisted(() => ({
 // a resize that hands the core the new grid and fires the resize event, and
 // focus as ghostty-web's: open() makes the element it opens in focusable,
 // reads keys there and puts its canvas in it, and focus() focuses that
-// element, then again on a zero-delay timer.
+// element once, synchronously.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("@chan/ghostty-web-ng");
@@ -323,8 +323,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     }
     focus() {
       this.focused += 1;
-      this.element?.focus();
-      setTimeout(() => this.element?.focus(), 0);
+      this.element?.focus({ preventScroll: true });
     }
     blur() {}
     getSelection() {
@@ -1446,8 +1445,8 @@ describe("terminal find on the ghostty backend", () => {
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
-  // ghostty-web's focus() focuses again on a zero-delay timer. A bar that
-  // reopens before that timer runs, as a quick Escape and find chord can,
+  // Escape hands the terminal the keyboard, and nothing focuses it again
+  // later: a bar that reopens at once, as a quick Escape and find chord can,
   // keeps the keyboard, and the next Escape is the bar's.
   test.each(["in Escape's own task", "once Escape has closed it"])(
     "a bar reopened %s keeps the keyboard",

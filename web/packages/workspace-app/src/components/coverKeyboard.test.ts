@@ -4,7 +4,8 @@
 // keyboard while it shows, and the dialog takes it back when the cover
 // lifts; with nothing owning the keyboard, the focused terminal takes it
 // back. The real screen lock, the app's prompt dialog, the close prompt,
-// the Team dialog and a terminal over the stand-in xterm, in jsdom.
+// the Team dialog and a terminal on the real widget (the shared fixture), in
+// jsdom.
 
 import { createRawSnippet, flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -16,7 +17,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import HamburgerMenu from "./HamburgerMenu.svelte";
@@ -26,13 +29,12 @@ import TerminalTab from "./TerminalTab.svelte";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   receive,
   resetTerminals,
   seatTerminals,
   TerminalSocket,
 } from "../__tests__/terminalTab";
-import { xterm } from "../__tests__/xterm";
+import { ghosttyHasFocus, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
 import { recordingContext2d } from "../__tests__/canvas";
@@ -75,7 +77,6 @@ afterEach(async () => {
   resolveCloseConfirm("cancel");
   closeTeamDialog();
   resetTerminals();
-  xterm.textareaFocus = false;
   for (const component of mounted.splice(0)) await unmount(component);
   await settle();
   workspace.info = null;
@@ -202,16 +203,14 @@ test("the Team dialog takes the keyboard back onto its name field when the scree
 });
 
 test("a terminal that held the keyboard takes it back when the screen lock lifts with nothing owning it", async () => {
-  xterm.textareaFocus = true;
   const [tab] = seatTerminals([terminalTab({ title: "shell" })]);
-  const { target } = await mountTerminal(TerminalTab, tab!);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
-  const textarea = target.querySelector<HTMLElement>("textarea")!;
-  await vi.waitFor(() => expect(document.activeElement, "the terminal holds the keyboard").toBe(textarea));
+  await vi.waitFor(() => expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true));
   await lockAndUnlock();
-  await vi.waitFor(() => expect(document.activeElement, "the terminal once the lock lifts").toBe(textarea));
+  await vi.waitFor(() => expect(ghosttyHasFocus(term), "the terminal once the lock lifts").toBe(true));
 });
 
 test("a tab-focus pulse fired under the screen lock leaves its PIN field the keyboard", async () => {

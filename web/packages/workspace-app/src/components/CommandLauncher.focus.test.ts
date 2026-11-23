@@ -17,7 +17,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 const library = vi.hoisted(() => ({ snapshot: null as unknown }));
 vi.mock("../state/commands/install", () => ({}));
@@ -41,19 +43,18 @@ import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
 import { demoWorkspaceInfo } from "../demo/data";
 import { screensaver } from "../state/screensaver.svelte";
 import { recordingContext2d } from "../__tests__/canvas";
+import { ghosttyHasFocus, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import TerminalTab from "./TerminalTab.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   receive,
   resetTerminals,
   seatTerminals,
   TerminalSocket,
 } from "../__tests__/terminalTab";
-import { xterm } from "../__tests__/xterm";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { allCommands, registerCommands } from "../state/commands";
 import "../state/commands/global";
@@ -307,7 +308,6 @@ afterEach(() => {
   launcherPanel.open = false;
   overlayStack.ids = [];
   resetTerminals();
-  xterm.textareaFocus = false;
   vi.clearAllMocks();
 });
 
@@ -767,21 +767,19 @@ describe("focus when the launcher closes", () => {
   });
 
   test("a dismissal whose opener is gone hands the keyboard to the focused terminal", async () => {
-    xterm.textareaFocus = true;
     const [tab] = seatTerminals([terminalTab({ title: "meeting" })]);
-    const { target: termTarget } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     const target = await openFromOrigin();
+    expect(ghosttyHasFocus(term), "the launcher holds the keyboard").toBe(false);
     // The opener leaves the document, as a closed dock does, before the
     // deck is dismissed.
     origin.remove();
     await press(target, "Escape");
     expect(launcherPanel.open, "Escape dismisses the deck").toBe(false);
-    const textarea = termTarget.querySelector<HTMLElement>("textarea");
-    expect(textarea, "the terminal opened its input").not.toBeNull();
-    await vi.waitFor(() => expect(document.activeElement, "the terminal takes the keyboard").toBe(textarea));
+    await vi.waitFor(() => expect(ghosttyHasFocus(term), "the terminal takes the keyboard").toBe(true));
   });
 
   test("a dismissal with no heir under a modal takes nothing", async () => {

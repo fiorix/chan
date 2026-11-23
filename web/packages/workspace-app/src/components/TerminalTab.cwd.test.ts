@@ -3,14 +3,15 @@
 // "Copy path to $CWD" puts the shell's working directory on the clipboard.
 // It runs from the command launcher while its overlay is dismissing, so the
 // terminal takes focus back before it writes, through the desktop-safe
-// clipboard writer. A TerminalTab is mounted over the stand-in xterm and the
-// server reports the cwd on its socket; the writer is stubbed.
+// clipboard writer. A TerminalTab is mounted on the real widget through the
+// shared fixture and the server reports the cwd on its socket; the writer is
+// stubbed and records whether the terminal held the keyboard as it ran.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 const clipboard = vi.hoisted(() => ({
-  writes: [] as Array<{ text: string; focusedBefore: number }>,
-  focusCount: (): number => 0,
+  writes: [] as Array<{ text: string; terminalFocused: boolean }>,
+  terminalFocused: (): boolean => false,
 }));
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -20,20 +21,22 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
   writeClipboardText: vi.fn(async (text: string) => {
-    clipboard.writes.push({ text, focusedBefore: clipboard.focusCount() });
+    clipboard.writes.push({ text, terminalFocused: clipboard.terminalFocused() });
   }),
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
 import { pathPromptState, resolvePathPrompt, ui, workspace } from "../state/store.svelte";
+import { ghosttyHasFocus, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   receive,
   resetTerminals,
   seatTerminals,
@@ -53,11 +56,11 @@ afterEach(() => {
 
 async function reportingCwd(cwd: string | null, cwdRel: string | null) {
   const [tab] = seatTerminals([terminalTab()]);
-  const { term } = await mountTerminal(TerminalTab, tab!);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   await receive(socket, { type: "cwd", cwd, cwd_rel: cwdRel });
-  clipboard.focusCount = () => term.focusCount;
+  clipboard.terminalFocused = () => ghosttyHasFocus(term);
   return { term };
 }
 
@@ -70,11 +73,13 @@ async function copyCwd(): Promise<void> {
 describe("Copy path to $CWD", () => {
   test("copies the absolute cwd the shell reported, after taking focus back", async () => {
     const { term } = await reportingCwd("/home/me/ws/notes", "notes");
-    const before = term.focusCount;
+    // The launcher's overlay dismissing leaves the keyboard on the body.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(ghosttyHasFocus(term), "the keyboard is off the terminal").toBe(false);
     await copyCwd();
 
     expect(clipboard.writes.map((w) => w.text)).toEqual(["/home/me/ws/notes"]);
-    expect(clipboard.writes[0]!.focusedBefore, "focused before the write").toBeGreaterThan(before);
+    expect(clipboard.writes[0]!.terminalFocused, "focused before the write").toBe(true);
   });
 
   test("falls back to the workspace-relative cwd without an absolute one", async () => {

@@ -92,6 +92,15 @@ test("mountTerminal outlasts a load slower than a second", async () => {
   expect(TerminalSocket.all).toHaveLength(1);
 });
 
+// A hold lasts until its release or the next reset, so a case that holds and
+// never releases leaves the file's later loads alone.
+test("a reset lets go of a hold its case never released", async () => {
+  holdGhosttyLoads();
+  resetTerminals();
+  const { term } = await opened();
+  expect(ghosttyFixture.terminals).toEqual([term]);
+});
+
 test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   const mounted = await mountTerminal(TerminalTab, tab!);
