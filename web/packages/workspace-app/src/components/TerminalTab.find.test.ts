@@ -377,7 +377,6 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 
 globalThis.ResizeObserver = TestResizeObserver as any;

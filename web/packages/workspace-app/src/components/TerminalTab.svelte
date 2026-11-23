@@ -181,7 +181,6 @@
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import {
     alignGhosttyRendererToXterm,
-    gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
@@ -643,10 +642,6 @@
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   let primarySelectionCleanup: (() => void) | null = null;
-  // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
-  // clicks on the content beneath it while it is invisible. Non-null ONLY on
-  // the ghostty backend, and only while the gate is installed.
-  let ghosttyScrollbarClickGate: (() => void) | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -1523,12 +1518,6 @@
       if (!ghosttyClickExtents) {
         console.warn(
           "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
-        );
-      }
-      ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
-      if (!ghosttyScrollbarClickGate) {
-        console.warn(
-          "[chan] ghostty-web mousedown hook unavailable; its overlay scrollbar claims clicks while hidden.",
         );
       }
     }
@@ -2856,8 +2845,6 @@
     host?.removeEventListener("keydown", noteInterruptKey, true);
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
-    ghosttyScrollbarClickGate?.();
-    ghosttyScrollbarClickGate = null;
     if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
     resizeScanTimer = null;
     secretMasker?.dispose();
@@ -3892,14 +3879,7 @@
     </div>
   {/if}
   {#if findOpen}
-    <!-- ghostty-web drops its selection on a click anywhere in the page
-         outside its canvas, and on ghostty find's highlight is that
-         selection, so a click in the bar (to place the caret) would take the
-         highlight away. The bar is the terminal's own, so its clicks stop
-         here; the menus close on pointerdown and the panes activate on
-         mousedown, which still bubble. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()}>
+    <div class="terminal-find" role="search" aria-label="find in terminal">
       <input
         bind:this={searchInput}
         class="find"
