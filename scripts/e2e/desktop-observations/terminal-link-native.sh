@@ -2,11 +2,11 @@
 # A click on a URL a terminal underlines, on the desktop's WebKitGTK page:
 # the link menu opens, and its "Open in browser" reaches the system opener.
 # The stock desktop's opener is intercepted by a private `xdg-open` first on
-# PATH, which records its arguments and opens nothing. Each backend runs in
-# turn (TERMINAL_LINK_BACKENDS, default "ghostty,xterm").
+# PATH, which records its arguments and opens nothing. The driver runs on
+# Ghostty (TERMINAL_LINK_BACKENDS, default "ghostty").
 #
 # Exit codes follow lib.sh: 0 the menu opened and the opener got the URL on
-# every backend, 1 a fault was observed (terminal-link.json names each), 2
+# Ghostty, 1 a fault was observed (terminal-link.json names each), 2
 # the environment or the driver's setup could not run (no menu was asked
 # for), 3 inconclusive.
 #
@@ -68,7 +68,7 @@ export CHAN_BIN
 obs_log "window $xid on $DISPLAY; results in $output"
 obs_verdict
 node "$HERE/terminal-link-native.mjs" --inspector "$INSPECTOR" --xid "$xid" --workspace "$WS" --output "$output" \
-    --backends "${TERMINAL_LINK_BACKENDS:-ghostty,xterm}"
+    --backends "${TERMINAL_LINK_BACKENDS:-ghostty}"
 verdict=$?
 if [ "$verdict" -eq 2 ]; then obs_refuse "the driver's setup did not run; see $output/terminal-link.json"; fi
 obs_judge "$verdict" "the link menu or the system opener failed on chan-desktop; see $output/terminal-link.json"

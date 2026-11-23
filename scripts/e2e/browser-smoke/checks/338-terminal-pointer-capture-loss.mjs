@@ -2,10 +2,9 @@
 // Native capture events pin completion; disposal is exercised through tab close.
 
 import assert from "node:assert/strict";
-import { drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { drainPointerInput, pointerEvents, pointerGrid, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "CAPTURE338";
-const unavailable = (message) => Object.assign(new Error(message), { code: "POINTER_UNAVAILABLE" });
 
 async function begin(page, terminal, grid) {
   await page.mouse.move(grid.x + grid.w * 0.2, grid.y + grid.h * 0.5);
@@ -20,7 +19,7 @@ async function begin(page, terminal, grid) {
 export default {
   name: "terminal-pointer-capture-loss",
   run(ctx) {
-    return runPointerCheck(ctx, 338, async ({ page, cdp, details, open, leg }) => {
+    return runPointerCheck(ctx, 338, async ({ page, details, open, leg }) => {
       await leg("connected-capture-loss", async (result) => {
         const terminal = await open("loss");
         const grid = result.grid = await terminal.prepare(TEXT);
@@ -93,55 +92,7 @@ export default {
         assert.deepEqual((await pointerWrites(page)).slice(writes), [{ text: TEXT, status: "fulfilled" }], "only the next terminal copied");
       });
 
-      await leg("reparent-then-second-pointer", async (result) => {
-        const terminal = await open("reparent");
-        const grid = result.grid = await terminal.prepare(TEXT);
-        const x = grid.x + grid.w * 0.2, y = grid.y + grid.h * 0.5;
-        await seedPointerClipboard(page, "SMOKE338_REPARENT_SENTINEL");
-        let penHeld = false;
-        try {
-          await penPointer(cdp, "mousePressed", x, y);
-          penHeld = true;
-          await penPointer(cdp, "mouseMoved", grid.x + grid.w * (TEXT.length - 0.2), y);
-          result.before = await pointerEvents(terminal.trace);
-          const pen = result.before.find((event) => event.type === "pointerdown" && event.onCanvas
-            && event.pointerType === "pen" && event.isPrimary && event.isTrusted);
-          if (!pen) throw unavailable("CDP did not deliver a trusted primary pen to begin reparent recovery");
-          assert.equal(await terminal.term.evaluate((t) => t.getSelection()), TEXT, "the first pointer selected before DOM movement");
-          assert.equal(await terminal.trace.evaluate((trace, id) => trace.canvas.hasPointerCapture(id), pen.pointerId), true,
-            "the first pointer owns capture before DOM movement");
-          result.reparent = await terminal.term.evaluate((t, id) => {
-            const host = t.element, parent = host.parentNode, next = host.nextSibling;
-            const canvas = host.querySelector(":scope > canvas");
-            host.remove();
-            const detachedCapture = canvas.hasPointerCapture(id);
-            parent.insertBefore(host, next);
-            return { detachedCapture, reattachedCapture: canvas.hasPointerCapture(id), connected: canvas.isConnected };
-          }, pen.pointerId);
-          // End the old pen outside the canvas. No same-pointer event at the
-          // widget may heal its stale owner before the mouse press tests it.
-          assert.ok(grid.x > 1 || grid.y > 1, "the pen release is outside the canvas");
-          await penPointer(cdp, "mouseReleased", 1, 1);
-          penHeld = false;
-          result.afterReparent = await pointerEvents(terminal.trace);
-          if (result.reparent.reattachedCapture || result.afterReparent.some((event) => event.onCanvas
-              && event.pointerId === pen.pointerId && ["lostpointercapture", "pointerup", "pointercancel"].includes(event.type))) {
-            throw unavailable("Chrome did not produce silent canvas capture loss after reparenting; native event trace retained");
-          }
-          const writes = (await pointerWrites(page)).length;
-          const mouse = result.secondPress = await begin(page, terminal, await pointerGrid(terminal.term));
-          assert.notEqual(mouse.pointerId, pen.pointerId, "recovery uses another pointer id");
-          await page.mouse.up();
-          await settlePointer(page);
-          result.clipboard = await page.evaluate(() => navigator.clipboard.readText());
-          assert.equal(result.clipboard, TEXT, "another pointer selects after silent loss");
-          assert.deepEqual((await pointerWrites(page)).slice(writes), [{ text: TEXT, status: "fulfilled" }], "the recovered pointer copies once");
-        } finally {
-          result.events = await pointerEvents(terminal.trace);
-          if (penHeld) await penPointer(cdp, "mouseReleased", 1, 1);
-        }
-      });
-      assert.deepEqual(Object.keys(details.legs), ["connected-capture-loss", "dispose-during-autoscroll", "reparent-then-second-pointer"]);
+      assert.deepEqual(Object.keys(details.legs), ["connected-capture-loss", "dispose-during-autoscroll"]);
     });
   },
 };

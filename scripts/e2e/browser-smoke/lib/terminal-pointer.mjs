@@ -1,3 +1,4 @@
+import { captureGhosttyTerminals } from "./ghostty-capture.mjs";
 import assert from "node:assert/strict";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,26 +31,7 @@ export function pointerReports(input) {
 // Capture the actual app instance through its module's open method. All
 // subsequent readings use public Terminal methods and the host's DOM.
 export async function capturePointerTerminals(page) {
-  const installed = await page.evaluate(async () => {
-    if (window.__pointerSmoke) throw new Error("pointer terminal capture already installed");
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      const terminals = [];
-      Terminal.prototype.open = function (...args) {
-        terminals.push(this);
-        return open.apply(this, args);
-      };
-      window.__pointerSmoke = {
-        terminals,
-        restore() { Terminal.prototype.open = open; delete window.__pointerSmoke; },
-      };
-      return true;
-    }
-    return false;
-  });
+  const installed = await captureGhosttyTerminals(page, "__pointerSmoke");
   assert.ok(installed, "the entry module names a Ghostty chunk");
 }
 
@@ -130,7 +112,7 @@ export function penPointer(cdp, type, x, y) {
   });
 }
 
-export async function observePointer(term) {
+async function observePointer(term) {
   return term.evaluateHandle((terminal) => {
     const canvas = terminal.element.querySelector(":scope > canvas");
     const events = [];
@@ -186,11 +168,12 @@ export async function runPointerCheck(ctx, number, body) {
     || sessionStorage.getItem("chan.session.window")?.trim() || "");
   assert.ok(windowId, "the page has a window id");
   await ctx.waitWindowLive(windowId);
-  const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+  const shell = (args) => ctx.exec(ctx.chanBin, ["shell", ...args], {
     cwd: ctx.workspaceDir,
     env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
     timeout: 90_000,
   });
+  const cs = (args) => shell(["terminal", ...args]);
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const original = await readTerminalPrefs(page, token);
   const cdp = await page.createCDPSession();
@@ -217,6 +200,7 @@ export async function runPointerCheck(ctx, number, body) {
     let row;
     try { row = await openAttachedTerminal(ctx, page, cs, windowId, tab, "ghostty", args); }
     catch (error) { throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]")); }
+    resource.row = row;
     resource.query = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"]`;
     resource.ready = await fixture.ready();
     assert.ok(resource.ready.tty && resource.ready.raw, "the fixture owns a raw PTY");
@@ -225,6 +209,8 @@ export async function runPointerCheck(ctx, number, body) {
     resource.prepare = async (text) => {
       const setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[?25l\x1b[2J\x1b[H${text}\r\n`);
       assert.equal(setup.reply, "\x1b[2;1R", "fixture text reached the parser without wrapping");
+      assert.equal(await resource.term.evaluate((t) => t.getScrollbackLength()), 0,
+        "each exact-selection gesture starts with empty scrollback");
       assert.deepEqual(await resource.term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
         [false, false, false, false], "each gesture starts with tracking off");
       await settlePointer(page);
@@ -273,7 +259,7 @@ export async function runPointerCheck(ctx, number, body) {
         restore();
       };
     });
-    await body({ page, cdp, details, open, leg });
+    await body({ page, cdp, details, open, leg, shell, windowId });
   } catch (error) {
     details.failures.push(`setup/body: ${error.message}`);
   } finally {

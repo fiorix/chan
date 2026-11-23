@@ -3,17 +3,16 @@
 // before echoing it, so an output-side scroll cannot stand in for input.
 // SGR and X10 mouse/wheel reports must also preserve the history view.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { drainPointerInput, pointerInputSince } from "../lib/terminal-pointer.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const PROMPT = "PROMPT229> ";
 const frame = (page) => page.evaluate(() => new Promise(requestAnimationFrame));
-const inputSince = (fixture, index) => Buffer.concat(fixture.records.slice(index)
-  .filter((record) => record.type === "keys")
-  .map((record) => Buffer.from(record.base64, "base64"))).toString("utf8");
 
 async function waitFor(page, label, read, accept) {
   const deadline = Date.now() + 20_000;
@@ -26,30 +25,12 @@ async function waitFor(page, label, read, accept) {
   throw new Error(`${label}: ${JSON.stringify(last)}`);
 }
 
-async function captureGhostty(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      window.__ghosttyTerminals229 = [];
-      Terminal.prototype.open = function (...args) {
-        window.__ghosttyTerminals229.push(this);
-        return open.apply(this, args);
-      };
-      window.__restoreGhostty229 = () => { Terminal.prototype.open = open; };
-      return true;
-    }
-    return false;
-  });
-}
 
 async function readViewport(page, hostQuery) {
   return page.evaluate((hostQuery) => {
     const host = document.querySelector(hostQuery);
     if (!host) throw new Error("Ghostty terminal host missing");
-    const term = window.__ghosttyTerminals229.find((candidate) => candidate.element === host);
+    const term = window.__ghostty229.terminals.find((candidate) => candidate.element === host);
     if (!term) throw new Error("the opened ghostty Terminal was not captured");
     const history = term.getScrollbackLength();
     const offset = term.getViewportY();
@@ -67,15 +48,6 @@ async function readViewport(page, hostQuery) {
       cursorX: cursor.x,
     };
   }, hostQuery);
-}
-
-async function outputAndDrain(fixture, bytes) {
-  const index = fixture.records.length;
-  await fixture.send("bytes", { base64: Buffer.from(bytes + "\x1b[6n").toString("base64") });
-  // The reply proves that the page parsed the preceding output, including
-  // output outside its viewport. Received WebSocket bytes alone do not.
-  await fixture.waitFor(() => /\x1b\[\d+;\d+R/.test(inputSince(fixture, index)));
-  return inputSince(fixture, index);
 }
 
 export default {
@@ -98,12 +70,11 @@ export default {
     const readings = {};
     const failures = [];
     try {
-      if (!(await captureGhostty(page))) throw new Error("the entry module names no ghostty-web chunk");
-      const backend = "ghostty";
-      const name = `InputScroll229-${backend}`;
-      const result = readings[backend] = {};
+      if (!(await captureGhosttyTerminals(page, "__ghostty229"))) throw new Error("the entry module names no ghostty-web chunk");
+      const name = `InputScroll229-ghostty`;
+      const result = readings.ghostty = {};
       const fixture = await startTerminalFixture({
-        logPath: join(ctx.outDir, `229-${backend}-output.bin`), deadlineMs: 20_000,
+        logPath: join(ctx.outDir, `229-ghostty-output.bin`), deadlineMs: 20_000,
       });
       let opened = false;
       try {
@@ -114,7 +85,7 @@ export default {
         // credential must not enter the runner's saved error message.
         let row;
         try {
-          row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend, spawnArgs);
+          row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
           opened = true;
         } catch (error) {
           throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]"));
@@ -124,8 +95,8 @@ export default {
         const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
         const read = () => readViewport(page, hostQuery);
         await fixture.send("rows", { prefix: "HISTORY229", count: 400 });
-        result.initialReply = await outputAndDrain(fixture, "BEFORE229> ");
-        await waitFor(page, `${backend}: prompt at bottom`, read,
+        result.initialReply = await drainPointerInput(fixture, "BEFORE229> ");
+        await waitFor(page, `ghostty: prompt at bottom`, read,
           (state) => state.bottom && state.rows.some((line) => line.trimEnd() === "BEFORE229>"));
         const box = await page.$eval(hostQuery, (host) => {
           const rect = host.getBoundingClientRect();
@@ -133,36 +104,36 @@ export default {
         });
         await page.mouse.click(box.x, box.y);
         await page.mouse.wheel({ deltaY: -600 });
-        result.history = await waitFor(page, `${backend}: wheel enters history`, read,
+        result.history = await waitFor(page, `ghostty: wheel enters history`, read,
           (state) => !state.bottom && state.rows.every((line) => !line.includes("BEFORE229>")));
-        await ctx.shot(`229-${backend}-history`);
+        await ctx.shot(`229-ghostty-history`);
 
-        result.outputReply = await outputAndDrain(fixture, `\r${PROMPT}`);
+        result.outputReply = await drainPointerInput(fixture, `\r${PROMPT}`);
         await frame(page);
         await frame(page);
         result.afterOutput = await read();
         if (result.afterOutput.bottom || JSON.stringify(result.afterOutput.rows) !== JSON.stringify(result.history.rows)) {
           throw new Error(`output or its query reply moved history: ${JSON.stringify(result)}`);
         }
-        await ctx.shot(`229-${backend}-output-keeps-history`);
+        await ctx.shot(`229-ghostty-output-keeps-history`);
 
         const keyIndex = fixture.records.length;
         await page.keyboard.type("q");
-        await fixture.waitFor(() => inputSince(fixture, keyIndex).includes("q"));
-        result.key = inputSince(fixture, keyIndex);
+        await fixture.waitFor(() => pointerInputSince(fixture, keyIndex).includes("q"));
+        result.key = pointerInputSince(fixture, keyIndex);
         await frame(page);
         await frame(page);
         result.beforeEcho = await read();
         // Read before echo: it is the input that must move the viewport.
-        if (!result.beforeEcho.bottom) failures.push(`${backend}: typed q reached the PTY but left the view in history`);
-        result.echoReply = await outputAndDrain(fixture, "q");
+        if (!result.beforeEcho.bottom) failures.push(`ghostty: typed q reached the PTY but left the view in history`);
+        result.echoReply = await drainPointerInput(fixture, "q");
         await frame(page);
         await frame(page);
         result.afterEcho = await read();
-        await ctx.shot(`229-${backend}-typed-letter`);
+        await ctx.shot(`229-ghostty-typed-letter`);
         if (!result.afterEcho.bottom || result.afterEcho.cursorRow?.trimEnd() !== `${PROMPT}q`
             || result.afterEcho.cursorX !== PROMPT.length + 1) {
-          failures.push(`${backend}: the typed letter and cursor are not at the bottom: ${JSON.stringify(result.afterEcho)}`);
+          failures.push(`ghostty: the typed letter and cursor are not at the bottom: ${JSON.stringify(result.afterEcho)}`);
         }
 
         result.reports = [];
@@ -172,21 +143,21 @@ export default {
             result.reports.push(report);
             // Scroll with tracking disabled, then enable it through real
             // program output. The DSR reply proves the mode was parsed.
-            await outputAndDrain(fixture, "\x1b[?1000l\x1b[?1006l");
+            await drainPointerInput(fixture, "\x1b[?1000l\x1b[?1006l");
             await page.mouse.move(box.x, box.y);
             await page.mouse.wheel({ deltaY: -300 });
-            await waitFor(page, `${backend}/${encoding}/${kind}: wheel enters history`, read,
+            await waitFor(page, `ghostty/${encoding}/${kind}: wheel enters history`, read,
               (state) => !state.bottom && state.rows.every((line) => !line.includes(PROMPT)));
             await frame(page);
             await frame(page);
             const beforeMode = await read();
-            report.modeReply = await outputAndDrain(fixture,
+            report.modeReply = await drainPointerInput(fixture,
               `\x1b[?1000h\x1b[?1006${encoding === "sgr" ? "h" : "l"}`);
             await frame(page);
             await frame(page);
             report.before = await read();
             if (report.before.bottom || JSON.stringify(report.before.rows) !== JSON.stringify(beforeMode.rows)) {
-              throw new Error(`${backend}/${encoding}/${kind}: enabling mouse reports moved history`);
+              throw new Error(`ghostty/${encoding}/${kind}: enabling mouse reports moved history`);
             }
             const surface = `${hostQuery} > canvas`;
             const position = await page.$eval(surface, (node) => {
@@ -202,10 +173,10 @@ export default {
             try {
               if (kind === "mouse") await page.mouse.down();
               else await page.mouse.wheel({ deltaY: -120 });
-              await fixture.waitFor(() => pattern.test(inputSince(fixture, inputIndex))).catch((error) => {
-                throw new Error(`${backend}/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
+              await fixture.waitFor(() => pattern.test(pointerInputSince(fixture, inputIndex))).catch((error) => {
+                throw new Error(`ghostty/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
               });
-              report.input = inputSince(fixture, inputIndex);
+              report.input = pointerInputSince(fixture, inputIndex);
               await frame(page);
               await frame(page);
               report.after = await read();
@@ -214,42 +185,41 @@ export default {
                 && JSON.stringify(report.after.rows) === JSON.stringify(report.before.rows)
                 && report.after.offset === report.before.offset;
               if (!sameHistory) {
-                failures.push(`${backend}/${encoding}/${kind}: report viewport rule failed: ${JSON.stringify(report)}`);
+                failures.push(`ghostty/${encoding}/${kind}: report viewport rule failed: ${JSON.stringify(report)}`);
               }
-              await ctx.shot(`229-${backend}-${encoding}-${kind}-report`);
+              await ctx.shot(`229-ghostty-${encoding}-${kind}-report`);
             } finally {
               if (kind === "mouse") await page.mouse.up();
             }
           }
         }
         if (result.reports.length !== 4 || result.reports.some((report) => !report.input || !report.after)) {
-          throw new Error(`${backend}: mouse/wheel report coverage is incomplete`);
+          throw new Error(`ghostty: mouse/wheel report coverage is incomplete`);
         }
       } catch (error) {
-        failures.push(`${backend}: ${error.message}`);
-        await ctx.shot(`229-${backend}-failure`).catch(() => {});
+        failures.push(`ghostty: ${error.message}`);
+        await ctx.shot(`229-ghostty-failure`).catch(() => {});
       } finally {
         result.records = fixture.records;
         // Flush the log without exiting: terminal close selects a live
         // session, so stopping the fixture first races that selection.
         result.cleanup = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
-          failures.push(`${backend}: could not flush fixture: ${error.message}`);
+          failures.push(`ghostty: could not flush fixture: ${error.message}`);
         });
         // Creation can succeed even when attachment times out. Always try
         // to close; a failed creation has no terminal for close to select.
         await cs(["close", "--tab-name", name]).catch((error) => {
-          if (opened) failures.push(`${backend}: could not close owned terminal: ${error.message}`);
+          if (opened) failures.push(`ghostty: could not close owned terminal: ${error.message}`);
         });
         await fixture.close();
-        writeFileSync(join(ctx.outDir, `229-${backend}.json`), JSON.stringify(result, null, 2) + "\n");
+        writeFileSync(join(ctx.outDir, `229-ghostty.json`), JSON.stringify(result, null, 2) + "\n");
       }
     } finally {
-      await page.evaluate(() => window.__restoreGhostty229?.());
+      await page.evaluate(() => window.__ghostty229?.restore());
       await writeTerminalPrefs(page, token, { mouse_capture: original.mouse_capture });
     }
-    for (const [backend, result] of Object.entries(readings)) {
-      console.log(`[smoke]   ${backend}: history=${result.history ? !result.history.bottom : "unavailable"}, output-kept-history=${result.afterOutput ? !result.afterOutput.bottom : "unavailable"}, input-at-bottom=${result.beforeEcho?.bottom ?? "unavailable"}, cursor=${result.afterEcho?.cursorX ?? "unavailable"}, reports=${result.reports?.length ?? 0}; evidence 229-${backend}.json`);
-    }
+    const result = readings.ghostty;
+    console.log(`[smoke]   ghostty: history=${result.history ? !result.history.bottom : "unavailable"}, output-kept-history=${result.afterOutput ? !result.afterOutput.bottom : "unavailable"}, input-at-bottom=${result.beforeEcho?.bottom ?? "unavailable"}, cursor=${result.afterEcho?.cursorX ?? "unavailable"}, reports=${result.reports?.length ?? 0}; evidence 229-ghostty.json`);
     if (failures.length) throw new Error(failures.join("\n"));
   },
 };

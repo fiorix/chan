@@ -227,10 +227,8 @@ async function workspaceTerminals(ctx, dir, failures) {
   try {
     strip = await readPaneStripPreference(page, token);
     if (strip.on) await writePaneStripPreference(page, token, false);
-    for (const engine of ["ghostty"]) {
-      await openTerminal(page, engine);
-      results.push(...await terminalArms(page, dir, "workspace", engine, ["body", "strip"], failures));
-    }
+    await openTerminal(page, "ghostty");
+    results.push(...await terminalArms(page, dir, "workspace", "ghostty", ["body", "strip"], failures));
     await ctx.shot("207-workspace-terminal", page);
     return results;
   } catch (error) {
@@ -323,12 +321,10 @@ async function standaloneTerminals(ctx, dir, failures) {
     const row = await poll("the minted terminal window", async () =>
       (await fetchWindows(origin, token)).find((r) => r.kind === "terminal" && r.token) ?? null);
     const address = terminalWindowUrl(origin, row);
-    for (const engine of ["ghostty"]) {
-      await goto(page, address);
-      await page.waitForSelector(".pane .terminal-tab", { timeout: 30_000 });
-      await openTerminal(page, engine);
-      results.push(...await terminalArms(page, dir, "standalone", engine, ["body"], failures));
-    }
+    await goto(page, address);
+    await page.waitForSelector(".pane .terminal-tab", { timeout: 30_000 });
+    await openTerminal(page, "ghostty");
+    results.push(...await terminalArms(page, dir, "standalone", "ghostty", ["body"], failures));
     await ctx.shot("207-standalone-terminal", page);
     return results;
   } catch (error) {

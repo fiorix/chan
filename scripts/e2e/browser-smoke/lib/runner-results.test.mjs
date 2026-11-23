@@ -26,7 +26,7 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
   put("node_modules/puppeteer-core/index.mjs", `
     ${startup}
     const mode = process.env.CONTROL_MODE;
-    const page = { on() {}, async goto() {}, async waitForSelector() {}, async screenshot() {} };
+    const page = { on() {}, async goto() {}, async waitForSelector() {}, async screenshot() { console.log("CONTROL_SHOT"); } };
     const context = {
       async newPage() { return page; }, async overridePermissions() {}, async pages() { return [page]; },
       async close() {
@@ -53,7 +53,7 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
       return "fixture-workspace";
     }
     export function launchServer() {
-      return { child: { pid: 1, kill(signal) { console.log("CONTROL_SERVER_KILL " + signal); } }, url: Promise.resolve("http://127.0.0.1:1/?t=fixture"), chanHome: "fixture-home" };
+      return { child: { pid: 1, kill(signal) { console.log("CONTROL_SERVER_KILL " + signal); } }, url: Promise.resolve("http://127.0.0.1:1/?t=fixture"), chanHome: "fixture-home", stderrLines: ["CONTROL_STDERR"] };
     }
     export async function teardownServer() {
       console.log("CONTROL_TEARDOWN");
@@ -415,4 +415,81 @@ test("an interrupted snapshot write preserves the previous readable file", (t) =
   assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
   assert.equal(r.currentCheck, "001-control.mjs");
   assert.deepEqual(r.checks, []);
+});
+
+
+test("a skipped check retains passed arms and unavailable traces in its serialized result", (t) => {
+  const smokeDetails = {
+    legs: { connected: { status: "passed" }, reparent: { status: "unavailable", events: [{ type: "lostpointercapture" }] } },
+    failures: ["reparent (unavailable): native loss reached the canvas"],
+  };
+  const { results: r, log, rc } = run(t, {
+    body: `throw Object.assign(new Error("native loss reached the canvas"), { smokeSkip: true, smokeDetails: ${JSON.stringify(smokeDetails)} });`,
+  });
+  assert.equal(rc, 2);
+  assert.equal(r.failed, 0);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, true);
+  assert.equal(r.checks[0].reason, "native loss reached the canvas");
+  assert.deepEqual(r.checks[0].details, smokeDetails);
+  assert.match(log, /\[smoke\]   SKIP: native loss reached the canvas/);
+  assert.doesNotMatch(log, /CONTROL_SHOT|\[smoke\]   FAIL:/);
+});
+
+test("a product failure retains its evidence and counts as failure", (t) => {
+  const smokeDetails = { legs: { connected: { status: "failed" } } };
+  const { results: r, log, rc } = run(t, {
+    body: `throw Object.assign(new Error("copy was lost"), { smokeDetails: ${JSON.stringify(smokeDetails)} });`,
+  });
+  assert.equal(rc, 1);
+  assert.equal(r.failed, 1);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, false);
+  assert.match(r.checks[0].error, /copy was lost/);
+  assert.deepEqual(r.checks[0].details, smokeDetails);
+  assert.match(log, /CONTROL_SHOT/);
+  assert.match(log, /\[smoke\]   FAIL:.*copy was lost/);
+});
+
+test("a plain skip does not fabricate evidence or a pass", (t) => {
+  const { results: r, log, rc } = run(t, { body: 'ctx.skip("device absent");' });
+  assert.equal(rc, 2);
+  assert.equal(r.failed, 0);
+  assert.equal(r.checks[0].ok, false);
+  assert.equal(r.checks[0].skipped, true);
+  assert.equal(r.checks[0].reason, "device absent");
+  assert.equal(Object.hasOwn(r.checks[0], "details"), false);
+  assert.match(log, /\[smoke\]   SKIP: device absent/);
+  assert.doesNotMatch(log, /CONTROL_SHOT/);
+});
+
+test("skip details are snapshotted before a later check changes them", (t) => {
+  const { results: r, rc } = run(t, { bodies: [
+    'globalThis.details = { value: "original" }; throw Object.assign(new Error("device absent"), { smokeSkip: true, smokeDetails: globalThis.details });',
+    'globalThis.details.value = 1n; return null;',
+  ] });
+  assert.equal(rc, 2);
+  assert.deepEqual(r.checks.map((row) => row.status), ["skipped", "passed"]);
+  assert.deepEqual(r.checks[0].details, { value: "original" });
+});
+
+test("unserializable skip details fail their row without hiding later results", (t) => {
+  const { results: r, rc } = run(t, { bodies: [
+    'throw Object.assign(new Error("device absent"), { smokeSkip: true, smokeDetails: { value: 1n } });',
+    'return null;',
+  ] });
+  assert.equal(rc, 1);
+  assert.deepEqual(r.checks.map((row) => row.status), ["failed", "passed"]);
+  assert.equal(r.checks[0].skipReason, "device absent");
+  assert.match(r.checks[0].error, /TypeError/);
+});
+
+test("checks receive the server stderr lines", (t) => {
+  const { results: r, rc } = run(t, { body: `
+    const assert = (await import("node:assert/strict")).default;
+    assert.deepEqual(ctx.stderrLines, ["CONTROL_STDERR"]);
+    return { stderr: ctx.stderrLines };
+  ` });
+  assert.equal(rc, 0);
+  assert.deepEqual(r.checks[0].details.stderr, ["CONTROL_STDERR"]);
 });

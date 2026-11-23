@@ -3,6 +3,8 @@
 // and the raw stream cursor the app should hold. It keeps counters, never
 // payloads, so a flood costs the page little.
 
+import { captureGhosttyTerminals } from "./ghostty-capture.mjs";
+
 /// Runs in the page, before the app opens the socket it observes.
 export function installStreamProbe() {
   if (globalThis.__streamProbe) return;
@@ -174,33 +176,12 @@ export function installStreamProbe() {
 
 /// Every ghostty-web Terminal the page opens from now on, kept in the page.
 export async function trackGhosttyTerminals(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      globalThis.__ghosttyTerminals = [];
-      Terminal.prototype.open = function (...args) {
-        globalThis.__ghosttyTerminals.push(this);
-        return open.apply(this, args);
-      };
-      // A flood scrolls chan's own lines out of the history within a second,
-      // so they are read as the app writes them. Those writes are short.
-      globalThis.__terminalNotices = [];
-      const write = Terminal.prototype.write;
-      const decoder = new TextDecoder();
-      Terminal.prototype.write = function (data, ...rest) {
-        const text = typeof data === "string" ? data : data.length < 256 ? decoder.decode(data) : "";
-        for (const match of text.matchAll(/terminal (?:replay missed \d+ bytes|error: [^\r\n]*)/g)) {
-          globalThis.__terminalNotices.push(match[0]);
-        }
-        return write.call(this, data, ...rest);
-      };
-      return true;
-    }
-    return false;
+  const chunk = await captureGhosttyTerminals(page, "__streamTerminals", { notices: true });
+  if (chunk) await page.evaluate(() => {
+    globalThis.__ghosttyTerminals = window.__streamTerminals.terminals;
+    globalThis.__terminalNotices = window.__streamTerminals.notices;
   });
+  return chunk;
 }
 
 /// The whole text the newest Ghostty terminal retains, history and screen.
@@ -210,7 +191,8 @@ export function readGhosttyText(page) {
     const history = term.getScrollbackLength();
     const text = term.wasmTerm.plainText({
       startRow: 0, startCol: 0, endRow: history + term.rows - 1, endCol: term.cols - 1,
-    }) ?? "";
+    });
+    if (text === null) throw new Error("Ghostty plainText returned null for the retained buffer");
     return { history, rows: term.rows, text };
   });
 }

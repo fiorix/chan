@@ -42,6 +42,7 @@
 // `wrapprobe-delta`, the line and the scrollback carry the row's prefix);
 // in the control terminal every path reads the break at the cut.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -88,32 +89,12 @@ function standIn(dir) {
   ].join("\n");
 }
 
-/// Every ghostty-web Terminal the page opens from now on, kept in the page.
-async function trackGhosttyTerminals(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const url = new URL(name, script.src).href;
-      const { Terminal } = await import(url);
-      const open = Terminal.prototype.open;
-      window.__ghosttyTerminals330 = [];
-      Terminal.prototype.open = function (...args) {
-        window.__ghosttyTerminals330.push(this);
-        return open.apply(this, args);
-      };
-      return url;
-    }
-    return null;
-  });
-}
-
 /// The ghostty-web Terminal whose element is the host of the tab `row` names.
 async function terminalOf(page, row) {
   const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
   const term = await page.evaluateHandle((query) => {
     const host = document.querySelector(query);
-    return window.__ghosttyTerminals330.find((t) => !t.isDisposed && host && t.element === host) ?? null;
+    return window.__ghostty330.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
   }, hostQuery);
   if (!(await term.evaluate((t) => t !== null))) throw new Error(`no ghostty-web Terminal holds the host ${hostQuery}`);
   return term;
@@ -262,7 +243,7 @@ export default {
     try {
       for (const name of ["muse-code-block-scroll.bin", "muse-code-block-cup.bin"]) copyFileSync(join(FIXTURES, name), join(dir, name));
       for (const name of ["muse", "replay"]) writeFileSync(join(dir, name), standIn(dir), { mode: 0o755 });
-      if (!(await trackGhosttyTerminals(page))) throw new Error("no entry module of the page names a ghostty-web chunk");
+      if (!(await captureGhosttyTerminals(page, "__ghostty330"))) throw new Error("no entry module of the page names a ghostty-web chunk");
       const sessions = await recordSessionFrames(page);
       await page.setViewport({ width: 1280, height: 900 });
 
@@ -347,6 +328,7 @@ export default {
     } finally {
       await cs(["close", "--tab-name", CONTROL]).catch(() => {});
       await cs(["close", "--tab-name", MUSE]).catch(() => {});
+      await page.evaluate(() => window.__ghostty330?.restore());
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     }

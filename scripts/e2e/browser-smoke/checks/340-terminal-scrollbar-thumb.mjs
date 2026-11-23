@@ -83,8 +83,8 @@ export default {
         result.reversed = await terminal.term.evaluate((t) => t.viewport.offset);
         result.events = await pointerEvents(terminal.trace);
         const moves = result.events.filter((event) => event.type === "pointermove" && event.onCanvas && event.buttons === 1);
-        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 200)) < 0.01), "the engine delivered the full 200-pixel overshoot");
-        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 198)) < 0.01), "the engine delivered the two-pixel reversal");
+        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 200)) < 0.01), "the full 200-pixel overshoot reached the canvas");
+        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 198)) < 0.01), "the two-pixel reversal reached the canvas");
         assert.ok(result.reversed < result.secondClamp && result.reversed > 0, "a two-pixel reversal moves immediately after repeated clamping");
         await page.mouse.up();
         await noSelectionOrReport(terminal, result);
@@ -94,18 +94,26 @@ export default {
         const terminal = await prepare("last-column", result);
         await terminal.term.evaluate((t) => t.viewport.scrollToBottom());
         const grid = result.grid;
-        result.textSetup = await drainPointerInput(terminal.fixture, `\x1b[2J\x1b[1;${grid.cols}HZ\x1b[3;1H`);
+        // Retain the history that makes the hidden strip claimable, while
+        // keeping this selection clear of both auto-scroll edge bands.
+        const markerRow = result.markerRow = Math.floor(grid.rows / 2);
+        const y = grid.y + grid.h * (markerRow + 0.5);
+        assert.ok(y - grid.y > 30 && grid.y + grid.height - y > 30,
+          "the last-column drag stays outside both auto-scroll edge bands");
+        result.textSetup = await drainPointerInput(terminal.fixture, `\x1b[2J\x1b[${markerRow + 1};${grid.cols}HZ\x1b[3;1H`);
         assert.equal(result.textSetup.reply, "\x1b[3;1R", "the last-column marker and cursor position were parsed");
+        assert.equal(await terminal.term.evaluate((t) => t.getScrollbackLength()), result.history,
+          "the hidden-strip fixture retains its scrollbar history");
         // Wait for the visible overlay to fade, measuring blank rows below
         // the marker. The first scan also proves the paint reader saw it.
-        const visible = await pointerStripPixels(terminal.term, 3);
+        const visible = await pointerStripPixels(terminal.term, markerRow + 1);
         result.visiblePeak = Math.max(...visible.samples);
         assert.ok(result.visiblePeak >= 12, "the overlay was visible before waiting for its fade");
         const deadline = Date.now() + 8_000;
         let pixels;
         do {
           await settlePointer(page);
-          pixels = await pointerStripPixels(terminal.term, 3);
+          pixels = await pointerStripPixels(terminal.term, markerRow + 1);
         } while (Math.max(...pixels.samples) > 1 && Date.now() < deadline);
         result.hiddenPeak = Math.max(...pixels.samples);
         assert.ok(result.hiddenPeak <= 1, "the overlay is hidden in the actual canvas paint");
@@ -114,9 +122,9 @@ export default {
         assert.ok(grid.w * 0.9 >= 4 && grid.w * 0.9 <= 12, "the press lies in both the last column and the hidden strip");
         await seedPointerClipboard(page, "SMOKE340_LAST_COLUMN_SENTINEL");
         const writes = (await pointerWrites(page)).length;
-        await page.mouse.move(start, grid.y + grid.h * 0.5);
+        await page.mouse.move(start, y);
         await page.mouse.down();
-        await page.mouse.move(end, grid.y + grid.h * 0.5, { steps: 3 });
+        await page.mouse.move(end, y, { steps: 3 });
         result.heldSelection = await terminal.term.evaluate((t) => t.getSelection());
         await page.mouse.up();
         await settlePointer(page);

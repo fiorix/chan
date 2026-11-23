@@ -42,8 +42,7 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
-    const result = { backend, legs: {}, cleanupErrors: [] };
+    const result = { backend: "ghostty", legs: {}, cleanupErrors: [] };
     const failures = [];
     const calls = [];
     // leg NAME FN: run one leg, record its readings and failure, and leave

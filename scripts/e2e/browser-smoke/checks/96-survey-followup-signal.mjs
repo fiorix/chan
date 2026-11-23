@@ -128,7 +128,9 @@ export default {
           const activeTab =
             document.querySelector(".tabs .tab-row > .tab.active .path")?.textContent?.trim() ?? "";
           const host = document.querySelector(".terminal-tab.active .terminal-host");
-          return activeTab === name && host?.contains(document.activeElement) === true;
+          const box = host?.querySelector(":scope > canvas")?.getBoundingClientRect();
+          return activeTab === name && host?.contains(document.activeElement) === true
+            && !!box && box.width > 0 && box.height > 0;
         },
         { timeout: 5_000 },
         TAB,
@@ -248,8 +250,11 @@ export default {
       // the terminal escape registry must match physical `code` like App does.
       await page.evaluate(() => {
         const focused = document.activeElement;
-        if (!(focused instanceof HTMLElement)) {
-          throw new Error("terminal has no focused element");
+        const host = document.querySelector(".terminal-tab.active .terminal-host");
+        const box = host?.querySelector(":scope > canvas")?.getBoundingClientRect();
+        if (!(focused instanceof HTMLElement) || !host?.contains(focused)
+            || !box || box.width <= 0 || box.height <= 0) {
+          throw new Error("the focused terminal has no visible Ghostty surface");
         }
         focused.dispatchEvent(
           new KeyboardEvent("keydown", {
