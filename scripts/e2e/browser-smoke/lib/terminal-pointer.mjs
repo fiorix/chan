@@ -1,3 +1,4 @@
+import { captureGhosttyTerminals } from "./ghostty-capture.mjs";
 import assert from "node:assert/strict";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,26 +31,7 @@ export function pointerReports(input) {
 // Capture the actual app instance through its module's open method. All
 // subsequent readings use public Terminal methods and the host's DOM.
 export async function capturePointerTerminals(page) {
-  const installed = await page.evaluate(async () => {
-    if (window.__pointerSmoke) throw new Error("pointer terminal capture already installed");
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      const terminals = [];
-      Terminal.prototype.open = function (...args) {
-        terminals.push(this);
-        return open.apply(this, args);
-      };
-      window.__pointerSmoke = {
-        terminals,
-        restore() { Terminal.prototype.open = open; delete window.__pointerSmoke; },
-      };
-      return true;
-    }
-    return false;
-  });
+  const installed = await captureGhosttyTerminals(page, "__pointerSmoke");
   assert.ok(installed, "the entry module names a Ghostty chunk");
 }
 

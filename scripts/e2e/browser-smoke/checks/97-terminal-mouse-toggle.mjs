@@ -5,6 +5,7 @@
 // and a drained PTY record boundary. The capture-on reports are positive
 // controls for the capture-off absence checks.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,30 +28,18 @@ async function outputAndDrain(fixture, bytes = "", index = fixture.records.lengt
 }
 
 async function captureGhostty(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      const terminals = [];
-      Terminal.prototype.open = function (...args) {
-        terminals.push(this);
-        return open.apply(this, args);
-      };
-      window.__mouse97 = {
-        term(query) {
-          const host = document.querySelector(query);
-          const term = host && terminals.find((candidate) => candidate.element === host);
-          if (!term) throw new Error("the attached Ghostty terminal was not captured");
-          return term;
-        },
-        restore() { Terminal.prototype.open = open; },
-      };
-      return true;
-    }
-    return false;
+  const chunk = await captureGhosttyTerminals(page, "__mouse97");
+  if (!chunk) return null;
+  await page.evaluate(() => {
+    const state = window.__mouse97;
+    state.term = (query) => {
+      const host = document.querySelector(query);
+      const term = host && state.terminals.find((candidate) => candidate.element === host);
+      if (!term) throw new Error("the attached Ghostty terminal was not captured");
+      return term;
+    };
   });
+  return chunk;
 }
 
 async function selection(page, hostQuery) {

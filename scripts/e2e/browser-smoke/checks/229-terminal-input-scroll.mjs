@@ -3,6 +3,7 @@
 // before echoing it, so an output-side scroll cannot stand in for input.
 // SGR and X10 mouse/wheel reports must also preserve the history view.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -26,30 +27,12 @@ async function waitFor(page, label, read, accept) {
   throw new Error(`${label}: ${JSON.stringify(last)}`);
 }
 
-async function captureGhostty(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      window.__ghosttyTerminals229 = [];
-      Terminal.prototype.open = function (...args) {
-        window.__ghosttyTerminals229.push(this);
-        return open.apply(this, args);
-      };
-      window.__restoreGhostty229 = () => { Terminal.prototype.open = open; };
-      return true;
-    }
-    return false;
-  });
-}
 
 async function readViewport(page, hostQuery) {
   return page.evaluate((hostQuery) => {
     const host = document.querySelector(hostQuery);
     if (!host) throw new Error("Ghostty terminal host missing");
-    const term = window.__ghosttyTerminals229.find((candidate) => candidate.element === host);
+    const term = window.__ghostty229.terminals.find((candidate) => candidate.element === host);
     if (!term) throw new Error("the opened ghostty Terminal was not captured");
     const history = term.getScrollbackLength();
     const offset = term.getViewportY();
@@ -98,7 +81,7 @@ export default {
     const readings = {};
     const failures = [];
     try {
-      if (!(await captureGhostty(page))) throw new Error("the entry module names no ghostty-web chunk");
+      if (!(await captureGhosttyTerminals(page, "__ghostty229"))) throw new Error("the entry module names no ghostty-web chunk");
       const backend = "ghostty";
       const name = `InputScroll229-${backend}`;
       const result = readings[backend] = {};
@@ -244,7 +227,7 @@ export default {
         writeFileSync(join(ctx.outDir, `229-${backend}.json`), JSON.stringify(result, null, 2) + "\n");
       }
     } finally {
-      await page.evaluate(() => window.__restoreGhostty229?.());
+      await page.evaluate(() => window.__ghostty229?.restore());
       await writeTerminalPrefs(page, token, { mouse_capture: original.mouse_capture });
     }
     for (const [backend, result] of Object.entries(readings)) {
