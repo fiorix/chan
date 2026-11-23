@@ -1551,6 +1551,23 @@ describe("terminal find on the ghostty backend", () => {
     expect(selection(term), "a step highlights again").toEqual(match(3));
   });
 
+  test("a tap in the terminal clears find's highlight, and find leaves it cleared", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    const at = { clientX: 2 * 8 + 1, clientY: 2 * 16 + 1 };
+    mousePointer(term.canvas, "pointerdown", at);
+    mousePointer(term.canvas, "pointerup", at);
+    expect(selection(term), "ghostty-web's press clears it").toBeNull();
+    await output("\r\nmore");
+    frames.settle();
+    await tick();
+    expect(selection(term), "find leaves it cleared").toBeNull();
+    expect(countElement()?.textContent).toBe("1 of 3");
+    pressEnter(input);
+    await tick();
+    expect(selection(term), "a step highlights again").toEqual(match(3));
+  });
+
   test("a selection the user drags after find's highlight stays theirs through a click in the bar", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
