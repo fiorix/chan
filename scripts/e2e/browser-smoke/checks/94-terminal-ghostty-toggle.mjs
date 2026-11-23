@@ -451,10 +451,16 @@ export default {
         const logicalLine = `${prefix}${word} TAIL94`;
         result.setup = await drainPointerInput(fixture, `\x1b[2J\x1b[H${logicalLine}\r\n${selected}\r\n\x1b[?1000;1006h`);
         assert.deepEqual(result.setup, { input: "", reply: "\x1b[4;1R" }, "1000: output and mode setup reached the parser");
-        result.rows = await term.evaluate((t) => [0, 1, 2].map((row) => {
-          const line = t.buffer.active.getLine(t.buffer.active.baseY + row);
-          return { text: line?.translateToString(true), wrapped: line?.isWrapped };
-        }));
+        result.rows = await term.evaluate((t) => {
+          const buffer = t.buffer.active;
+          if (buffer.type !== "normal") throw new Error("the wrap fixture requires the normal buffer");
+          // Visible rows follow retained history in the public buffer API.
+          const screenStart = t.getScrollbackLength();
+          return [0, 1, 2].map((row) => {
+            const line = buffer.getLine(screenStart + row);
+            return { text: line?.translateToString(true), wrapped: line?.isWrapped };
+          });
+        });
         assert.deepEqual(result.rows, [
           { text: prefix + word.slice(0, 3), wrapped: false },
           { text: word.slice(3) + " TAIL94", wrapped: true },
