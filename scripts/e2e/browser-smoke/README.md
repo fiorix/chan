@@ -56,12 +56,17 @@ Files under `checks/` run in sorted filename order. The sort is LEXICAL, not num
 
 - `ctx.page`: a puppeteer page on `smoke-check-<prefix>`. Each check gets a new page and window in its own browser context, exposed as `ctx.browser`; that context and its pages close after the check. The window is addressable before the check only when the runner found a control socket.
 - `ctx.serverUrl`, `ctx.workspaceDir`, `ctx.outDir`, `ctx.downloadDir`
-- `ctx.chanBin`, `ctx.serverPid`, `ctx.controlSocket`
+- `ctx.chanBin`, `ctx.serverPid`, `ctx.controlSocket`, `ctx.repoRoot`
+- `ctx.chanHome`: the shared server's private, throwaway config home. CLI probes must use this home explicitly.
+- `ctx.stderrLines`: the shared server's live raw stderr array from startup onward, without stdout. Mask tokens before saving it; `ctx.watchServerLog()` supplies a masked subscription to both streams instead.
+- `ctx.exec(bin, args, options)`: promisified process execution; pass the run's private home and control-socket environment when needed.
+- `ctx.mark(step, data)`, `ctx.evidenceEvents()`, `ctx.pendingEvidence()`: add a timeline mark, snapshot recorded events, or read pending evidence operations.
+- `ctx.observePage(page, label)`, `ctx.capturePage(page, label)`: attach timeline observation to another page, or collect a bounded diagnostic screenshot and page state.
 - `ctx.watchServerLog()`: `{ lines, stop }`, every line the shared server logs from the call until `stop()`, token-masked, in order and none dropped. A check that judges the server's log over its own run reads it here, since the failure record's events are bounded and drop their oldest.
 - `ctx.shot(name, page = ctx.page)`: screenshot into the out dir (auto-recorded). Its default is the current check's page; a check driving another page passes it explicitly.
 - `ctx.pollFile(path, timeoutMs)`: wait for a file to exist + settle.
 - `ctx.waitWindowLive(windowId, timeoutMs)`: wait until the SERVER can address that window. Mandatory between opening a window and driving it with `cs` / `chan shell`, and not the same thing as `.pane` appearing: `.pane` is the client rendering its own state, while a `--window` command reaches the window through the server's session registry, which it joins when its session socket registers. Skip this and the check races a `window "..." is not connected` refusal.
-- `ctx.skip(reason)`: mark the check skipped (e.g. a peer surface not merged yet).
+- `ctx.skip(reason)`: throw a skipped-check result. A thrown error with `smokeSkip: true` also skips inside the check body; `smokeDetails` on a thrown failure or skip carries serializable partial evidence into the result row. Nonserializable details fail that row. An unavailable native trigger must remain a skip, while any independent product failure must remain a failure.
 - `ctx.assertPdf(bytes, { pages, orientation, minInkRatio })`: pdf-lib byte assertions (page count, A4 dims, per-page nonzero raster ink).
 - `ctx.assertNoDuplicateBands(bytes)`: fails when the head band of a page also appears on the previous page (pagination duplication). Only meaningful for documents whose content does not repeat itself.
 - A check that has to read a PDF's pixels imports `pdfPageRasters`, `colourBox` and `longestRun` from `lib/pdf.mjs`. Ink alone is passed by a page that kept its text and lost its image, so `20-pdf-inspector` uses seeded images of known colours and finds those colours on the exported pages: where an image is and how large, whether a slide that overflows came out whole, whether a block wider than its slide painted a scrollbar, and whether a line that fits in play broke.
@@ -251,7 +256,7 @@ Controller errors are `INVALID_FIXTURE_OPTIONS`; `FIXTURE_IDENTITY_REFUSED` for 
 
 ### Creating a terminal for a run
 
-Use a run-owned `chan` server with a throwaway home/workspace. `seedWorkspace()`, `launchServer(bin, workspace, log)` and `teardownServer(bin, server.child, workspace, server.chanHome, log)` are exported by `lib/server.mjs`. `log` is a function called with one line of text; `launchServer` returns `{ child, url, stderrLines, chanHome }`, with `url` a promise. Obtain the origin and the bearer token from `new URL(await server.url)`; its token query key is `t`. Redact credentials before saving server output. Always tear down only the server/processes that the run created.
+Use a run-owned `chan` server with a throwaway home/workspace. `seedWorkspace()`, `launchServer(bin, workspace, log, options = {})` and `teardownServer(bin, server.child, workspace, server.chanHome, log)` are exported by `lib/server.mjs`. `log` is an optional function called with one line of text. `options.prepareChanHome(home)` seeds the private home before spawn; `options.env` overlays child environment values such as `RUST_LOG`, while the generated `CHAN_HOME`, `XDG_RUNTIME_DIR` and disabled devserver handoff remain fixed. `launchServer` returns `{ child, url, stderrLines, chanHome }`, with `url` a promise. Obtain the origin and the bearer token from `new URL(await server.url)`; its token query key is `t`. Redact credentials before saving server output. Always tear down only the server/processes that the run created.
 
 Create the fixture controller, then POST to `{origin}/api/terminals` with `authorization: Bearer TOKEN`, `content-type: application/json`, and body `{ name, command: "stty -opost -echo && " + fixture.command, env: fixture.env }`. Require HTTP 201; the JSON member `session` is the terminal id. The POSIX wrapper requires `stty`: raw input alone does not disable output newline translation, so successful `stty -opost -echo` is required for byte equality. Await `fixture.ready()` and verify `tty`, `raw` and geometry.
 
