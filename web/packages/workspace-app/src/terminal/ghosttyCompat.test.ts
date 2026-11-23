@@ -388,13 +388,11 @@ const STRIP_X = CANVAS_CSS_WIDTH - 10;
 // Inside the strip upstream clears, outside the bar it then draws: nothing
 // ever paints here, so it reads as content or as nothing at all.
 const ERASED_X = CANVAS_CSS_WIDTH - 2;
-const CONTENT_X = 100;
 // At viewportY 0 the thumb sits at the bottom of the track, so these sample a
 // thumb pixel and a track-only pixel respectively.
 const THUMB_Y = 100;
 const TRACK_Y = 20;
 
-const THEME_BACKGROUND: Rgba = { r: 16, g: 16, b: 16, a: 1 };
 const CONTENT: Rgba = { r: 40, g: 80, b: 160, a: 1 };
 const TRACK_OVER_CONTENT = sourceOver(
   { r: 128, g: 128, b: 128, a: 0.1 },
