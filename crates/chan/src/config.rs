@@ -352,11 +352,21 @@ fn set_retired_engine_key(raw: &str, err: &mut impl std::io::Write) -> Result<()
 }
 
 pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
+    config_command(action, &mut std::io::stdout(), &mut std::io::stderr())
+}
+
+/// [`cmd_config`] over the streams it writes, so a test reads which line
+/// goes to which: a script captures `out`, and a warning must not land in it.
+fn config_command(
+    action: ConfigAction,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Result<()> {
     match action {
         ConfigAction::Get { key: Some(key), .. }
             if canonical_config_key(&key) == RETIRED_ENGINE_KEY =>
         {
-            get_retired_engine_key(&mut std::io::stdout(), &mut std::io::stderr())
+            get_retired_engine_key(out, err)
         }
         ConfigAction::Get { key, json } => {
             let editor = EditorPrefs::load().context("loading editor preferences")?;
@@ -366,17 +376,17 @@ pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
                     let output = ConfigOutput { editor, server };
                     validate_config_dump(&serde_json::to_value(&output)?)?;
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&output)?);
+                        writeln!(out, "{}", serde_json::to_string_pretty(&output)?)?;
                     } else {
-                        print!("{}", toml::to_string_pretty(&output)?);
+                        write!(out, "{}", toml::to_string_pretty(&output)?)?;
                     }
                 }
                 Some(k) => {
                     let value = read_config_key(&editor, &server, k)?;
                     if json {
-                        println!("{}", serde_json::to_string(&value)?);
+                        writeln!(out, "{}", serde_json::to_string(&value)?)?;
                     } else {
-                        println!("{}", scalar_to_string(&value));
+                        writeln!(out, "{}", scalar_to_string(&value))?;
                     }
                 }
             }
@@ -386,7 +396,7 @@ pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
             let (key, raw_value) = split_assignment(&key, value.as_deref())?;
             let key = canonical_config_key(&key);
             if key == RETIRED_ENGINE_KEY {
-                return set_retired_engine_key(&raw_value, &mut std::io::stderr());
+                return set_retired_engine_key(&raw_value, err);
             }
             if key.starts_with("server.") {
                 let mut cfg = ServerConfig::load().context("loading server config")?;
@@ -397,7 +407,7 @@ pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
                 write_pref_key(&mut prefs, &key, &raw_value)?;
                 prefs.save().context("saving editor preferences")?;
             }
-            println!("{key} = {raw_value}");
+            writeln!(out, "{key} = {raw_value}")?;
             Ok(())
         }
     }
@@ -1055,6 +1065,47 @@ mod tests {
             })
             .unwrap_or_else(|error| panic!("{key}: {error:#}"));
         }
+    }
+
+    #[test]
+    fn retired_engine_key_warns_on_stderr_and_answers_on_stdout() {
+        let _env = test_env::ChanTestEnv::new();
+        let run = |action| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            config_command(action, &mut out, &mut err).unwrap();
+            (
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        };
+        let warning = format!("{RETIRED_ENGINE_WARNING}\n");
+        for json in [false, true] {
+            let get = ConfigAction::Get {
+                key: Some("terminal.ghostty".into()),
+                json,
+            };
+            assert_eq!(run(get), ("true\n".into(), warning.clone()), "{json}");
+        }
+        let set = ConfigAction::Set {
+            key: "terminal.ghostty".into(),
+            value: Some("false".into()),
+        };
+        assert_eq!(run(set), (String::new(), warning));
+
+        // An ordinary key keeps its whole answer on stdout.
+        let set = ConfigAction::Set {
+            key: "terminal.font_size".into(),
+            value: Some("13".into()),
+        };
+        assert_eq!(
+            run(set),
+            ("server.terminal.font_size = 13\n".into(), String::new())
+        );
+        let get = ConfigAction::Get {
+            key: Some("terminal.font_size".into()),
+            json: false,
+        };
+        assert_eq!(run(get), ("13\n".into(), String::new()));
     }
 
     #[test]
