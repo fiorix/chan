@@ -69,7 +69,12 @@ test("missing and broken chunks do not report a capture", async (t) => {
 test("notice capture keeps transient text and short bytes while delegating every write", async (t) => {
   const { page, write } = fixture(t);
   await captureGhosttyTerminals(page, "capture", { notices: true });
+  const unopened = new CaptureTestTerminal();
+  unopened.write("terminal error: outside capture\n");
+  assert.deepEqual(window.capture.notices, [], "only captured instances are observed");
+  assert.equal(CaptureTestTerminal.prototype.write, write, "the public write prototype stays intact");
   const term = new CaptureTestTerminal();
+  term.open({});
   const callback = () => {};
   for (const data of ["", new Uint8Array(), new Uint8Array(256), "ordinary output"]) {
     assert.equal(term.write(data, callback), "written");
@@ -84,4 +89,21 @@ test("notice capture keeps transient text and short bytes while delegating every
   ]);
   window.capture.restore();
   assert.equal(CaptureTestTerminal.prototype.write, write);
+  assert.equal(Object.hasOwn(term, "write"), false, "restoration removes the instance wrapper");
+  term.write("terminal error: after restore\n");
+});
+
+test("notice capture restores an instance's own write method", async (t) => {
+  const { page } = fixture(t);
+  await captureGhosttyTerminals(page, "capture", { notices: true });
+  const term = new CaptureTestTerminal();
+  const write = function (data) { assert.equal(this, term); return data; };
+  Object.defineProperty(term, "write", { value: write, writable: true, configurable: true });
+  const descriptor = Object.getOwnPropertyDescriptor(term, "write");
+  term.open({});
+  term.open({});
+  assert.equal(term.write("terminal error: once"), "terminal error: once");
+  assert.deepEqual(window.capture.notices, ["terminal error: once"]);
+  window.capture.restore();
+  assert.deepEqual(Object.getOwnPropertyDescriptor(term, "write"), descriptor);
 });
