@@ -102,12 +102,14 @@ const immediateFrame = ((cb: FrameRequestCallback) => {
 
 const immediateFrames: Frames = { request: immediateFrame };
 
-/// A frame one task after it is requested, as in a browser. The widget's
-/// render loop requests its next frame from inside each one, which an
-/// immediate frame would run without end. The task comes from the setTimeout
-/// in place now, so frames keep running under fake timers a test installs
-/// later.
-function taskFrames(): Frames {
+/// Frames that each run one task after they are requested, as in a browser,
+/// never inside the call that asked: the widget's render loop requests its
+/// next frame from inside each one, which an immediate frame would run
+/// without end. The task comes from the setTimeout in place when the frames
+/// are made. A default `vi.useFakeTimers()` installed after that fakes
+/// `requestAnimationFrame` itself, so until `vi.useRealTimers()` frames run
+/// on the fake clock, as its timers do.
+export function taskFrames(): Required<Frames> {
   const nextTask = globalThis.setTimeout;
   const cancelTask = globalThis.clearTimeout;
   const pending = new Map<number, ReturnType<typeof setTimeout>>();
