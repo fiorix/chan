@@ -26,7 +26,7 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 installTerminalDom();
 
 beforeEach(() => {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
 });
 
 afterEach(() => {

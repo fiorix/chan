@@ -94,7 +94,7 @@ function installDesktopBridge(): void {
 }
 
 async function openTerminal(withNeighbour = false) {
-  await mountApp(undefined, { preferences: terminalPreferences({ ghostty: true }) });
+  await mountApp(undefined, { preferences: terminalPreferences() });
   setSocketFactory((url) => new URL(url, location.href).pathname === "/api/terminal/ws"
     ? new TerminalSocket(url) as unknown as WebSocket
     : demoSocketFactory(url));

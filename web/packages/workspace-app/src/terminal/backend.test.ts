@@ -2,42 +2,7 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { VtCells, type GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { describe, expect, test } from "vitest";
-import type { TerminalPreferences } from "../api/types";
-import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";
-
-describe("terminalBackendFromPrefs", () => {
-  test("absent field (older server) means xterm.js", () => {
-    expect(terminalBackendFromPrefs(undefined)).toBe("xterm");
-    expect(terminalBackendFromPrefs({} as never)).toBe("xterm");
-  });
-
-  test("explicit false means xterm.js", () => {
-    expect(terminalBackendFromPrefs({ ghostty: false } as never)).toBe("xterm");
-  });
-
-  test("true selects the ghostty backend", () => {
-    expect(terminalBackendFromPrefs({ ghostty: true } as never)).toBe("ghostty");
-  });
-});
-
-describe("the backend of a terminal and its masking", () => {
-  // Masking exists on both backends, so the masking preference never
-  // moves a terminal off the configured backend.
-  test.each([
-    [undefined, true, "ghostty"],
-    [true, true, "ghostty"],
-    [false, true, "ghostty"],
-    [undefined, false, "xterm"],
-    [true, false, "xterm"],
-    [false, false, "xterm"],
-  ] as const)("secret_masking %s, ghostty %s: %s", (secretMasking, ghostty, backend) => {
-    const prefs = {
-      ghostty,
-      ...(secretMasking === undefined ? {} : { secret_masking: secretMasking }),
-    } as TerminalPreferences;
-    expect(terminalBackendFromPrefs(prefs)).toBe<TerminalBackend>(backend);
-  });
-});
+import { ghosttyKitFrom } from "./backend";
 
 describe("ghostty kit instances", () => {
   /// The vendored release wasm (relative to the package directory vitest

@@ -25,7 +25,6 @@ The CLI serializes these under the `server.*` namespace, so terminal fields are 
 | `terminal.background_opacity` | `u32` | `100`, clamped `80..=100` | CLI, API, Settings | Settings → Terminal → background opacity; below 100 chan-desktop paints its terminal tabs at this alpha so the desktop shows through. A browser tab stays opaque; Linux needs a compositing window manager |
 | `terminal.mcp_env` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → MCP discovery; whether new non-team terminals export `CHAN_MCP_*` (team spawns follow the team config's own `mcp_env`) |
 | `terminal.mouse_capture` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → mouse capture; off strips the mouse-enable sequences so drag selection keeps working in full-screen programs, for new terminals |
-| `terminal.ghostty` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → Terminal engine (new terminals), a choice of `ghostty` and `xterm`; `false` renders with xterm.js, new terminals at once and open ones when their window reloads |
 | `terminal.secret_masking` | `Option<bool>` | unset | CLI, API, Settings | Settings → Terminal → Secret masking, a choice of `On`, `Off` and `Default`; `Default` clears the key, and unset masks by window kind (on in a control terminal, off elsewhere), while `true` or `false` is the user's choice everywhere. The per-tab toggle, `Secret masking (this terminal)`, is ephemeral |
 | `terminal.program_status` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → Program status (OSC 7501); whether chan reads the reports programs write and marks tabs with them; off clears live records |
 | `terminal.tmux.enabled` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → tmux control mode; whether a terminal honours the marker a `tmux -CC` client prints. A local tmux enters at once; any other foreground program raises a question first |
@@ -37,6 +36,8 @@ The CLI serializes these under the `server.*` namespace, so terminal fields are 
 | `tunnel.max_live` | `usize` | `32` | CLI | Not surfaced in Settings (file-only `[tunnel]` table); live `cs tunnel` tunnels a host admits across every terminal; zero in the file selects the default |
 
 `attachments_dir` is a retired key: a value in the file has no effect, the next save drops it, and the CLI and the API reject it.
+
+`terminal.ghostty` is a retired key with a warning period: every terminal uses Ghostty. A stored `false` warns once per process that the key has no effect and a future release will reject it; a stored `true` is silent, and a value that is not a boolean is a load error. Loading never rewrites the file, and the next save drops the key. `PATCH /api/config` accepts a boolean `ghostty` in the terminal object and ignores it. `chan config get server.terminal.ghostty` prints `true`, and `chan config set server.terminal.ghostty true|false` writes nothing; both print the deprecation warning on stderr.
 
 #### Authoring terminal profiles
 

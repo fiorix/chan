@@ -231,7 +231,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(LINUX);
   vi.stubGlobal("ClipboardItem", class {
     constructor(readonly items: Record<string, Blob>) {}

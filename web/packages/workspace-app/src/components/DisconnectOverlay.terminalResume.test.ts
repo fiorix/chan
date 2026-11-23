@@ -107,7 +107,7 @@ beforeEach(() => {
     }
     remove(type, listener, options);
   }) as typeof window.removeEventListener);
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
   resetConnectionHealthForTests();
   resetHostVocabularyForTests();
   const invoke = vi.fn(async (cmd: string) => {

@@ -69,7 +69,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   installSoftwareCanvas();
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
 });
 
 afterEach(async () => {
@@ -266,7 +266,7 @@ describe("mouse events encoded by the Ghostty input handler", () => {
 
 describe("a mouse filter holding an unfinished control sequence", () => {
   beforeEach(() => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, mouse_capture: false }));
+    __testSetStandalonePreferences(terminalPreferences({ mouse_capture: false }));
   });
 
   test("drops the partial tail when a cut replay resumes with an empty ring", async () => {

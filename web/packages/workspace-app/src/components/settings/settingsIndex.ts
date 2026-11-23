@@ -298,10 +298,6 @@ const SPACING: readonly SettingOption[] = [
   { value: "standard", label: "Standard" },
   { value: "compact", label: "Compact" },
 ];
-const TERMINAL_ENGINES: readonly SettingOption[] = [
-  { value: "ghostty", label: "ghostty" },
-  { value: "xterm", label: "xterm" },
-];
 const SECRET_MASKING: readonly SettingOption[] = [
   { value: "on", label: "On" },
   { value: "off", label: "Off" },
@@ -634,22 +630,6 @@ const ENTRIES: readonly SettingEntry[] = [
     {
       get: (p) => p.terminal.mouse_capture ?? true,
       change: (on) => (p) => ({ ...p, terminal: { ...p.terminal, mouse_capture: on } }),
-    },
-  ),
-  choice(
-    {
-      id: "terminal.engine",
-      section: "terminal",
-      heading: "Terminal engine (new terminals)",
-      keywords: ["backend", "renderer", "Ghostty backend", "ghostty-web", "xterm.js"],
-    },
-    TERMINAL_ENGINES,
-    {
-      get: (p) => (p.terminal.ghostty ? "ghostty" : "xterm"),
-      change: (value) => (p) => ({
-        ...p,
-        terminal: { ...p.terminal, ghostty: value === "ghostty" },
-      }),
     },
   ),
   toggle(

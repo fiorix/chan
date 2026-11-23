@@ -268,7 +268,7 @@ type GhosttyStandIn = FakeTerminal & {
 };
 
 async function attachedGhostty() {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
   const [tab, member] = seatTerminals([
     terminalTab({ broadcastEnabled: true }),
     terminalTab({ id: "term-2", broadcastEnabled: true }),

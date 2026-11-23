@@ -1,5 +1,4 @@
-/// Terminal backend selection + the ghostty lazy loader, backing
-/// `terminal.ghostty = true`.
+/// The Ghostty lazy loader. Every terminal opens on Ghostty.
 ///
 /// A ghostty terminal is ghostty-web's `Terminal` (renderer, input,
 /// selection) over Ghostty's own release build of libghostty-vt, vendored
@@ -8,12 +7,11 @@
 /// wasm the package carries.
 ///
 /// WHY lazy: the wasm is about 1.2MB. A static import would put that
-/// asset on the critical path for every user whose terminals run on
-/// xterm.js, so the library and the wasm URL load through dynamic imports
-/// and only ever fetch when a terminal actually spawns with the ghostty
-/// backend. Vite emits `ghostty-vt.wasm` as a hashed asset; the `?url`
-/// import hands us its served path, which the loader fetches and compiles
-/// itself.
+/// asset on the critical path of every window, including the ones that
+/// never open a terminal, so the library and the wasm URL load through
+/// dynamic imports and only ever fetch when a terminal actually spawns.
+/// Vite emits `ghostty-vt.wasm` as a hashed asset; the `?url` import hands
+/// us its served path, which the loader fetches and compiles itself.
 ///
 /// WHY one WASM instance per terminal: a wasm memory only grows, so on a
 /// shared instance the scrollback of every terminal ever opened would stay
@@ -36,8 +34,9 @@
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
-import type { TerminalPreferences } from "../api/types";
 
+/// The engine a live terminal runs on: Ghostty, or xterm.js when its
+/// Ghostty load failed.
 export type TerminalBackend = "xterm" | "ghostty";
 
 /// Everything TerminalTab needs to construct a ghostty terminal without
@@ -48,19 +47,6 @@ export type GhosttyKit = {
   instantiate: (host?: VtHost) => Promise<GhosttyVt>;
   Terminal: typeof Terminal;
 };
-
-/// Backend for a newly spawned terminal. Spawn-time only, same contract
-/// as scrollback / mouse_capture: read once at terminal start, so
-/// flipping the setting later affects only newly opened terminals.
-/// The server stores the choice and defaults it to ghostty; an absent
-/// field (a server older than the key) means xterm.js, which such a server
-/// can still drive. Secret masking exists on both backends, so the window's
-/// kind plays no part here.
-export function terminalBackendFromPrefs(
-  prefs: TerminalPreferences | undefined,
-): TerminalBackend {
-  return (prefs?.ghostty ?? false) ? "ghostty" : "xterm";
-}
 
 /// Build a kit over an already compiled ghostty-vt module. Split from
 /// the loader so a test can hand it the vendored wasm read from disk.

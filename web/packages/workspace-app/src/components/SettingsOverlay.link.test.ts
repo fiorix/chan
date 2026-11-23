@@ -74,19 +74,19 @@ afterEach(() => {
 
 describe("a link into Settings, opened from closed", () => {
   test("shows the field's section, brings the field into view, focuses its control and marks it", async () => {
-    openSettings({ section: "terminal", field: "terminal.engine" });
+    openSettings({ section: "terminal", field: "terminal.secretMasking" });
     await settle();
 
     expect(settingsPanel.open).toBe(true);
     expect(activeTab()).toBe("Terminal");
-    const field = anchor("terminal.engine")!;
-    expect(field.querySelector("h3")?.textContent).toBe("Terminal engine (new terminals)");
+    const field = anchor("terminal.secretMasking")!;
+    expect(field.querySelector("h3")?.textContent).toBe("Secret masking");
     expect(scrolled).toEqual([field]);
     // A choice is entered on the option it holds.
     const held = field.querySelector<HTMLInputElement>('input[type="radio"]:checked')!;
-    expect(held.value).toBe("xterm");
+    expect(held.value).toBe("default");
     expect(document.activeElement).toBe(held);
-    expect(marked()).toEqual(["terminal.engine"]);
+    expect(marked()).toEqual(["terminal.secretMasking"]);
     expect(settingsPanel.target).toBeNull();
   });
 

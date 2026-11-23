@@ -1135,7 +1135,7 @@ describe("terminal find on the ghostty backend", () => {
   });
 
   beforeEach(() => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+    __testSetStandalonePreferences(terminalPreferences());
   });
 
   afterEach(() => {

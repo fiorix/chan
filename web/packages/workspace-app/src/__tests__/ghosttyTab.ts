@@ -18,7 +18,7 @@ import { Terminal } from "@chan/ghostty-web-ng";
 import { mount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
-import type { GhosttyKit, TerminalBackend, ghosttyKitFrom } from "../terminal/backend";
+import type { GhosttyKit, ghosttyKitFrom } from "../terminal/backend";
 import { SoftwareCanvasContext } from "./softwareCanvas";
 import { attach, receive, TERMINAL_PANE, TerminalSocket, useGhosttyFixture } from "./terminalTab";
 
@@ -174,9 +174,8 @@ export const ghosttyFixture: GhosttyRuntime = { module: null, terminals: [] };
 let coreCompiled: Promise<void> | null = null;
 
 /// The `vi.mock("../terminal/backend", ...)` factory. Every terminal opens on
-/// the widget whatever the terminal preferences say, the way the product
-/// opens one when the preference selects nothing, and the loader hands out
-/// the vendored core instead of fetching it.
+/// the widget, as in the product, and the loader hands out the vendored core
+/// instead of fetching it.
 export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   coreCompiled ??= compileGhosttyCore(ghosttyFixture);
@@ -186,7 +185,6 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
   useGhosttyFixture({ opened: openedGhostty, press: pressInGhostty, reset: resetGhosttyFixture });
   return {
     ...actual,
-    terminalBackendFromPrefs: (): TerminalBackend => "ghostty",
     loadGhosttyKit: async (): Promise<GhosttyKit> => {
       await coreCompiled;
       return fixtureKit(actual.ghosttyKitFrom);

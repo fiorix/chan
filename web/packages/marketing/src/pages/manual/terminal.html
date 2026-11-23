@@ -19,7 +19,7 @@
   <h2><a class="heading-anchor" href="#tabs">Terminal tabs</a></h2>
   <p>Choose <strong>New terminal</strong> from a pane menu, the command launcher, or Computers, or press <kbd>Cmd+T</kbd> on the macOS desktop and <kbd>Ctrl+Shift+T</kbd> elsewhere. Moving, splitting and closing tabs is in <a href="/manual/navigation/#panes">Windows, panes and tabs</a>.</p>
   <p>At the bottom, the view follows new output. While you read earlier output, new output leaves your view in place. If the output you are reading falls outside the retained history, the view advances to the oldest output kept. Typing, pasting or dropping files into the terminal returns the view to the cursor. A Rich Prompt returns the view to the cursor when you submit it. Copying a selection leaves you in the history.</p>
-  <p>Mouse and wheel reports sent to a program leave a scrolled-back view in place on Ghostty. On xterm.js, SGR mouse reports return the view to the cursor; X10 reports leave it in the history.</p>
+  <p>Mouse and wheel reports sent to a program leave a scrolled-back view in place.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
@@ -52,10 +52,10 @@
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
-      <li>On reattach, chan asks the program to redraw and restores the cursor-key, mouse, focus-reporting and bracketed-paste modes it had on. Mouse encodings still depend on support in the selected terminal engine.</li>
+      <li>On reattach, chan asks the program to redraw and restores the cursor-key, mouse, focus-reporting and bracketed-paste modes it had on. Mouse encodings still depend on what Ghostty, the terminal engine, supports.</li>
       <li>Renaming or regrouping a running terminal applies at once, but its shell keeps the old <code>$CHAN_TAB_NAME</code> and <code>$CHAN_TAB_GROUP</code>: the tab menu reads <em>stale env</em> and offers <strong>Restart terminal</strong>.</li>
       <li>Two terminals can share a name. A <code>cs</code> command that selects by name reaches both.</li>
-      <li>For shells chan starts itself, a ghostty view that falls behind slows the program until it has caught up, so it loses nothing. A view that reports no progress for five seconds stops holding the program and resumes from retained output when it runs again, with a line saying how many bytes it missed if the retained output no longer reaches back that far. Other views of the same shell share the output rate of the slowest one that is still progressing. An xterm.js view never slows the program. tmux panes keep producing and recover only the output still retained; older bytes can be lost.</li>
+      <li>For shells chan starts itself, a view that falls behind slows the program until it has caught up, so it loses nothing. A view that reports no progress for five seconds stops holding the program and resumes from retained output when it runs again, with a line saying how many bytes it missed if the retained output no longer reaches back that far. Other views of the same shell share the output rate of the slowest one that is still progressing. tmux panes keep producing and recover only the output still retained; older bytes can be lost.</li>
       <li>On Windows, where chan finds several shells (PowerShell, cmd, Git Bash, WSL), the pane menu lists them under <strong>New terminal</strong>, and the command launcher has <strong>New terminal with profile</strong>.</li>
       <li>Most browsers keep <kbd>Ctrl+Shift+T</kbd> to reopen a closed tab. Use the pane menu, or bind another key in <a href="/manual/shortcuts/#customize">Keyboard shortcuts</a>.</li>
     </ul>
@@ -101,9 +101,8 @@
       <li>On Windows and Linux, <kbd>Ctrl+G</kbd> steps only while the keyboard is in the find bar. In the shell it is the bell character.</li>
       <li>A browser steps with <kbd>Enter</kbd> and <kbd>Shift+Enter</kbd> only.</li>
       <li>The query is kept for the next time the bar opens. A restart that replaces the terminal closes the bar.</li>
-      <li>With the ghostty engine, the default, a resize keeps the selected match. A resize that removes it, as narrowing a full-screen program can, leaves no match selected.</li>
+      <li>A resize keeps the selected match. A resize that removes it, as narrowing a full-screen program can, leaves no match selected.</li>
       <li>Heavy output into a long scrollback restarts the search for a moment, shown as <code>+</code> and <code>?</code>. If it has not caught up after about a second, or the output pushes the match out of the scrollback, no match stays selected.</li>
-      <li>On the xterm engine (<strong>Terminal engine (new terminals)</strong> set to <code>xterm</code> in Terminal settings) the bar counts up to 1000 matches and then reads <code>? of 1000+</code>.</li>
     </ul>
   </details>
 </section>
@@ -133,12 +132,12 @@
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
-      <li>With the ghostty engine, the default, a mouse selection, a double click and a triple click also copy to the clipboard.</li>
-      <li>Muse draws a line longer than the terminal is wide by itself, cutting it at the right edge, so the terminal sees no wrap. With the ghostty engine, while Muse is the program in front of a terminal, and for the whole life of a terminal chan started with Muse as its command, even after Muse exits to a shell, every copy joins a row that reaches the right edge with the row below it, so a command Muse printed across rows pastes as one line. A full-width rule of box-drawing characters and a row with a blank row below it keep their line breaks, and so do rows that stop short of the edge, such as Muse's prose. The xterm.js engine and every other terminal copy only the terminal's own wraps as one line.</li>
-      <li>On the Linux desktop a selection also sets PRIMARY, and a middle click pastes PRIMARY on either engine, including text selected in another application. Copy keys and the menu's Copy use the regular clipboard.</li>
+      <li>A mouse selection, a double click and a triple click also copy to the clipboard.</li>
+      <li>Muse draws a line longer than the terminal is wide by itself, cutting it at the right edge, so the terminal sees no wrap. While Muse is the program in front of a terminal, and for the whole life of a terminal chan started with Muse as its command, even after Muse exits to a shell, every copy joins a row that reaches the right edge with the row below it, so a command Muse printed across rows pastes as one line. A full-width rule of box-drawing characters and a row with a blank row below it keep their line breaks, and so do rows that stop short of the edge, such as Muse's prose. Every other terminal copies only its own wraps as one line.</li>
+      <li>On the Linux desktop a selection also sets PRIMARY, and a middle click pastes PRIMARY, including text selected in another application. Copy keys and the menu's Copy use the regular clipboard.</li>
       <li>In a browser, selection and middle click follow the browser.</li>
-      <li>With the ghostty engine a paste cannot end the bracketed paste a program asked for: escape, NUL, backspace, delete and the control characters such as <kbd>Ctrl+C</kbd>, <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+U</kbd> and <kbd>Ctrl+W</kbd> arrive as spaces. Tabs stay.</li>
-      <li>On either engine every pasted line break arrives as the carriage return <kbd>Enter</kbd> sends.</li>
+      <li>A paste cannot end the bracketed paste a program asked for: escape, NUL, backspace, delete and the control characters such as <kbd>Ctrl+C</kbd>, <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+U</kbd> and <kbd>Ctrl+W</kbd> arrive as spaces. Tabs stay.</li>
+      <li>Every pasted line break arrives as the carriage return <kbd>Enter</kbd> sends.</li>
       <li><code>cs copy</code> and <code>cs paste</code> use the clipboard of the machine viewing the window, so they work from a devserver terminal too.</li>
     </ul>
   </details>
@@ -156,7 +155,6 @@
       <li>A <code>file://</code> link that names another machine is not opened; the entry shows the machine's name instead.</li>
       <li>A terminal-only window that serves no files cannot open a file link; the entry says so.</li>
       <li>The menu closes when the output under it changes or scrolls away.</li>
-      <li>On the xterm.js engine, a link a program marks with a relative or <code>~/</code> path is not underlined, and a link printed in the row under a resting pointer is underlined once the pointer leaves that row and comes back.</li>
     </ul>
   </details>
 </section>

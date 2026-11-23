@@ -3,8 +3,8 @@
 // A terminal's two menus. The tab menu (from the tab strip) names and groups
 // the terminal, shows its status and its broadcast list, and ends with the
 // pane's flip and the tab's close. The body menu (a right-click in the
-// terminal) shows the live engine and the secret-masking toggle, then Find,
-// Copy, Paste and Copy scrollback, and ends with the command launcher, which
+// terminal) shows the secret-masking toggle, then Find, Copy, Paste and
+// Copy scrollback, and ends with the command launcher, which
 // opens from this terminal as its chord does. Every row that offers a catalog
 // action takes its words from the catalog, and a toggle's row its check. A
 // TerminalTab is mounted over the stand-in xterm and socket.
@@ -92,16 +92,15 @@ function text(el: Element | null | undefined): string {
   return (el?.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-/// The open menu's rows in order: a separator as "---", a label row by its
-/// label, a named field by its caption, the status row by its text.
+/// The open menu's rows in order: a separator as "---", a named field by
+/// its caption, the status row by its text.
 function menuShape(): string[] {
   const menu = document.body.querySelector(".terminal-tab-menu-bubble")!;
-  return [...menu.querySelectorAll(".msep, .mbtn, .rename-row, .terminal-status-row, .terminal-backend-label")].map(
+  return [...menu.querySelectorAll(".msep, .mbtn, .rename-row, .terminal-status-row")].map(
     (el) => {
       if (el.classList.contains("msep")) return "---";
       if (el.classList.contains("rename-row")) return `field ${el.querySelector("span")?.textContent?.trim()}`;
       if (el.classList.contains("terminal-status-row")) return `status ${el.querySelector(".terminal-status")?.textContent?.trim()}`;
-      if (el.classList.contains("terminal-backend-label")) return `engine ${el.querySelector(".terminal-backend-value")?.textContent?.trim()}`;
       return el.querySelector(".mbtn-label")?.textContent?.trim() ?? "";
     },
   );
@@ -116,7 +115,6 @@ function menuWords(): string[] {
   return [
     ...menu.querySelectorAll(
       [
-        ".terminal-backend-label > span:first-child",
         ".mbtn-label",
         ".rename-label",
         ".env-stale-row button",
@@ -264,18 +262,17 @@ describe("the body menu", () => {
     expect(masking()).toBe(on);
   });
 
-  test("starts with the engine and masking, then Find, Copy, Paste and Copy scrollback", async () => {
+  test("starts with masking, then Find, Copy, Paste and Copy scrollback", async () => {
     const { target } = await attached();
     await openBodyMenu(target);
     expect(menuShape()).toEqual([
-      "engine xterm",
       "Secret masking (this terminal)",
       "---",
       "Find",
       "Copy",
       "Paste",
       "Copy scrollback",
-      ...menuShape().slice(7),
+      ...menuShape().slice(6),
     ]);
   });
 
@@ -473,7 +470,6 @@ describe("every row takes its words from the catalog", () => {
 
     expect(menuWords()).toEqual(
       expected([
-        { own: "Terminal engine", why: "a display row: the engine this terminal runs on, beside its value" },
         { command: "app.terminal.secretMasking.toggle" },
         { command: "terminal.find" },
         { command: "terminal.copy" },

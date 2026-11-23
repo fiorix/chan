@@ -61,7 +61,7 @@ beforeEach(() => {
   canvas = installSoftwareCanvas();
   vi.mocked(document.fonts.load).mockReset().mockResolvedValue([{} as FontFace]);
   ui.theme = "dark";
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
 });
 
 afterEach(async () => {
@@ -128,7 +128,7 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
     { background: "#edf3f7", foreground: "#102030", cursor: "#234567", contrast: "light" },
     { background: "#132435", foreground: "#e0d0c0", cursor: "#bada55", contrast: "dark" },
   ] satisfies TerminalCustomColors[]) {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true }, {
+    __testSetStandalonePreferences(terminalPreferences({}, {
       terminal_colors: { mode: "custom", custom },
     }));
     flushSync();
@@ -150,7 +150,7 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
     });
   }
 
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }, { terminal_colors: { mode: "standard" } }));
+  __testSetStandalonePreferences(terminalPreferences({}, { terminal_colors: { mode: "standard" } }));
   flushSync();
   await tick();
   expect(colors(), "standard mode restores the theme defaults").toEqual(initial);

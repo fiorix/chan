@@ -76,7 +76,6 @@ export const DEMO_PREFERENCES: Preferences = {
     background_opacity: 100,
     mcp_env: false,
     mouse_capture: true,
-    ghostty: false,
   },
   bubble_overlay_mode: "stack",
   empty_pane_carousel_cycling: true,
