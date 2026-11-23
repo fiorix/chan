@@ -140,7 +140,6 @@ describe.each(cases)("soft-wrap search: $name", ({ first, needle, expected }) =>
 
   beforeAll(async () => {
     // The first line occupies rows 0 and 1. The later wrap crosses rows 1132/1133.
-    // Setup stays outside test.fails so an allocation/ABI error cannot count as proof.
     boundary = await observe(first + "\n".repeat(1130) + "x".repeat(41) + "\r\n", needle);
     for (const control of controls) readings.set(control.name, await observe(first + control.suffix, needle));
   });
@@ -150,11 +149,8 @@ describe.each(cases)("soft-wrap search: $name", ({ first, needle, expected }) =>
     expect(boundary.binding).toEqual(boundary.core);
   });
 
-  // Known failure: the pinned core returns [expected, expected], not [expected].
-  // A correction must change this test to an ordinary passing assertion.
-  test.fails("one occurrence has one match even with the later soft wrap", () => {
-    expect(boundary.binding).toEqual({ total: 1, matches: [expected] });
-  });
+  // The widget owner deduplicates these raw ranges; lib/search.test.ts
+  // drives the same bytes through count, navigation and highlights.
 
   test.each(controls)("one occurrence has one match with $name", ({ name }) => {
     const correct = { total: 1, matches: [expected] };

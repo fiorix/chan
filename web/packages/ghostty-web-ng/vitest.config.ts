@@ -12,6 +12,7 @@ export default defineConfig({
       "lib/terminal.theme.test.ts",
       "lib/terminal.selection.test.ts",
       "lib/highlights.test.ts",
+      "lib/search.test.ts",
       "lib/paint-layers.test.ts",
       "lib/render-options.test.ts",
       "lib/drawn-wraps.test.ts",

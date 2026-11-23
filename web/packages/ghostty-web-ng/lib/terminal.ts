@@ -30,6 +30,7 @@ import type {
   TerminalChange,
   TerminalCore,
   TerminalHighlights,
+  TerminalSearch,
   TerminalLinkActivation,
   TerminalViewport,
 } from './interfaces';
@@ -39,6 +40,7 @@ import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer, type FontMetrics, type PaintLayer } from './renderer';
 import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
 import { createTerminalCore } from './terminal-core';
+import { SearchOwner } from './search';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -69,6 +71,8 @@ export class Terminal {
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   private highlightsManager?: HighlightsManager;
+  #searchOwner?: SearchOwner;
+  public readonly search: TerminalSearch;
   /** Stable facade; requests before open or after disposal do not retain state. */
   public readonly highlights: TerminalHighlights = {
     set: (name, ranges, style) => { this.highlightsManager?.set(name, ranges, style); },
@@ -184,6 +188,14 @@ export class Terminal {
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
     const terminal = this;
+    const emptySearch = Object.freeze({ index: 0, total: 0, partial: false });
+    this.search = Object.freeze({
+      find: (query: string) => this.#searchOwner?.find(query),
+      step: (query: string, direction: 'older' | 'newer') => this.#searchOwner?.step(query, direction),
+      close: () => this.#searchOwner?.close(),
+      get state() { return terminal.#searchOwner?.state ?? emptySearch; },
+      onChange: (listener: Parameters<TerminalSearch['onChange']>[0]) => this.#searchOwner?.onChange(listener) ?? { dispose() {} },
+    });
     this.viewport = {
       get offset() { return terminal.viewportY; },
       followOutput: 'at-bottom',
@@ -493,6 +505,7 @@ export class Terminal {
       this.renderer.setSelectionManager(this.selectionManager);
       this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
       this.renderer.setHighlights(this.highlightsManager);
+      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlights, this.viewport, this.wasmTerm.isAlternateScreen());
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
@@ -601,6 +614,7 @@ export class Terminal {
 
     // Observers see the current links and view, with replies already sent,
     // before an echo or scrollbar animation can paint synchronously.
+    this.#searchOwner?.changed('write', core.isAlternateScreen());
     this.changeEmitter.fire({ kind: 'write' });
 
     if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
@@ -721,6 +735,7 @@ export class Terminal {
       // Resize renderer
       this.renderer!.resize(cols, rows);
 
+      this.#searchOwner?.changed('resize', this.wasmTerm!.isAlternateScreen());
       this.changeEmitter.fire({ kind: 'resize' });
 
       // The dimension event also serves PTY size publication.
@@ -1178,6 +1193,8 @@ export class Terminal {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.#searchOwner?.dispose();
+    this.#searchOwner = undefined;
     this.#coreAccess?.dispose();
     this.#coreAccess = undefined;
     this.endScrollbarDrag();

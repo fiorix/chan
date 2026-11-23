@@ -17,6 +17,8 @@ export type {
   TerminalCoreSearch,
   TerminalCoreTrackedCell,
   TerminalHighlights,
+  TerminalSearch,
+  TerminalSearchState,
   TerminalTestHooks,
   TerminalLinkActivation,
   TerminalLinkKind,

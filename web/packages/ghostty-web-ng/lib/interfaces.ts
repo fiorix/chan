@@ -141,6 +141,23 @@ export interface TerminalViewport {
   reveal(row: number, align?: 'start' | 'center' | 'end'): void;
 }
 
+/** One-based index from newest, null when unknown; zero when no matches exist. */
+export type TerminalSearchState = Readonly<{ index: number | null; total: number; partial: boolean }>;
+
+/** One query per widget; matching and highlights never modify the user selection. */
+export interface TerminalSearch {
+  /** Start a query and activate its newest match; unchanged queries keep their position. Empty closes. */
+  find(query: string): void;
+  /** Older is next/up, newer is previous/down. A changed query starts from no active match. */
+  step(query: string, direction: 'older' | 'newer'): void;
+  /** Frozen snapshot; a partial total counts only the distinct matches found so far. */
+  readonly state: TerminalSearchState;
+  /** Reports changed count/index/partial snapshots; does not replay the current state. */
+  readonly onChange: IEvent<TerminalSearchState>;
+  /** Free the query and tracked references and remove only the two search highlight layers. */
+  close(): void;
+}
+
 /** Named paint independent of selection, copy and content-change events. */
 export interface TerminalHighlights {
   /** Replace a layer with copied, ordered ranges and style; invalid coordinates throw while open. */
