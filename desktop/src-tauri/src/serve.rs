@@ -1162,6 +1162,12 @@ fn build_workspace_window_with_completion(
             tauri::webview::PageLoadEvent::Finished => {
                 crate::titlebar_tabs::page_load_finished(&window);
             }
+        })
+        .on_permission_request(|_, kind| {
+            crate::webview_permission::permission_response(
+                kind,
+                crate::webview_permission::PermissionSurface::Workspace,
+            )
         });
         // Build hidden when restored geometry will be applied, so the window
         // never flashes at the default size/position before it is repositioned.

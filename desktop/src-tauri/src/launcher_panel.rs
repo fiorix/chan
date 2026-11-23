@@ -1027,6 +1027,7 @@ fn build_panel(
     // the first webview's proxy is the process's, so every webview must
     // agree, and on Linux the proxy carries the loopback launcher page too.
     let builder = crate::wireguard::with_launcher_proxy(wry::WebViewBuilder::new())
+        .with_permission_handler(crate::webview_permission::launcher_permission_response)
         .with_url(url)
         .with_visible(false)
         .with_transparent(true)
