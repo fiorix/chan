@@ -294,11 +294,11 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     ]);
   });
 
-  /// A primary-button double click at `el` as the engine delivers it: each
-  /// press and release with its compatibility mouse events, then a click
-  /// carrying the count so far.
-  function engineDoubleClick(el: Element, at: { clientX: number; clientY: number }, shiftKey = false): void {
-    for (const detail of [1, 2]) {
+  /// `count` primary-button clicks in a row at `el` as the engine delivers
+  /// them: each press and release with its compatibility mouse events, then
+  /// a click carrying the count so far.
+  function engineClicks(el: Element, at: { clientX: number; clientY: number }, count: number, shiftKey = false): void {
+    for (let detail = 1; detail <= count; detail++) {
       const mouse = (type: string, buttons: number) =>
         el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, detail, shiftKey, ...at }));
       const compat = !mousePointer(el, "pointerdown", at, { shiftKey }).defaultPrevented;
@@ -311,7 +311,7 @@ describe("mouse events encoded by the Ghostty input handler", () => {
 
   // The word wraps after "hel", so a Shift double click on "lo" copying the
   // whole word is chan's extents, not the widget's own one-row double click.
-  test("on the Linux desktop a double click a program reports copies nothing; with Shift it selects and copies the word", async () => {
+  test("on the Linux desktop a double or triple click a program reports copies nothing; with Shift a double click selects and copies the word", async () => {
     const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
     const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invoke } };
     desktop.__TAURI_INTERNALS__ = { invoke };
@@ -330,17 +330,20 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     socket.sent.splice(0);
     invoke.mockClear();
 
-    engineDoubleClick(canvas, afterWrap);
-    await vi.waitFor(() => expect(inputFrames(socket).map((frame) => frame.data)).toEqual([
-      "\x1b[<0;1;2M", "\x1b[<0;1;2m", "\x1b[<0;1;2M", "\x1b[<0;1;2m",
-    ]));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(invoke.mock.calls, "no clipboard or PRIMARY write").toEqual([]);
-    expect(term.hasSelection()).toBe(false);
-    expect(term.getSelection()).toBe("");
+    for (const count of [2, 3]) {
+      socket.sent.splice(0);
+      engineClicks(canvas, afterWrap, count);
+      await vi.waitFor(() => expect(inputFrames(socket).map((frame) => frame.data)).toEqual(
+        Array.from({ length: count }, () => ["\x1b[<0;1;2M", "\x1b[<0;1;2m"]).flat(),
+      ));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls, `no clipboard or PRIMARY write after ${count} clicks`).toEqual([]);
+      expect(term.hasSelection()).toBe(false);
+      expect(term.getSelection()).toBe("");
+    }
 
     socket.sent.splice(0);
-    engineDoubleClick(canvas, afterWrap, true);
+    engineClicks(canvas, afterWrap, 2, true);
     await vi.waitFor(() => expect(invoke.mock.calls).toEqual([
       ["write_clipboard_text", { text: "hello" }],
       ["write_primary_selection", { text: "hello" }],
