@@ -40,6 +40,10 @@
 //   ctrl-click      Ctrl with a click opens the URL with no menu.
 //   double-click    a double click on the URL leaves no menu and opens
 //                   nothing.
+//   out-and-back    a drag past half a cell and back opens no menu and
+//                   leaves the clipboard sentinel intact.
+//   padding-release a row-zero press released just above the canvas opens
+//                   no link, including one in hidden history.
 // Then the shell prints a URL, turns on mouse tracking (1000, SGR 1006) and
 // becomes a raw recorder of what the PTY receives:
 //   tracked-click   a plain click reaches the PTY as a report; no menu, and
@@ -54,6 +58,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const DIR = "linkcheck316";
@@ -63,6 +68,7 @@ const URL_ARG = "s://example.com/link316?q=1";
 const URL_316 = `http${URL_ARG}`;
 const TRACK_URL = "https://example.com/track316";
 const REST_URL = "https://example.com/rest316";
+const EDGE_URL = "https://example.com/edge316";
 const FOREIGN = "file://elsewhere.invalid/etc/hosts";
 const MENU = '.terminal-tab-menu-bubble[aria-label="terminal link menu"]';
 const SENTINEL = "SMOKE316_CLIPBOARD_SENTINEL";
@@ -240,6 +246,8 @@ export default {
       await waitScrollback(name, "L316_READY");
       if (!existsSync(sizeFile)) throw new Error(`${backend}: the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
+      assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
+        "the PTY grid fits the link fixtures without wrapping");
       const home = existsSync(homeRecord) ? readFileSync(homeRecord, "utf8").trim() : "";
       if (home) homeFiles.add(join(home, HOME_FILE));
       await sleep(500);
@@ -339,6 +347,24 @@ export default {
         if (now.length !== before) throw new Error(`the opener got ${JSON.stringify(now.slice(before))}`);
       });
 
+      await leg(at("out-and-back"), async () => {
+        const before = (await opened()).length;
+        const p = await cell(4, ROW.url);
+        await approach(p);
+        await seedPointerClipboard(page, SENTINEL);
+        await page.mouse.down();
+        try {
+          await page.mouse.move(p.x + p.w, p.y);
+          await page.mouse.move(p.x, p.y);
+        } finally { await page.mouse.up(); }
+        await expectNoMenu("out-and-back drag");
+        const copied = await page.evaluate(() => navigator.clipboard.readText());
+        const now = await opened();
+        assert.equal(now.length, before, "out-and-back drag opens no browser tab");
+        assert.equal(copied, SENTINEL, "out-and-back drag copies nothing on release");
+        return { travel: p.w, threshold: p.w / 2, copied };
+      });
+
       await leg(at("rel-editor"), async () => {
         await clickRow(ROW.rel);
         const menu = await waitMenu("relative click");
@@ -400,6 +426,39 @@ export default {
         await page.waitForSelector(MENU, { hidden: true, timeout: 10_000 }).catch(() => {
           throw new Error("the menu stayed up over a cleared screen");
         });
+      });
+
+      await leg(at("padding-release"), async () => {
+        // Fill history with links so a negative click row cannot silently
+        // pass merely because the wrongly mapped history row is empty.
+        await cs(["write", "--tab-name", name,
+          `printf '\\033[H\\033[2J'; i=0; while [ "$i" -lt ${rows + 4} ]; do printf 'http%s\\n' '${EDGE_URL.slice(4)}'; i=$((i+1)); done; printf '\\033[Hhttp%s\\nEDGE316_%s\\n' '${EDGE_URL.slice(4)}' READY\n`]);
+        const output = await waitScrollback(name, "EDGE316_READY");
+        const historyUrls = output.split(EDGE_URL).length - 1;
+        assert.ok(historyUrls > rows, "the PTY printed more link rows than fit on the screen");
+        await sleep(500);
+        const p = await cell(4, 0);
+        const edge = await page.$eval(surfaceQuery, (canvas) => {
+          const r = canvas.getBoundingClientRect();
+          const host = canvas.parentElement;
+          const h = host.getBoundingClientRect();
+          return { top: r.top, hostTop: h.top, padding: Number.parseFloat(getComputedStyle(host).paddingTop) };
+        });
+        assert.ok(edge.top - edge.hostTop >= 2 && edge.padding >= 2, "the terminal has padding above the canvas");
+        assert.ok(p.w / 2 > 2, "the release is closer than the half-cell drag threshold");
+        const release = { x: p.x, y: edge.top - 1 };
+        assert.ok(await page.evaluate(({ query, point }) => {
+          const canvas = document.querySelector(query);
+          return document.elementFromPoint(point.x, point.y) === canvas.parentElement;
+        }, { query: surfaceQuery, point: release }), "the release point hits host padding, outside the canvas");
+        const before = (await opened()).length;
+        await page.mouse.move(p.x, edge.top + 1);
+        await page.mouse.down();
+        try { await page.mouse.move(release.x, release.y); }
+        finally { await page.mouse.up(); }
+        await expectNoMenu("padding release");
+        assert.equal((await opened()).length, before, "padding release opens no browser tab");
+        return { edge, release, historyUrls };
       });
 
       // ghostty looks a link up at the click, so one printed into the row
@@ -496,9 +555,10 @@ export default {
         throw new Error(`failed legs: ${failures.join(", ")}\n${JSON.stringify(results, null, 2)}`);
       }
       const required = ["url-menu", "foreign", "missing", "escape-typing", "ctrl-click", "double-click",
-        "rel-editor", "home-editor", "abs-editor", "output-closes", "resting-click", "tracked-click", "shift-click", "shift-drag"]
+        "out-and-back", "rel-editor", "home-editor", "abs-editor", "output-closes", "padding-release",
+        "resting-click", "tracked-click", "shift-click", "shift-drag"]
         .map((leg) => `ghostty.${leg}`);
-      assert.deepEqual(Object.keys(results).sort(), required.sort(), "all 14 Ghostty link-menu legs ran");
+      assert.deepEqual(Object.keys(results).sort(), required.sort(), "all 16 Ghostty link-menu legs ran");
       return results;
     } catch (error) {
       runError = error;
