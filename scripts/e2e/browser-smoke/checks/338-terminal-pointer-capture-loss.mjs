@@ -2,7 +2,7 @@
 // Native capture events pin completion; disposal is exercised through tab close.
 
 import assert from "node:assert/strict";
-import { drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerReports, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "CAPTURE338";
 const unavailable = (message) => Object.assign(new Error(message), { code: "POINTER_UNAVAILABLE" });
@@ -93,6 +93,72 @@ export default {
         assert.deepEqual((await pointerWrites(page)).slice(writes), [{ text: TEXT, status: "fulfilled" }], "only the next terminal copied");
       });
 
+      await leg("reported-reparent-release", async (result) => {
+        const terminal = await open("reported-reparent");
+        const grid = result.grid = await terminal.prepare(TEXT);
+        result.mode = await drainPointerInput(terminal.fixture, "\x1b[?1002;1006h");
+        assert.deepEqual(result.mode, { input: "", reply: "\x1b[2;1R" }, "drag tracking setup reached the parser");
+        assert.deepEqual(await terminal.term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
+          [false, true, false, true], "only button-motion tracking and SGR are enabled");
+        const sentinel = "SMOKE338_REPORTED_REPARENT_SENTINEL";
+        await seedPointerClipboard(page, sentinel);
+        const writes = (await pointerWrites(page)).length;
+        const index = terminal.fixture.records.length;
+        const y = grid.y + grid.h * 0.5;
+        await page.mouse.move(grid.x + grid.w * 2.5, y);
+        await page.mouse.down();
+        await page.mouse.move(grid.x + grid.w * 7.5, y);
+        result.before = await drainPointerInput(terminal.fixture, "", index);
+        assert.deepEqual(pointerReports(result.before.input), [
+          { button: 0, col: 3, row: 1, end: "M" },
+          { button: 32, col: 8, row: 1, end: "M" },
+        ], "the reported gesture reaches a known last cell before reparenting");
+        const down = result.press = (await pointerEvents(terminal.trace))
+          .findLast((event) => event.type === "pointerdown" && event.onCanvas);
+        assert.ok(down?.isPrimary && down.isTrusted && down.pointerType === "mouse", "the canvas received a trusted primary mouse press");
+        assert.equal(await terminal.trace.evaluate((trace, id) => trace.canvas.hasPointerCapture(id), down.pointerId), true,
+          "the reported press owns capture before DOM movement");
+        assert.equal(await terminal.term.evaluate((t) => t.getSelection()), "", "the reported drag has no held selection");
+        const afterReparent = terminal.fixture.records.length;
+        result.reparent = await terminal.term.evaluate((t, id) => {
+          const host = t.element, parent = host.parentNode, next = host.nextSibling;
+          const canvas = host.querySelector(":scope > canvas");
+          host.remove();
+          const detachedCapture = canvas.hasPointerCapture(id);
+          parent.insertBefore(host, next);
+          return { detachedCapture, reattachedCapture: canvas.hasPointerCapture(id), connected: canvas.isConnected };
+        }, down.pointerId);
+        assert.equal(result.reparent.connected, true, "the original canvas is connected again before motion");
+        assert.deepEqual(await pointerGrid(terminal.term), grid, "DOM reparenting preserves the cell geometry");
+        if (result.reparent.reattachedCapture) {
+          throw unavailable("Chrome retained canvas capture across reparenting; no capture-loss trigger was available");
+        }
+        result.eventsBeforeMove = await pointerEvents(terminal.trace);
+        await page.mouse.move(grid.x + grid.w * 10.5, y);
+        await settlePointer(page);
+        result.eventsAfterMove = await pointerEvents(terminal.trace);
+        assert.ok(result.eventsAfterMove.slice(result.eventsBeforeMove.length).some((event) => event.type === "pointermove"
+          && event.onCanvas && event.pointerId === down.pointerId && event.pointerType === "mouse"
+          && event.isPrimary && event.isTrusted && event.buttons === 1), "a real held move reached the reattached canvas");
+        result.loss = await drainPointerInput(terminal.fixture, "", afterReparent);
+        assert.deepEqual(pointerReports(result.loss.input), [{ button: 0, col: 8, row: 1, end: "m" }],
+          "capture loss reports exactly one release at the last cell before the move");
+        const afterLoss = terminal.fixture.records.length;
+        await page.mouse.up();
+        await page.mouse.move(grid.x + grid.w * 11.5, y);
+        await settlePointer(page);
+        result.after = await drainPointerInput(terminal.fixture, "", afterLoss);
+        result.eventsAfterRelease = await pointerEvents(terminal.trace);
+        assert.ok(result.eventsAfterRelease.some((event) => event.type === "pointerup" && event.onCanvas
+          && event.pointerId === down.pointerId && event.pointerType === "mouse" && event.isPrimary && event.isTrusted),
+        "the late native release reached the canvas");
+        assert.equal(result.after.input, "", "late release and hover add no report after capture loss");
+        assert.equal(await terminal.term.evaluate((t) => t.getSelection()), "", "report-only capture loss creates no selection");
+        result.writes = (await pointerWrites(page)).slice(writes);
+        assert.deepEqual(result.writes, [], "report-only reparenting and late release never attempt a copy");
+        assert.equal(await page.evaluate(() => navigator.clipboard.readText()), sentinel, "the reported gesture keeps the sentinel");
+      });
+
       await leg("reparent-then-second-pointer", async (result) => {
         const terminal = await open("reparent");
         const grid = result.grid = await terminal.prepare(TEXT);
@@ -141,7 +207,7 @@ export default {
           if (penHeld) await penPointer(cdp, "mouseReleased", 1, 1);
         }
       });
-      assert.deepEqual(Object.keys(details.legs), ["connected-capture-loss", "dispose-during-autoscroll", "reparent-then-second-pointer"]);
+      assert.deepEqual(Object.keys(details.legs), ["connected-capture-loss", "dispose-during-autoscroll", "reported-reparent-release", "reparent-then-second-pointer"]);
     });
   },
 };
