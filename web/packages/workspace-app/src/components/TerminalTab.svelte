@@ -1848,6 +1848,19 @@
       wakeProbe.frameReceived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
+        // Count the frame before the terminal takes it. The core parses a
+        // write before anything it then runs (replies, change listeners, a
+        // render), so code inside the write sees the position the core
+        // reached, and a throw from any of it cannot leave the position
+        // short: a short ack stops the server once its window fills, and a
+        // short cursor makes a redial replay what the screen already shows.
+        // It precedes the reset and notice below, whose writes run the same
+        // listeners.
+        streamAck.parsed(bytes.length, attachReplayActive);
+        // Advance the server byte cursor only for LIVE output: replay chunks
+        // (between the `session` and `ready` frames) reconstruct history up to
+        // the prelude `seq` we already adopted, so counting them would double.
+        if (!attachReplayActive) receivedSeq += bytes.length;
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
           const terminal = term;
@@ -1866,11 +1879,6 @@
           }
         }
         writePtyOutput(bytes, attachPtyWriteOrigin());
-        streamAck.parsed(bytes.length, attachReplayActive);
-        // Advance the server byte cursor only for LIVE output: replay chunks
-        // (between the `session` and `ready` frames) reconstruct history up to
-        // the prelude `seq` we already adopted, so counting them would double.
-        if (!attachReplayActive) receivedSeq += bytes.length;
         recordOutputActivity();
         maybeSeedPrompt();
         return;
@@ -2028,6 +2036,12 @@
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0 && !resetBeforeReplay) {
+          // The lost bytes can end inside a sequence whose rest never comes.
+          // CAN on the output path ends it in the core and in every stream
+          // observer, as the server's own recovery suffix does after the
+          // replay, so neither this line nor the replay is read as part of
+          // it. A reset replay starts with RIS, which ends it too.
+          writePtyOutput(Uint8Array.of(0x18), "replay");
           writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
         // A replacement socket has attached to the same session: what waited
