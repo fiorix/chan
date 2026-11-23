@@ -3309,9 +3309,8 @@
 
   /// The close-tab chord on an exited terminal is Ctrl+D and nothing near
   /// it. Shift is excluded because Ctrl+Shift+D is a different chord the
-  /// terminal does not claim: matching it here closed a tab the user was
-  /// not closing, and the double dispatch below then took its neighbour
-  /// with it.
+  /// terminal does not claim, so matching it would close a tab the user is
+  /// not closing.
   function isCloseExitedTabKey(e: KeyboardEvent): boolean {
     return (
       e.type === "keydown" &&
