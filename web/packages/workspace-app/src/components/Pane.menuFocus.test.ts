@@ -1,4 +1,9 @@
 // @vitest-environment jsdom
+//
+// Where the keyboard is while a pane menu opens and closes, and where a left
+// press on the pane strip's stretch puts it. The pane tree is mounted over the
+// demo workspace; a terminal runs on the real widget (the shared fixture),
+// and its surface is the widget's element, which the widget's focus() takes.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -10,7 +15,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import Workspace from "./Workspace.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -18,7 +25,8 @@ import { demoSocketFactory } from "../demo/socket";
 import { setSocketFactory } from "../api/transport";
 import { refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { cancelPaneMode, enterPaneMode, layout, type LeafNode, type Tab } from "../state/tabs.svelte";
-import { installTerminalDom, resetTerminals, terminalTab, xterm } from "../__tests__/terminalTab";
+import { openedGhostty } from "../__tests__/ghosttyTab";
+import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 import { fileTab } from "../__tests__/tabs";
 
 installTerminalDom();
@@ -31,7 +39,6 @@ const cleanups: Array<() => void> = [];
 beforeEach(async () => {
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) =>
     setTimeout(() => callback(0), 0) as unknown as number) as typeof requestAnimationFrame;
-  xterm.textareaFocus = true;
   installDemoWorkspace({
     metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 0, textCount: 0 },
     files: [],
@@ -67,9 +74,9 @@ async function mountPane(withTerminal = true): Promise<{ target: HTMLElement; su
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  if (tab) await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
+  const term = tab ? await openedGhostty(target) : null;
   await settle();
-  const surface = tab ? xterm.terminals.at(-1)?.textarea : target.querySelector<HTMLElement>(".welcome");
+  const surface = term ? term.element : target.querySelector<HTMLElement>(".welcome");
   if (!surface) throw new Error("the focused surface did not mount");
   surface.focus();
   expect(document.activeElement).toBe(surface);
@@ -90,9 +97,9 @@ async function mountSplitPane(otherTabs: Tab[] = []): Promise<{ target: HTMLElem
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
+  const term = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${tab.id}"]`) ?? target);
   await settle();
-  const surface = xterm.terminals[0]?.textarea;
+  const surface = term.element;
   const other = target.querySelector<HTMLElement>(`[data-pane-id="${right.id}"]`);
   if (!surface || !other) throw new Error("the split pane did not mount");
   surface.focus();
@@ -290,7 +297,7 @@ describe("left press on the pane strip stretch", () => {
 
   test("focuses another pane's active terminal", async () => {
     const { other } = await mountSplitPane([terminalTab({ id: "menu-focus-other-terminal" })]);
-    const destination = xterm.terminals[1]?.textarea;
+    const destination = (await openedGhostty(other)).element;
     if (!destination) throw new Error("the other terminal did not mount");
     const press = pressWithBrowserFocus(other.querySelector<HTMLElement>(".tabs .dead-zone")!, 0);
     await settle();
