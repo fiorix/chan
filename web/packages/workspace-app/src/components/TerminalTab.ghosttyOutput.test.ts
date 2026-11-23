@@ -22,11 +22,10 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
-import { ghosttyLineText, ghosttyMouseTracking } from "../__tests__/ghosttyTab";
+import { ghosttyLineText, ghosttyMouseTracking, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
   installTerminalDom,
-  mountTerminal,
   output,
   receive,
   resetTerminals,
@@ -59,7 +58,7 @@ afterEach(() => {
 
 async function mounted(): Promise<{ tab: TerminalTabState; socket: TerminalSocket; term: Terminal }> {
   const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
-  const { term } = await mountTerminal<Terminal>(TerminalTab, tab!);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   return { tab: tab!, socket: TerminalSocket.all.at(-1)!, term };
 }
 

@@ -196,14 +196,21 @@ export function seatTerminals(tabs: TerminalTabState[]): TerminalTabState[] {
 
 const mounted: Array<Record<string, unknown>> = [];
 
-/// Mount `TerminalTab` for a seated tab and wait for its socket and its
-/// terminal: the widget under the shared fixture, the stand-in otherwise.
-/// `T` names which one the file declared.
-export async function mountTerminal<T extends FakeTerminal | GhosttyTerminal = FakeTerminal>(
+/// Whether the file declared the shared widget fixture.
+export function ghosttyFixtureDeclared(): boolean {
+  return ghostty !== null;
+}
+
+/// Mount `TerminalTab` for a seated tab and wait for its terminal and its
+/// socket: the widget under the shared fixture, the stand-in otherwise.
+/// `term` is the stand-in. Under the fixture reading it throws: a file that
+/// reads the widget mounts it with `mountGhosttyTerminal` in `./ghosttyTab`,
+/// which refuses a file that did not declare the fixture.
+export async function mountTerminal(
   TerminalTab: Component<any>,
   tab: TerminalTabState,
   props: { focused?: boolean; active?: boolean; side?: "a" | "b" } = {},
-): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: T }> {
+): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: FakeTerminal }> {
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
@@ -219,14 +226,25 @@ export async function mountTerminal<T extends FakeTerminal | GhosttyTerminal = F
   mounted.push(component);
   await tick();
   await tick();
-  await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
   if (ghostty) {
-    const term = await ghostty.opened(target);
+    // The widget dials only once it has loaded and opened, so its own wait
+    // bounds the load, and the socket follows.
+    await ghostty.opened(target);
+    await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
     expect(xterm.terminals, "the shared fixture opened no stand-in xterm").toHaveLength(0);
-    return { target, component, term: term as T };
+    // Not enumerable, so a caller that spreads the result reads nothing.
+    const opened: { target: HTMLElement; component: Record<string, unknown> } = { target, component };
+    return Object.defineProperty(opened, "term", {
+      get(): never {
+        throw new Error("this terminal is the widget: mount it with mountGhosttyTerminal in ./ghosttyTab to read it");
+      },
+    }) as typeof opened & { term: FakeTerminal };
   }
+  await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
   await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
-  return { target, component, term: xterm.terminals.at(-1)! as T };
+  const term = xterm.terminals.at(-1);
+  if (!(term instanceof FakeTerminal)) throw new Error("the stand-in xterm opened no FakeTerminal");
+  return { target, component, term };
 }
 
 export function openSocket(): TerminalSocket {

@@ -35,6 +35,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
 
 import TerminalTab from "./TerminalTab.svelte";
 import { failOnTerminalInitFailures } from "../../vitest.setup";
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
 import { XtermStandInRequested, xterm } from "../__tests__/xterm";
@@ -65,6 +66,12 @@ test("a terminal opened without the shared widget fixture fails its test, naming
 test.fails("a terminal opened without the shared widget fixture, its report left to the guard, fails the test", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await mountTerminal(TerminalTab, tab!);
+});
+
+test("the widget's checked mount refuses a file that did not declare the fixture", async () => {
+  const [tab] = seatTerminals([terminalTab()]);
+  await expect(mountGhosttyTerminal(TerminalTab, tab!)).rejects.toThrow(/needs the shared fixture/);
+  expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
 });
 
 test("a load that fails with the stand-in route's error is let through", async () => {

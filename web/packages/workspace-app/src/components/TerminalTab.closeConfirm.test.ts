@@ -20,12 +20,12 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { closeTab, layout, type LeafNode } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   receive,
   resetTerminals,
   seatTerminals,
@@ -46,7 +46,7 @@ const paneTabs = () => (layout.nodes[TERMINAL_PANE] as LeafNode).tabs;
 /// Mount a terminal tab and return it with its socket.
 async function mounted() {
   const [tab] = seatTerminals([terminalTab()]);
-  await mountTerminal(TerminalTab, tab!);
+  await mountGhosttyTerminal(TerminalTab, tab!);
   return { tab: tab!, socket: TerminalSocket.all.at(-1)! };
 }
 

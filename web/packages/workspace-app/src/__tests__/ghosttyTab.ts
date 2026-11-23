@@ -10,8 +10,9 @@
 //   vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 //     (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 //
-// and every terminal it opens, through `mountTerminal` or through the app,
-// is the widget over the vendored core.
+// and every terminal it opens, through `mountGhosttyTerminal`, which returns
+// it, through `mountTerminal` or through the app, is the widget over the
+// vendored core.
 
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
@@ -20,7 +21,15 @@ import { expect, vi } from "vitest";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import type { GhosttyKit, ghosttyKitFrom } from "../terminal/backend";
 import { SoftwareCanvasContext } from "./softwareCanvas";
-import { attach, receive, TERMINAL_PANE, TerminalSocket, useGhosttyFixture } from "./terminalTab";
+import {
+  attach,
+  ghosttyFixtureDeclared,
+  mountTerminal,
+  receive,
+  TERMINAL_PANE,
+  TerminalSocket,
+  useGhosttyFixture,
+} from "./terminalTab";
 
 export type GhosttyRuntime = {
   module: WebAssembly.Module | null;
@@ -196,6 +205,25 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
 /// metrics to align the widget's cells with.
 export async function ghosttyCompatModule(importOriginal: <T>() => Promise<T>) {
   return { ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()), ...ghosttyCompatStubs() };
+}
+
+/// Mount `TerminalTab` for a seated tab, as `mountTerminal` does, and return
+/// the fixture's widget it opened. Throws before mounting unless the file
+/// declared the fixture, so a file whose mocks did not apply fails rather
+/// than running on another terminal.
+export async function mountGhosttyTerminal(
+  TerminalTab: Component<any>,
+  tab: TerminalTabState,
+  props: { focused?: boolean; active?: boolean; side?: "a" | "b" } = {},
+): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: Terminal }> {
+  if (!ghosttyFixtureDeclared()) {
+    throw new Error(
+      'mountGhosttyTerminal needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
+        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+    );
+  }
+  const { target, component } = await mountTerminal(TerminalTab, tab, props);
+  return { target, component, term: await openedGhostty(target) };
 }
 
 /// The fixture terminal open inside `within`, once there is one.
