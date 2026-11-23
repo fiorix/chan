@@ -12,6 +12,12 @@ export interface ITerminalOptions {
   cursorStyle?: 'block' | 'underline' | 'bar';
   theme?: ITheme;
   scrollback?: number; // Default: 10000
+  /**
+   * Core history budget in bytes, replacing scrollback's line limit. Construction only.
+   * Positive finite integers saturate at 0xfffffffe; invalid values use scrollback.
+   * Whole-page retention can exceed the budget; this is not a process-memory cap.
+   */
+  scrollbackBytes?: number;
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
   /** Cell-height multiplier, at least 1; defaults to 1. Construction only. */

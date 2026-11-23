@@ -28,6 +28,12 @@ An omitted or `undefined` color clears its previous override. Core defaults are 
 
 Default backgrounds use the row's theme fill, explicit backgrounds use their own RGB (so black stays black), and inverse video uses the original foreground as its background. A transparent or translucent final backdrop has no known external color, so its ink is left unchanged; explicit opaque cells on that backdrop still receive the floor. Selection and highlights composite their background over the row fill, and inherited ink is measured against that composite when it is opaque. An explicit selection or highlight foreground, cursor/accent, explicit SGR underline color and link-hover underline keep their own colors. Other decorations follow the adjusted ink. Faint, shade glyph opacity and font antialiasing still apply afterward, so their resulting edge/translucent pixels can be below the requested ratio. Custom paint layers, including the final mask, receive no contrast adjustment.
 
+## Scrollback budget
+
+Construction option `scrollbackBytes` sets a budget in bytes of retained history in the core, not process memory or WebAssembly memory capacity. A positive finite integer replaces the `scrollback` line ceiling, even when both options are supplied. Values above `4,294,967,294` saturate there because wasm32 reserves the next value for unlimited history. Zero, negative, fractional and non-finite values behave as an omitted byte budget: `scrollback` retains its line-count behavior, defaulting to 10,000 with zero meaning unlimited. Neither option updates the core after open.
+
+The binding forwards the budget as `VtTerminalConfig.scrollbackMaxBytes`. An omitted binding byte limit uses the line limit; explicit zero disables history. The core prunes whole pages and retains the live grid, so a small budget rounds up to its page minimum and retained allocation can exceed it by page granularity. Page size depends on content: wide/combining clusters can consume more bytes per row and retain fewer rows than ASCII at the same budget. For a setting in MiB, pass `scrollbackBytes: mib * 1_048_576`; do not also convert it into a line count.
+
 ## Core access and lifetime
 
 `term.core` is a frozen runtime forwarding facade, not the raw `VtTerminal`: core is available when `term.core` is defined, never by instanceof. It is `undefined` before open and after disposal, and the same facade and core remain throughout an open terminal's lifetime. Writes, resize reflow and a program's VT reset do not replace either. There is no `Terminal.reset()` method or core-replacement event.
@@ -96,7 +102,7 @@ Selection and mouse reporting share a captured primary mouse or pen gesture on t
 
 ## Type checking and tests
 
-TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and widget test suites under the workspace app's strict settings. `vitest.config.ts` selects the binding, input-handler, focus, core, theme, selection, highlights, paint-layer, rendering-option, drawn-wrap, link, pointer and viewport suites. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
+TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and widget test suites under the workspace app's strict settings. `vitest.config.ts` selects the binding, input-handler, focus, core, scrollback, theme, selection, highlights, paint-layer, rendering-option, drawn-wrap, link, pointer and viewport suites. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
 
 The package's `tsconfig.json` is a build input for `lib/`: its ES2020 target preserves constructor-assigned class fields. Vite uses the nearest configuration that includes each file. The binding's separate configuration targets ES2022; it does not change how Vite compiles the widget. The workspace app's `src/terminal/ghosttyWidget.test.ts` pins the widget's class-field behavior.
 

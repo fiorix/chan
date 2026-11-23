@@ -150,6 +150,7 @@ export class Terminal {
       cursorStyle: options.cursorStyle ?? 'block',
       theme: { ...options.theme },
       scrollback: options.scrollback ?? 10000,
+      scrollbackBytes: options.scrollbackBytes,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
       lineHeight: options.lineHeight ?? 1,
@@ -277,9 +278,12 @@ export class Terminal {
   private buildWasmConfig(): VtTerminalConfig | undefined {
     const theme = this.options.theme;
     const scrollback = this.options.scrollback;
+    // wasm32 SIZE_MAX means unlimited, so keep finite budgets below it.
+    const scrollbackMaxBytes = Number.isInteger(this.options.scrollbackBytes) && this.options.scrollbackBytes > 0
+      ? Math.min(this.options.scrollbackBytes, 0xffff_fffe) : undefined;
 
     // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
+    if (!theme && scrollback === 10000 && scrollbackMaxBytes === undefined) {
       return undefined;
     }
 
@@ -307,6 +311,7 @@ export class Terminal {
 
     return {
       scrollbackLimit: scrollback,
+      scrollbackMaxBytes,
       fgColor: this.parseColorToHex(theme?.foreground),
       bgColor: this.parseColorToHex(theme?.background),
       cursorColor: this.parseColorToHex(theme?.cursor),

@@ -534,6 +534,8 @@ class VtWasm {
 /// zero is explicit black, including in a partially specified palette.
 export type VtTerminalConfig = {
   scrollbackLimit?: number;
+  /** wasm32 byte budget; undefined uses lines, zero disables history. */
+  scrollbackMaxBytes?: number;
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
@@ -1253,15 +1255,11 @@ export class VtTerminal {
     const fn = this.wasm.fn;
     const s = this.scratch;
     const O = ABI.GhosttyTerminalOption;
-    // ghostty-web counts scrollback in lines, zero meaning unlimited.
-    // Upstream also caps history in bytes, by default at one page (about a
-    // thousand short lines at 80 columns), and the first cap reached wins.
-    // SIZE_MAX, the wasm32 size_t's maximum, lifts the byte cap so the line
-    // count the user's setting maps to holds; a null value would restore
-    // the default.
-    this.wasm.view().setUint32(s + SCRATCH.slot, 0xffff_ffff, true);
+    // A supplied byte budget replaces the line ceiling. Without one,
+    // SIZE_MAX lifts the core's default byte cap so only lines limit history.
+    this.wasm.view().setUint32(s + SCRATCH.slot, config?.scrollbackMaxBytes ?? 0xffff_ffff, true);
     fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_BYTES, s + SCRATCH.slot);
-    const lines = config?.scrollbackLimit ?? 10_000;
+    const lines = config?.scrollbackMaxBytes === undefined ? config?.scrollbackLimit ?? 10_000 : 0;
     if (lines > 0) {
       this.wasm.view().setUint32(s + SCRATCH.slot, lines, true);
       fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, s + SCRATCH.slot);
