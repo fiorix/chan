@@ -12,19 +12,14 @@
 ///
 /// The ghostty adapters are the product's own modules, compiled straight out
 /// of src/terminal/ into /product/. Only the wiring is written here, and it
-/// tracks TerminalTab.start() and backend.ts: the same core under the same
-/// binding, same options, same post-open() alignment, same custom-glyph and
-/// overlay-scrollbar installs.
+/// uses chan's core binding, font options, custom-glyph and overlay-scrollbar
+/// installs. Cell dimensions come from the widget's renderer metrics.
 
-import { Terminal as XtermTerminal } from "/vendor/xterm/lib/xterm.mjs";
-import { WebglAddon } from "/vendor/addon-webgl/lib/addon-webgl.mjs";
 import { Terminal as GhosttyTerminal } from "/vendor/ghostty-web-ng/ghostty-web.js";
 import { GhosttyVt } from "/vendor/ghostty-web-ng/vt.js";
 import {
-  alignGhosttyRendererToXterm,
   installGhosttyCustomGlyphs,
   installGhosttyOverlayScrollbar,
-  measureXtermCellDimensions,
 } from "/product/ghosttyCompat.js";
 
 /// The grid every scenario renders on. Fixed rather than fitted: a fitted
@@ -32,10 +27,6 @@ import {
 /// painting the same pattern in the same cells.
 const COLS = 60;
 const ROWS = 20;
-
-/// TerminalTab's line height. Also what measureXtermCellDimensions is handed
-/// when the ghostty renderer is aligned to xterm's grid.
-const LINE_HEIGHT = 1.2;
 
 /// The pattern's geometry, in cells. Every region the driver samples is
 /// derived from these, so moving the pattern moves the measurements with it.
@@ -696,54 +687,6 @@ function nextFrame() {
   );
 }
 
-async function startXterm(host, scenario, warnings, bytes) {
-  const term = new XtermTerminal({
-    allowProposedApi: true,
-    allowTransparency: false,
-    cols: COLS,
-    cursorBlink: false,
-    cursorStyle: "block",
-    fontFamily: scenario.fontFamily,
-    fontSize: scenario.fontSize,
-    lineHeight: LINE_HEIGHT,
-    macOptionIsMeta: true,
-    rows: ROWS,
-    scrollback: 1000,
-    tabStopWidth: 8,
-    theme: terminalTheme(host),
-  });
-  term.open(host);
-  // The desktop app stays on the DOM renderer on Linux (see
-  // shouldUseWebglRenderer). The webgl arm exists so a run can measure what
-  // the renderer chan turns off there would have painted: it is the only
-  // xterm renderer that fires the customGlyphs path, since @xterm/addon-canvas
-  // has no release for xterm 6 and installing it pulls the core back to 5.5.
-  const addons = { webgl: WebglAddon };
-  const Addon = addons[scenario.renderer];
-  if (Addon) {
-    try {
-      term.loadAddon(new Addon());
-    } catch (err) {
-      warnings.push(`${scenario.renderer} addon unavailable: ${err}`);
-    }
-  }
-  await new Promise((resolve) => term.write(bytes, resolve));
-  await nextFrame();
-
-  const screen = host.querySelector(".xterm-screen");
-  if (!screen) throw new Error("xterm painted no .xterm-screen");
-  const rect = screen.getBoundingClientRect();
-  return {
-    cols: term.cols,
-    rows: term.rows,
-    cellWidth: rect.width / term.cols,
-    cellHeight: rect.height / term.rows,
-    originX: rect.x,
-    originY: rect.y,
-    renderer: scenario.renderer,
-  };
-}
-
 /// The vendored libghostty-vt core, compiled once per page like the module
 /// behind loadGhosttyKit's cached promise. Every chan terminal instantiates
 /// it into a memory of its own, through chan's binding (backend.ts's
@@ -790,21 +733,7 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
   });
   term.open(host);
 
-  // TerminalTab's post-open() alignment, in the order it runs there.
   const renderer = term.renderer;
-  const targetCell = measureXtermCellDimensions(
-    host,
-    scenario.fontFamily,
-    scenario.fontSize,
-    LINE_HEIGHT,
-  );
-  if (
-    !renderer ||
-    !targetCell ||
-    !alignGhosttyRendererToXterm(renderer, targetCell, term.cols, term.rows)
-  ) {
-    warnings.push("ghostty renderer metrics unavailable; native spacing");
-  }
   if (renderer && !installGhosttyCustomGlyphs(renderer)) {
     warnings.push("ghostty text hook unavailable; font-rendered box glyphs");
   }
@@ -823,11 +752,18 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
   if (!canvas) throw new Error("ghostty painted no canvas");
   const rect = canvas.getBoundingClientRect();
   const metrics = renderer?.getMetrics();
+  if (
+    !metrics ||
+    !Number.isFinite(metrics.width) || metrics.width <= 0 ||
+    !Number.isFinite(metrics.height) || metrics.height <= 0
+  ) {
+    throw new Error("ghostty renderer cell metrics unavailable");
+  }
   return {
     cols: term.cols,
     rows: term.rows,
-    cellWidth: metrics?.width ?? rect.width / term.cols,
-    cellHeight: metrics?.height ?? rect.height / term.rows,
+    cellWidth: metrics.width,
+    cellHeight: metrics.height,
     originX: rect.x,
     originY: rect.y,
     renderer: "ghostty-canvas",
@@ -855,8 +791,9 @@ async function main() {
     `${scenario.fontSize}px "Source Code Pro"`,
   );
 
-  const start =
-    scenario.backend === "ghostty" ? startGhostty : startXterm;
+  if (scenario.backend !== "ghostty") {
+    throw new Error(`unsupported terminal backend ${scenario.backend}`);
+  }
 
   // A reference pattern settles through the ghostty widget's own API and
   // its scrollbar's timing, so it is painted on ghostty alone.
@@ -864,7 +801,7 @@ async function main() {
   if (scenario.pattern && !pattern) {
     throw new Error(`no pattern named ${scenario.pattern}`);
   }
-  if (pattern && (scenario.backend !== "ghostty" || scenario.newTab)) {
+  if (pattern && scenario.newTab) {
     throw new Error(`the ${scenario.pattern} pattern paints one ghostty tab`);
   }
 
@@ -881,7 +818,7 @@ async function main() {
     prior.style.cssText = `position:absolute;left:-${size.width + 100}px;top:0;
       width:${size.width}px;height:${size.height}px;overflow:hidden;`;
     document.body.appendChild(prior);
-    await start(prior, scenario, warnings, patternBytes());
+    await startGhostty(prior, scenario, warnings, patternBytes());
   }
 
   const bytes = pattern
@@ -889,7 +826,7 @@ async function main() {
     : scenario.newTab
       ? promptBytes()
       : patternBytes();
-  const grid = await start(host, scenario, warnings, bytes, pattern?.settle);
+  const grid = await startGhostty(host, scenario, warnings, bytes, pattern?.settle);
 
   // The title is the whole channel back to the driver: it is readable
   // without a JavaScriptCore binding and it arrives on an event the driver

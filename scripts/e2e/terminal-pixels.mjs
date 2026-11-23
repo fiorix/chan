@@ -23,15 +23,14 @@
  * harness. The app's own build is irrelevant there; it is being used as a
  * WebView2 host configured the way the product configures one.
  *
- * The Windows matrix is NOT the Linux one. shouldUseWebglRenderer(true,
- * "windows") is true, so the desktop app ships xterm's WebGL renderer here and
- * the DOM renderer Linux ships is the reference arm. The font chain diverges
- * too: `os-default` leads with Cascadia Mono, so the two font preferences
- * resolve to different faces instead of the same one.
+ * The Ghostty grid and second-tab scenarios use Windows font chains:
+ * `os-default` leads with Cascadia Mono, so the two font preferences resolve
+ * to different faces instead of the same one. Reference patterns and PNG
+ * comparisons are provided by the Python driver only.
  *
  * Usage:
- *   node scripts/e2e/terminal-pixels.mjs [--out DIR] [--include-renderers]
- *                                        [--only SUBSTRING] [--webview2]
+ *   node scripts/e2e/terminal-pixels.mjs [--out DIR]
+ *                                      [--only SUBSTRING] [--webview2]
  *
  * Exit status: 0 pass, 1 fail, 2 skipped because no webview host was found.
  * A skip is not a pass; report it as a skip.
@@ -116,7 +115,7 @@ function fontFaceBlock() {
 /** Compile the product's own ghostty adapters into `outDir`.
  *
  * Compiled rather than reimplemented: this harness exists to measure what
- * TerminalTab paints, and a second copy of the alignment and custom-glyph
+ * TerminalTab paints, and a second copy of the custom-glyph and scrollbar
  * code would measure the copy.
  */
 async function buildProductModules(outDir) {
@@ -171,8 +170,6 @@ const CONTENT_TYPES = {
 async function serve(productDir, ghosttyDir, page) {
   const mounts = [
     ["/fonts/", path.join(WORKSPACE_APP, "src/fonts")],
-    ["/vendor/xterm/", path.join(WEB, "node_modules/@xterm/xterm")],
-    ["/vendor/addon-webgl/", path.join(WEB, "node_modules/@xterm/addon-webgl")],
     // The widget is bundled into the run directory, not linked: its package
     // holds TypeScript sources only (see terminal-pixels/build-ghostty.mjs).
     ["/vendor/ghostty-web-ng/", ghosttyDir],
@@ -788,8 +785,7 @@ function measure(pixels, report) {
     //
     // This does not soften TG-03. The defect it exists to catch is an
     // unpainted strip at EVERY cell boundary, which is interior to the
-    // rectangle and untouched by a one-pixel inset: the DOM renderer arms
-    // still score in the high eighties against this same measurement.
+    // rectangle and untouched by a one-pixel inset.
     const rect = pixels.grow(spanRect(pixels, regions.block), -1, -1);
     numbers.block_coverage = pixels.coverage(rect);
     numbers.block_gaps = gapBands(pixels.inkedRows(rect));
@@ -802,63 +798,43 @@ function measure(pixels, report) {
   return numbers;
 }
 
-/** One cell of the shipped matrix: a backend, a font preference. */
+/** One font preference and tab position in the Ghostty matrix. */
 class Scenario {
-  constructor(backend, font, { renderer = "dom", newTab = false } = {}) {
-    this.backend = backend;
+  constructor(font, { newTab = false } = {}) {
     this.font = font;
-    // Only meaningful for the xterm backend; ghostty owns its renderer.
-    this.renderer = renderer;
     this.newTab = newTab;
   }
 
   get name() {
-    let suffix = this.renderer === "dom" ? "" : ` +${this.renderer}`;
-    if (this.newTab) suffix += " (second tab)";
-    return `${this.font}, ${this.backend}${suffix}`;
+    const suffix = this.newTab ? " (second tab)" : "";
+    return `${this.font}, ghostty${suffix}`;
   }
 
   get slug() {
     return (
-      `${this.backend}-${this.font}` +
-      (this.renderer === "dom" ? "" : `-${this.renderer}`) +
+      `ghostty-${this.font}` +
       (this.newTab ? "-newtab" : "")
     );
   }
 
   url(port) {
     const config = {
-      backend: this.backend,
+      backend: "ghostty",
       font: this.font,
       fontFamily: windowsFontChain(this.font),
       fontSize: FONT_SIZE,
       newTab: this.newTab,
-      renderer: this.renderer,
     };
     return `http://127.0.0.1:${port}/index.html#${encodeURIComponent(JSON.stringify(config))}`;
   }
 }
 
-// The shipped Windows matrix, in the order the settings present it, then the
-// same backends opening a second tab while the first still holds its content.
-// The xterm arms carry the WebGL renderer because that is what
-// shouldUseWebglRenderer turns on for a Windows desktop.
+// The font preferences in settings order, followed by
+// a second tab while the first still holds its content.
 const SCENARIOS = [
-  new Scenario("xterm", "os-default", { renderer: "webgl" }),
-  new Scenario("xterm", "source-code-pro", { renderer: "webgl" }),
-  new Scenario("ghostty", "os-default"),
-  new Scenario("ghostty", "source-code-pro"),
-  new Scenario("xterm", "os-default", { renderer: "webgl", newTab: true }),
-  new Scenario("ghostty", "os-default", { newTab: true }),
-];
-
-// Not shipped on Windows. Runs only under --include-renderers, to measure
-// what the DOM renderer -- the one the Linux desktop falls back to -- paints
-// on this rasteriser, which is the only arm directly comparable to the Linux
-// numbers.
-const RENDERER_SCENARIOS = [
-  new Scenario("xterm", "os-default"),
-  new Scenario("xterm", "source-code-pro"),
+  new Scenario("os-default"),
+  new Scenario("source-code-pro"),
+  new Scenario("os-default", { newTab: true }),
 ];
 
 /** Print one scenario's numbers; return the assertions it failed. */
@@ -901,14 +877,12 @@ function reportScenario(scenario, report, numbers) {
 function parseArgs(argv) {
   const args = {
     out: "target/e2e/terminal-pixels",
-    includeRenderers: false,
     only: "",
     webview2: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--include-renderers") args.includeRenderers = true;
-    else if (arg === "--webview2") args.webview2 = true;
+    if (arg === "--webview2") args.webview2 = true;
     else if (arg === "--out") args.out = argv[++i];
     else if (arg === "--only") args.only = argv[++i];
     else throw new Error(`unknown argument ${arg}`);
@@ -921,7 +895,7 @@ async function main() {
   const out = path.isAbsolute(args.out) ? args.out : path.join(REPO, args.out);
   fs.mkdirSync(out, { recursive: true });
 
-  let scenarios = SCENARIOS.concat(args.includeRenderers ? RENDERER_SCENARIOS : []);
+  let scenarios = SCENARIOS;
   if (args.only) scenarios = scenarios.filter((s) => s.slug.includes(args.only));
   if (!scenarios.length) throw new Error(`--only ${args.only} matched no scenario`);
 

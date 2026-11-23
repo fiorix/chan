@@ -2,19 +2,15 @@
 """Measure what the terminal grid actually paints in the real Linux webview.
 
 WHY this exists as its own harness: chan's terminal glyphs are drawn by the
-engine, not by chan, and the Linux AppImage ships on WebKitGTK with an xterm
-renderer selected from its dma-buf capability. Other Linux packages keep the
-DOM renderer because they do not run that AppImage policy. Whether a
-box-drawing rule joins across a cell boundary, or a solid block tiles without
-a seam, is a property of that engine, that renderer and the resolved font face
+engine, not by chan, and the Linux desktop paints Ghostty's canvas through
+WebKitGTK. Whether a box-drawing rule joins across a cell boundary, or a solid
+block tiles without a seam, is a property of that engine, that renderer and the resolved font face
 together. No unit test can see it: jsdom paints nothing and Chrome is a
 different rasteriser with a different font stack.
 
-The four default scenarios are explicit DOM and ghostty reference arms over
-{os-default, source-code-pro}; --include-renderers adds the xterm WebGL
-reference. They cover the AppImage's NVIDIA fallback and accelerated readings
-without pretending to execute chan-desktop's driver policy. The font chain is
-not restated here; it is read out of terminal/font.ts, the @font-face block
+The default scenarios are Ghostty grids over {os-default, source-code-pro},
+a second tab, and the reference patterns below. The font chain is not restated
+here; it is read out of terminal/font.ts, the @font-face block
 out of the app's own fonts.css and the palette out of TerminalTab.svelte, so
 a chain or palette edit moves the measurement with it.
 
@@ -33,8 +29,8 @@ cursor hidden where it stands and one never shown, a selection moved and
 the last one made alone), and each pair must paint the same PNG in one run.
 
 Usage:
-    python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
-                                           [--only SUBSTRING] [--compare DIR]
+    python3 scripts/e2e/terminal-pixels.py [--out DIR]
+                                         [--only SUBSTRING] [--compare DIR]
 
 Exit status: 0 pass, 1 fail, 2 skipped because the GUI stack is unavailable.
 A skip is not a pass; report it as a skip.
@@ -48,13 +44,6 @@ from python-gobject (`python3-gi-cairo` on Debian/Ubuntu). Without it
 `get_snapshot_finish` raises TypeError on every scenario. That dependency is
 easy to miss because nothing imports cairo by name here: the converter is what
 lets the snapshot cross the GI boundary at all.
-
-A caution about the WebGL reference arm under software rendering: on a
-llvmpipe/Xvfb stack the WebGL layer is not composited into the snapshot, so
-`--include-renderers` reports 0.0% on every measure for those rows. That is
-"nothing was captured", not "the renderer paints nothing", and it is why the
-webgl arm needs a real GPU to mean anything. The DOM and ghostty arms measure
-correctly there, because glyph rasterisation is CPU-side.
 """
 
 from __future__ import annotations
@@ -179,8 +168,6 @@ def build_serve_dir(root: pathlib.Path) -> None:
         "index.html": PAGE_DIR / "index.html",
         "harness.mjs": PAGE_DIR / "harness.mjs",
         "fonts": WORKSPACE_APP / "src/fonts",
-        "vendor/xterm": WEB / "node_modules/@xterm/xterm",
-        "vendor/addon-webgl": WEB / "node_modules/@xterm/addon-webgl",
     }
     for name, target in links.items():
         if not target.exists():
@@ -216,7 +203,7 @@ def build_serve_dir(root: pathlib.Path) -> None:
 
     # The ghostty adapters are the product's own TypeScript, compiled rather
     # than reimplemented: this harness exists to measure what TerminalTab
-    # paints, and a second copy of the alignment and custom-glyph code would
+    # paints, and a second copy of the custom-glyph and scrollbar code would
     # measure the copy.
     tsc = WEB / "node_modules/.bin/tsc"
     if not tsc.exists():
@@ -536,18 +523,13 @@ class Scenario:
 
     def __init__(
         self,
-        backend: str,
         font: str,
-        renderer: str = "dom",
         new_tab: bool = False,
         pattern: str = "",
         cursor_style: str = "",
         twin: str = "",
     ):
-        self.backend = backend
         self.font = font
-        # Only meaningful for the xterm backend; ghostty owns its renderer.
-        self.renderer = renderer
         self.new_tab = new_tab
         # One of the page's reference patterns, or "" for the grid pattern.
         self.pattern = pattern
@@ -559,12 +541,11 @@ class Scenario:
 
     @property
     def name(self) -> str:
-        suffix = "" if self.renderer == "dom" else f" +{self.renderer}"
-        suffix += " (second tab)" if self.new_tab else ""
+        suffix = " (second tab)" if self.new_tab else ""
         if self.pattern:
             style = f" {self.cursor_style}" if self.cursor_style else ""
             suffix += f", {self.pattern}{style} pattern"
-        return f"{self.font}, {self.backend}{suffix}"
+        return f"{self.font}, ghostty{suffix}"
 
     @property
     def slug(self) -> str:
@@ -572,20 +553,18 @@ class Scenario:
         if self.cursor_style:
             pattern = pattern.replace("cursor-", f"cursor-{self.cursor_style}-")
         return (
-            f"{self.backend}-{self.font}"
-            f"{'' if self.renderer == 'dom' else '-' + self.renderer}"
+            f"ghostty-{self.font}"
             f"{'-newtab' if self.new_tab else ''}"
             f"{'-' + pattern if pattern else ''}"
         )
 
     def url(self, port: int) -> str:
         config = {
-            "backend": self.backend,
+            "backend": "ghostty",
             "font": self.font,
             "fontFamily": linux_font_chain(self.font),
             "fontSize": FONT_SIZE,
             "newTab": self.new_tab,
-            "renderer": self.renderer,
         }
         # The grid pattern paints default colours under the widget's default
         # cursor style, so only the pattern arms carry these.
@@ -598,15 +577,12 @@ class Scenario:
         return f"http://127.0.0.1:{port}/index.html#{fragment}"
 
 
-# The default reference matrix, in the order the settings present it, then the
-# same backends opening a second tab while the first still holds its content.
+# The font preferences in settings order, followed by
+# a second tab while the first still holds its content.
 SCENARIOS = [
-    Scenario("xterm", "os-default"),
-    Scenario("xterm", "source-code-pro"),
-    Scenario("ghostty", "os-default"),
-    Scenario("ghostty", "source-code-pro"),
-    Scenario("xterm", "os-default", new_tab=True),
-    Scenario("ghostty", "os-default", new_tab=True),
+    Scenario("os-default"),
+    Scenario("source-code-pro"),
+    Scenario("os-default", new_tab=True),
 ]
 
 # The ghostty reference patterns (harness.mjs's PATTERNS), each cursor pattern
@@ -614,39 +590,28 @@ SCENARIOS = [
 # both font preferences resolve to the same chain (TG-06), so a second font
 # arm would paint the same PNGs.
 PATTERN_SCENARIOS = [
-    Scenario("ghostty", "os-default", pattern="attrs"),
-    Scenario("ghostty", "os-default", pattern="glyphs"),
-    Scenario("ghostty", "os-default", pattern="scrollback"),
-    Scenario("ghostty", "os-default", pattern="partial-scroll"),
-    Scenario("ghostty", "os-default", pattern="selection"),
-    Scenario("ghostty", "os-default", pattern="redraw"),
-    Scenario("ghostty", "os-default", pattern="alt-screen"),
-    Scenario("ghostty", "os-default", pattern="resize"),
-    Scenario("ghostty", "os-default", pattern="theme"),
-    Scenario("ghostty", "os-default", pattern="select-move", twin="select-once"),
-    Scenario("ghostty", "os-default", pattern="scrollbar"),
+    Scenario("os-default", pattern="attrs"),
+    Scenario("os-default", pattern="glyphs"),
+    Scenario("os-default", pattern="scrollback"),
+    Scenario("os-default", pattern="partial-scroll"),
+    Scenario("os-default", pattern="selection"),
+    Scenario("os-default", pattern="redraw"),
+    Scenario("os-default", pattern="alt-screen"),
+    Scenario("os-default", pattern="resize"),
+    Scenario("os-default", pattern="theme"),
+    Scenario("os-default", pattern="select-move", twin="select-once"),
+    Scenario("os-default", pattern="scrollbar"),
 ] + [
-    Scenario("ghostty", "os-default", pattern=f"cursor-{where}", cursor_style=style)
+    Scenario("os-default", pattern=f"cursor-{where}", cursor_style=style)
     for style in ("block", "underline", "bar")
     for where in ("blank", "glyph")
 ] + [
     # Twins: each pair paints one picture by two roads, one of which a
     # renderer that repaints too little gets wrong.
-    Scenario("ghostty", "os-default", pattern="fraction-scroll", twin="partial-scroll"),
-    Scenario("ghostty", "os-default", pattern="cursor-never", cursor_style="block"),
-    Scenario("ghostty", "os-default", pattern="cursor-hide", cursor_style="block", twin="cursor-never"),
-    Scenario("ghostty", "os-default", pattern="select-once"),
-]
-
-# Explicit accelerated-path reference, run only under --include-renderers.
-# The Linux AppImage ships this arm when dma-buf is available and the default
-# DOM arm when it is disabled; other Linux packages stay on DOM. WebGL is the
-# only alternative xterm renderer available:
-# @xterm/addon-canvas has no release for xterm 6, and installing it pulls the
-# core back to 5.5.
-RENDERER_SCENARIOS = [
-    Scenario("xterm", "os-default", renderer="webgl"),
-    Scenario("xterm", "source-code-pro", renderer="webgl"),
+    Scenario("os-default", pattern="fraction-scroll", twin="partial-scroll"),
+    Scenario("os-default", pattern="cursor-never", cursor_style="block"),
+    Scenario("os-default", pattern="cursor-hide", cursor_style="block", twin="cursor-never"),
+    Scenario("os-default", pattern="select-once"),
 ]
 
 
@@ -750,9 +715,7 @@ def unequal_twins(scenarios: list[Scenario], out: pathlib.Path) -> list[str]:
         if not scenario.twin:
             continue
         twin = Scenario(
-            scenario.backend,
             scenario.font,
-            renderer=scenario.renderer,
             new_tab=scenario.new_tab,
             pattern=scenario.twin,
             cursor_style=scenario.cursor_style,
@@ -799,11 +762,6 @@ def main() -> int:
         help="directory for the rendered PNGs",
     )
     parser.add_argument(
-        "--include-renderers",
-        action="store_true",
-        help="also measure the explicit xterm WebGL reference arms",
-    )
-    parser.add_argument(
         "--only",
         default="",
         help="run only scenarios whose slug contains this substring",
@@ -829,10 +787,8 @@ def main() -> int:
         if reference.resolve() == out.resolve():
             raise SystemExit("--compare names the directory this run writes")
 
-    scenarios = SCENARIOS + PATTERN_SCENARIOS + (
-        RENDERER_SCENARIOS if args.include_renderers else []
-    )
-    every = SCENARIOS + PATTERN_SCENARIOS + RENDERER_SCENARIOS
+    scenarios = SCENARIOS + PATTERN_SCENARIOS
+    every = scenarios
     if args.only:
         scenarios = [s for s in scenarios if args.only in s.slug]
     if not scenarios:
