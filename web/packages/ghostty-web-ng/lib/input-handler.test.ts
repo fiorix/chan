@@ -1263,6 +1263,17 @@ describe('InputHandler', () => {
       handler.dispose();
       expect(dataReceived).toEqual(['\x1b[<35;1;1M']);
     });
+
+    test('X10 no-button motion encodes 35 plus the Ctrl modifier', () => {
+      createMouseHandler(
+        ghostty, container as any, (data) => dataReceived.push(data),
+        vi.fn(), undefined, undefined, (mode) => mode === 1003,
+        undefined, undefined, mouseConfig(false)
+      );
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0, ctrlKey: true });
+      expect(dataReceived).toEqual(['\x1b[M\x43!!', '\x1b[M\x53!!']);
+    });
   });
 
   describe('Clipboard Operations', () => {

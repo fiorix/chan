@@ -609,21 +609,23 @@ describe('report and bypass completion', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  test('a report-only buttonless move frees capture and admits another pointer before the late up', async () => {
+  test.each([1002, 1003])('a report-only buttonless move under %i frees capture and admits another pointer before the late up', async (mode) => {
     const { term, canvas, capture, release, reports, write } = await open();
-    term.write('\x1b[?1002h\x1b[?1006h');
+    term.write(`\x1b[?${mode}h\x1b[?1006h`);
     drag(canvas);
     pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
     expect(canvas.hasPointerCapture(7)).toBe(false);
     expect(release).toHaveBeenCalledExactlyOnceWith(7);
-    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;9;1m']);
+    const first = ['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;9;1m'];
+    if (mode === 1003) first.push('\x1b[<35;9;1M');
+    expect(reports).toEqual(first);
     pointer(canvas, 'pointerdown', 17, 1, { pointerId: 8 });
     expect(capture.mock.calls).toEqual([[7], [8]]);
     pointer(canvas, 'pointerup', 97, 1);
     expect(canvas.hasPointerCapture(8)).toBe(true);
-    expect(reports.slice(3)).toEqual(['\x1b[<0;3;1M']);
+    expect(reports.slice(first.length)).toEqual(['\x1b[<0;3;1M']);
     pointer(canvas, 'pointerup', 33, 1, { pointerId: 8 });
-    expect(reports.slice(3)).toEqual(['\x1b[<0;3;1M', '\x1b[<0;5;1m']);
+    expect(reports.slice(first.length)).toEqual(['\x1b[<0;3;1M', '\x1b[<0;5;1m']);
     expect(write).not.toHaveBeenCalled();
   });
 
