@@ -5,11 +5,15 @@
 // host chords, OSC 52, paste bytes and mouse capture/selection stay required.
 // PTY output and cat -v witness the byte contracts independently of paint;
 // trusted CDP gestures and the copy chord witness selection.
+// A raw fixture pins press-only tracking, double clicks and Shift release;
+// every drag seeds its sentinel before pressing, including reporting drags.
 
 import assert from "node:assert/strict";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
+import { capturePointerTerminals, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
@@ -90,8 +94,8 @@ export default {
         false, "Ghostty must not fall back to xterm DOM");
     }
 
-    async function openTerminal() {
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, "ghostty");
+    async function openTerminal(newArgs = []) {
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, "ghostty", newArgs);
       await assertOnlyGhostty();
       return row;
     }
@@ -218,6 +222,7 @@ export default {
     /// echoed command + marker output all live there, so a multi-row
     /// selection necessarily covers rendered text). Mirrors 97.
     async function dragOverTopRows() {
+      await seedPointerClipboard(page, CLIPBOARD_SENTINEL);
       const box = await screenBox();
       const x0 = box.x + 5;
       const y0 = box.y + 8;
@@ -402,10 +407,10 @@ export default {
     /// Selection probe via the terminal's own copy chord
     /// (Ctrl+Shift+C -> copySelectionToClipboard, a no-op on empty
     /// selection) with the clipboard pre-seeded with a sentinel.
-    /// Ghostty's hidden textarea gets focus
-    /// first so the keydown lands on the terminal.
+    /// The sentinel is seeded before the drag, so this read cannot erase
+    /// a copy made by the release. Focus alone routes the copy chord.
     async function readSelectionViaCopy() {
-      await page.evaluate(async (sentinel) => {
+      await page.evaluate(() => {
         const ta = document.querySelector(".terminal-host textarea");
         if (!ta) {
           throw new Error(
@@ -413,8 +418,7 @@ export default {
           );
         }
         ta.focus();
-        await navigator.clipboard.writeText(sentinel);
-      }, CLIPBOARD_SENTINEL);
+      });
       await page.keyboard.down("Control");
       await page.keyboard.down("Shift");
       await page.keyboard.press("KeyC");
@@ -423,6 +427,101 @@ export default {
       await sleep(300);
       const text = await page.evaluate(() => navigator.clipboard.readText());
       return text === CLIPBOARD_SENTINEL ? "" : text;
+    }
+
+    async function probePressOnlyTracking() {
+      const result = { gestures: {}, failures: [] };
+      const word = "POINTERWORD";
+      const selected = "SHIFT_SELECT_94";
+      const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, "94-pointer-output.bin"), deadlineMs: 20_000 });
+      let term;
+      try {
+        await capturePointerTerminals(page);
+        const args = ["--command", "stty -opost -echo && " + fixture.command,
+          ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
+        let row;
+        try { row = await openTerminal(args); }
+        catch (error) { throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]")); }
+        result.fixture = await fixture.ready();
+        assert.ok(result.fixture.tty && result.fixture.raw, "1000: fixture is a raw PTY");
+        term = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
+        result.setup = await drainPointerInput(fixture, `\x1b[2J\x1b[H${word}\r\n${selected}\r\n\x1b[?1000;1006h`);
+        assert.deepEqual(result.setup, { input: "", reply: "\x1b[3;1R" }, "1000: output and mode setup reached the parser");
+        assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
+          [true, false, false, true], "1000: press-only tracking with SGR, no motion modes");
+        await settlePointer(page);
+        const box = await pointerGrid(term);
+        const from = { x: box.x + box.w * 0.25, y: box.y + box.h * 1.5 };
+        const to = { x: box.x + box.w * (selected.length - 0.25), y: from.y };
+        for (const kind of ["drag", "double-click", "shift-double-click", "shift-released-drag"]) {
+          const gesture = result.gestures[kind] = {};
+          let held = false;
+          try {
+            await term.evaluate((t) => t.clearSelection());
+            const sentinel = `SMOKE94_${kind}_SENTINEL`;
+            await seedPointerClipboard(page, sentinel);
+            assert.equal((await drainPointerInput(fixture)).input, "", `${kind}: PTY starts drained`);
+            const index = fixture.records.length;
+            if (kind.includes("double-click")) {
+              const x = box.x + box.w * 2.5;
+              const y = box.y + box.h * 0.5;
+              await page.mouse.move(x, y);
+              if (kind.startsWith("shift")) await page.keyboard.down("Shift");
+              await page.mouse.click(x, y, { count: 2 });
+              await page.keyboard.up("Shift");
+            } else {
+              await page.mouse.move(from.x, from.y);
+              if (kind.startsWith("shift")) await page.keyboard.down("Shift");
+              await page.mouse.down();
+              held = true;
+              await page.mouse.move(to.x, to.y, { steps: 6 });
+              // Release Shift while the button remains held, then move
+              // again so both the motion and release see Shift up.
+              await page.keyboard.up("Shift");
+              await page.mouse.move(to.x - box.w * 0.1, to.y);
+              await page.mouse.up();
+              held = false;
+            }
+            await settlePointer(page);
+            gesture.after = await drainPointerInput(fixture, "", index);
+            gesture.reports = pointerReports(gesture.after.input);
+            gesture.selection = await term.evaluate((t) => t.getSelection());
+            gesture.releaseClipboard = await page.evaluate(() => navigator.clipboard.readText());
+            gesture.copyClipboard = await copyPointerSelection(page, term);
+            if (kind === "drag") {
+              assert.deepEqual(gesture.reports, [
+                { button: 0, col: 1, row: 2, end: "M" },
+                { button: 0, col: selected.length, row: 2, end: "m" },
+              ], "1000 drag: only a press and release, no motion reports");
+            } else if (kind === "double-click") {
+              assert.deepEqual(gesture.reports, ["M", "m", "M", "m"].map((end) => ({ button: 0, col: 3, row: 1, end })),
+                "1000 double click: exactly four reports");
+            } else {
+              assert.equal(gesture.after.input, "", `${kind}: bypass sends no bytes`);
+            }
+            const expected = kind.startsWith("shift") ? (kind.includes("double") ? word : selected) : "";
+            assert.equal(gesture.selection, expected, `${kind}: selection`);
+            assert.equal(gesture.releaseClipboard, expected || sentinel, `${kind}: release clipboard`);
+            assert.equal(gesture.copyClipboard, expected || sentinel, `${kind}: copy chord clipboard`);
+          } catch (error) {
+            gesture.error = error.message;
+            result.failures.push(`${kind}: ${error.message}`);
+            await ctx.shot(`94-${kind}-failure`).catch(() => {});
+          } finally {
+            if (held) await page.mouse.up().catch(() => {});
+            await page.keyboard.up("Shift").catch(() => {});
+          }
+        }
+        assert.equal(Object.keys(result.gestures).length, 4, "all press-only gesture legs ran");
+        return result;
+      } finally {
+        result.records = fixture.records;
+        await closeTerminal(TAB_G).catch((error) => result.failures.push(`terminal cleanup: ${error.message}`));
+        await fixture.close();
+        await term?.dispose();
+        await page.evaluate(() => window.__pointerSmoke?.restore());
+        writeFileSync(join(ctx.outDir, "94-pointer.json"), JSON.stringify(result, null, 2) + "\n");
+      }
     }
 
     const details = { legacy: {} };
@@ -452,6 +551,9 @@ export default {
     let runError = null;
     try {
       await writeTerminalPrefs(page, authToken, { mouse_capture: true, program_status: true });
+      // Run the independent pointer fixture before config compatibility:
+      // an old server that retains the retired key still yields its bytes.
+      details.mouse1000Leg = await probePressOnlyTracking();
       for (const ghostty of [true, false]) {
         await compatibilityArm(`api-${ghostty}`, async () => {
           const row = await openLegacyConfiguredTerminal(ctx, page, cs, windowId, TAB_G, ghostty);
@@ -707,6 +809,7 @@ export default {
       await setMouseCapture(true);
       await assertTomlMouseCapture(true);
 
+      assert.deepEqual(details.mouse1000Leg.failures, [], "all press-only gesture legs passed");
       return details;
     } catch (error) {
       runError = error;
