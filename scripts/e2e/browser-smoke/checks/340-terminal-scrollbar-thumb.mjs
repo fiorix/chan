@@ -83,8 +83,8 @@ export default {
         result.reversed = await terminal.term.evaluate((t) => t.viewport.offset);
         result.events = await pointerEvents(terminal.trace);
         const moves = result.events.filter((event) => event.type === "pointermove" && event.onCanvas && event.buttons === 1);
-        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 200)) < 0.01), "the engine delivered the full 200-pixel overshoot");
-        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 198)) < 0.01), "the engine delivered the two-pixel reversal");
+        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 200)) < 0.01), "the full 200-pixel overshoot reached the canvas");
+        assert.ok(moves.some((event) => event.isTrusted && Math.abs(event.y - (top - 198)) < 0.01), "the two-pixel reversal reached the canvas");
         assert.ok(result.reversed < result.secondClamp && result.reversed > 0, "a two-pixel reversal moves immediately after repeated clamping");
         await page.mouse.up();
         await noSelectionOrReport(terminal, result);
