@@ -505,7 +505,8 @@ export class Terminal {
       this.renderer.setSelectionManager(this.selectionManager);
       this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
       this.renderer.setHighlights(this.highlightsManager);
-      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlights, this.viewport, this.wasmTerm.isAlternateScreen());
+      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlights, this.viewport,
+        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange());
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);

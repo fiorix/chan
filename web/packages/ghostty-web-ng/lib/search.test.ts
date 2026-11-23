@@ -315,6 +315,47 @@ describe('widget search', () => {
     expect(search.state.index).toBe(1);
   });
 
+  test('a resize result first rediscovered at the deadline does not restore the active match', async () => {
+    const { term } = await create('needle');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    term.resize(41, 6);
+    now = 1000;
+    settle(search);
+    expect(search.state).toEqual({ index: null, total: 1, partial: false });
+    expect(active(term)).toBeUndefined();
+  });
+
+  test('a delayed ordinary output feed keeps the active match without a restoration deadline', async () => {
+    const { term } = await create('needle');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    term.write(' more');
+    now = 2000;
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 1, partial: false });
+    expect(active(term)).toEqual([range(0, 0)]);
+  });
+
+  test('a user selection made while a step waits prevents a delayed viewport jump', async () => {
+    const { term } = await create(long());
+    const search = searchOf(term);
+    search.step('needle', 'newer');
+    const selected = range(2998, 0, 2998, 3);
+    term.setSelection(selected);
+    const offset = term.viewport.offset;
+    settle(search);
+    expect(search.state).toEqual({ index: 300, total: 300, partial: false });
+    expect(active(term)).toEqual([range(5, 0)]);
+    expect(term.getSelectionRange()).toEqual(selected);
+    expect(term.viewport.offset).toBe(offset);
+    search.step('needle', 'newer');
+    expect(term.viewport.offset).toBeGreaterThan(offset);
+    expect(term.getSelectionRange()).toEqual(selected);
+  });
+
   test('an active match cropped by alternate-screen resize is lost', async () => {
     const { term } = await create('\x1b[?1049h' + 'x'.repeat(17) + 'needle', 24, 4);
     const search = searchOf(term);

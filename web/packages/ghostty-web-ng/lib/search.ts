@@ -25,6 +25,7 @@ export class SearchOwner {
   private index: number | null = null;
   private complete = true;
   private waiting: Waiting[] = [];
+  private askedOver: HighlightRange | null = null;
   private kept: MatchRange | null = null;
   private keptStart: TerminalCoreTrackedCell | null = null;
   private keptEnd: TerminalCoreTrackedCell | null = null;
@@ -49,6 +50,7 @@ export class SearchOwner {
     private readonly highlights: TerminalHighlights,
     private readonly viewport: TerminalViewport,
     private alternateScreen: boolean,
+    private readonly selection: () => HighlightRange | null,
   ) {
     this.stopResizing = core.beforeResize(({ rows }) => {
       const start = this.keptStart?.point();
@@ -62,7 +64,10 @@ export class SearchOwner {
   find(query: string): void {
     if (this.disposed) return;
     if (!query) return this.close();
-    if (this.prepare(query)) this.waiting.push({ direction: 'older', at: performance.now(), newest: true });
+    if (this.prepare(query)) {
+      this.waiting.push({ direction: 'older', at: performance.now(), newest: true });
+      this.askedOver = this.selection();
+    }
     this.schedule();
     this.publish();
   }
@@ -74,6 +79,7 @@ export class SearchOwner {
     else this.catchUp();
     this.readResults();
     this.waiting.push({ direction, at: performance.now() });
+    this.askedOver = this.selection();
     const reveal = this.applyWaiting();
     this.schedule();
     this.show(reveal);
@@ -106,8 +112,7 @@ export class SearchOwner {
     const range = switched ? null : this.keptRange();
     if (range) {
       this.kept = range;
-      // Repeated output restarts must not renew the restoration deadline.
-      if (kind === 'resize' || this.restoreAt === null) this.restoreAt = performance.now();
+      if (kind === 'resize') this.restoreAt = performance.now();
       this.highlightActive();
       if (kind === 'resize' && this.keptOnScreen) this.viewport.reveal(range.startRow);
     } else {
@@ -142,6 +147,7 @@ export class SearchOwner {
     this.needle = '';
     this.matches = [];
     this.waiting = [];
+    this.askedOver = null;
     this.complete = true;
     this.dirty = this.resized = false;
     this.readMs = COST_PRIORS.read;
@@ -169,6 +175,8 @@ export class SearchOwner {
         ? check + read > FRAME_BUDGET_MS && completion < check + read
         : read >= SCAN_BUDGET_MS && read + completion > FRAME_BUDGET_MS;
       if (restart) {
+        // Repeated output restarts must not renew the restoration deadline.
+        if (this.kept && this.restoreAt === null) this.restoreAt = performance.now();
         search.restart();
         this.markBacklog();
         return;
@@ -220,7 +228,7 @@ export class SearchOwner {
     const reveal = this.applyWaiting();
     // Schedule before notifying: a subscriber can close or replace the query.
     if (running || this.waiting.length > 0 || this.restoreAt !== null) this.schedule();
-    this.show(reveal);
+    this.show(reveal && this.askStands());
   }
 
   private readResults(): void {
@@ -242,8 +250,10 @@ export class SearchOwner {
     this.index = index < 0 ? null : index;
     if (range) {
       this.kept = range;
-      if (index >= 0) this.restoreAt = null;
-      else if (this.complete || (this.restoreAt !== null && performance.now() - this.restoreAt >= WAIT_CAP_MS)) this.forget();
+      if (this.restoreAt !== null && performance.now() - this.restoreAt >= WAIT_CAP_MS) this.forget();
+      else if (index >= 0) this.restoreAt = null;
+      else if (this.complete) this.forget();
+      else this.restoreAt ??= performance.now();
     } else if (this.kept) {
       this.forget();
     }
@@ -304,6 +314,14 @@ export class SearchOwner {
   private highlightActive(): void {
     if (this.kept) this.highlights.set('search-active', [highlight(this.kept)], { background: '#ffb454', foreground: '#000000' });
     else this.highlights.clear('search-active');
+  }
+
+  private askStands(): boolean {
+    const selection = this.selection();
+    // A delayed step must not pull the viewport away from a new selection.
+    return selection === null || (this.askedOver !== null &&
+      selection.start.absoluteRow === this.askedOver.start.absoluteRow && selection.start.col === this.askedOver.start.col &&
+      selection.end.absoluteRow === this.askedOver.end.absoluteRow && selection.end.col === this.askedOver.end.col);
   }
 
   private show(reveal: boolean): void {
