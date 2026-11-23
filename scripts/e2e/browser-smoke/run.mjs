@@ -43,6 +43,7 @@ let currentCheck = null;
 let currentRecorder = null;
 let server = null;
 let browser = null;
+let finished = false;
 
 function unrunnable(...lines) {
   throw new Error(lines.join("\n"));
@@ -58,7 +59,9 @@ function checkError(error, phase) {
   currentCheck.errors ??= [];
   currentCheck.errors.push({ phase, status, detail });
   currentCheck.error = currentCheck.errors.map((entry) => `${entry.phase}: ${entry.detail}`).join("\n");
-  if (currentCheck.status !== "error") currentCheck.status = status;
+  if (currentCheck.status !== "error" && currentCheck.status !== "failed") {
+    currentCheck.status = status;
+  }
   currentCheck.ok = false;
   if (currentCheck.skipped) currentCheck.skipReason = currentCheck.reason;
   currentCheck.skipped = false;
@@ -95,10 +98,12 @@ function writeResults(final = false) {
   results.status = "running";
   results.ok = false;
   results.exitCode = null;
+  results.currentCheck = currentCheck && !results.checks.includes(currentCheck) ? currentCheck.file : null;
   if (final) {
     results.finishedAt = new Date().toISOString();
-    results.status = results.fatal || results.errors ? "error" :
-      results.failed ? "failed" : results.skipped ? "skipped" : "passed";
+    results.status = results.errorPhase !== undefined || results.errors ? "error" :
+      results.failed ? "failed" : results.skipped ? "skipped" :
+      results.passed > 0 && results.passed === results.selectedChecks.length ? "passed" : "error";
     if (results.errorPhase === "selection") results.status = "selection-error";
     results.ok = results.status === "passed";
     results.exitCode = results.ok ? 0 : results.status === "failed" ? 1 : 2;
@@ -120,6 +125,7 @@ function finish() {
   const verdict = { passed: "ALL GREEN", failed: `${results.failed} FAILURE(S)`,
     skipped: "INCOMPLETE", error: "ERROR", "selection-error": "SELECTION ERROR" }[results.status];
   console.log(`[smoke] ${verdict} (${results.ran} ran; ${results.passed} passed, ${results.failed} failed, ${results.skipped} skipped, ${results.errors} errors)`);
+  finished = true;
   process.exit(results.exitCode);
 }
 
@@ -139,6 +145,10 @@ function recordCrash(kind, error) {
 
 process.on("unhandledRejection", (e) => recordCrash("unhandled rejection", e));
 process.on("uncaughtException", (e) => recordCrash("uncaught exception", e));
+process.on("exit", (code) => {
+  // A check can exit directly without producing a final verdict.
+  if (!finished && !process.argv.includes("--deps-only")) process.exitCode = code || 2;
+});
 
 // The checks that start their own `chan devserver run` give it a throwaway
 // CHAN_HOME and CHAN_NO_DEVSERVER_HANDOFF, and it still binds a discovery
@@ -180,7 +190,6 @@ async function main() {
     outDir = process.env.SMOKE_OUT_DIR ?? mkdtempSync(join(tmpdir(), "chan-browser-smoke-"));
     results.outDir = outDir;
     mkdirSync(outDir, { recursive: true });
-    writeResults();
     const reason = sharedRuntimeDirReason();
     if (reason) {
       unrunnable(
@@ -202,6 +211,7 @@ async function main() {
       .filter((f) => !only || only.some((p) => f.startsWith(p)))
       .sort(compareCheckFiles);
     results.selectedChecks = checkFiles;
+    writeResults();
     if (missing.length || checkFiles.length === 0) {
       results.errorPhase = "selection";
       unrunnable(`SMOKE_ONLY=${process.env.SMOKE_ONLY} has unmatched prefixes: ${missing.join(", ") || "(empty selection)"}`);
@@ -494,6 +504,7 @@ async function main() {
         startedAt: new Date().toISOString(),
       };
       const t0 = Date.now();
+      writeResults();
       let checkBrowser = null;
       let phase = "setup";
       currentRecorder = new FailureRecord(file.replace(/\.mjs$/, ""), outDir);
