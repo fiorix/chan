@@ -170,22 +170,20 @@ describe('captured selection lifecycle', () => {
     expect(write.mock.calls).toEqual([['hello w']]);
   });
 
-  test('mouse and new pen contacts recover from a silently uncaptured pen', async () => {
+  test.each([{}, { pointerType: 'pen', pointerId: 10 }])('a new contact %j recovers from a silently uncaptured pen', async (extra) => {
     const { term, host, canvas, captured, write, reports } = await open();
     drag(canvas, { pointerType: 'pen', pointerId: 9 });
     host.remove();
     document.body.append(host);
     captured.clear();
-    for (const extra of [{}, { pointerType: 'pen', pointerId: 10 }]) {
-      pointer(canvas, 'pointerdown', 1, 1, extra);
-      pointer(canvas, 'pointermove', 49, 1, extra);
-      pointer(canvas, 'pointerup', 49, 1, extra);
-    }
+    pointer(canvas, 'pointerdown', 1, 1, extra);
+    pointer(canvas, 'pointermove', 49, 1, extra);
+    pointer(canvas, 'pointerup', 49, 1, extra);
     term.write('\x1b[?1000h\x1b[?1006h');
     pointer(canvas, 'pointerdown');
     pointer(canvas, 'pointerup');
     expect({ writes: write.mock.calls, reports }).toEqual({
-      writes: [['hello w'], ['hello w']],
+      writes: [['hello w']],
       reports: ['\x1b[<0;1;1M', '\x1b[<0;1;1m'],
     });
   });
@@ -357,7 +355,16 @@ describe('report and bypass completion', () => {
     expect(reports).toEqual([]);
     expect(write).toHaveBeenCalledTimes(button === 0 ? 1 : 0);
     pointer(canvas, 'pointermove', 1, 1, { buttons: 0 });
-    expect(reports).toEqual(['\x1b[<32;1;1M']);
+    expect(reports).toEqual(['\x1b[<35;1;1M']);
+  });
+
+  test('any-motion hover after a reported release carries the no-button code', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointerup', 17, 1);
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<0;3;1m', '\x1b[<35;5;1M']);
   });
 
   test.each(['pointercancel', 'lostpointercapture', 'uncaptured', 'reattached', 'recapture'])('a report-only %s releases at its last position and leaves no held button or copy', async (end) => {
@@ -408,15 +415,177 @@ describe('report and bypass completion', () => {
     expect(write).toHaveBeenCalledExactlyOnceWith('hello');
   });
 
-  test('a reported press stays reported if tracking stops during its drag', async () => {
-    const { term, canvas, reports, write } = await open();
+  test.each(['pointerup', 'pointercancel', 'lostpointercapture', 'uncaptured'])('a reported press ends silently on %s after tracking stops', async (end) => {
+    const { term, canvas, captured, reports, write } = await open();
     term.write('\x1b[?1000h\x1b[?1006h');
     pointer(canvas, 'pointerdown');
     term.write('\x1b[?1000l');
     pointer(canvas, 'pointermove', 33, 1);
-    pointer(canvas, 'pointerup', 33, 1);
-    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<0;5;1m']);
+    if (end === 'uncaptured') {
+      captured.clear();
+      pointer(canvas, 'pointermove', 49, 1);
+    } else {
+      pointer(canvas, end, 33, 1);
+    }
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 65, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  test('a chorded release after tracking stops sends no release bytes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 1 });
+    pointer(canvas, 'pointerup', 33, 1);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 49, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<2;1;1M']);
+  });
+
+  test('a local click ending with tracking off leaves later hover enabled', async () => {
+    const { term, canvas, reports } = await open();
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointerup');
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<35;5;1M']);
+  });
+
+  test('a chorded release while tracking is off stays cleared when tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 1 });
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 49, 1);
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<2;1;1M', '\x1b[<32;7;1M', '\x1b[<0;7;1m',
+    ]);
+  });
+
+  test('a buttonless move while tracking is off clears the press before tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
+  });
+
+  test('a buttonless local selection move clears a reported chord while tracking is off', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointerup', 49, 1, { button: 2 });
+    expect(reports).toEqual(['\x1b[<2;1;1M']);
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+  });
+
+  test('a held move while tracking is off preserves the press when tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 17, 1);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 33, 1);
+    pointer(canvas, 'pointerup', 33, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;5;1m']);
+  });
+
+  test('a Shift selection keeps buttonless moves local and copies once', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 81, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 81, 1);
+    expect(reports).toEqual([]);
+    expect(term.getSelection()).toBe('hello world');
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello world');
+  });
+
+  test('a chord event dropping two buttons reconciles both at that event without motion', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 1, buttons: 5 });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 7 });
+    pointer(canvas, 'pointermove', 33, 1, { button: 1, buttons: 1 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M', '\x1b[<1;5;1m', '\x1b[<2;5;1m',
+    ]);
+    pointer(canvas, 'pointermove', 49, 1);
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports.slice(5)).toEqual(['\x1b[<32;7;1M', '\x1b[<0;7;1m']);
+  });
+
+  test.each([0, 1, 2])('a captured buttonless move releases reported button %i once at that position', async (button) => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { button, buttons: [1, 4, 2][button] });
+    pointer(canvas, 'pointermove', 33, 1, { buttons: [1, 4, 2][button] });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 97, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 97, 1, { button });
+    expect(reports).toEqual([`\x1b[<${button};1;1M`, `\x1b[<${32 + button};5;1M`, `\x1b[<${button};9;1m`]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('a report-only buttonless move frees capture and admits another pointer before the late up', async () => {
+    const { term, canvas, capture, release, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    drag(canvas);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    expect(canvas.hasPointerCapture(7)).toBe(false);
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;9;1m']);
+    pointer(canvas, 'pointerdown', 17, 1, { pointerId: 8 });
+    expect(capture.mock.calls).toEqual([[7], [8]]);
+    pointer(canvas, 'pointerup', 97, 1);
+    expect(canvas.hasPointerCapture(8)).toBe(true);
+    expect(reports.slice(3)).toEqual(['\x1b[<0;3;1M']);
+    pointer(canvas, 'pointerup', 33, 1, { pointerId: 8 });
+    expect(reports.slice(3)).toEqual(['\x1b[<0;3;1M', '\x1b[<0;5;1m']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('captured moves release only missing reported buttons, including all remaining buttons', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 1, buttons: 5 });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 7 });
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 6 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M',
+      '\x1b[<0;5;1m', '\x1b[<33;5;1M',
+    ]);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 97, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 97, 1, { button: 2 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M',
+      '\x1b[<0;5;1m', '\x1b[<33;5;1M', '\x1b[<1;9;1m', '\x1b[<2;9;1m',
+    ]);
   });
 
   test('a Shift selection copies once on connected capture loss', async () => {
@@ -575,7 +744,7 @@ describe('scoped context menu and click selection', () => {
     pointer(canvas, 'pointerdown', 17, 1); pointer(canvas, 'pointerup', 17, 1);
     canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 17, clientY: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(reports).toEqual(['\x1b[<0;3;1M', '\x1b[<0;3;1m']);
+    expect(reports).toEqual(['\x1b[<0;3;1M']);
     expect(activated).toEqual([]);
   });
 
@@ -611,6 +780,23 @@ async function scrollbar(offset = 12.25) {
 }
 
 describe('captured scrollbar lifecycle', () => {
+  test('strip presses reset a prior local click before double-click selection', async () => {
+    const { term, canvas, width, write } = await open(Array.from({ length: 40 }, () => 'w'.repeat(COLS)).join('\r\n'));
+    term.viewport.scrollTo(1);
+    term.viewport.scrollTo(10);
+    rawPointer(canvas, 'pointerdown', 1, 1);
+    rawPointer(canvas, 'pointerup', 1, 1);
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 1, clientY: 1 }));
+    const x = COLS * width - 8;
+    for (let i = 0; i < 2; i++) {
+      expect(rawPointer(canvas, 'pointerdown', x, 5).defaultPrevented).toBe(true);
+      rawPointer(canvas, 'pointerup', x, 5);
+    }
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2, clientX: x, clientY: 5 }));
+    expect(term.hasSelection()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   test('dispose cancels the pending scrollbar animation as well as the render loop', async () => {
     let id = 0;
     const frames = new Map<number, FrameRequestCallback>();

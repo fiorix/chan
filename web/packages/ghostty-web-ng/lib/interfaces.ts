@@ -2,7 +2,8 @@
  * Terminal options and buffer interfaces
  */
 
-import type { GhosttyVt } from '../vt/ghosttyVt';
+import type { GhosttyVt, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
+import type { HighlightRange, HighlightStyle } from './highlights';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -11,18 +12,46 @@ export interface ITerminalOptions {
   cursorStyle?: 'block' | 'underline' | 'bar';
   theme?: ITheme;
   scrollback?: number; // Default: 10000
+  /**
+   * Core history budget in bytes, replacing scrollback's line limit. Construction only.
+   * Positive finite integers saturate at 0xfffffffe; invalid values use scrollback.
+   * Whole-page retention can exceed the budget; this is not a process-memory cap.
+   */
+  scrollbackBytes?: number;
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  /** Cell-height multiplier, at least 1; defaults to 1. Construction only. */
+  lineHeight?: number;
+  /** Draw supported box and block characters as cell paths. Defaults to false. Construction only. */
+  boxGlyphs?: boolean;
+  /** Composite the scrollbar over content. Omit for the background strip. Construction only. */
+  scrollbar?: 'overlay';
   disableStdin?: boolean; // Disable keyboard input (default: false)
+
+  /** Test-only paint controls. Omit in production. */
+  testHooks?: TerminalTestHooks;
 
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
   // The core this terminal runs on, through chan's libghostty-vt binding.
   ghostty: GhosttyVt;
+
+  /** Receives automatic and explicit widget copies; defaults to the clipboard. */
+  copy?: (text: string) => void;
+  /** Asked on each text read and word/line click; defaults to false. */
+  joinDrawnWraps?: () => boolean;
+}
+
+/** Test-only instrumentation; observe repaints with an ordinary paint layer. */
+export interface TerminalTestHooks {
+  /** Fixed paint opacity in [0, 1], disabling automatic scrollbar fades while set. */
+  scrollbarOpacity?: number;
 }
 
 export interface ITheme {
+  /** Cell ink contrast before faint/antialiasing; default 1, invalid values use 1. */
+  minimumContrastRatio?: number;
   foreground?: string;
   background?: string;
   cursor?: string;
@@ -58,6 +87,25 @@ export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 /** A parsed write or a completed grid resize, delivered before painting. */
 export type TerminalChange = { kind: 'write' | 'resize' };
 
+/** Read-only terminal access; every member throws TerminalCoreDisposedError after disposal. */
+export type TerminalCore = Readonly<Pick<VtTerminal,
+  'cols' | 'getScrollbackLength' | 'getDimensions' | 'plainText' | 'readRow' | 'readHistoryRow' |
+  'isRowWrapped' | 'isScrollbackRowWrapped' | 'encodePaste'
+>> & {
+  readonly beforeResize: (listener: (from: Readonly<{ cols: number; rows: number }>) => void) => () => void;
+  readonly createSearch: () => TerminalCoreSearch;
+  readonly trackCell: (row: number, col: number) => TerminalCoreTrackedCell | null;
+};
+
+/** Owns only its search state. Free is idempotent; terminal disposal also releases it. */
+export type TerminalCoreSearch = Readonly<Pick<VtSearch,
+  'setNeedle' | 'restart' | 'step' | 'feed' | 'selectNext' | 'selectPrev' | 'caughtUp' |
+  'state' | 'matchesBetween' | 'indexOfMatchAt' | 'completingUnitMs' | 'free'
+>>;
+
+/** Owns only its tracked point. Free is idempotent; terminal disposal also releases it. */
+export type TerminalCoreTrackedCell = Readonly<Pick<VtTrackedCell, 'point' | 'moveTo' | 'free'>>;
+
 /** Which provider found a link: an OSC 8 hyperlink or a URL in the text. */
 export type TerminalLinkKind = 'osc8' | 'url';
 
@@ -91,6 +139,33 @@ export interface TerminalViewport {
   scrollToBottom(): void;
   /** Reveal an absolute buffer row; leave a visible row in place. */
   reveal(row: number, align?: 'start' | 'center' | 'end'): void;
+}
+
+/** One-based index from newest, null when unknown; zero when no matches exist. */
+export type TerminalSearchState = Readonly<{ index: number | null; total: number; partial: boolean }>;
+
+/** One query per widget; matching and highlights never modify the user selection. */
+export interface TerminalSearch {
+  /** Start a query and activate its newest match; unchanged queries keep their position. Empty closes. */
+  find(query: string): void;
+  /** Older is next/up, newer is previous/down. A changed query starts from no active match. */
+  step(query: string, direction: 'older' | 'newer'): void;
+  /** Frozen snapshot; a partial total counts only the distinct matches found so far. */
+  readonly state: TerminalSearchState;
+  /** Reports changed count/index/partial snapshots; does not replay the current state. */
+  readonly onChange: IEvent<TerminalSearchState>;
+  /** Free the query and tracked references and remove only the two search highlight layers. */
+  close(): void;
+}
+
+/** Named paint independent of selection, copy and content-change events. */
+export interface TerminalHighlights {
+  /** Replace a layer with copied, ordered ranges and style; invalid coordinates throw while open. */
+  set(name: string, ranges: readonly HighlightRange[], style?: HighlightStyle): void;
+  /** Remove only this layer, repainting its previous coverage; false if absent. */
+  clear(name: string): boolean;
+  /** A fresh snapshot, or undefined when absent, before open or after disposal. */
+  get(name: string): { ranges: readonly HighlightRange[]; style: Readonly<HighlightStyle> } | undefined;
 }
 
 /**

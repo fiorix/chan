@@ -11,8 +11,11 @@
  */
 
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { drawBoxGlyph, isCustomGlyph } from './box-glyphs';
+import { compositeColor, contrastingColor, parseColor, rgbColor, type Color } from './color';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
+import type { HighlightsManager, HighlightSpan, HighlightStyle } from './highlights';
 
 // ============================================================================
 // Type Definitions
@@ -25,6 +28,28 @@ export interface RendererOptions {
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
+  lineHeight?: number; // Default: 1
+  boxGlyphs?: boolean; // Default: false
+  scrollbar?: 'overlay'; // Composite the translucent bar over content
+}
+
+/** A snapshot of the rows repainted beneath a layer, in CSS pixels. */
+export interface PaintFrame {
+  readonly ctx: CanvasRenderingContext2D;
+  readonly metrics: Readonly<FontMetrics>;
+  readonly pixelRatio: number;
+  readonly viewportOffset: number;
+  readonly topRow: number;
+  readonly full: boolean;
+  readonly changedRows: readonly number[];
+  readonly rows: number;
+  readonly cols: number;
+}
+
+/** Numeric layers paint in stable ascending order; the sole mask paints last. */
+export interface PaintLayer {
+  readonly order: number | 'mask';
+  paint(frame: PaintFrame): void;
 }
 
 export interface FontMetrics {
@@ -46,6 +71,7 @@ type RendererTheme = Required<Omit<ITheme, 'selectionForeground'>> &
   Pick<ITheme, 'selectionForeground'>;
 
 export const DEFAULT_THEME: RendererTheme = {
+  minimumContrastRatio: 1,
   foreground: '#d4d4d4',
   background: '#1e1e1e',
   cursor: '#ffffff',
@@ -82,8 +108,20 @@ export class CanvasRenderer {
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
   private theme: RendererTheme;
+  private readonly contrastCache = new Map<string, string>();
+  private readonly backgroundCache = new Map<string, Color | undefined>();
   private devicePixelRatio: number;
+  private readonly followsDevicePixelRatio: boolean;
+  private readonly lineHeight: number;
+  private readonly boxGlyphs: boolean;
+  private readonly scrollbar?: 'overlay';
   private metrics: FontMetrics;
+  private resizeRequired = false;
+
+  private paintLayers: PaintLayer[] = [];
+  private repaintAll = false;
+  private rendering = false;
+  private paintedScrollbar = false;
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -109,6 +147,9 @@ export class CanvasRenderer {
     endCol: number;
     endRow: number;
   } | null = null;
+
+  private highlightSource?: HighlightsManager;
+  private currentHighlightRows: HighlightSpan[][] = [];
 
   // Link rendering state
   private hoveredHyperlinkId: number = 0;
@@ -137,8 +178,13 @@ export class CanvasRenderer {
     this.fontFamily = options.fontFamily ?? 'monospace';
     this.cursorStyle = options.cursorStyle ?? 'block';
     this.cursorBlink = options.cursorBlink ?? false;
-    this.theme = { ...DEFAULT_THEME, ...options.theme };
+    this.theme = this.resolveTheme(options.theme ?? {});
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.followsDevicePixelRatio = options.devicePixelRatio === undefined;
+    const lineHeight = options.lineHeight ?? 1;
+    this.lineHeight = Number.isFinite(lineHeight) && lineHeight >= 1 ? lineHeight : 1;
+    this.boxGlyphs = options.boxGlyphs ?? false;
+    this.scrollbar = options.scrollbar;
 
     // Measure font metrics
     this.metrics = this.measureFont();
@@ -154,27 +200,77 @@ export class CanvasRenderer {
   // ==========================================================================
 
   private measureFont(): FontMetrics {
-    // Use an offscreen canvas for measurement
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
-
-    // Set font (use actual pixel size for accurate measurement)
+    const ctx = document.createElement('canvas').getContext('2d')!;
     ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+    const ink = ctx.measureText('M');
+    const ascent = ink.actualBoundingBoxAscent || this.fontSize * 0.8;
+    const descent = ink.actualBoundingBoxDescent || this.fontSize * 0.2;
+    const natural = {
+      width: Math.ceil(ink.width),
+      height: Math.ceil(ascent + descent) + 2,
+      baseline: Math.ceil(ascent) + 1,
+    };
+    const fallbackHeight = natural.height * this.lineHeight;
+    const fallback = {
+      width: natural.width,
+      height: fallbackHeight,
+      baseline: Math.max(0, Math.min(fallbackHeight, natural.baseline + (fallbackHeight - natural.height) / 2)),
+    };
+    const measured = this.measureCell();
+    const ratio = this.devicePixelRatio;
+    if (!measured || !Number.isFinite(ratio) || ratio <= 0 ||
+        !Number.isFinite(measured.width) || measured.width <= 0 ||
+        !Number.isFinite(measured.height) || measured.height <= 0) return fallback;
+    const width = Math.floor(measured.width * ratio) / ratio;
+    const height = Math.floor(Math.ceil(measured.height * ratio) * this.lineHeight) / ratio;
+    if (width <= 0 || height <= 0) return fallback;
+    return {
+      width,
+      height,
+      baseline: Math.max(0, Math.min(height, natural.baseline + (height - natural.height) / 2)),
+    };
+  }
 
-    // Measure width using 'M' (typically widest character)
-    const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
+  private syncDevicePixelRatio(): void {
+    if (!this.followsDevicePixelRatio) return;
+    const ratio = window.devicePixelRatio;
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio === this.devicePixelRatio) return;
+    this.devicePixelRatio = ratio;
+    this.metrics = this.measureFont();
+    this.resizeRequired = true;
+    this.repaintAll = true;
+  }
 
-    // Measure height using ascent + descent with padding for glyph overflow
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
-
-    // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
-    // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
-
-    return { width, height, baseline };
+  private measureCell(): { width: number; height: number } | null {
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const ctx = new OffscreenCanvas(100, 100).getContext('2d');
+        const probe = ctx?.measureText('W');
+        if (ctx && probe && 'fontBoundingBoxAscent' in probe && 'fontBoundingBoxDescent' in probe) {
+          ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+          const measured = ctx.measureText('W');
+          return { width: measured.width, height: measured.fontBoundingBoxAscent + measured.fontBoundingBoxDescent };
+        }
+      }
+    } catch {
+      // Engines without offscreen text metrics use the same DOM measurement.
+    }
+    const parent = this.canvas.parentElement;
+    if (!parent) return null;
+    const span = document.createElement('span');
+    span.textContent = 'W'.repeat(32);
+    span.setAttribute('aria-hidden', 'true');
+    Object.assign(span.style, {
+      display: 'inline-block', visibility: 'hidden', position: 'absolute',
+      top: '0', left: '-9999em', lineHeight: 'normal', whiteSpace: 'pre',
+      fontKerning: 'none', fontFamily: this.fontFamily, fontSize: `${this.fontSize}px`,
+    });
+    parent.appendChild(span);
+    try {
+      return { width: span.offsetWidth / 32, height: span.offsetHeight };
+    } finally {
+      span.remove();
+    }
   }
 
   // ==========================================================================
@@ -193,6 +289,7 @@ export class CanvasRenderer {
    * Resize canvas to fit terminal dimensions
    */
   public resize(cols: number, rows: number): void {
+    this.syncDevicePixelRatio();
     const cssWidth = cols * this.metrics.width;
     const cssHeight = rows * this.metrics.height;
 
@@ -200,9 +297,11 @@ export class CanvasRenderer {
     this.canvas.style.width = `${cssWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
-    // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    // The backing store and resize comparison use identical integer sizes.
+    // Fractional device products otherwise reset the canvas on every frame.
+    this.canvas.width = Math.round(cssWidth * this.devicePixelRatio);
+    this.canvas.height = Math.round(cssHeight * this.devicePixelRatio);
+    this.resizeRequired = false;
 
     // Scale context to match DPI: the size assignment above reset the
     // context, so this puts the device scale back for the rest of the frame.
@@ -232,6 +331,41 @@ export class CanvasRenderer {
     viewportY: number = 0,
     scrollbarOpacity: number = 1
   ): void {
+    if (this.rendering) {
+      this.repaintAll = true;
+      return;
+    }
+    this.syncDevicePixelRatio();
+    this.rendering = true;
+    const layers = [...this.paintLayers];
+    forceAll ||= this.repaintAll;
+    this.repaintAll = false;
+    let begun = false;
+    try {
+      const dirty = term.beginFrame();
+      begun = true;
+      this.paintFrame(term, forceAll || dirty === ABI.GhosttyRenderStateDirty.FULL,
+        viewportY, scrollbarOpacity, layers);
+    } catch (error) {
+      this.repaintAll = true;
+      throw error;
+    } finally {
+      try {
+        if (begun) term.endFrame();
+      } finally {
+        this.rendering = false;
+        this.currentTerm = null;
+      }
+    }
+  }
+
+  private paintFrame(
+    term: VtTerminal,
+    forceAll: boolean,
+    viewportY: number,
+    scrollbarOpacity: number,
+    layers: readonly PaintLayer[],
+  ): void {
     // The canvas scale is absolute, not relative: a host that resets the
     // drawing state at an unchanged size leaves an identity transform
     // behind, and the next repaint must heal it without waiting for a
@@ -248,16 +382,16 @@ export class CanvasRenderer {
     // the scrollbar reads the fraction.
     const historyRows = Math.max(0, Math.floor(viewportY));
 
-    // A resize, a screen switch, new colours or output that scrolled change
-    // every row.
-    if (term.beginFrame() === ABI.GhosttyRenderStateDirty.FULL) {
-      forceAll = true;
-    }
+    // The scrollbar touches every row. Fresh content under it also removes
+    // the previous strip when it disappears and prevents alpha accumulation.
+    const scrollbar = scrollbarOpacity > 0 && scrollbackLength > 0;
+    if (scrollbar || this.paintedScrollbar) forceAll = true;
 
     // Resize canvas if dimensions changed
     const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
+      this.resizeRequired ||
+      this.canvas.width !== Math.round(dims.cols * this.metrics.width * this.devicePixelRatio) ||
+      this.canvas.height !== Math.round(dims.rows * this.metrics.height * this.devicePixelRatio);
 
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
@@ -270,42 +404,27 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line).
-    // A cursor hidden or shown where it stands repaints its line as a move
-    // does: the core marks no row dirty for it.
-    const cursorMoved =
-      cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    const cursorShownChanged = cursor.visible !== this.lastCursorShown;
-    if (cursorMoved || cursorShownChanged || this.cursorBlink) {
-      // Mark cursor lines as needing redraw
-      if (!forceAll && !term.isRowDirty(cursor.y)) {
-        // Need to redraw cursor line
-        if (term.readRow(cursor.y, this.cells)) {
-          this.renderLine(this.cells, cursor.y, dims.cols);
-        }
-      }
-      if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
-        // Also redraw old cursor line if cursor moved to different line
-        if (!forceAll && !term.isRowDirty(this.lastCursorPosition.y)) {
-          if (term.readRow(this.lastCursorPosition.y, this.cells)) {
-            this.renderLine(this.cells, this.lastCursorPosition.y, dims.cols);
-          }
-        }
-      }
+    // Cache overlays before any cursor-only redraw can paint a row.
+    this.currentSelectionCoords = this.selectionManager?.hasSelection()
+      ? this.selectionManager.getSelectionCoords() : null;
+    const highlights = this.highlightSource?.frame(scrollbackLength - historyRows, dims.rows, dims.cols);
+    this.cacheHighlights(highlights?.spans ?? []);
+
+    const cursorRows = new Set<number>();
+    const cursorShown = cursor.visible && this.cursorVisible;
+    const cursorMoved = cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
+    if (historyRows === 0 && (cursorMoved || cursorShown !== this.lastCursorShown)) {
+      cursorRows.add(cursor.y);
+      cursorRows.add(this.lastCursorPosition.y);
     }
 
     // Check if we need to redraw selection-related lines
-    const hasSelection = this.selectionManager && this.selectionManager.hasSelection();
-    const selectionRows = new Set<number>();
-
-    // Cache selection coordinates for use during cell rendering
-    // This is used by isInSelection() to determine if a cell needs selection colors
-    this.currentSelectionCoords = hasSelection ? this.selectionManager!.getSelectionCoords() : null;
+    const selectionRows = highlights?.dirtyRows ?? new Set<number>();
 
     // Mark current selection rows for redraw (includes programmatic selections)
     if (this.currentSelectionCoords) {
       const coords = this.currentSelectionCoords;
-      for (let row = coords.startRow; row <= coords.endRow; row++) {
+      for (let row = Math.max(0, coords.startRow); row <= Math.min(dims.rows - 1, coords.endRow); row++) {
         selectionRows.add(row);
       }
     }
@@ -377,7 +496,7 @@ export class CanvasRenderer {
       const needsRender =
         historyRows > 0
           ? true
-          : forceAll || term.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
+          : forceAll || term.isRowDirty(y) || cursorRows.has(y) || selectionRows.has(y) || hyperlinkRows.has(y);
 
       if (needsRender) {
         rowsToRender.add(y);
@@ -387,6 +506,7 @@ export class CanvasRenderer {
       }
     }
 
+    const changedRows: number[] = [];
     // Render each line
     for (let y = 0; y < dims.rows; y++) {
       if (!rowsToRender.has(y)) {
@@ -395,6 +515,7 @@ export class CanvasRenderer {
 
       if (this.readViewRow(term, y, historyRows, scrollbackLength)) {
         this.renderLine(this.cells, y, dims.cols);
+        changedRows.push(y);
       }
     }
 
@@ -404,22 +525,49 @@ export class CanvasRenderer {
     // Link underlines are drawn during cell rendering (see renderCell)
 
     // Render cursor (only if the view shows no history row)
-    if (historyRows === 0 && cursor.visible && this.cursorVisible) {
+    if (historyRows === 0 && cursorShown && rowsToRender.has(cursor.y)) {
       this.renderCursor(cursor.x, cursor.y);
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
-    if (scrollbarOpacity > 0) {
-      this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
-    }
-
-    // Update last cursor position and visibility
+    if (scrollbar) this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
+    this.paintedScrollbar = scrollbar;
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
-    this.lastCursorShown = cursor.visible;
+    this.lastCursorShown = cursorShown;
 
-    // ALWAYS end the frame after rendering, regardless of forceAll: what
-    // changed is painted now, and the next frame lists only newer changes.
-    term.endFrame();
+    if (changedRows.length === 0) return;
+    const frame: PaintFrame = Object.freeze({
+      ctx: this.ctx,
+      metrics: Object.freeze(this.getMetrics()),
+      pixelRatio: this.devicePixelRatio,
+      viewportOffset: viewportY,
+      topRow: scrollbackLength - historyRows,
+      full: changedRows.length === dims.rows,
+      changedRows: Object.freeze(changedRows),
+      rows: dims.rows,
+      cols: dims.cols,
+    });
+    const errors: unknown[] = [];
+    for (const layer of layers) {
+      this.ctx.save();
+      try {
+        // Layers only composite onto fresh pixels, even if they draw a full
+        // canvas. A failing ordinary layer must not skip the final mask.
+        this.ctx.beginPath();
+        for (const row of changedRows) {
+          this.ctx.rect(0, row * this.metrics.height, dims.cols * this.metrics.width, this.metrics.height);
+        }
+        this.ctx.clip();
+        this.ctx.beginPath();
+        layer.paint(frame);
+      } catch (error) {
+        errors.push(error);
+      } finally {
+        this.ctx.restore();
+        this.ctx.beginPath();
+      }
+    }
+    if (errors.length > 0) throw errors[0];
   }
 
   /**
@@ -499,6 +647,13 @@ export class CanvasRenderer {
       return; // Selection background replaces cell background
     }
 
+    const highlight = this.highlightAt(x, y, cell.width);
+    if (highlight) {
+      this.ctx.fillStyle = highlight.background ?? this.theme.selectionBackground;
+      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
+      return;
+    }
+
     // A default background paints nothing over the row's theme fill, which
     // a see-through theme leaves clear. Its colour cannot say it is the
     // default: a see-through theme's resolves to black in the core, as a
@@ -527,6 +682,7 @@ export class CanvasRenderer {
 
     // Check if this cell is selected
     const isSelected = this.isInSelection(x, y);
+    const highlight = isSelected ? null : this.highlightAt(x, y, cell.width);
 
     // Set text style
     let fontStyle = '';
@@ -539,10 +695,25 @@ export class CanvasRenderer {
       this.ctx.fillStyle = colorOverride;
     } else if (isSelected && this.theme.selectionForeground) {
       this.ctx.fillStyle = this.theme.selectionForeground;
+    } else if (highlight?.foreground) {
+      this.ctx.fillStyle = highlight.foreground;
     } else {
       // Extract colors and handle inverse: when inverted, foreground
       // becomes background
-      this.ctx.fillStyle = this.rgbToCSS(cell.flags & VtFlag.INVERSE ? cell.bg : cell.fg);
+      const inverse = (cell.flags & VtFlag.INVERSE) !== 0;
+      const foreground = inverse ? cell.bg : cell.fg;
+      let background: Color | undefined;
+      if (this.theme.minimumContrastRatio > 1) {
+        const rowBackground = this.backgroundColor(this.theme.background);
+        if (isSelected || highlight) {
+          const overlay = this.backgroundColor(isSelected ? this.theme.selectionBackground
+            : highlight!.background ?? this.theme.selectionBackground);
+          if (overlay) background = compositeColor(overlay, rowBackground);
+        } else {
+          background = inverse ? rgbColor(cell.fg) : cell.defaultBg ? rowBackground : rgbColor(cell.bg);
+        }
+      }
+      this.ctx.fillStyle = this.cellForeground(foreground, background);
     }
 
     // Apply faint effect
@@ -554,10 +725,11 @@ export class CanvasRenderer {
     const textX = cellX;
     const textY = cellY + this.metrics.baseline;
 
-    // The character to render: the cell's whole cluster for complex
-    // scripts, else its codepoint, a space if it has none
+    // Complex clusters stay with the font. Cell paths share the resolved
+    // foreground and decorations, including selection and cursor overrides.
     const char = cell.cluster ?? String.fromCodePoint(cell.codepoint || 32);
-    this.ctx.fillText(char, textX, textY);
+    const boxed = this.boxGlyphs && cell.cluster === null && isCustomGlyph(cell.codepoint);
+    if (!boxed) this.ctx.fillText(char, textX, textY);
 
     // Reset alpha
     if (cell.flags & VtFlag.FAINT) {
@@ -628,6 +800,12 @@ export class CanvasRenderer {
         this.ctx.lineTo(cellX + cellWidth, underlineY);
         this.ctx.stroke();
       }
+    }
+
+    // Cell paths sit above decorations where their ink intersects.
+    if (boxed) {
+      drawBoxGlyph(this.ctx, this.metrics, cell.codepoint, x, y,
+        (cell.flags & VtFlag.FAINT) !== 0, this.devicePixelRatio);
     }
   }
 
@@ -774,7 +952,38 @@ export class CanvasRenderer {
    * Update theme colors
    */
   public setTheme(theme: ITheme): void {
-    this.theme = { ...DEFAULT_THEME, ...theme };
+    this.theme = this.resolveTheme(theme);
+    this.contrastCache.clear();
+    this.backgroundCache.clear();
+    this.repaintAll = true;
+  }
+
+  private resolveTheme(theme: ITheme): RendererTheme {
+    const supplied = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
+    const ratio = theme.minimumContrastRatio ?? 1;
+    return { ...DEFAULT_THEME, ...supplied,
+      minimumContrastRatio: Number.isFinite(ratio) && ratio >= 1 ? ratio : 1 };
+  }
+
+  private backgroundColor(css: string): Color | undefined {
+    if (!this.backgroundCache.has(css)) {
+      if (this.backgroundCache.size >= 256) this.backgroundCache.clear();
+      this.backgroundCache.set(css, parseColor(css));
+    }
+    return this.backgroundCache.get(css);
+  }
+
+  private cellForeground(foreground: number, background: Color | undefined): string {
+    // A transparent canvas has no known backdrop against which to measure.
+    if (this.theme.minimumContrastRatio <= 1 || !background || background[3] < 1) return this.rgbToCSS(foreground);
+    const key = `${foreground}:${background}`;
+    let color = this.contrastCache.get(key);
+    if (color === undefined) {
+      color = this.rgbToCSS(contrastingColor(foreground, background, this.theme.minimumContrastRatio));
+      if (this.contrastCache.size >= 1024) this.contrastCache.clear();
+      this.contrastCache.set(key, color);
+    }
+    return color;
   }
 
   /**
@@ -838,10 +1047,12 @@ export class CanvasRenderer {
     const scrollbarPadding = 4;
     const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
 
-    // Always clear the scrollbar area first (fixes ghosting when fading out)
-    ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
-    ctx.fillStyle = this.theme.background;
-    ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+    // The overlay composites onto the fresh rows painted by this frame.
+    if (this.scrollbar !== 'overlay') {
+      ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+      ctx.fillStyle = this.theme.background;
+      ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+    }
 
     // Don't draw scrollbar if fully transparent or no scrollback
     if (opacity <= 0 || scrollbackLength === 0) return;
@@ -865,7 +1076,29 @@ export class CanvasRenderer {
     ctx.fillRect(scrollbarX, thumbY, scrollbarWidth, thumbHeight);
   }
   public getMetrics(): FontMetrics {
+    this.syncDevicePixelRatio();
     return { ...this.metrics };
+  }
+
+  /** Register a copied layer; changes become visible on the next frame. */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (layer.order !== 'mask' && !Number.isFinite(layer.order)) {
+      throw new RangeError('Paint layer order must be finite or "mask"');
+    }
+    if (layer.order === 'mask' && this.paintLayers.some((entry) => entry.order === 'mask')) {
+      throw new Error('Only one mask paint layer can be registered');
+    }
+    const entry: PaintLayer = { order: layer.order, paint: layer.paint };
+    this.paintLayers.push(entry);
+    this.paintLayers.sort((a, b) => a.order === 'mask' ? 1 : b.order === 'mask' ? -1 : a.order - b.order);
+    this.repaintAll = true;
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      this.paintLayers = this.paintLayers.filter((candidate) => candidate !== entry);
+      this.repaintAll = true;
+    };
   }
 
   /**
@@ -880,6 +1113,33 @@ export class CanvasRenderer {
    */
   public setSelectionManager(manager: SelectionManager): void {
     this.selectionManager = manager;
+  }
+
+  public setHighlights(source: HighlightsManager): void {
+    this.highlightSource = source;
+  }
+
+  private cacheHighlights(spans: HighlightSpan[]): void {
+    const rows: HighlightSpan[][] = [];
+    for (const span of spans) {
+      for (let row = span.startRow; row <= span.endRow; row++) {
+        (rows[row] ??= []).push(span);
+      }
+    }
+    this.currentHighlightRows = rows;
+  }
+
+  /** Last covering span wins; a wide glyph includes either of its cells. */
+  private highlightAt(x: number, y: number, width: number): Readonly<HighlightStyle> | null {
+    const spans = this.currentHighlightRows[y];
+    if (!spans) return null;
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const span = spans[i];
+      if (y === span.startRow && x + width - 1 < span.startCol) continue;
+      if (y === span.endRow && x > span.endCol) continue;
+      return span.style;
+    }
+    return null;
   }
 
   /**
@@ -938,20 +1198,22 @@ export class CanvasRenderer {
    * Get character cell width (for coordinate conversion)
    */
   public get charWidth(): number {
-    return this.metrics.width;
+    return this.getMetrics().width;
   }
 
   /**
    * Get character cell height (for coordinate conversion)
    */
   public get charHeight(): number {
-    return this.metrics.height;
+    return this.getMetrics().height;
   }
 
   /**
    * Clear entire canvas
    */
   public clear(): void {
+    this.repaintAll = true;
+    this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0);
     // clearRect first because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -963,6 +1225,7 @@ export class CanvasRenderer {
    * Cleanup resources
    */
   public dispose(): void {
+    this.paintLayers = [];
     this.stopCursorBlink();
   }
 }

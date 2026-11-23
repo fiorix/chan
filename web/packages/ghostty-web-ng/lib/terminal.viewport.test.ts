@@ -56,6 +56,39 @@ async function history(rows = 6) {
   return fixture;
 }
 
+describe('cursor position', () => {
+  test('reads synchronous live-screen coordinates across writes, moves and lifecycle changes', async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({}, {
+      get: (_, key) => key === 'measureText'
+        ? () => ({ width: 8, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 })
+        : () => undefined,
+      set: () => true,
+    })) as never);
+    const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+    const term = new Terminal({ ghostty, cols: 40, rows: 6, smoothScrollDuration: 0 });
+    terminals.push(term);
+    expect(term.getCursor()).toBeUndefined();
+    term.open(document.createElement('div'));
+    expect(term.getCursor()).toEqual({ x: 0, y: 0 });
+    term.write('hello\r\nworld');
+    const written = term.getCursor();
+    expect(written).toEqual({ x: 5, y: 1 });
+    term.write('\x1b[4;8H');
+    expect(term.getCursor()).toEqual({ x: 7, y: 3 });
+    expect(written).toEqual({ x: 5, y: 1 });
+    term.write(Array.from({ length: 20 }, () => '\r\nline').join(''));
+    term.viewport.scrollTo(5);
+    expect(term.viewport.offset).toBe(5);
+    expect(term.getCursor()).toEqual({ x: 4, y: 5 });
+    term.write('\x1b[?1049h\x1b[2;10Halt');
+    expect(term.getCursor()).toEqual({ x: 12, y: 1 });
+    term.write('\x1b[?1049l');
+    expect(term.getCursor()).toEqual({ x: 4, y: 5 });
+    term.dispose();
+    expect(term.getCursor()).toBeUndefined();
+  });
+});
+
 describe('viewport positioning', () => {
   test('offset counts fractional rows back from the bottom and clamps to history', async () => {
     const { term } = await history();

@@ -133,6 +133,30 @@ describe('link activation', () => {
 });
 
 describe('link gesture completion through registered listeners', () => {
+  test('a release at the drag threshold without a move cannot activate a link', async () => {
+    const { term, seen } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    const end = { x: at.x + CELL.width * DRAG_THRESHOLD_CELLS, y: at.y };
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointerup', end);
+    await dispatchClick(term, end);
+    expect(seen).toEqual([]);
+  });
+
+  test('a prevented new pointer discards the previous released link press', async () => {
+    const { term, seen, host } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointerup', at);
+    host.addEventListener('pointerdown', (event) => event.preventDefault(), { capture: true });
+    pointer(term, 'pointerdown', at, { pointerId: 8 });
+    pointer(term, 'pointerup', at, { pointerId: 8 });
+    await dispatchClick(term, at);
+    expect(seen).toEqual([]);
+  });
+
   test.each(['pointercancel', 'lostpointercapture', 'uncaptured', 'detached', 'prevented'])('%s abandons a pending link press', async (end) => {
     const { term, seen, host, canvas, captured } = await terminal();
     term.write('https://example.com');
