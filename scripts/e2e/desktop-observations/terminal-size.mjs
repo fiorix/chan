@@ -21,12 +21,12 @@ const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(new URL("../browser-smoke/package.json", import.meta.url));
 const { values } = parseArgs({ options: {
-  backend: { type: "string" }, output: { type: "string" }, cycles: { type: "string", default: "3" },
+  backend: { type: "string", default: "ghostty" }, output: { type: "string" }, cycles: { type: "string", default: "3" },
   "co-view": { type: "boolean", default: false }, verbose: { type: "boolean", short: "v", default: false },
   "without-observer": { type: "boolean", default: false }, "full-screen": { type: "boolean", default: false },
 } });
-if (!["xterm", "ghostty"].includes(values.backend) || !values.output || !/^[1-9]$/.test(values.cycles)) {
-  throw new Error("usage: terminal-size.mjs --backend xterm|ghostty --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [--full-screen] [-v]");
+if (values.backend !== "ghostty" || !values.output || !/^[1-9]$/.test(values.cycles)) {
+  throw new Error("usage: terminal-size.mjs [--backend ghostty] --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [--full-screen] [-v]");
 }
 if (values["co-view"] && values.cycles !== "1") throw new Error("co-view requires --cycles 1 to bound resize storms");
 if (values["without-observer"] && !values["co-view"]) throw new Error("without-observer requires co-view");
@@ -149,7 +149,7 @@ try {
   }
   const page = await openPage("primary", 1600, 1000);
   await until(async () => { try { return await layout(); } catch { return null; } }, Boolean, "window addressable");
-  await writeTerminalPrefs(page, token, { ghostty: values.backend === "ghostty", secret_masking: false });
+  await writeTerminalPrefs(page, token, { secret_masking: false });
   const initial = await layout();
   const left = initial.activePaneId;
   const anchor = (paneId, name) => cs(["terminal", "new", "--window", windowId, "--pane", paneId,

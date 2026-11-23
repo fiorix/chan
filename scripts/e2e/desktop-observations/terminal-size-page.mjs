@@ -6,8 +6,7 @@ export function unobservedViews({ name, tabId, surfaces }) {
     if (id !== tabId) return [];
     const host = tab.querySelector(".terminal-host");
     const pane = tab.closest(".pane");
-    const xterm = tab.querySelector(surfaces.xterm);
-    const screen = xterm ?? tab.querySelector(surfaces.ghostty);
+    const screen = tab.querySelector(surfaces.ghostty);
     const box = (element) => {
       if (!element) return null;
       const { x, y, width, height } = element.getBoundingClientRect();
@@ -15,7 +14,7 @@ export function unobservedViews({ name, tabId, surfaces }) {
     };
     return [{ name, tab: id, pane: pane?.getAttribute("data-pane-id"), connected: !!screen,
       visible: !!host && tab.classList.contains("active") && getComputedStyle(host).visibility === "visible",
-      backend: xterm ? "xterm" : screen ? "ghostty" : null, grid: null,
+      backend: screen ? "ghostty" : null, grid: null,
       paneBox: box(pane), hostBox: box(host), screenBox: box(screen) }];
   });
 }
@@ -39,9 +38,7 @@ export function installSizeObserver(surfaces) {
     const tab = document.querySelector(`[data-terminal-tab-id="${CSS.escape(entry.tab)}"]`);
     const pane = tab?.closest(".pane");
     const host = tab?.querySelector(".terminal-host");
-    const xterm = tab?.querySelector(surfaces.xterm);
-    const screen = xterm ?? tab?.querySelector(surfaces.ghostty);
-    const scrollbar = host?.querySelector(".xterm .scrollbar.vertical");
+    const screen = tab?.querySelector(surfaces.ghostty);
     const style = host ? getComputedStyle(host) : null;
     const padding = style ? {
       left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight),
@@ -52,12 +49,11 @@ export function installSizeObserver(surfaces) {
       pane: pane?.getAttribute("data-pane-id") ?? null,
       connected: entry.peer.readyState === NativeSocket.OPEN,
       visible: !!host && tab.classList.contains("active") && style.visibility === "visible" && host.clientWidth > 0 && host.clientHeight > 0,
-      backend: xterm ? "xterm" : screen ? "ghostty" : null,
+      backend: screen ? "ghostty" : null,
       grid: entry.grid, sizeIfUnset: entry.sizeIfUnset, paneBox: box(pane), hostBox: box(host), screenBox: box(screen),
       hostWidth: host?.clientWidth ?? 0, hostHeight: host?.clientHeight ?? 0, padding,
-      // Xterm uses a custom scrollbar, so native offsetWidth-clientWidth is
-      // zero even while FitAddon reserves its width. Ghostty overlays it.
-      scrollbar: xterm ? (scrollbar ? parseFloat(getComputedStyle(scrollbar).width) : null) : 0,
+      // Ghostty's scrollbar overlays the cells without reserving width.
+      scrollbar: 0,
     };
   };
   const append = (record) => {

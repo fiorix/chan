@@ -268,7 +268,7 @@ async function run() {
       content: (id) => [...(pane(id)?.querySelectorAll(".cm-content") ?? [])].find((c) => !c.closest(".rich-prompt") && visible(c)) ?? null,
       modeOf: (c) => !c ? null : c.closest(".md-source") ? "source" : c.closest(".md-wysiwyg-cm6") ? "rendered" : "other",
       host: (id) => [...(pane(id)?.querySelectorAll(".terminal-host") ?? [])].find(visible) ?? null,
-      backendOf: (h) => !h ? null : h.querySelector(terminalSurfaces.xterm) ? "xterm" : h.querySelector(terminalSurfaces.ghostty) ? "ghostty" : "unknown",
+      backendOf: (h) => !h ? null : h.querySelector(terminalSurfaces.ghostty) ? "ghostty" : "missing",
       center: (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; },
       api: async (path, init = {}) => {
         const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\\/+$/, "") ?? "";
@@ -1382,8 +1382,8 @@ async function run() {
     const keyboard = active?.closest(".browser") ? "browser"
       : active?.closest(".terminal-host") ? (active.tagName === "TEXTAREA" ? "terminal-textarea" : "terminal") : "other";
     const allHosts = [...document.querySelectorAll(".terminal-host")].filter(visible);
-    const backend = allHosts.some((el) => el.querySelector(terminalSurfaces.xterm)) ? "xterm"
-      : allHosts.some((el) => el.querySelector(terminalSurfaces.ghostty)) ? "ghostty" : "none";
+    const backend = allHosts.length === 0 ? "none"
+      : allHosts.every((el) => el.querySelector(terminalSurfaces.ghostty)) ? "ghostty" : "missing";
     return { at: performance.now(), document: performance.timeOrigin, hashFocus,
       focused: browser ? "browser" : host ? "terminal" : "other", keyboard, backend,
       panes: document.querySelectorAll(".pane[data-pane-id]").length };

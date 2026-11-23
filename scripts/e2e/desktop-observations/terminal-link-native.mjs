@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 // The link menu on chan-desktop's WebKitGTK page (terminal-link-native.sh
-// starts the desktop, the private xdg-open and the window). For each
-// backend: the terminal preference is written, which a new terminal reads
-// at spawn, with no reload; a new terminal's shell writes its grid size to a
+// starts the desktop, the private xdg-open and the window). A new Ghostty
+// terminal's shell writes its grid size to a
 // file, clears the screen and prints a URL on the top row (the printf's
 // argument holds the URL's tail, so the echoed command holds no link); a
 // click by XTEST on the URL must open the link menu showing it, and a click
 // by XTEST on "Open in browser" must put the URL in the private xdg-open's
 // record.
 //
-// Exit 0 every backend held; 10 a fault (the wrapper turns it into 1); 2
+// Exit 0 the Ghostty arm held; 10 a fault (the wrapper turns it into 1); 2
 // the setup did not run (the page, the terminal or the printed URL never
 // came, or X input cannot be placed on the page); 3 the driver failed in a
 // way it does not expect.
@@ -18,6 +17,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
+import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
 
 const exec = promisify(execFile);
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -30,9 +30,9 @@ const { values } = parseArgs({
     backends: { type: "string" },
   },
 });
-const backends = (values.backends ?? "ghostty,xterm").split(",").filter(Boolean);
-if (!values.inspector || !values.xid || !values.workspace || !values.output || backends.some((b) => b !== "ghostty" && b !== "xterm")) {
-  console.error("usage: terminal-link-native.mjs --inspector HOST:PORT --xid XID --workspace DIR --output DIR [--backends ghostty,xterm]");
+const backends = (values.backends ?? "ghostty").split(",").filter(Boolean);
+if (!values.inspector || !values.xid || !values.workspace || !values.output || !backends.length || backends.some((b) => b !== "ghostty")) {
+  console.error("usage: terminal-link-native.mjs --inspector HOST:PORT --xid XID --workspace DIR --output DIR [--backends ghostty]; retired backends are unsupported");
   process.exit(2);
 }
 const out = resolve(values.output);
@@ -48,7 +48,6 @@ process.env.CHAN_NO_DEVSERVER_HANDOFF = "1";
 const URL_TAIL = "s://example.com/native316";
 const URL_316 = `http${URL_TAIL}`;
 const MENU = '.terminal-tab-menu-bubble[aria-label="terminal link menu"]';
-const SURFACE = { ghostty: ".terminal-host > canvas", xterm: ".terminal.xterm .xterm-screen" };
 const verdict = { engine: "webkitgtk", sha: process.env.OBS_SHA ?? null, backends: {}, faults: [] };
 const save = () => writeFileSync(join(out, "terminal-link.json"), `${JSON.stringify(verdict, null, 2)}\n`, { mode: 0o600 });
 
@@ -162,53 +161,30 @@ async function clickAt(offset, point) {
   await exec("xdotool", ["click", "1"]);
 }
 
-async function setBackend(backend) {
-  await page.evaluate(async (ghostty) => {
-    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\/+$/, "") ?? "";
-    const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
-    if (!token) throw new Error("the workspace page has no auth token");
-    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-    const config = await (await fetch(`${prefix}/api/config`, { headers })).json();
-    const response = await fetch(`${prefix}/api/config`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ expected_revision: config.revision, preferences: { terminal: { ...config.preferences.terminal, ghostty } } }),
-    });
-    if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
-  }, backend === "ghostty");
-  // The page takes the preference from the server's config event, as a new
-  // terminal reads it at spawn; no reload, which would restore the tabs the
-  // page had saved, the last backend's closing terminal among them. The
-  // surface the terminal mounts says which backend it took.
-  await delay(1500);
-}
-
 /// The page selector of the named terminal's surface, from the server's own
 /// list of where that terminal shows (its pane and tab), or null while it is
 /// not listed. Keyed on the terminal, not on whichever tab is active, so a
-/// terminal another backend's run left behind cannot stand in for it.
+/// terminal another run left behind cannot stand in for it.
 async function surfaceOf(name, backend) {
   const listed = JSON.parse(await cs("terminal", "list", "--json"));
   const row = Object.values(listed.groups ?? {}).flat().find((entry) => entry.name === name);
   if (!row?.pane || !row.tab) return null;
-  return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${SURFACE[backend]}`;
+  return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES[backend]}`;
 }
 
 async function runBackend(backend, offset) {
-  const record = { ok: false };
+  const record = { ok: false, requestedBackend: backend, mounted: null };
   verdict.backends[backend] = record;
   const name = `LinkNative${backend}`;
   try {
     await driveBackend(backend, name, record, offset);
   } finally {
-    // Closed whatever the outcome, so the next backend's run meets no
-    // terminal of this one.
+    // Close the named terminal even when setup or the gesture fails.
     await cs("terminal", "close", "--tab-name", name).catch(() => {});
   }
 }
 
 async function driveBackend(backend, name, record, offset) {
-  await setBackend(backend);
   record.offset = offset;
   const size = join(values.workspace, `size-${backend}`);
   rmSync(size, { force: true });
@@ -217,7 +193,7 @@ async function driveBackend(backend, name, record, offset) {
   await until(`the ${backend} terminal ${name}`, async () => {
     surface = await surfaceOf(name, backend);
     if (!surface) return { listed: false };
-    return page.evaluate((sel, tabSel) => {
+    const state = await page.evaluate((sel, tabSel, ghosttySurface) => {
       const box = document.querySelector(sel)?.getBoundingClientRect();
       const tab = document.querySelector(tabSel);
       const tabBox = tab?.getBoundingClientRect();
@@ -226,10 +202,12 @@ async function driveBackend(backend, name, record, offset) {
         shown: Boolean(box && box.width > 0 && box.height > 0),
         // What the tab holds when it is not shown, for the setup's record.
         tab: tab ? { active: tab.classList.contains("active"), width: tabBox.width, height: tabBox.height } : null,
-        mounted: tab ? (tab.querySelector(".terminal.xterm") ? "xterm" : tab.querySelector(".terminal-host > canvas") ? "ghostty" : "none") : null,
+        mounted: tab ? (tab.querySelector(ghosttySurface) ? "ghostty" : tab.querySelector(".terminal.xterm") ? "xterm" : "none") : null,
       };
-    }, surface, surface.slice(0, surface.indexOf("]", surface.indexOf("data-terminal-tab-id")) + 1));
-  }, (v) => v?.shown === true, 60_000, SetupError);
+    }, surface, surface.slice(0, surface.indexOf("]", surface.indexOf("data-terminal-tab-id")) + 1), TERMINAL_SURFACES.ghostty);
+    record.mounted = state.mounted;
+    return state;
+  }, (v) => v?.shown === true && v.mounted === backend, 60_000, SetupError);
   record.surface = surface;
   const format = String.raw`\033[H\033[2Jhttp%s\nN316_%s\n`;
   await cs("terminal", "write", "--tab-name", name, `stty size > '${size}' && printf '${format}' '${URL_TAIL}' READY\n`);
