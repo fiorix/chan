@@ -63,6 +63,7 @@ vi.mock("../api/client", async (importOriginal) => {
 import App from "../App.svelte";
 import RichPrompt from "./RichPrompt.svelte";
 import { draftPath } from "../__tests__/drafts";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { dispatchTrusted } from "../__tests__/trustedEvent";
 import { api } from "../api/client";
 import * as desktop from "../api/desktop";
@@ -784,6 +785,7 @@ describe("the Rich Prompt chord", () => {
       expect(isRichPromptVisible("term-chord")).toBe(true);
       chord();
       expect(isRichPromptVisible("term-chord")).toBe(false);
+      await seatedGhostty();
     } finally {
       await teardown();
     }
