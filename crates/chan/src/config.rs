@@ -1106,6 +1106,31 @@ mod tests {
             json: false,
         };
         assert_eq!(run(get), ("13\n".into(), String::new()));
+        let get = ConfigAction::Get {
+            key: Some("terminal.font_size".into()),
+            json: true,
+        };
+        assert_eq!(run(get), ("13\n".into(), String::new()));
+
+        // So does the listing of every key, in each format.
+        let (out, err) = run(ConfigAction::Get {
+            key: None,
+            json: false,
+        });
+        assert_eq!(err, "");
+        let listing: toml::Value = toml::from_str(&out).unwrap();
+        assert_eq!(
+            listing["server"]["terminal"]["font_size"].as_integer(),
+            Some(13),
+            "{out}"
+        );
+        let (out, err) = run(ConfigAction::Get {
+            key: None,
+            json: true,
+        });
+        assert_eq!(err, "");
+        let listing: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(listing["server"]["terminal"]["font_size"], 13, "{out}");
     }
 
     #[test]
