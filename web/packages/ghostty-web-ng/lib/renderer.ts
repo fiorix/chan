@@ -13,6 +13,7 @@
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
+import type { HighlightsManager, HighlightSpan, HighlightStyle } from './highlights';
 
 // ============================================================================
 // Type Definitions
@@ -109,6 +110,9 @@ export class CanvasRenderer {
     endCol: number;
     endRow: number;
   } | null = null;
+
+  private highlightSource?: HighlightsManager;
+  private currentHighlightSpans: HighlightSpan[] = [];
 
   // Link rendering state
   private hoveredHyperlinkId: number = 0;
@@ -270,6 +274,12 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
+    // Cache overlays before any cursor-only redraw can paint a row.
+    this.currentSelectionCoords = this.selectionManager?.hasSelection()
+      ? this.selectionManager.getSelectionCoords() : null;
+    const highlights = this.highlightSource?.frame(scrollbackLength - historyRows, dims.rows, dims.cols);
+    this.currentHighlightSpans = highlights?.spans ?? [];
+
     // Check if cursor position changed or if blinking (need to redraw cursor line).
     // A cursor hidden or shown where it stands repaints its line as a move
     // does: the core marks no row dirty for it.
@@ -295,17 +305,12 @@ export class CanvasRenderer {
     }
 
     // Check if we need to redraw selection-related lines
-    const hasSelection = this.selectionManager && this.selectionManager.hasSelection();
-    const selectionRows = new Set<number>();
-
-    // Cache selection coordinates for use during cell rendering
-    // This is used by isInSelection() to determine if a cell needs selection colors
-    this.currentSelectionCoords = hasSelection ? this.selectionManager!.getSelectionCoords() : null;
+    const selectionRows = highlights?.dirtyRows ?? new Set<number>();
 
     // Mark current selection rows for redraw (includes programmatic selections)
     if (this.currentSelectionCoords) {
       const coords = this.currentSelectionCoords;
-      for (let row = coords.startRow; row <= coords.endRow; row++) {
+      for (let row = Math.max(0, coords.startRow); row <= Math.min(dims.rows - 1, coords.endRow); row++) {
         selectionRows.add(row);
       }
     }
@@ -499,6 +504,13 @@ export class CanvasRenderer {
       return; // Selection background replaces cell background
     }
 
+    const highlight = this.highlightAt(x, y, cell.width);
+    if (highlight) {
+      this.ctx.fillStyle = highlight.background ?? this.theme.selectionBackground;
+      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
+      return;
+    }
+
     // A default background paints nothing over the row's theme fill, which
     // a see-through theme leaves clear. Its colour cannot say it is the
     // default: a see-through theme's resolves to black in the core, as a
@@ -527,6 +539,7 @@ export class CanvasRenderer {
 
     // Check if this cell is selected
     const isSelected = this.isInSelection(x, y);
+    const highlight = isSelected ? null : this.highlightAt(x, y, cell.width);
 
     // Set text style
     let fontStyle = '';
@@ -539,6 +552,8 @@ export class CanvasRenderer {
       this.ctx.fillStyle = colorOverride;
     } else if (isSelected && this.theme.selectionForeground) {
       this.ctx.fillStyle = this.theme.selectionForeground;
+    } else if (highlight?.foreground) {
+      this.ctx.fillStyle = highlight.foreground;
     } else {
       // Extract colors and handle inverse: when inverted, foreground
       // becomes background
@@ -880,6 +895,22 @@ export class CanvasRenderer {
    */
   public setSelectionManager(manager: SelectionManager): void {
     this.selectionManager = manager;
+  }
+
+  public setHighlights(source: HighlightsManager): void {
+    this.highlightSource = source;
+  }
+
+  /** Last covering span wins; a wide glyph includes either of its cells. */
+  private highlightAt(x: number, y: number, width: number): Readonly<HighlightStyle> | null {
+    for (let i = this.currentHighlightSpans.length - 1; i >= 0; i--) {
+      const span = this.currentHighlightSpans[i];
+      if (y < span.startRow || y > span.endRow) continue;
+      if (y === span.startRow && x + width - 1 < span.startCol) continue;
+      if (y === span.endRow && x > span.endCol) continue;
+      return span.style;
+    }
+    return null;
   }
 
   /**

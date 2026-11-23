@@ -3,6 +3,7 @@
  */
 
 import type { GhosttyVt } from '../vt/ghosttyVt';
+import type { HighlightRange, HighlightStyle } from './highlights';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -96,6 +97,16 @@ export interface TerminalViewport {
   scrollToBottom(): void;
   /** Reveal an absolute buffer row; leave a visible row in place. */
   reveal(row: number, align?: 'start' | 'center' | 'end'): void;
+}
+
+/** Named paint independent of selection, copy and content-change events. */
+export interface TerminalHighlights {
+  /** Replace a layer with copied, ordered ranges and style; invalid coordinates throw while open. */
+  set(name: string, ranges: readonly HighlightRange[], style?: HighlightStyle): void;
+  /** Remove only this layer, repainting its previous coverage; false if absent. */
+  clear(name: string): boolean;
+  /** A fresh snapshot, or undefined when absent, before open or after disposal. */
+  get(name: string): { ranges: readonly HighlightRange[]; style: Readonly<HighlightStyle> } | undefined;
 }
 
 /**

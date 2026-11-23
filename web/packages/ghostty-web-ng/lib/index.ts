@@ -12,6 +12,7 @@ export { Terminal } from './terminal';
 export type {
   ITheme,
   TerminalChange,
+  TerminalHighlights,
   TerminalLinkActivation,
   TerminalLinkKind,
   TerminalViewport,
@@ -27,3 +28,4 @@ export { InputHandler } from './input-handler';
 export { SelectionManager } from './selection-manager';
 
 export type { SelectionAnchor, SelectionRange } from './selection-manager';
+export type { HighlightRange, HighlightStyle } from './highlights';
