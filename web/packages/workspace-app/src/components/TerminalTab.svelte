@@ -2036,6 +2036,12 @@
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0 && !resetBeforeReplay) {
+          // The lost bytes can end inside a sequence whose rest never comes.
+          // CAN on the output path ends it in the core and in every stream
+          // observer, as the server's own recovery suffix does after the
+          // replay, so neither this line nor the replay is read as part of
+          // it. A reset replay starts with RIS, which ends it too.
+          writePtyOutput(Uint8Array.of(0x18), "replay");
           writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
         // A replacement socket has attached to the same session: what waited
