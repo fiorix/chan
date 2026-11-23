@@ -293,6 +293,61 @@ describe("mouse events encoded by the Ghostty input handler", () => {
       "\x1b[<0;3;2M", "\x1b[<0;3;2m", "\x1b[<2;3;2M", "\x1b[<2;3;2m",
     ]);
   });
+
+  /// A primary-button double click at `el` as the engine delivers it: each
+  /// press and release with its compatibility mouse events, then a click
+  /// carrying the count so far.
+  function engineDoubleClick(el: Element, at: { clientX: number; clientY: number }, shiftKey = false): void {
+    for (const detail of [1, 2]) {
+      const mouse = (type: string, buttons: number) =>
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, detail, shiftKey, ...at }));
+      const compat = !mousePointer(el, "pointerdown", at, { shiftKey }).defaultPrevented;
+      if (compat) mouse("mousedown", 1);
+      mousePointer(el, "pointerup", at, { shiftKey });
+      if (compat) mouse("mouseup", 0);
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail, shiftKey, ...at }));
+    }
+  }
+
+  // The word wraps after "hel", so a Shift double click on "lo" copying the
+  // whole word is chan's extents, not the widget's own one-row double click.
+  test("on the Linux desktop a double click a program reports copies nothing; with Shift it selects and copies the word", async () => {
+    const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
+    const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invoke } };
+    desktop.__TAURI_INTERNALS__ = { invoke };
+    cleanups.push(() => delete desktop.__TAURI_INTERNALS__);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, `${" ".repeat(term.cols - 3)}hello world\x1b[?1000h\x1b[?1006h`);
+    expect(ghosttyLineText(term, 0)?.trimStart()).toBe("hel");
+    expect(ghosttyLineText(term, 1)).toBe("lo world");
+    expect(ghosttyMouseTracking(term)).toBe(true);
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    const { width, height } = ghosttyCellMetrics(term);
+    const afterWrap = { clientX: 0.5 * width, clientY: 1.5 * height };
+    socket.sent.splice(0);
+    invoke.mockClear();
+
+    engineDoubleClick(canvas, afterWrap);
+    await vi.waitFor(() => expect(inputFrames(socket).map((frame) => frame.data)).toEqual([
+      "\x1b[<0;1;2M", "\x1b[<0;1;2m", "\x1b[<0;1;2M", "\x1b[<0;1;2m",
+    ]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invoke.mock.calls, "no clipboard or PRIMARY write").toEqual([]);
+    expect(term.hasSelection()).toBe(false);
+    expect(term.getSelection()).toBe("");
+
+    socket.sent.splice(0);
+    engineDoubleClick(canvas, afterWrap, true);
+    await vi.waitFor(() => expect(invoke.mock.calls).toEqual([
+      ["write_clipboard_text", { text: "hello" }],
+      ["write_primary_selection", { text: "hello" }],
+    ]));
+    expect(inputFrames(socket), "Shift keeps the clicks from the program").toEqual([]);
+    expect(term.getSelection()).toBe("hello");
+  });
 });
 
 describe("a mouse filter holding an unfinished control sequence", () => {
