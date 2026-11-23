@@ -359,7 +359,7 @@ export default {
     } finally {
       if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
-      await page.evaluate(() => window.__ghostty211?.restore());
+      await page.evaluate(() => window.__ghostty211?.restore()).catch(() => {});
     }
   },
 };

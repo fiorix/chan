@@ -550,7 +550,7 @@ export default {
         await closeTerminal(TAB_G).catch((error) => result.failures.push(`terminal cleanup: ${error.message}`));
         await fixture?.close().catch((error) => result.failures.push(`fixture cleanup: ${error.message}`));
         await term?.dispose().catch((error) => result.failures.push(`handle cleanup: ${error.message}`));
-        await page.evaluate(() => window.__pointerSmoke?.restore());
+        await page.evaluate(() => window.__pointerSmoke?.restore()).catch(() => {});
         result.status = result.failures.length ? "failed" : "passed";
         writeFileSync(join(ctx.outDir, "94-pointer.json"), JSON.stringify(result, null, 2) + "\n");
       }

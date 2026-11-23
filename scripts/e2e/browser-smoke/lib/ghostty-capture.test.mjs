@@ -107,3 +107,30 @@ test("notice capture restores an instance's own write method", async (t) => {
   window.capture.restore();
   assert.deepEqual(Object.getOwnPropertyDescriptor(term, "write"), descriptor);
 });
+
+
+for (const order of [["first", "second"], ["second", "first"]]) {
+  test(`nested captures restore in ${order.join(" then ")} order`, async (t) => {
+    const { page, open, write } = fixture(t);
+    for (const key of ["first", "second"]) await captureGhosttyTerminals(page, key, { notices: true });
+    const states = { first: window.first, second: window.second };
+    const term = new CaptureTestTerminal();
+    term.open({});
+    term.write("terminal error: both");
+    states[order[0]].restore();
+    const other = new CaptureTestTerminal();
+    other.open({});
+    term.write("terminal error: remaining");
+    other.write("terminal error: new");
+    assert.deepEqual(states[order[0]].terminals, [term]);
+    assert.deepEqual(states[order[0]].notices, ["terminal error: both"]);
+    assert.deepEqual(states[order[1]].terminals, [term, other]);
+    assert.deepEqual(states[order[1]].notices, ["terminal error: both", "terminal error: remaining", "terminal error: new"]);
+    states[order[1]].restore();
+    assert.equal(CaptureTestTerminal.prototype.open, open);
+    assert.equal(term.write, write);
+    assert.equal(other.write, write);
+    assert.equal(Object.hasOwn(term, "write"), false);
+    assert.equal(Object.hasOwn(other, "write"), false);
+  });
+}

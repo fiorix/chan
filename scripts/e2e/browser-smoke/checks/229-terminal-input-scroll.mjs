@@ -219,7 +219,7 @@ export default {
         writeFileSync(join(ctx.outDir, `229-ghostty.json`), JSON.stringify(result, null, 2) + "\n");
       }
     } finally {
-      await page.evaluate(() => window.__ghostty229?.restore());
+      await page.evaluate(() => window.__ghostty229?.restore()).catch(() => {});
       await writeTerminalPrefs(page, token, { mouse_capture: original.mouse_capture });
     }
     const result = readings.ghostty;

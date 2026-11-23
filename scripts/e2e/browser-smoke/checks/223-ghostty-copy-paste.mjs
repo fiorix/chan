@@ -304,7 +304,7 @@ export default {
     } finally {
       await cs(["close", "--tab-name", TARGET]).catch(() => {});
       await cs(["close", "--tab-name", SOURCE]).catch(() => {});
-      await page.evaluate(() => window.__ghostty223?.restore());
+      await page.evaluate(() => window.__ghostty223?.restore()).catch(() => {});
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }

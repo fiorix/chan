@@ -333,7 +333,7 @@ export default {
     } finally {
       await cs(["close", "--tab-name", CONTROL]).catch(() => {});
       await cs(["close", "--tab-name", MUSE]).catch(() => {});
-      await page.evaluate(() => window.__ghostty330?.restore());
+      await page.evaluate(() => window.__ghostty330?.restore()).catch(() => {});
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     }
