@@ -7,7 +7,8 @@
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
+import { Terminal } from "@chan/ghostty-web-ng";
+import { openedGhostty } from "../__tests__/ghosttyTab";
 
 const measurement = vi.hoisted(() => ({
   grid: { cols: 132, rows: 41 } as { cols: number; rows: number } | null,
@@ -24,45 +25,14 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (importOriginal) => {
-  const { FakeTerminal } = await import("../__tests__/terminalTab");
-  // The inherited resize calls every onResize handler synchronously, as
-  // both renderers do. Each case also proves a shown fit reaches the socket.
-  class GhosttyTerminal extends FakeTerminal {
-    renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
-    buffer = { active: {}, alternate: {} };
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() { return false; }
-    hasFocusEvents() { return false; }
-    // What chan's ghostty key listener reads and drives on a key.
-    getMode() { return false; }
-    scrollLines() {}
-    selectAll() {}
-    clearSelection() {}
-  }
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({
-    ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  });
-});
-vi.mock("../terminal/ghosttyCompat", () => ({
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
-}));
-vi.mock("../terminal/ghosttyViewport", () => ({
-  GhosttyViewportController: class {
-    write() {}
-    dispose() {}
-  },
-}));
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 vi.mock("../terminal/resize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/resize")>();
   return {
     ...actual,
-    proposeGhosttyDimensions: () => measurement.grid,
     runTerminalFit: (...args: Parameters<typeof actual.runTerminalFit>) => {
       measurement.fits += 1;
       return actual.runTerminalFit(...args);
@@ -87,7 +57,7 @@ import { dockTerminal, terminalLayer, terminalPlacements } from "../state/termin
 import { layout, type LeafNode } from "../state/tabs.svelte";
 import {
   attach, installTerminalDom, receive, resetTerminals, resizeObservers,
-  seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket, xterm,
+  seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -97,7 +67,6 @@ const gridFrame = (cols: number, rows: number) => ({ type: "resize", cols, rows 
 
 function hostGrid(cols: number, rows: number) {
   measurement.grid = { cols, rows };
-  xterm.fit.size = { cols, rows };
 }
 
 async function settled() {
@@ -122,7 +91,7 @@ async function mounted(active = true, sessionId?: string) {
   const result = mounting(active, sessionId);
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
   await tick();
-  return { ...result, term: xterm.terminals.at(-1)!, socket: TerminalSocket.all[0]! };
+  return { ...result, term: await openedGhostty(result.target), socket: TerminalSocket.all[0]! };
 }
 
 async function shown() {
@@ -158,16 +127,22 @@ function cleanup() {
   resetTerminals();
 }
 
-describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
+describe("widget size ownership", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
-    useXtermStandIn(backend === "xterm");
+    // The software canvas measures cells at 8 by 19 CSS pixels.
+    for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+      const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
+      vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
+        return this.classList.contains("terminal-host") ? (measurement.grid?.[axis] ?? 0) * cell : original.call(this);
+      });
+    }
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
     hostGrid(132, 41);
     measurement.fits = 0;
 
     const control = await shown();
-    expect("renderer" in control.term, "the selected backend's stand-in is running").toBe(backend === "ghostty");
+    expect(control.term).toBeInstanceOf(Terminal);
     hostGrid(101, 33);
     resizeObservers.at(-1)!.callback();
     await settled();
@@ -304,7 +279,6 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
 
   test("a later measured fit supplies the hidden fresh redial", async () => {
     measurement.grid = null;
-    xterm.fit.size = null;
     TerminalSocket.connecting = true;
     const { props, socket } = await mounted();
     expect(new URL(socket.url, "http://chan.test").searchParams.get("cols")).toBeNull();
@@ -369,7 +343,6 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const { props, socket } = await shown();
     await visibility(props, false);
     measurement.grid = null;
-    xterm.fit.size = null;
     await visibility(props, true);
     socket.close();
     await vi.advanceTimersByTimeAsync(1000);
@@ -389,7 +362,7 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     expect(confirmState.open, "the focused terminal receives the restart command").toBe(true);
     resolveConfirm(true);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
-    const nextTerm = xterm.terminals.at(-1)!;
+    const nextTerm = await openedGhostty();
     const nextSocket = TerminalSocket.all[1]!;
     expect(nextTerm, "restart builds a new renderer in the same component").not.toBe(term);
     expect([nextTerm.cols, nextTerm.rows]).toEqual([132, 41]);
@@ -414,7 +387,6 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const { props, socket } = await shown();
     await visibility(props, false);
     measurement.grid = null;
-    xterm.fit.size = null;
     await visibility(props, true);
     await settled();
     expect(frames(socket), "an unmeasured reveal sends nothing").toEqual([]);

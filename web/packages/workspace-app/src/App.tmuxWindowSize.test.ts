@@ -17,14 +17,16 @@ vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).s
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 vi.mock("./terminal/backend", async (importOriginal) =>
-  (await import("./__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("./__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { api, sessionWindowId } from "./api/client";
 import { setSocketFactory } from "./api/transport";
 import { demoSocketFactory } from "./demo/socket";
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { resetLayout, terminalTab } from "./__tests__/tabs";
-import { xterm } from "./__tests__/xterm";
+import { ghosttyFixture } from "./__tests__/ghosttyTab";
 import { onWatchEvent } from "./state/store.svelte";
 import { cancelPaneMode, enterPaneMode, layout, splitPane, type LeafNode } from "./state/tabs.svelte";
 import type { TmuxLayoutNode, TmuxPaneRef, TmuxRequest } from "./state/tmux";
@@ -108,6 +110,7 @@ function tmuxPaneSockets(url: string): WebSocket {
 const spyOnRequests = () => vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
 const spyOnBox = (element: HTMLElement) => vi.spyOn(element, "getBoundingClientRect");
 
+let hostGrid = { cols: 60, rows: 40 };
 let target: HTMLElement;
 let main: HTMLElement;
 let areaBox: ReturnType<typeof spyOnBox>;
@@ -120,7 +123,7 @@ const windowSizes = () => requests().filter(([, body]) => body.request === "wind
 /// do after a divider moves or a layout lands; each host holds `cols` by
 /// `rows`.
 async function hostsMoved(cols: number, rows = 40): Promise<void> {
-  xterm.fit.size = { cols, rows };
+  hostGrid = { cols, rows };
   resized((element) => element.classList.contains("terminal-host"));
   await vi.advanceTimersByTimeAsync(300);
 }
@@ -162,7 +165,14 @@ beforeEach(async () => {
   // Each host holds 60 by 40 cells, so the row of two panes and a divider
   // folds to 121 by 40; the 1210 by 800 box is the ask's trigger, not its
   // size.
-  xterm.fit.size = { cols: 60, rows: 40 };
+  hostGrid = { cols: 60, rows: 40 };
+  // The shared software canvas measures an 8 by 19 CSS-pixel cell.
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
+    vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("terminal-host") ? hostGrid[axis] * cell : original.call(this);
+    });
+  }
   target = await mountApp();
   setSocketFactory(tmuxPaneSockets);
   main = target.querySelector("main")!;
@@ -176,6 +186,7 @@ beforeEach(async () => {
   right.activeTabId = "t1";
   setTmuxLayout(TREE);
   await settle();
+  await vi.waitFor(() => expect(ghosttyFixture.terminals.filter((t) => t.element?.isConnected)).toHaveLength(2));
   await vi.advanceTimersByTimeAsync(400);
   expect(windowSizes(), "the attach asks once for the hosts' fold").toEqual([
     ["pane-0", { request: "window-size", pane: "%0", cols: 121, rows: 40 }],
@@ -186,9 +197,9 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.useRealTimers();
   setTmuxLayout(null);
-  xterm.fit.size = null;
   await settle();
   await unmountApp();
+  ghosttyFixture.terminals.splice(0);
   vi.restoreAllMocks();
   vi.clearAllMocks();
 });
