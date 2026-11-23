@@ -4,9 +4,9 @@
 // After a devserver parks a PTY the next process can restore it, so the
 // blob keeps the session id and the reloaded window reattaches to it; every
 // other `closed` reason and a process exit drop it, and an explicit close
-// deletes the blob with its tab. A TerminalTab is mounted over the stand-in
-// xterm and attached on its socket; the assertions read the blobs the
-// window writes and deletes.
+// deletes the blob with its tab. A TerminalTab is mounted on the real widget
+// through the shared fixture and attached on its socket; the assertions read
+// the blobs the window writes and deletes.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 

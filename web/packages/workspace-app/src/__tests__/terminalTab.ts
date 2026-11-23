@@ -1,11 +1,14 @@
 // Mounting TerminalTab in jsdom over a stand-in WebSocket. A file that
 // declares the shared fixture in `./ghosttyTab` mounts it on the real widget
-// over the vendored core. A file that does not still runs it on the stand-in
-// xterm: the xterm modules are replaced with the recorders in `./xterm`,
-// re-exported here, so a test reads what the component configured and
-// wrote, and drives the key handler it registered the way xterm would. This
-// module imports no component: a test file declares its mocks, imports
-// TerminalTab itself and hands it to mountTerminal.
+// over the vendored core. A file on the transitional stand-in route in
+// `./xterm` runs it on the stand-in xterm instead: its Ghostty load fails on
+// purpose, TerminalTab falls back, and the xterm modules are replaced with
+// the recorders in `./xterm`, re-exported here, so a test reads what the
+// component configured and wrote, and drives the key handler it registered
+// the way xterm would. A terminal opened with neither fails its test (the
+// guard in vitest.setup.ts). This module imports no component: a test file
+// declares its mocks, imports TerminalTab itself and hands it to
+// mountTerminal.
 
 import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { mount, tick, unmount, type Component } from "svelte";

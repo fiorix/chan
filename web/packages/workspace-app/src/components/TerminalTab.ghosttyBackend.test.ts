@@ -388,7 +388,7 @@ describe("a control terminal whose masking starts on", () => {
 });
 
 describe("choosing the backend", () => {
-  test("the ghostty setting spawns the terminal on ghostty with chan's options", async () => {
+  test("a terminal spawns on ghostty with chan's options", async () => {
     const { term } = await mountGhostty();
     expect(xterm.terminals, "no xterm built").toHaveLength(0);
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
