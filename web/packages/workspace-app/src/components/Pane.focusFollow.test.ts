@@ -6,9 +6,9 @@
 // focus, and the surface of the focused tab takes the keyboard. A terminal
 // tab selects on its matching left release; a file tab still pulses on press
 // and release. A terminal that stops being focused
-// lets go of its xterm. The pane tree (Workspace, which draws the pane and
+// lets go of its widget. The pane tree (Workspace, which draws the pane and
 // docks its terminal into it) is mounted over the demo workspace with a
-// terminal (the stand-in xterm) and real editors.
+// terminal on the real widget (the shared fixture) and real editors.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -20,7 +20,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import Workspace from "./Workspace.svelte";
 import Pane from "./Pane.svelte";
@@ -44,8 +46,10 @@ import {
   type LeafNode,
   type Tab,
 } from "../state/tabs.svelte";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
-import { installTerminalDom, resetTerminals, terminalTab, xterm, type FakeTerminal } from "../__tests__/terminalTab";
+import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 
 installTerminalDom();
 Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
@@ -122,16 +126,16 @@ async function settle(turns = 6): Promise<void> {
 
 /// Mounts the pane tree over one pane holding `tabs` (a terminal first), with
 /// the first one active.
-async function mountPane(tabs: Tab[]): Promise<{ target: HTMLElement; term: FakeTerminal }> {
+async function mountPane(tabs: Tab[]): Promise<{ target: HTMLElement; term: Terminal }> {
   layout.nodes = { [PANE]: { kind: "leaf", id: PANE, tabs, activeTabId: tabs[0]!.id } };
   layout.rootId = PANE;
   layout.activePaneId = PANE;
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
+  const term = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${tabs[0]!.id}"]`) ?? target);
   await settle();
-  return { target, term: xterm.terminals.at(-1)! };
+  return { target, term };
 }
 
 function paneTabs(): Tab[] {
@@ -184,14 +188,15 @@ describe("the focus pulse", () => {
 describe("a chord switch", () => {
   test("pulses once per switch, and the keyboard follows between the terminal and the editors", async () => {
     const { term } = await mountPane([terminalTab(), rich(), plain()]);
-    const blurs = term.blurCount;
+    expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true);
+    const blur = vi.spyOn(term, "blur");
 
     let pulse = tabFocusPulse.value;
     selectNextTabInActivePane();
     await settle();
     expect(tabFocusPulse.value).toBe(pulse + 1);
     expect(focusedEditor()).toContain("wysiwyg body");
-    expect(term.blurCount, "the terminal lets go of its xterm").toBeGreaterThan(blurs);
+    expect(blur, "the terminal lets go of its widget").toHaveBeenCalled();
 
     pulse = tabFocusPulse.value;
     selectTabAtIndexInActivePane(2);
@@ -205,18 +210,18 @@ describe("a chord switch", () => {
     expect(tabFocusPulse.value).toBe(pulse + 1);
     expect(focusedEditor()).toContain("wysiwyg body");
 
-    const focuses = term.focusCount;
     selectPrevTabInActivePane();
     await settle();
     expect(focusedEditor(), "the editor gives up the keyboard").toBe("");
-    expect(term.focusCount, "the terminal takes it").toBeGreaterThan(focuses);
+    expect(ghosttyHasFocus(term), "the terminal takes it").toBe(true);
   });
 });
 
 describe("opening a file", () => {
   test("in a new tab pulses once and moves the keyboard from the terminal into its editor", async () => {
     const { term } = await mountPane([terminalTab()]);
-    const blurs = term.blurCount;
+    expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true);
+    const blur = vi.spyOn(term, "blur");
     const pulse = tabFocusPulse.value;
 
     await openInPane(PANE, FRESH);
@@ -224,7 +229,7 @@ describe("opening a file", () => {
     expect(paneTabs().map((t) => t.kind)).toEqual(["terminal", "file"]);
     expect(tabFocusPulse.value).toBe(pulse + 1);
     expect(focusedEditor()).toContain("new body");
-    expect(term.blurCount).toBeGreaterThan(blurs);
+    expect(blur, "the terminal lets go of its widget").toHaveBeenCalled();
   });
 
   test("already open, re-activates its tab, pulses once and moves the keyboard into its editor", async () => {
@@ -485,34 +490,33 @@ describe("the tab strip", () => {
     { part: "padding", button: 1 }, { part: "padding", button: 2 },
     { part: "label", button: 1 }, { part: "label", button: 2 },
   ])("a $part press with button $button returns focus to the selected terminal without a widget retry", async ({ part, button }) => {
-    xterm.textareaFocus = true;
     const first = terminalTab({ id: "term-first" });
     const second = terminalTab({ id: "term-second" });
     const { target } = await mountPane([first, second]);
     const tab = stripTab(target, 1);
     const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
     const pressed = part === "padding" ? tab : label;
-    const input = target.querySelector<HTMLTextAreaElement>(`[data-terminal-tab-id="${second.id}"] textarea`);
-    expect(input, "the selected terminal has a real DOM focus target").not.toBeNull();
+    const selected = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${second.id}"]`)!);
+    expect(ghosttyHasFocus(selected), "the second terminal starts without the keyboard").toBe(false);
 
     press(pressed, "mousedown", button);
     await tick();
     await tick();
     expect(activeTab()?.id, "non-primary selection happens on press").toBe(second.id);
-    expect(document.activeElement, "selection first sends focus to the terminal").toBe(input);
+    expect(ghosttyHasFocus(selected), "selection first sends focus to the terminal").toBe(true);
 
     // jsdom omits the native mouse-focus default after the press handlers.
-    // The stand-in xterm only focuses synchronously, with no backup timer.
+    // The widget focuses once, synchronously, with no backup timer.
     pressed.focus();
     expect(document.activeElement).toBe(pressed);
     const focusLabel = vi.spyOn(label, "focus");
     try {
       await settle();
       expect(focusLabel, "the deferred path waits for the surface instead of briefly focusing the label").not.toHaveBeenCalled();
-      expect(document.activeElement, "the deferred press path restores the terminal's keyboard").toBe(input);
+      expect(ghosttyHasFocus(selected), "the deferred press path restores the terminal's keyboard").toBe(true);
       press(pressed, "mouseup", button);
       await settle();
-      expect(document.activeElement, "non-primary release keeps surface focus").toBe(input);
+      expect(ghosttyHasFocus(selected), "non-primary release keeps surface focus").toBe(true);
     } finally {
       focusLabel.mockRestore();
     }
