@@ -225,6 +225,8 @@ export async function runPointerCheck(ctx, number, body) {
     resource.prepare = async (text) => {
       const setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[?25l\x1b[2J\x1b[H${text}\r\n`);
       assert.equal(setup.reply, "\x1b[2;1R", "fixture text reached the parser without wrapping");
+      assert.equal(await resource.term.evaluate((t) => t.getScrollbackLength()), 0,
+        "each exact-selection gesture starts with empty scrollback");
       assert.deepEqual(await resource.term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
         [false, false, false, false], "each gesture starts with tracking off");
       await settlePointer(page);

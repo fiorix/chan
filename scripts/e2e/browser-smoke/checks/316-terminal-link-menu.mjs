@@ -9,7 +9,7 @@
 // the shell first writes in its $HOME. The printf's format string holds the
 // escapes and its arguments the targets, so the echoed command line holds no
 // link and no marker. A cell's pixels come from the surface's box and the
-// grid `stty` reported; nothing reads the page's terminal objects.
+// grid `stty` reported. The public history count guards the row-zero drag.
 // `window.open` is stubbed in the page and records what the browser would
 // have opened.
 //
@@ -58,7 +58,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
-import { seedPointerClipboard } from "../lib/terminal-pointer.mjs";
+import { capturePointerTerminals, pointerTerminal, seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const DIR = "linkcheck316";
@@ -124,6 +124,7 @@ export default {
     const failures = [];
     const tabs = [];
     const homeFiles = new Set();
+    let terminal;
 
     async function waitScrollback(tab, needle, timeoutMs = 30_000) {
       const deadline = Date.now() + timeoutMs;
@@ -233,8 +234,10 @@ export default {
       const at = (leg) => `${backend}.${leg}`;
       await writeTerminalPrefs(page, authToken, { mouse_capture: true });
       await assertTerminalPrefs(ctx, { mouse_capture: true });
+      await capturePointerTerminals(page);
       const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
       tabs.push(name);
+      terminal = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
       const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
       const sizeFile = join(dir, `size316-${backend}`);
       rmSync(sizeFile, { force: true });
@@ -524,6 +527,10 @@ export default {
       });
 
       await leg(at("shift-drag"), async () => {
+        // Keep the edge gesture, but refuse leftover history before a timer
+        // can scroll it into the selection and make the result timing-dependent.
+        assert.equal(await terminal.evaluate((t) => t.getScrollbackLength()), 0,
+          `shift-drag starts without retained padding history (${EDGE_URL})`);
         const before = recorded().length;
         const from = await cell(0, 0);
         const to = await cell(14, 0);
@@ -570,6 +577,8 @@ export default {
     } finally {
       let restoreError = null;
       try {
+        await terminal?.dispose();
+        await page.evaluate(() => window.__pointerSmoke?.restore());
         await restoreTerminalPrefs(ctx, page, authToken, originalPrefs);
       } catch (error) {
         restoreError = error;
