@@ -1,49 +1,10 @@
-// terminal.secret_masking: the visual secret-masking feature end to end.
-//
-// Five legs against the REAL xterm pipeline (PTY -> server ring -> WS ->
-// xterm buffer -> scan -> decoration DOM), mirroring 97's harness:
-//
-//   MASKED   -- workspace default off, then a stored on choice: printf
-//               secret-looking assignments down the
-//               PTY (the printf args split the secret NAMES so the echoed
-//               command line itself carries no NAME= match), then assert
-//               (a) the SERVER-side scrollback holds the CLEARTEXT (the
-//               ring/replay contract: masking is visual only), and (b)
-//               exactly two .terminal-secret-mask decoration elements
-//               exist -- one for GH_TOKEN's value, one for the quoted
-//               QUOTED_SECRET value -- while TOKENIZE/MONKEY/AUTHOR stay
-//               unmasked. A trusted-input drag over the rows plus the
-//               terminal's own copy chord then proves the clipboard
-//               receives the REAL value: copy of a masked region yields
-//               cleartext, which is a requirement, not a leak.
-//   TOGGLE   -- the ephemeral per-tab toggle (the launcher's Secret
-//               masking (this terminal) row, which changes in place)
-//               clears the decorations in place and surfaces the
-//               transient status; a second run re-masks in place.
-//   SETTINGS -- the Terminal row shows the stored choice as On among
-//               On, Off and Default, and read-only suffixes; Default
-//               clears the choice and the row then reads Default.
-//   CONFIG   -- PATCH terminal.secret_masking=false through the
-//               revisioned /api/config contract (the settings UI's own
-//               chain), prove it persisted into the SANDBOXED
-//               ${chanHome}/server.toml, and show a NEW terminal (the
-//               flag is read at spawn time) renders NO masks.
-//   GHOSTTY  -- with terminal.ghostty=true a new terminal mounts the
-//               wasm backend (canvas, no xterm DOM) and masks on it: the
-//               canvas pixels hold exactly two opaque rectangles of the
-//               mask colour, one cell high, 13 and 7 cells wide (the two
-//               values), while no decoration element exists; a drag over
-//               the rows and the copy chord yield the cleartext; the
-//               per-tab toggle clears the rectangles in place and a
-//               second run paints them again.
-//
-// Output progress is polled through `cs terminal scrollback`
-// (server-side, renderer-independent; headless Chrome runs xterm's
-// WebGL renderer so there is no .xterm-rows DOM to read). Decorations
-// are renderer-independent: xterm always paints them as DOM overlay
-// elements, so .terminal-secret-mask is a real observable. Under ghostty
-// the mask is painted onto its 2D canvas, so the observable is the
-// canvas's own pixels read back through getImageData.
+// Secret masking through the PTY, server ring and Ghostty canvas.
+// Default: no stored choice leaves a workspace terminal unmasked.
+// Stored on: suffix matches mask only values, preserving ring and copy text.
+// Toggle: the live tab changes in place without changing its stored choice.
+// Settings: On and the suffix list are visible; Default clears the choice.
+// Stored off: a fresh terminal paints output without masks.
+// Re-enabled: a fresh terminal masks, copies cleartext and toggles again.
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -51,12 +12,10 @@ import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerm
 const TAB_DEFAULT = "SmokeMask93Default";
 const TAB = "SmokeMask93";
 const TAB_OFF = "SmokeMask93Off";
-const TAB_G = "SmokeMask93G";
+const TAB_REENABLED = "SmokeMask93Reenabled";
 const SECRET_VALUE = "smoke93secret";
 const CLIPBOARD_SENTINEL = "SMOKE93_CLIPBOARD_SENTINEL";
-// The two masked values' widths in cells: GH_TOKEN's 13 and the quoted
-// "a b c" with its quotes, 7. Under ghostty the mask rectangles on the
-// canvas are these many cells wide, one cell high.
+// Quoted values include their quotes in the painted span.
 const MASK_CELLS = [13, 7];
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
@@ -64,11 +23,13 @@ const LAUNCHER_SELECTED_TITLE = `${LAUNCHER} [role="option"][aria-selected="true
 const TOGGLE_ROW = "Secret masking (this terminal)";
 
 // The printf args split every positive secret NAME across two quoted
-// words, so the echoed command line contains no NAME= match and only
-// program OUTPUT does. The third line is the negative corpus.
+// words, so the echoed command line contains no NAME= match. Clear/home
+// puts output on known rows for selection; the coloured ready marker proves
+// the canvas painted it even when the expected mask count is zero.
 const PAYLOAD =
-  `printf '%s%s\\n%s%s\\n%s\\n' 'GH_TO' 'KEN=${SECRET_VALUE}' ` +
-  `'QUOTED_SE' 'CRET="a b c"' 'TOKENIZE=1 MONKEY=2 AUTHOR=alex'\n`;
+  `printf '\\033[2J\\033[H%s%s\\n%s%s\\n%s\\n\\033[48;2;37;181;123mM93_%s\\033[0m\\n' ` +
+  `'GH_TO' 'KEN=${SECRET_VALUE}' 'QUOTED_SE' 'CRET="a b c"' ` +
+  `'TOKENIZE=1 MONKEY=2 AUTHOR=alex' READY\n`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,11 +37,10 @@ export default {
   name: "terminal-secret-masking",
   async run(ctx) {
     const socket = ctx.controlSocket;
-    if (!socket) ctx.skip("control socket not found for the server pid");
+    if (!socket) throw new Error("secret masking setup: control socket not found for the server pid");
     const { page } = ctx;
     await page.bringToFront();
-    // Same window-id precedence as 70-cs-paste/96/97: the URL `?w=`
-    // param may have been rewritten by an earlier check.
+    // The URL's window id takes precedence over the cached session id.
     const windowId = await page.evaluate(
       () =>
         new URL(location.href).searchParams.get("w")?.trim() ||
@@ -114,8 +74,8 @@ export default {
     const originalPrefs = await readTerminalPrefs(page, authToken);
     const patchTerminalConfig = (changes) => writeTerminalPrefs(page, authToken, changes);
     const assertToml = (expected) => assertTerminalPrefs(ctx, expected);
-    const openTerminal = (name, backend) =>
-      openAttachedTerminal(ctx, page, cs, windowId, name, backend);
+    const openTerminal = (name) =>
+      openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
 
     async function closeTerminal(name) {
       await cs(["close", "--tab-name", name]);
@@ -152,33 +112,7 @@ export default {
     /// Emit the payload and its ready marker, then prove delivery.
     async function emitPayload(tab) {
       await cs(["write", "--tab-name", tab, PAYLOAD]);
-      await cs(["write", "--tab-name", tab, "printf 'M93_%s\\n' READY\n"]);
       await waitScrollback(tab, "M93_READY");
-    }
-
-    function maskCount() {
-      return page.evaluate(
-        () => document.querySelectorAll(".terminal-secret-mask").length,
-      );
-    }
-
-    /// Wait until exactly `want` mask decorations exist (or none, when
-    /// `want` is 0 -- a settle window, since absence cannot be polled).
-    async function awaitMaskCount(want) {
-      if (want === 0) {
-        await sleep(1_500);
-        return maskCount();
-      }
-      try {
-        await page.waitForFunction(
-          (n) => document.querySelectorAll(".terminal-secret-mask").length === n,
-          { timeout: 20_000 },
-          want,
-        );
-      } catch (error) {
-        throw new Error(`expected ${want} mask decorations, found ${await maskCount()}`, { cause: error });
-      }
-      return want;
     }
 
     /// The transient status pill auto-dismisses after 3s; poll for its
@@ -219,50 +153,6 @@ export default {
       await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 });
     }
 
-    /// Renderer-independent selection probe via the terminal's own copy
-    /// chord (Ctrl+Shift+C -> copySelectionToClipboard), same as 97.
-    async function dragAndCopy() {
-      const screen = await page.$(`.terminal-tab ${TERMINAL_SURFACES.xterm}`);
-      if (!screen) {
-        throw new Error(
-          "xterm selector missing: .xterm-screen -- xterm internals renamed?",
-        );
-      }
-      const box = await screen.boundingBox();
-      if (!box) throw new Error("xterm screen has no bounding box");
-      const x0 = box.x + 5;
-      const y0 = box.y + 8;
-      const x1 = box.x + Math.min(420, box.width - 10);
-      const y1 = box.y + Math.min(90, box.height - 10);
-      await page.mouse.move(x0, y0);
-      await page.mouse.down();
-      for (let s = 1; s <= 6; s++) {
-        await page.mouse.move(
-          x0 + ((x1 - x0) * s) / 6,
-          y0 + ((y1 - y0) * s) / 6,
-        );
-      }
-      await page.mouse.up();
-      await sleep(250);
-      await page.evaluate(async (sentinel) => {
-        const ta = document.querySelector(".xterm-helper-textarea");
-        if (!ta) {
-          throw new Error(
-            "xterm selector missing: .xterm-helper-textarea -- xterm internals renamed?",
-          );
-        }
-        ta.focus();
-        await navigator.clipboard.writeText(sentinel);
-      }, CLIPBOARD_SENTINEL);
-      await page.keyboard.down("Control");
-      await page.keyboard.down("Shift");
-      await page.keyboard.press("KeyC");
-      await page.keyboard.up("Shift");
-      await page.keyboard.up("Control");
-      await sleep(300);
-      return page.evaluate(() => navigator.clipboard.readText());
-    }
-
     /// The opaque rectangles of the mask colour on ghostty's canvas, read
     /// back from its pixels: runs of mask pixels at least 16px long on a
     /// row, merged with the same run on the rows below. Text in the
@@ -272,12 +162,20 @@ export default {
     function canvasMaskRects() {
       return page.evaluate((selector) => {
         const canvas = document.querySelector(selector);
-        if (!canvas) return null;
+        if (!(canvas instanceof HTMLCanvasElement) || !canvas.width || !canvas.height) return null;
         const { width, height } = canvas;
-        const data = canvas.getContext("2d").getImageData(0, 0, width, height).data;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Ghostty canvas has no readable 2D context");
+        const data = context.getImageData(0, 0, width, height).data;
         const mask = (i) =>
-          (data[i] === 0x6c && data[i + 1] === 0x6c && data[i + 2] === 0x70) ||
-          (data[i] === 0x57 && data[i + 1] === 0x60 && data[i + 2] === 0x6a);
+          data[i + 3] === 255 && (
+            (data[i] === 0x6c && data[i + 1] === 0x6c && data[i + 2] === 0x70) ||
+            (data[i] === 0x57 && data[i + 1] === 0x60 && data[i + 2] === 0x6a)
+          );
+        let markerPixels = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i] === 37 && data[i + 1] === 181 && data[i + 2] === 123 && data[i + 3] === 255) markerPixels++;
+        }
         const open = new Map();
         const rects = [];
         for (let y = 0; y < height; y++) {
@@ -305,7 +203,7 @@ export default {
           open.clear();
           for (const [key, rect] of next) open.set(key, rect);
         }
-        return rects.filter((rect) => rect.h >= 8);
+        return { rects: rects.filter((rect) => rect.h >= 8), markerPixels };
       }, `.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
     }
 
@@ -316,7 +214,7 @@ export default {
       const deadline = Date.now() + 20_000;
       for (;;) {
         last = await canvasMaskRects();
-        if (last && last.length === want) break;
+        if (last?.markerPixels >= 10 && last.rects.length === want) break;
         if (Date.now() > deadline) {
           throw new Error(`expected ${want} mask rectangles on the ghostty canvas, found ${JSON.stringify(last)}`);
         }
@@ -325,25 +223,36 @@ export default {
       if (want === 0) {
         await sleep(500);
         last = await canvasMaskRects();
-        if (!last || last.length !== 0) {
+        if (!last || last.markerPixels < 10 || last.rects.length !== 0) {
           throw new Error(`mask rectangles came back after clearing: ${JSON.stringify(last)}`);
         }
       }
-      return last;
+      return last.rects;
     }
 
-    /// The ghostty counterpart of dragAndCopy: a trusted drag across the
-    /// canvas (its SelectionManager listens there, not on the padded
-    /// host) and the terminal's own copy chord from ghostty's textarea.
-    async function dragAndCopyGhostty() {
+    function assertMaskGeometry(rects) {
+      const [wide, narrow] = [...rects].sort((a, b) => b.w - a.w);
+      if (rects.length !== 2 || wide.h !== narrow.h || wide.h < 8 || wide.y === narrow.y ||
+          Math.abs(wide.w / narrow.w - MASK_CELLS[0] / MASK_CELLS[1]) > 0.05 ||
+          wide.y !== 0 || narrow.y !== wide.h ||
+          Math.abs(wide.x - 9 * wide.w / 13) > 2 ||
+          Math.abs(narrow.x - 14 * narrow.w / 7) > 2) {
+        throw new Error(`expected two one-row masks with ${MASK_CELLS.join(":")} cell widths: ${JSON.stringify(rects)}`);
+      }
+    }
+
+    // A trusted canvas drag must focus the terminal without a private input seam.
+    async function dragAndCopy(rects) {
       const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
       if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
       const box = await canvas.boundingBox();
       if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
-      const x0 = box.x + 5;
-      const y0 = box.y + 8;
-      const x1 = box.x + Math.min(420, box.width - 10);
-      const y1 = box.y + Math.min(90, box.height - 10);
+      const pixelHeight = await canvas.evaluate((element) => element.height);
+      const cellHeight = rects[0].h * box.height / pixelHeight;
+      const x0 = box.x + 1;
+      const y0 = box.y + cellHeight / 2;
+      const x1 = box.x + box.width - 2;
+      const y1 = box.y + cellHeight * 2.5;
       await page.mouse.move(x0, y0);
       await page.mouse.down();
       for (let s = 1; s <= 6; s++) {
@@ -355,9 +264,9 @@ export default {
       await page.mouse.up();
       await sleep(250);
       await page.evaluate(async (sentinel) => {
-        const ta = document.querySelector(".terminal-host textarea");
-        if (!ta) throw new Error("ghostty textarea selector missing: .terminal-host textarea");
-        ta.focus();
+        if (!document.querySelector(".terminal-host")?.contains(document.activeElement)) {
+          throw new Error("canvas drag did not focus the terminal for copy");
+        }
         await navigator.clipboard.writeText(sentinel);
       }, CLIPBOARD_SENTINEL);
       await page.keyboard.down("Control");
@@ -366,29 +275,33 @@ export default {
       await page.keyboard.up("Shift");
       await page.keyboard.up("Control");
       await sleep(300);
-      return page.evaluate(() => navigator.clipboard.readText());
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      for (const line of [`GH_TOKEN=${SECRET_VALUE}`, 'QUOTED_SECRET="a b c"', "TOKENIZE=1 MONKEY=2 AUTHOR=alex"]) {
+        if (!copied.includes(line)) throw new Error(`masked copy lost ${JSON.stringify(line)}: ${JSON.stringify(copied.slice(0, 200))}`);
+      }
+      return copied;
     }
 
-    const details = {};
+    const details = { backend: "ghostty" };
     let runError = null;
     try {
-      await patchTerminalConfig({ ghostty: false, secret_masking: null });
-      await assertToml({ ghostty: false, secret_masking: null });
-      // ---- Leg 1a: the workspace default leaves xterm unmasked ----
-      await openTerminal(TAB_DEFAULT, "xterm");
+      await ctx.waitWindowLive(windowId);
+      await patchTerminalConfig({ secret_masking: null });
+      await assertToml({ secret_masking: null });
+      // The workspace default paints the corpus without masking its values.
+      await openTerminal(TAB_DEFAULT);
       await emitPayload(TAB_DEFAULT);
       if (!(await cs(["scrollback", "--tab-name", TAB_DEFAULT])).stdout.includes(`GH_TOKEN=${SECRET_VALUE}`)) {
         throw new Error("workspace-default scrollback lost the cleartext secret line");
       }
-      if ((await awaitMaskCount(0)) !== 0) {
-        throw new Error("workspace default painted secret masks without a stored choice");
-      }
+      await awaitCanvasMasks(0);
+      details.defaultLeg = { masks: 0, outputPainted: true, ringCleartext: true, storedChoice: null };
       await closeTerminal(TAB_DEFAULT);
 
-      // ---- Leg 1b: a stored choice masks new xterm terminals ----
+      // Stored On masks the two suffix matches and leaves the negative corpus clear.
       await patchTerminalConfig({ secret_masking: true });
       await assertToml({ secret_masking: true });
-      await openTerminal(TAB, "xterm");
+      await openTerminal(TAB);
       await emitPayload(TAB);
       // Contract: the server ring (and therefore copy/replay/snapshots)
       // carries CLEARTEXT at all times. waitScrollback already proved it
@@ -400,34 +313,28 @@ export default {
             "masking must be visual only, the ring stays intact",
         );
       }
-      const masked = await awaitMaskCount(2);
-      if (masked !== 2) {
-        throw new Error(`expected 2 mask decorations, found ${masked}`);
-      }
-      details.maskedLeg = { decorations: 2, ringCleartext: true };
+      const masked = await awaitCanvasMasks(2);
+      assertMaskGeometry(masked);
+      details.maskedLeg = { rects: masked, ringCleartext: true, storedChoice: true };
       await ctx.shot("masked-default-on");
 
       // Contract: copy of a masked region yields the real value.
-      const copied = await dragAndCopy();
-      if (!copied.includes(SECRET_VALUE)) {
-        throw new Error(
-          `copy of the masked rows did not yield the cleartext value; ` +
-            `clipboard: ${JSON.stringify(copied.slice(0, 160))}`,
-        );
-      }
+      await dragAndCopy(masked);
       details.maskedLeg.copyYieldsCleartext = true;
 
-      // ---- Leg 2: TOGGLE (ephemeral, in place) ----
+      // The live toggle clears and restores masks without changing stored On.
       await toggleFromLauncher("Secret masking disabled for this terminal");
-      if ((await awaitMaskCount(0)) !== 0) {
-        throw new Error("toggle off left mask decorations in place");
+      await awaitCanvasMasks(0);
+      await assertToml({ secret_masking: true });
+      if ((await readTerminalPrefs(page, authToken)).secret_masking !== true) {
+        throw new Error("per-tab toggle changed the stored masking preference");
       }
       await ctx.shot("toggle-off-revealed");
       await toggleFromLauncher("Secret masking enabled for this terminal");
-      await awaitMaskCount(2);
-      details.toggleLeg = { offCleared: true, onRemasked: true };
+      assertMaskGeometry(await awaitCanvasMasks(2));
+      details.toggleLeg = { offCleared: true, onRemasked: true, storedChoice: true };
 
-      // ---- Leg 3: SETTINGS (stored choice and Default) ----
+      // Settings shows On and twelve suffixes; Default clears the stored choice.
       await page.keyboard.down("Control");
       await page.keyboard.press("Comma");
       await page.keyboard.up("Control");
@@ -506,74 +413,49 @@ export default {
         () => !document.querySelector('[aria-label="Settings sections"]'),
         { timeout: 10_000 },
       );
+      if ((await readTerminalPrefs(page, authToken)).secret_masking != null) {
+        throw new Error("Default did not clear the stored masking preference");
+      }
+      // A preference save seeds future terminals; this live tab keeps its toggle.
+      assertMaskGeometry(await awaitCanvasMasks(2));
+      details.settingsLeg.defaultCleared = true;
+      details.settingsLeg.liveChoiceRetained = true;
       await closeTerminal(TAB);
 
-      // ---- Leg 4: CONFIG OFF (PATCH round-trip; spawn-time read) ----
+      // Stored Off survives persistence and seeds an unmasked fresh terminal.
       await patchTerminalConfig({ secret_masking: false });
       await assertToml({ secret_masking: false });
-      await openTerminal(TAB_OFF, "xterm");
+      await openTerminal(TAB_OFF);
       await emitPayload(TAB_OFF);
       await waitScrollback(TAB_OFF, `GH_TOKEN=${SECRET_VALUE}`);
-      if ((await awaitMaskCount(0)) !== 0) {
-        throw new Error(
-          "secret_masking=false yet a new terminal painted mask decorations",
-        );
-      }
-      details.configOffLeg = { decorations: 0, tomlPersisted: true };
+      await awaitCanvasMasks(0);
+      details.configOffLeg = { masks: 0, outputPainted: true, ringCleartext: true, tomlPersisted: true };
       await ctx.shot("config-off-unmasked");
       await closeTerminal(TAB_OFF);
 
-      // ---- Leg 5: GHOSTTY (masked on the canvas, copy in clear) ----
-      // Masking goes back ON here: leg 4 turned it off.
-      await patchTerminalConfig({ secret_masking: true, ghostty: true });
-      await assertToml({ secret_masking: true, ghostty: true });
-      await openTerminal(TAB_G, "ghostty");
-      await emitPayload(TAB_G);
-      await waitScrollback(TAB_G, `GH_TOKEN=${SECRET_VALUE}`);
-      if (
-        await page.evaluate((selector) => document.querySelector(selector),
-          `.terminal-tab ${TERMINAL_SURFACES.xterm}`)
-      ) {
-        throw new Error("ghostty leg: xterm DOM present on a ghostty terminal");
-      }
-      // Two values, two rectangles: one cell high each, 13 and 7 cells
-      // wide, so their widths stand in the values' ratio and their
-      // heights agree. The xterm decorations are not built under ghostty.
+      // Re-enabling the stored choice masks a fresh terminal and preserves copy.
+      await patchTerminalConfig({ secret_masking: true });
+      await assertToml({ secret_masking: true });
+      await openTerminal(TAB_REENABLED);
+      await emitPayload(TAB_REENABLED);
+      await waitScrollback(TAB_REENABLED, `GH_TOKEN=${SECRET_VALUE}`);
       const rects = await awaitCanvasMasks(2);
-      const [wide, narrow] = [...rects].sort((a, b) => b.w - a.w);
-      if (wide.h !== narrow.h || wide.h < 8) {
-        throw new Error(`ghostty leg: mask rectangles differ in height: ${JSON.stringify(rects)}`);
-      }
-      if (Math.abs(wide.w / narrow.w - MASK_CELLS[0] / MASK_CELLS[1]) > 0.05) {
-        throw new Error(`ghostty leg: mask widths are not ${MASK_CELLS[0]}:${MASK_CELLS[1]} cells: ${JSON.stringify(rects)}`);
-      }
-      if (wide.y === narrow.y) {
-        throw new Error(`ghostty leg: both masks on one row: ${JSON.stringify(rects)}`);
-      }
-      if ((await maskCount()) !== 0) {
-        throw new Error("ghostty leg: xterm mask decorations on the wasm backend");
-      }
-      details.ghosttyLeg = { rects, decorations: 0, ringCleartext: true };
-      await ctx.shot("ghostty-masked");
-
-      // Contract: copy of a masked region yields the real value here too.
-      const copiedG = await dragAndCopyGhostty();
-      if (!copiedG.includes(SECRET_VALUE)) {
-        throw new Error(
-          `ghostty leg: copy of the masked rows did not yield the cleartext value; ` +
-            `clipboard: ${JSON.stringify(copiedG.slice(0, 160))}`,
-        );
-      }
-      details.ghosttyLeg.copyYieldsCleartext = true;
+      assertMaskGeometry(rects);
+      await ctx.shot("reenabled-masked");
+      await dragAndCopy(rects);
+      details.reenabledLeg = { rects, ringCleartext: true, copyYieldsCleartext: true };
 
       // The per-tab toggle clears the canvas in place and paints again.
       await toggleFromLauncher("Secret masking disabled for this terminal");
       await awaitCanvasMasks(0);
       await ctx.shot("ghostty-toggle-off-revealed");
       await toggleFromLauncher("Secret masking enabled for this terminal");
-      const again = await awaitCanvasMasks(2);
-      details.ghosttyLeg.toggle = { offCleared: true, onRemasked: again.length === 2 };
-      await closeTerminal(TAB_G);
+      assertMaskGeometry(await awaitCanvasMasks(2));
+      details.reenabledLeg.toggle = { offCleared: true, onRemasked: true };
+      await closeTerminal(TAB_REENABLED);
+      for (const leg of ["defaultLeg", "maskedLeg", "toggleLeg", "settingsLeg", "configOffLeg", "reenabledLeg"]) {
+        if (!details[leg]) throw new Error(`secret masking leg did not run: ${leg}`);
+      }
       return details;
     } catch (error) {
       runError = error;
@@ -586,7 +468,7 @@ export default {
       } catch (error) {
         restoreError = error;
       }
-      for (const tab of [TAB_DEFAULT, TAB, TAB_OFF, TAB_G]) {
+      for (const tab of [TAB_DEFAULT, TAB, TAB_OFF, TAB_REENABLED]) {
         try {
           await cs(["close", "--tab-name", tab]);
         } catch {}
