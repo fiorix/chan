@@ -37,6 +37,7 @@ import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { FRESH_SHELL_ALT_EXIT, FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
 import {
   attach,
@@ -244,12 +245,10 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     expect(ghosttyMouseTracking(term)).toBe(true);
     socket.sent.splice(0);
     const { width, height } = ghosttyCellMetrics(term);
-    for (const type of ["mousedown", "mouseup"]) {
-      host.dispatchEvent(
-        new MouseEvent(type, {
-          button: 0, clientX: 150.5 * width, clientY: 3.5 * height, bubbles: true, cancelable: true,
-        }),
-      );
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    for (const type of ["pointerdown", "pointerup"] as const) {
+      mousePointer(canvas, type, { clientX: 150.5 * width, clientY: 3.5 * height });
     }
     const reports = sgr
       ? ["\x1b[<0;151;4M", "\x1b[<0;151;4m"]
