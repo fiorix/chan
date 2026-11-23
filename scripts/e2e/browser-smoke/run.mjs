@@ -512,6 +512,7 @@ try {
       if (e.smokeSkip) {
         currentCheck.skipped = true;
         currentCheck.reason = e.message;
+        if (e.smokeDetails) currentCheck.details = e.smokeDetails;
         console.log(`[smoke]   SKIP: ${e.message}`);
       } else {
         currentCheck.error = maskTokens(e.stack ?? String(e));
