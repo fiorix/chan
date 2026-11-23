@@ -2,6 +2,7 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { engineClick, modelPointerCapture } from "../__tests__/pointer";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { ghosttyFixture, openedGhostty, pressInGhostty } from "../__tests__/ghosttyTab";
 import { runTerminalFit } from "../terminal/resize";
@@ -850,9 +851,7 @@ describe("TerminalTab and the app around it", () => {
 async function clickLink(term: Terminal): Promise<void> {
   const canvas = term.element!.querySelector("canvas")!;
   vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
-  const position = { bubbles: true, cancelable: true, button: 0, detail: 1, clientX: 12, clientY: 9 };
-  canvas.dispatchEvent(new MouseEvent("mousedown", position));
-  canvas.dispatchEvent(new MouseEvent("mouseup", position));
-  canvas.dispatchEvent(new MouseEvent("click", position));
+  modelPointerCapture(canvas);
+  engineClick(canvas, 0, { clientX: 12, clientY: 9 });
   await vi.waitFor(() => expect(document.querySelector('[aria-label="terminal link menu"]')).not.toBeNull());
 }
