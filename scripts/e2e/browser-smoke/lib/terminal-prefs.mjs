@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "./terminal-attach.mjs";
@@ -91,17 +92,36 @@ async function writeCurrentTerminalPrefs(page, token, changes) {
   }
 }
 
-export async function assertTerminalPrefs(ctx, expected) {
+export async function assertTerminalPrefs(ctx, expected, { expectMissingFile = false } = {}) {
   const path = join(ctx.chanHome, "server.toml");
   const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    let toml = "";
-    try { toml = readFileSync(path, "utf8"); } catch {}
-    const matched = Object.entries(expected).every(([key, value]) => {
-      const assignment = new RegExp(`^${key}\\s*=\\s*(true|false|[0-9]+)\\s*$`, "m").exec(toml);
-      return value == null ? !assignment : assignment?.[1] === String(value);
-    });
-    if (matched) return;
+  if (expectMissingFile && Object.values(expected).some((value) => value != null)) {
+    throw new Error("a missing file cannot persist terminal preference values");
+  }
+  for (;;) {
+    let toml;
+    try {
+      toml = readFileSync(path);
+    } catch (error) {
+      if (expectMissingFile && error.code === "ENOENT") return;
+      throw error;
+    }
+    if (expectMissingFile) throw new Error("expected server.toml to be missing");
+    let terminal;
+    try {
+      // Python's standard TOML parser also validates unrelated sections;
+      // a line regex cannot distinguish a missing key from a broken file.
+      terminal = JSON.parse(execFileSync("python3", ["-c",
+        'import json, sys, tomllib; print(json.dumps(tomllib.loads(sys.stdin.buffer.read().decode("utf-8")).get("terminal", {}), default=str))',
+      ], { input: toml, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5_000 }));
+    } catch (error) {
+      throw new Error(`invalid server.toml or unavailable Python TOML parser: ${error.stderr || error.message}`, { cause: error });
+    }
+    if (!terminal || typeof terminal !== "object" || Array.isArray(terminal)) {
+      throw new Error("server.toml terminal must be a table");
+    }
+    if (matchesChanges(terminal, expected)) return;
+    if (Date.now() >= deadline) break;
     await sleep(200);
   }
   throw new Error(`server.toml did not persist terminal preferences: ${JSON.stringify(expected)}`);
@@ -119,10 +139,12 @@ export async function restoreTerminalPrefs(ctx, page, token, original) {
   });
 }
 
-// Compatibility writes deliberately carry the retired key. Prove the server
-// drops it from canonical readback before opening a fresh Ghostty surface.
+// Undefined sends no legacy key; booleans deliberately carry it. Prove the
+// canonical response omits it before opening a fresh Ghostty surface.
 export function openLegacyConfiguredTerminal(ctx, page, cs, windowId, name, ghostty, newArgs = []) {
-  if (typeof ghostty !== "boolean") throw new TypeError("legacy terminal.ghostty must be a boolean");
+  if (ghostty !== undefined && typeof ghostty !== "boolean") {
+    throw new TypeError("legacy terminal.ghostty must be a boolean or undefined (absent)");
+  }
   return openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArgs);
 }
 
@@ -134,11 +156,13 @@ async function openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArg
     const got = await fetch("/api/config", { headers });
     if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
     const config = await got.json();
+    const { ghostty: _legacy, ...current } = config.preferences.terminal;
+    const terminalPatch = ghostty === undefined ? current : { ...current, ghostty };
     const response = await fetch("/api/config", {
       method: "PATCH", headers,
       body: JSON.stringify({
         expected_revision: config.revision,
-        preferences: { terminal: { ...config.preferences.terminal, ghostty } },
+        preferences: { terminal: terminalPatch },
       }),
     });
     if (!response.ok) throw new Error(`legacy terminal.ghostty PATCH -> ${response.status}`);
