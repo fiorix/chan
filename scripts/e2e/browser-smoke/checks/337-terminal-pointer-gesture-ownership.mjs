@@ -1,6 +1,7 @@
 // Trusted CDP gestures on the app's real terminal prove selection survives
 // outside clicks, capture completes a reported outside release, and enabling
-// tracking during a local drag cannot change that drag's owner. The raw PTY
+// tracking during a local drag cannot change that drag's owner. Turning
+// tracking off during a reported press suppresses the later release. The raw PTY
 // fixture changes modes through an independent control connection; cursor
 // replies prove each change was parsed and drain the report stream.
 // Cancellation is not exercised: no native mouse-cancel path has been
@@ -251,7 +252,37 @@ export default {
         assert.equal(result.selection, TEXT, "the held selection survives the mode change");
         assert.equal(result.clipboard, TEXT, "release copies the selection after tracking is enabled");
       });
-      assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "tracking-enabled-mid-drag"], "all required pointer legs ran");
+
+      await leg("tracking-disabled-mid-press", async (result) => {
+        const grid = await prepare(result);
+        result.mode = await drainPointerInput(fixture, "\x1b[?1000;1006h");
+        assert.deepEqual(result.mode, { input: "", reply: "\x1b[3;1R" }, "press-only tracking setup reached the parser");
+        assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
+          [true, false, false, true], "only press/release tracking and SGR are enabled");
+        const sentinel = "SMOKE337_TRACKING_OFF_SENTINEL";
+        await seedPointerClipboard(page, sentinel);
+        const index = fixture.records.length;
+        await page.mouse.move(grid.x + grid.w * 2.5, grid.y + grid.h * 0.5);
+        await page.mouse.down();
+        held = true;
+        result.mid = await drainPointerInput(fixture, "\x1b[?1000l", index);
+        assert.equal(result.mid.reply, "\x1b[3;1R", "tracking-off control output was parsed while the button was held");
+        assert.deepEqual(pointerReports(result.mid.input), [{ button: 0, col: 3, row: 1, end: "M" }],
+          "the PTY received exactly the press before tracking was turned off");
+        assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
+          [false, false, false, true], "tracking is off before release while SGR stays enabled");
+        const afterMode = fixture.records.length;
+        await page.mouse.up();
+        held = false;
+        await settlePointer(page);
+        result.after = await drainPointerInput(fixture, "", afterMode);
+        result.selection = await term.evaluate((t) => t.getSelection());
+        result.clipboard = await page.evaluate(() => navigator.clipboard.readText());
+        assert.equal(result.after.input, "", "turning tracking off suppresses the reported press's later release");
+        assert.equal(result.selection, "", "the reported press never becomes a local selection");
+        assert.equal(result.clipboard, sentinel, "turning tracking off does not copy the reported press");
+      });
+      assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
     } finally {
       if (held) await page.mouse.up().catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch((error) => failures.push(`terminal cleanup: ${error.message}`));
