@@ -102,6 +102,7 @@ export default {
         if (problems.length) failures.push(`${leg.key}: ${problems.join("; ")}: ${JSON.stringify(observed)}`);
       }
       const retained = await readGhosttyText(page);
+      assert.ok(retained.text.includes(LEGS.at(-1).end), "the final stream end marker is in the retained buffer");
       assert.ok(!retained.text.includes("terminal output lagged"), "no lag line in the buffer");
       await ctx.shot("333-after-streams");
       if (failures.length) throw new Error(failures.join("\n"));

@@ -210,7 +210,8 @@ export function readGhosttyText(page) {
     const history = term.getScrollbackLength();
     const text = term.wasmTerm.plainText({
       startRow: 0, startCol: 0, endRow: history + term.rows - 1, endCol: term.cols - 1,
-    }) ?? "";
+    });
+    if (text === null) throw new Error("Ghostty plainText returned null for the retained buffer");
     return { history, rows: term.rows, text };
   });
 }
