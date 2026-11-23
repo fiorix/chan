@@ -426,7 +426,7 @@ describe('report and bypass completion', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  test('a chorded release after tracking stops clears held state silently', async () => {
+  test('a chorded release after tracking stops sends no release bytes', async () => {
     const { term, canvas, reports } = await open();
     term.write('\x1b[?1002h\x1b[?1006h');
     pointer(canvas, 'pointerdown');
@@ -437,6 +437,95 @@ describe('report and bypass completion', () => {
     term.write('\x1b[?1002h');
     pointer(canvas, 'pointermove', 49, 1, { buttons: 0 });
     expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<2;1;1M']);
+  });
+
+  test('a local click ending with tracking off leaves later hover enabled', async () => {
+    const { term, canvas, reports } = await open();
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointerup');
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<32;5;1M']);
+  });
+
+  test('a chorded release while tracking is off stays cleared when tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 1 });
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 49, 1);
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<2;1;1M', '\x1b[<32;7;1M', '\x1b[<0;7;1m',
+    ]);
+  });
+
+  test('a buttonless move while tracking is off clears the press before tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
+  });
+
+  test('a buttonless local selection move clears a reported chord while tracking is off', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointerup', 49, 1, { button: 2 });
+    expect(reports).toEqual(['\x1b[<2;1;1M']);
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+  });
+
+  test('a held move while tracking is off preserves the press when tracking resumes', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 17, 1);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 33, 1);
+    pointer(canvas, 'pointerup', 33, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;5;1m']);
+  });
+
+  test('a Shift selection keeps buttonless moves local and copies once', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 81, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 81, 1);
+    expect(reports).toEqual([]);
+    expect(term.getSelection()).toBe('hello world');
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello world');
+  });
+
+  test('a chord event dropping two buttons reconciles both at that event without motion', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 1, buttons: 5 });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 7 });
+    pointer(canvas, 'pointermove', 33, 1, { button: 1, buttons: 1 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M', '\x1b[<1;5;1m', '\x1b[<2;5;1m',
+    ]);
+    pointer(canvas, 'pointermove', 49, 1);
+    pointer(canvas, 'pointerup', 49, 1);
+    expect(reports.slice(5)).toEqual(['\x1b[<32;7;1M', '\x1b[<0;7;1m']);
   });
 
   test.each([0, 1, 2])('a captured buttonless move releases reported button %i once at that position', async (button) => {
