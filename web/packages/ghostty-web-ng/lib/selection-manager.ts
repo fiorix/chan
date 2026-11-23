@@ -471,8 +471,7 @@ export class SelectionManager {
 
   private handleLostPointerCapture = (event: PointerEvent): void => {
     if (!this.matchesPointer(event)) return;
-    const connected = this.renderer.getCanvas().isConnected;
-    this.endPointer(connected, connected ? this.activePointer!.lastEvent : undefined);
+    this.endPointer(this.renderer.getCanvas().isConnected);
   };
 
   private endPointer(copy: boolean, release?: MouseEvent): void {
@@ -489,7 +488,7 @@ export class SelectionManager {
     } catch {
       // A detached element can already have lost its capture.
     }
-    this.mouseInput?.end(release);
+    this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
     if (!selecting) return;
     if (!this.dragThresholdMet) {
       this.clearSelection();

@@ -333,14 +333,41 @@ describe('report and bypass completion', () => {
     expect(reports).toEqual(['\x1b[<32;1;1M']);
   });
 
-  test.each(['pointercancel', 'lostpointercapture'])('a report-only %s leaves no held button or copy', async (end) => {
-    const { term, canvas, reports, write } = await open();
+  test.each(['pointercancel', 'lostpointercapture', 'uncaptured', 'reattached', 'recapture'])('a report-only %s releases at its last position and leaves no held button or copy', async (end) => {
+    const { term, host, canvas, capture, captured, reports, write } = await open();
     term.write('\x1b[?1002h\x1b[?1006h');
     drag(canvas);
-    pointer(canvas, end);
-    reports.length = 0;
+    if (end === 'reattached') {
+      host.remove();
+      document.body.append(host);
+    }
+    if (end !== 'pointercancel') captured.clear();
+    if (end === 'recapture') {
+      capture.mockImplementation(() => captured);
+      pointer(canvas, 'pointerdown', 99, 99, { pointerType: 'pen', pointerId: 9 });
+    } else if (end === 'uncaptured' || end === 'reattached') {
+      pointer(canvas, 'pointermove', 99, 99);
+    } else {
+      pointer(canvas, end, 99, 99);
+    }
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;5;1m']);
     pointer(canvas, 'pointermove', 1, 1, { buttons: 0 }); pointer(canvas, 'pointerup');
-    expect(reports).toEqual([]);
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M', '\x1b[<0;5;1m']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test.each(['dispose', 'pointercancel', 'lostpointercapture', 'pointermove', 'pointerup'])('a report-only %s on disposal or a disconnected canvas sends no release', async (end) => {
+    const { term, host, canvas, captured, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    drag(canvas);
+    if (end === 'dispose') term.dispose();
+    else {
+      host.remove();
+      captured.clear();
+      pointer(canvas, end, 99, 99);
+    }
+    pointer(canvas, 'lostpointercapture'); pointer(canvas, 'pointerup');
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<32;5;1M']);
     expect(write).not.toHaveBeenCalled();
   });
 

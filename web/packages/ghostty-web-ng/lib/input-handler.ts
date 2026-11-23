@@ -838,9 +838,8 @@ export class InputHandler {
   handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
 
-    // A release ends the gesture its press began: a bypassed press is not
-    // reported, a reported one is, Shift or not, so the program never holds
-    // a button down.
+    // Pair a reported press with its release even when Shift has changed.
+    // Disposal and detachment only clear held state in endMouseGesture.
     if (this.mouseButtonsBypassed & (1 << event.button)) {
       this.mouseButtonsBypassed &= ~(1 << event.button);
       return;
@@ -855,7 +854,7 @@ export class InputHandler {
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
 
-  /** Complete the captured gesture; cancellation clears state without a report. */
+  /** Release held buttons at the supplied position; no event clears state silently. */
   endMouseGesture(event?: MouseEvent): void {
     const pressed = this.mouseButtonsPressed;
     this.mouseButtonsPressed = 0;
