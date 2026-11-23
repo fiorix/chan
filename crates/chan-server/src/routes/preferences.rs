@@ -179,7 +179,10 @@ struct PreferencesPatch {
 /// back on with any other terminal setting it saves. An object that leaves
 /// the key out keeps the stored value. `tmux` is the third, for the same
 /// reason, and a `tmux` object that leaves `trust` out keeps the stored
-/// list, since Settings edits only the switch.
+/// list, since Settings edits only the switch. `ghostty`, the retired engine
+/// choice, is not a setting: a page loaded before its retirement still sends
+/// it with every terminal write, so a boolean is accepted and dropped, and any
+/// other value is refused as it was while the setting existed.
 #[derive(Debug, Clone)]
 struct TerminalPatch {
     config: TerminalConfig,
@@ -194,7 +197,11 @@ impl<'de> Deserialize<'de> for TerminalPatch {
     where
         D: serde::Deserializer<'de>,
     {
-        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let mut object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        if let Some(ghostty) = object.remove("ghostty") {
+            bool::deserialize(ghostty)
+                .map_err(|e| serde::de::Error::custom(format!("terminal.ghostty: {e}")))?;
+        }
         let names_secret_masking = object.contains_key("secret_masking");
         let names_program_status = object.contains_key("program_status");
         let names_tmux = object.contains_key("tmux");
@@ -504,9 +511,6 @@ pub(crate) fn broadcast_config_changed(state: &AppState) {
     if let Ok(config) = state.server_config.lock() {
         state
             .terminal_sessions
-            .set_terminal_backend(config.terminal.ghostty);
-        state
-            .terminal_sessions
             .set_program_status(config.terminal.program_status);
         state.terminal_sessions.set_tmux(&config.terminal.tmux);
         state.terminal_sessions.set_terminal_profiles(
@@ -639,13 +643,10 @@ fn normalize_hex_color(field: &str, value: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use crate::state::test_support::make_test_state;
-    use crate::terminal_sessions::{CloseReason, CreateOptions, SessionEvent};
     use axum::body::to_bytes;
-    use portable_pty::PtySize;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     fn to_json(view: &GlobalConfigView) -> serde_json::Value {
@@ -814,6 +815,102 @@ mod tests {
             .contains("unknown field `attachments_dir`"));
     }
 
+    /// The number of WARN events `f` gives on this thread.
+    fn count_warnings<T>(f: impl FnOnce() -> T) -> (usize, T) {
+        struct Count(Arc<AtomicUsize>);
+        impl tracing::Subscriber for Count {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let out = tracing::subscriber::with_default(Count(Arc::clone(&count)), f);
+        (count.load(Ordering::Relaxed), out)
+    }
+
+    #[test]
+    fn the_preferences_view_omits_a_stored_terminal_ghostty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nghostty = false\nfont_size = 12\n").unwrap();
+        let state = make_test_state(false);
+        *state.server_config.lock().unwrap() = ServerConfig::load_from(&path).unwrap();
+
+        let terminal = terminal_as_read(&state);
+        assert_eq!(terminal["font_size"], json!(12), "{terminal}");
+        assert!(terminal.get("ghostty").is_none(), "{terminal}");
+        let global = to_json(&global_config_view(&state).unwrap());
+        assert!(
+            global["preferences"]["terminal"].get("ghostty").is_none(),
+            "{global}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_write_carrying_terminal_ghostty_is_applied_without_it() {
+        // A page loaded before the retirement echoes the terminal object it
+        // read, `ghostty` included, with one setting changed.
+        for ghostty in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("server.toml");
+            let state = make_test_state(false);
+            let revision = state.config_revision.load(Ordering::Relaxed);
+            let mut older = terminal_as_read(&state);
+            older["ghostty"] = json!(ghostty);
+            older["mcp_env"] = json!(true);
+            let body = serde_json::from_value::<PatchConfigBody>(json!({
+                "expected_revision": revision,
+                "preferences": { "terminal": older },
+            }))
+            .expect("a boolean terminal.ghostty is accepted");
+
+            let (warnings, written) = count_warnings(|| {
+                patch_config_with_saves(&state, body, noop_save_editor, |config| {
+                    config.save_to(&path)
+                })
+            });
+            let answer = to_json(&written.expect("the write is applied"));
+
+            assert_eq!(warnings, 0, "ghostty = {ghostty}");
+            assert_eq!(state.config_revision.load(Ordering::Relaxed), revision + 1);
+            assert_eq!(answer["preferences"]["terminal"]["mcp_env"], json!(true));
+            assert!(
+                answer["preferences"]["terminal"].get("ghostty").is_none(),
+                "{answer}"
+            );
+            assert!(terminal_as_read(&state).get("ghostty").is_none());
+            let file = std::fs::read_to_string(&path).unwrap();
+            assert!(file.contains("mcp_env = true"), "{file}");
+            assert!(!file.contains("ghostty"), "{file}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_write_refuses_a_non_boolean_terminal_ghostty() {
+        for value in [json!("yes"), json!(1), json!(null)] {
+            let error = serde_json::from_value::<PatchConfigBody>(json!({
+                "expected_revision": 1,
+                "preferences": { "terminal": { "ghostty": value.clone() } },
+            }))
+            .expect_err("a non-boolean terminal.ghostty is refused")
+            .to_string();
+            assert!(error.contains("terminal.ghostty"), "{value}: {error}");
+            assert!(error.contains("expected a boolean"), "{value}: {error}");
+        }
+    }
+
     #[test]
     fn broadcast_config_changed_emits_a_config_changed_frame_on_the_ws_bus() {
         // Cross-window settings sync: the SPA's /ws event store keys on a
@@ -827,52 +924,6 @@ mod tests {
         let frame = rx.try_recv().expect("a frame on the /ws bus");
         let json: serde_json::Value = serde_json::from_str(&frame).expect("valid json frame");
         assert_eq!(json["kind"], "config_changed");
-    }
-
-    #[tokio::test]
-    async fn broadcast_config_changed_refreshes_direct_terminal_spawns() {
-        let state = make_test_state(false);
-        state.server_config.lock().unwrap().terminal.ghostty = true;
-        broadcast_config_changed(&state);
-
-        let mut handle = state
-            .terminal_sessions
-            .create(CreateOptions {
-                size: PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                },
-                tab_name: None,
-                tab_group: None,
-                window_id: None,
-                mcp_env: false,
-                cwd: None,
-                command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
-                env: Default::default(),
-                profile: None,
-            })
-            .expect("spawn terminal after preference refresh");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut out = String::new();
-        while !out.contains("CHAN_TERMINAL=<ghostty>") && Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, handle.rx.recv()).await {
-                Ok(Ok(SessionEvent::Output(data))) => {
-                    out.push_str(&String::from_utf8_lossy(&data));
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) | Err(_) => break,
-            }
-        }
-        assert!(
-            out.contains("CHAN_TERMINAL=<ghostty>"),
-            "config broadcast did not refresh direct spawn preference: {out:?}"
-        );
-        state
-            .terminal_sessions
-            .close(handle.id(), CloseReason::Explicit);
     }
 
     #[test]

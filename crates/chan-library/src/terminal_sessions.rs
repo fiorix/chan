@@ -541,11 +541,6 @@ enum SpawnProgram {
 pub struct Registry {
     config: RegistryConfig,
     library_id: OnceLock<String>,
-    /// Last known terminal-engine preference, sampled once for each PTY spawn.
-    /// Workspace servers push config changes into this cell. A long-lived
-    /// terminal-only tenant can additionally install `terminal_backend_resolver`
-    /// because it has no settings route or config-change push channel.
-    terminal_ghostty: AtomicBool,
     /// Whether this registry's sessions take part in OSC 7501 program status.
     /// Starts from the config and follows [`Registry::set_program_status`].
     /// Each session carries the word under its own output lock.
@@ -567,20 +562,19 @@ pub struct Registry {
     /// desktop whose only window ran `tmux -CC` has a window to show before
     /// that one empties and closes.
     tmux_pending_releases: Mutex<HashMap<String, (String, String)>>,
-    /// Optional spawn-time preference pull for a terminal-only tenant. Kept
-    /// absent on workspace registries, whose config-change path updates the
-    /// atomic cell directly.
-    terminal_backend_resolver: Mutex<Option<TerminalBackendResolver>>,
     /// Last known `terminal.profiles` / `terminal.default_profile`, sampled
-    /// once for each PTY spawn. Refreshed by the same push and pull the
-    /// engine preference above rides, and for the same reason: the boot-time
-    /// `config` snapshot cannot answer for a file the user edits later, and
-    /// the endpoint that feeds the picker reads the LIVE config. A cell that
+    /// once for each PTY spawn. Workspace servers push config changes into
+    /// this cell, and a long-lived terminal-only tenant, which has no
+    /// settings route or config-change push channel, installs
+    /// `terminal_profiles_resolver` to pull them: the boot-time `config`
+    /// snapshot cannot answer for a file the user edits later, and the
+    /// endpoint that feeds the picker reads the LIVE config. A cell that
     /// only one of the two consults is a picker that lists a shell clicking
     /// it will not open.
     terminal_profiles: Mutex<TerminalProfilePrefs>,
-    /// Optional spawn-time profile pull, installed alongside
-    /// `terminal_backend_resolver` and absent for the same registries.
+    /// Optional spawn-time profile pull for a terminal-only tenant. Kept
+    /// absent on workspace registries, whose config-change path updates
+    /// `terminal_profiles` directly.
     terminal_profiles_resolver: Mutex<Option<TerminalProfilesResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Ids of sessions closed explicitly or removed after their exit, with
@@ -726,28 +720,6 @@ impl std::fmt::Debug for BlobReaper {
     }
 }
 
-/// Spawn-time terminal-engine preference pull for registries that cannot
-/// receive a config-change push. `Some(bool)` is a successful read;
-/// `None` asks the registry to retain its last known value.
-#[derive(Clone)]
-pub struct TerminalBackendResolver(Arc<dyn Fn() -> Option<bool> + Send + Sync>);
-
-impl TerminalBackendResolver {
-    pub fn new(f: impl Fn() -> Option<bool> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
-    }
-
-    fn resolve(&self) -> Option<bool> {
-        (self.0)()
-    }
-}
-
-impl std::fmt::Debug for TerminalBackendResolver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TerminalBackendResolver(..)")
-    }
-}
-
 /// The user's declared profiles and their chosen default, as one value so a
 /// refresh cannot land half of the pair.
 #[derive(Debug, Clone, Default)]
@@ -756,9 +728,9 @@ pub struct TerminalProfilePrefs {
     pub default_profile: Option<String>,
 }
 
-/// Spawn-time profile pull, the [`TerminalBackendResolver`] analogue for
-/// `terminal.profiles`. `None` asks the registry to retain its last known
-/// value.
+/// Spawn-time `terminal.profiles` pull for registries that cannot receive a
+/// config-change push. `Some` is a successful read; `None` asks the registry
+/// to retain its last known value.
 #[derive(Clone)]
 pub struct TerminalProfilesResolver(Arc<dyn Fn() -> Option<TerminalProfilePrefs> + Send + Sync>);
 
@@ -2067,7 +2039,6 @@ impl Drop for MetadataReservation<'_> {
 impl Registry {
     /// An empty registry over `config`, with no hooks installed.
     pub fn new(config: RegistryConfig) -> Self {
-        let terminal_ghostty = config.terminal.ghostty;
         let program_status = config.terminal.program_status;
         let tmux = config.terminal.tmux.clone();
         let terminal_profiles = TerminalProfilePrefs {
@@ -2077,13 +2048,11 @@ impl Registry {
         Self {
             config,
             library_id: OnceLock::new(),
-            terminal_ghostty: AtomicBool::new(terminal_ghostty),
             program_status: AtomicBool::new(program_status),
             tmux: Mutex::new(tmux),
             tmux_windows: Mutex::new(None),
             tmux_controls: Mutex::new(HashMap::new()),
             tmux_pending_releases: Mutex::new(HashMap::new()),
-            terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
@@ -2145,11 +2114,6 @@ impl Registry {
                 !session.closed.load(Ordering::Relaxed)
                     && session.window_id().as_deref() == Some(window_id)
             })
-    }
-
-    /// Refresh the backend preference sampled by subsequent PTY spawns.
-    pub fn set_terminal_backend(&self, ghostty: bool) {
-        self.terminal_ghostty.store(ghostty, Ordering::Relaxed);
     }
 
     /// Turn OSC 7501 program status off or on for this registry: every live
@@ -2457,19 +2421,8 @@ impl Registry {
             .set_enabled(self.program_status_enabled());
     }
 
-    /// Install the backend preference pull used by a long-lived terminal-only
-    /// tenant. A later install replaces the prior resolver.
-    pub fn install_terminal_backend_resolver(&self, resolver: TerminalBackendResolver) {
-        // A poisoned cell still holds a callable resolver, so recovering keeps
-        // spawns working instead of turning one panic into a process abort.
-        *self
-            .terminal_backend_resolver
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
-    }
-
-    /// Refresh the declared profiles sampled by subsequent PTY spawns. The
-    /// engine preference's push analogue, called from the same place.
+    /// Refresh the declared profiles sampled by subsequent PTY spawns, from a
+    /// workspace server's config-change path.
     pub fn set_terminal_profiles(&self, prefs: TerminalProfilePrefs) {
         *self
             .terminal_profiles
@@ -2480,18 +2433,19 @@ impl Registry {
     /// Install the profile pull used by a long-lived terminal-only tenant. A
     /// later install replaces the prior resolver.
     pub fn install_terminal_profiles_resolver(&self, resolver: TerminalProfilesResolver) {
+        // A poisoned cell still holds a callable resolver, so recovering keeps
+        // spawns working instead of turning one panic into a process abort.
         *self
             .terminal_profiles_resolver
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
     }
 
-    /// The registry config with the live-sampled terminal engine and shell
-    /// profiles, taken once per PTY spawn so a create and a restart see the
-    /// same settings.
+    /// The registry config with the live-sampled program status, tmux policy
+    /// and shell profiles, taken once per PTY spawn so a create and a restart
+    /// see the same settings.
     fn spawn_config(&self) -> SessionSpawnConfig {
         let mut config = self.config.clone();
-        config.terminal.ghostty = self.resolve_terminal_backend();
         config.terminal.program_status = self.program_status_enabled();
         config.terminal.tmux = self.tmux_config();
         let profiles = self.resolve_terminal_profiles();
@@ -2503,10 +2457,12 @@ impl Registry {
         }
     }
 
-    /// Sample the declared profiles for one PTY spawn, on the same fail-open
-    /// terms as [`Self::resolve_terminal_backend`]: a successful pull refreshes
-    /// the live cell, and an unreadable store keeps the last good value rather
-    /// than dropping the user's profiles back to the boot-time snapshot.
+    /// Sample the declared profiles for one PTY spawn. A successful pull
+    /// refreshes the live cell. `None` means the backing store is malformed
+    /// or unreadable: terminal creation stays fail-open and keeps the LAST
+    /// good value rather than dropping the user's profiles back to the
+    /// boot-time snapshot, which may remain stale until a later spawn can
+    /// read the store.
     fn resolve_terminal_profiles(&self) -> TerminalProfilePrefs {
         let resolver = self
             .terminal_profiles_resolver
@@ -2521,24 +2477,6 @@ impl Registry {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-    }
-
-    /// Sample the configured backend for one PTY spawn. A successful pull also
-    /// refreshes the live cell. `None` means the backing store is malformed or
-    /// unreadable: terminal creation stays fail-open and uses the LAST good
-    /// value, which may remain stale until a later spawn can read the store.
-    fn resolve_terminal_backend(&self) -> bool {
-        let resolver = self
-            .terminal_backend_resolver
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        if let Some(ghostty) = resolver.and_then(|resolver| resolver.resolve()) {
-            self.terminal_ghostty.store(ghostty, Ordering::Relaxed);
-            ghostty
-        } else {
-            self.terminal_ghostty.load(Ordering::Relaxed)
-        }
     }
 
     /// Install the systemd fd-store parking hook. Installed by the devserver
@@ -5317,14 +5255,9 @@ impl Session {
         let mut chan_env = ChanSpawnEnv::default();
         chan_env.set("CHAN", "1");
         chan_env.set("CHAN_SESSION_ID", &id);
-        chan_env.set(
-            "CHAN_TERMINAL",
-            if config.terminal.ghostty {
-                "ghostty"
-            } else {
-                "xterm"
-            },
-        );
+        // Every chan terminal view is Ghostty, so the value is fixed; it stays
+        // in the environment for programs and scripts that read it.
+        chan_env.set("CHAN_TERMINAL", "ghostty");
         if opts.mcp_env {
             if let Some(socket_path) = config.mcp_socket_path.as_deref() {
                 for (key, value) in mcp_env(socket_path).into_iter().flatten() {
@@ -13004,47 +12937,11 @@ mod tests {
     // default shell (PowerShell).
     #[cfg(unix)]
     #[tokio::test]
-    async fn standalone_spawn_exports_configured_terminal_backend() {
+    async fn every_spawn_exports_chan_terminal_ghostty() {
         // No workspace window, control socket, or MCP environment participates
-        // in this spawn. Reading from the child proves CHAN_TERMINAL survives
-        // the shared environment scrub and reaches a standalone PTY.
-        for (ghostty, expected) in [(false, "xterm"), (true, "ghostty")] {
-            let mut config = test_config(4096, 4, 60);
-            config.terminal.ghostty = ghostty;
-            let registry = Arc::new(Registry::new(config));
-            let mut handle = registry
-                .create(CreateOptions {
-                    size: test_size(),
-                    tab_name: None,
-                    tab_group: None,
-                    window_id: None,
-                    mcp_env: false,
-                    cwd: None,
-                    command: Some("printf 'CHAN_TERMINAL=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
-                    env: Default::default(),
-                    profile: None,
-                })
-                .unwrap();
-
-            let needle = format!("CHAN_TERMINAL=<{expected}>");
-            let out = collect_until(&mut handle, &needle, Duration::from_secs(5)).await;
-            assert!(
-                out.contains(&needle),
-                "standalone PTY did not export configured backend {expected}: {out:?}"
-            );
-            registry.close(handle.id(), CloseReason::Explicit);
-        }
-    }
-
-    // POSIX printf plus parameter expansion; not valid under the Windows
-    // default shell (PowerShell).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn backend_preference_flip_applies_to_direct_create_and_restart_only() {
+        // in these spawns. Reading from the child proves CHAN_TERMINAL survives
+        // the shared environment scrub, on a create and on a restart alike.
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
-        // State the starting backend explicitly so this test checks that a
-        // flip does not reach a running PTY, independent of the default.
-        registry.set_terminal_backend(false);
         let mut original = registry
             .create(CreateOptions {
                 size: test_size(),
@@ -13059,14 +12956,12 @@ mod tests {
             })
             .unwrap();
         let original_id = original.id().to_string();
-
-        registry.set_terminal_backend(true);
         original.send_input(b"printf 'ORIGINAL=<%s>\\n' \"$CHAN_TERMINAL\"\n");
-        let old_out =
-            collect_until(&mut original, "ORIGINAL=<xterm>", Duration::from_secs(5)).await;
+        let original_out =
+            collect_until(&mut original, "ORIGINAL=<ghostty>", Duration::from_secs(5)).await;
         assert!(
-            old_out.contains("ORIGINAL=<xterm>"),
-            "live preference change reached an already-running PTY: {old_out:?}"
+            original_out.contains("ORIGINAL=<ghostty>"),
+            "a created shell does not carry CHAN_TERMINAL=ghostty: {original_out:?}"
         );
 
         let mut created = registry
@@ -13086,7 +12981,7 @@ mod tests {
             collect_until(&mut created, "CREATED=<ghostty>", Duration::from_secs(5)).await;
         assert!(
             created_out.contains("CREATED=<ghostty>"),
-            "direct create did not sample the live preference: {created_out:?}"
+            "a created command does not carry CHAN_TERMINAL=ghostty: {created_out:?}"
         );
 
         assert!(registry
@@ -13102,7 +12997,7 @@ mod tests {
         .await;
         assert!(
             restarted_out.contains("RESTARTED=<ghostty>"),
-            "direct restart did not sample the live preference: {restarted_out:?}"
+            "a restarted shell does not carry CHAN_TERMINAL=ghostty: {restarted_out:?}"
         );
 
         registry.close(created.id(), CloseReason::Explicit);
@@ -13113,8 +13008,8 @@ mod tests {
     fn declared_profiles_refresh_from_both_the_push_and_the_pull() {
         // The endpoint feeding the shell picker answers from the LIVE server
         // config. If the spawn kept reading the boot-time snapshot, the picker
-        // would list a profile that clicking it silently ignores, so both of
-        // the engine preference's refresh channels have to carry profiles too.
+        // would list a profile that clicking it silently ignores, so both
+        // refresh channels, the push and the pull, have to carry profiles.
         fn profile(id: &str) -> TerminalProfile {
             TerminalProfile {
                 id: id.into(),
@@ -13157,113 +13052,13 @@ mod tests {
         );
 
         // An unreadable store keeps the last good value rather than dropping
-        // the user's profiles back to the boot snapshot, matching the engine
-        // preference's fail-open posture.
+        // the user's profiles back to the boot snapshot: spawning stays
+        // fail-open.
         *pulled.lock().unwrap() = None;
         assert_eq!(
             registry.resolve_terminal_profiles().profiles[0].id,
             "pulled"
         );
-    }
-
-    // POSIX printf plus parameter expansion; not valid under the Windows
-    // default shell (PowerShell).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn spawn_time_backend_resolver_updates_new_children_and_keeps_last_good_value() {
-        let resolved = Arc::new(Mutex::new(Some(false)));
-        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
-        registry.install_terminal_backend_resolver(TerminalBackendResolver::new({
-            let resolved = resolved.clone();
-            move || *resolved.lock().unwrap()
-        }));
-        let mut original = registry
-            .create(CreateOptions {
-                size: test_size(),
-                tab_name: None,
-                tab_group: None,
-                window_id: None,
-                mcp_env: false,
-                cwd: None,
-                command: None,
-                env: Default::default(),
-                profile: None,
-            })
-            .unwrap();
-        let original_id = original.id().to_string();
-
-        *resolved.lock().unwrap() = Some(true);
-        original.send_input(b"printf 'ORIGINAL=<%s>\\n' \"$CHAN_TERMINAL\"\n");
-        let original_out =
-            collect_until(&mut original, "ORIGINAL=<xterm>", Duration::from_secs(5)).await;
-        assert!(
-            original_out.contains("ORIGINAL=<xterm>"),
-            "resolver changed an already-running child: {original_out:?}"
-        );
-
-        let mut created = registry
-            .create(CreateOptions {
-                size: test_size(),
-                tab_name: None,
-                tab_group: None,
-                window_id: None,
-                mcp_env: false,
-                cwd: None,
-                command: Some("printf 'CREATED=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
-                env: Default::default(),
-                profile: None,
-            })
-            .unwrap();
-        let created_out =
-            collect_until(&mut created, "CREATED=<ghostty>", Duration::from_secs(5)).await;
-        assert!(
-            created_out.contains("CREATED=<ghostty>"),
-            "new child did not sample the resolver: {created_out:?}"
-        );
-
-        assert!(registry
-            .restart(&original_id, RestartOverrides::default())
-            .unwrap());
-        let mut restarted = registry.attach(&original_id, None).unwrap();
-        restarted.send_input(b"printf 'RESTARTED=<%s>\\n' \"$CHAN_TERMINAL\"\n");
-        let restarted_out = collect_until(
-            &mut restarted,
-            "RESTARTED=<ghostty>",
-            Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            restarted_out.contains("RESTARTED=<ghostty>"),
-            "restart did not sample the resolver: {restarted_out:?}"
-        );
-
-        // A malformed/unreadable store resolves to None. Spawning remains
-        // fail-open and keeps the last successful value (ghostty), rather than
-        // falling all the way back to the registry's startup xterm value.
-        *resolved.lock().unwrap() = None;
-        let mut fallback = registry
-            .create(CreateOptions {
-                size: test_size(),
-                tab_name: None,
-                tab_group: None,
-                window_id: None,
-                mcp_env: false,
-                cwd: None,
-                command: Some("printf 'FALLBACK=<%s>\\n' \"$CHAN_TERMINAL\"".into()),
-                env: Default::default(),
-                profile: None,
-            })
-            .unwrap();
-        let fallback_out =
-            collect_until(&mut fallback, "FALLBACK=<ghostty>", Duration::from_secs(5)).await;
-        assert!(
-            fallback_out.contains("FALLBACK=<ghostty>"),
-            "resolver failure did not keep the last good value: {fallback_out:?}"
-        );
-
-        registry.close(created.id(), CloseReason::Explicit);
-        registry.close(fallback.id(), CloseReason::Explicit);
-        registry.close(&original_id, CloseReason::Explicit);
     }
 
     // systemd supervision state is a Linux-host concern, and the child half
@@ -13457,13 +13252,7 @@ mod tests {
     async fn spawn_env_overrides_win_over_the_spawn_defaults() {
         let home = tempfile::tempdir().unwrap();
         let home_path = home.path().to_string_lossy().into_owned();
-        let config = test_config(4096, 4, 60);
-        let chan_terminal = if config.terminal.ghostty {
-            "ghostty"
-        } else {
-            "xterm"
-        };
-        let registry = Arc::new(Registry::new(config));
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
         let env = [
             ("NO_COLOR", "1"),
             ("TERM", "dumb"),
@@ -13498,7 +13287,7 @@ mod tests {
             .unwrap();
 
         let expected =
-            format!("ENV=<1|dumb|true|1|0|{home_path}|{chan_terminal}|codex|/tmp/chan-tenv-home>");
+            format!("ENV=<1|dumb|true|1|0|{home_path}|ghostty|codex|/tmp/chan-tenv-home>");
         let out = collect_until(&mut handle, &expected, Duration::from_secs(5)).await;
         assert!(
             out.contains(&expected),

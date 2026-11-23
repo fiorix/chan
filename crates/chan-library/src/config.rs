@@ -109,18 +109,6 @@ pub struct TerminalConfig {
     /// ones; a connection already running is left alone.
     #[serde(default)]
     pub tmux: TerminalTmuxConfig,
-    /// Whether newly opened terminals use the ghostty-web backend
-    /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
-    /// SPA at terminal start time; the server only persists the value.
-    /// Applies to newly opened terminals, control terminals included.
-    ///
-    /// On by default on every platform; `false` keeps xterm.js. Ghostty
-    /// draws box drawings and block elements itself, where the xterm.js DOM
-    /// renderer of the Linux desktop leaves one unpainted scanline at cell
-    /// boundaries (96.0% rule continuity and 95.2% block coverage), and both
-    /// engines mask secrets, so nothing keeps a window kind on xterm.js.
-    #[serde(default = "default_terminal_ghostty")]
-    pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
     /// secret-looking `NAME=value` assignments. The buffer remains
     /// cleartext so selection, copy, replay, and snapshots are unchanged.
@@ -231,7 +219,6 @@ impl Default for TerminalConfig {
             mouse_capture: default_terminal_mouse_capture(),
             program_status: default_terminal_program_status(),
             tmux: TerminalTmuxConfig::default(),
-            ghostty: default_terminal_ghostty(),
             secret_masking: None,
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
             profiles: Vec::new(),
@@ -273,10 +260,6 @@ fn default_terminal_mouse_capture() -> bool {
 }
 
 fn default_terminal_program_status() -> bool {
-    true
-}
-
-fn default_terminal_ghostty() -> bool {
     true
 }
 
@@ -859,28 +842,10 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_backend_defaults_to_ghostty_on_every_platform() {
-        assert!(TerminalConfig::default().ghostty);
-    }
-
-    #[test]
-    fn an_absent_backend_field_uses_ghostty() {
-        let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
-        assert!(config.ghostty);
-    }
-
-    #[test]
     fn an_absent_background_opacity_is_opaque() {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
         assert_eq!(config.background_opacity, TERMINAL_BACKGROUND_OPACITY_MAX);
         assert_eq!(TerminalConfig::default().background_opacity, 100);
-    }
-
-    #[test]
-    fn an_explicit_backend_choice_survives_the_default() {
-        let config: TerminalConfig =
-            serde_json::from_value(json!({ "ghostty": false })).expect("deserialize");
-        assert!(!config.ghostty);
     }
 
     #[test]
