@@ -8,9 +8,9 @@
 // right press (the right one opens chan's terminal menu) leaves the textarea
 // holding the keyboard. chan's own focus focuses the host. The input
 // handler's key listener sits on the host, so a key reaches the program from
-// either. focus() focuses the host, and again on a zero-delay timer, so every
-// reading after a focus or an open waits a task for that timer. What the
-// terminal hands the program is what its onData fires.
+// either. focus() focuses the host once, synchronously; a reading after a
+// focus or an open still waits a task, so a later focus would be seen. What
+// the terminal hands the program is what its onData fires.
 
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
@@ -169,7 +169,7 @@ describe("blur() on a ghostty terminal", () => {
     expect(document.activeElement).toBe(input);
   });
 
-  test("right after focus(), blur() leaves no retry to take the keyboard back", async () => {
+  test("right after focus(), blur() leaves nothing to take the keyboard back", async () => {
     const { term, host, sent } = await openTerminal();
     await nextTask();
     const input = document.createElement("input");
@@ -181,7 +181,7 @@ describe("blur() on a ghostty terminal", () => {
     term.blur();
     expect(document.activeElement).toBe(document.body);
     await nextTask();
-    expect(document.activeElement, "focus()'s retry ran after the blur").toBe(document.body);
+    expect(document.activeElement, "something took the keyboard back after the blur").toBe(document.body);
     typeKey("ArrowUp", "ArrowUp");
     expect(sent).toEqual([]);
   });

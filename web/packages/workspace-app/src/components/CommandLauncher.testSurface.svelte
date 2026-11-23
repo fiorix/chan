@@ -9,8 +9,8 @@
   // A stand-in for a surface under the launcher that a row shows: a field that
   // takes the keyboard when shown, the ways the real ones do. The Rich Prompt
   // focuses its composer as it shows and its terminal in a microtask as it
-  // hides, a terminal focuses again on a zero-delay timer, and an editor
-  // remounted by a mode switch focuses as it mounts.
+  // hides, the date popover focuses its day on a zero-delay timer, and an
+  // editor remounted by a mode switch focuses as it mounts.
   import { flushSync, tick } from "svelte";
 
   let shown = $state(false);
