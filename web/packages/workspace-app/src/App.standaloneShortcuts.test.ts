@@ -44,6 +44,7 @@ vi.mock("./api/client", async (importOriginal) => {
 import { api } from "./api/client";
 import type { Preferences } from "./api/types";
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { hydrateOverrides, overrideChordFor } from "./state/keymapOverrides.svelte";
 import { chordFor } from "./state/shortcuts";
 import {
@@ -115,6 +116,7 @@ describe("a standalone terminal window resolves its chords with the saved shortc
     expect(chordFor("app.settings.open")).toBe("Ctrl+Alt+Y");
     expect(await opensSettings(ASSIGNED), "the saved chord runs the command").toBe(true);
     expect(await opensSettings(BUILT_IN), "the built-in chord it replaced runs nothing").toBe(false);
+    await seatedGhostty();
   });
 
   test("after a change saved from another window, and after that change is cleared", async () => {

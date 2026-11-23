@@ -74,6 +74,13 @@ export class FakeTerminal {
   constructor(options: Record<string, unknown> = {}) {
     this.options = { ...options };
     xterm.terminals.push(this);
+    // A file's own Ghostty double built on the stand-in is constructed by its
+    // kit, with the core it instantiated; only the xterm.js fallback is paid
+    // for by a load (see the route below).
+    if (!("ghostty" in options)) {
+      if (route.paid > 0) route.paid -= 1;
+      else route.unpaid += 1;
+    }
   }
 
   loadAddon(addon: { activate?: (terminal: FakeTerminal) => void }): void {
@@ -269,6 +276,14 @@ export function webglAddonModule() {
 // terminal initialization guard lets that one failure through, by its class.
 // The route is transitional: a file leaves it when its assertions move to the
 // widget fixture (`./ghosttyTab`), and the route goes with the last file.
+//
+// Each load that asks for the fallback pays for one stand-in: the route's
+// own failure, or a file's own kit failing under the switch, which is that
+// file's choice. A stand-in nothing paid for fell back on its own, with
+// neither fixture nor route, and the setup file's guard fails its test from
+// this count, whatever the test did with the console. The count is per file:
+// a load whose component was torn down before it built a terminal leaves its
+// payment for the next.
 
 /// The load failure a file on the stand-in route asks for.
 export class XtermStandInRequested extends Error {
@@ -278,11 +293,28 @@ export class XtermStandInRequested extends Error {
   }
 }
 
+const route = { paid: 0, unpaid: 0 };
+
+/// A Ghostty load that asks for the stand-in: it fails with the route's
+/// error, and pays for the fallback terminal it leads to.
+export function requestXtermStandIn(): Promise<never> {
+  route.paid += 1;
+  return Promise.reject(new XtermStandInRequested());
+}
+
+/// How many stand-ins were constructed with no load paying for them since
+/// the last call.
+export function takeUnroutedStandIns(): number {
+  const unpaid = route.unpaid;
+  route.unpaid = 0;
+  return unpaid;
+}
+
 /// The `vi.mock("../terminal/backend", ...)` factory of a file whose every
 /// terminal runs on the stand-in.
 export async function xtermStandInBackendModule(importOriginal: <T>() => Promise<T>) {
   const actual = await importOriginal<Record<string, unknown>>();
-  return { ...actual, loadGhosttyKit: (): Promise<never> => Promise.reject(new XtermStandInRequested()) };
+  return { ...actual, loadGhosttyKit: requestXtermStandIn };
 }
 
 const standIn = { on: false };
@@ -295,11 +327,19 @@ export function useXtermStandIn(on = true): void {
 }
 
 /// Wraps the module a file's own backend mock returns, so `useXtermStandIn`
-/// decides each load.
+/// decides each load. The file's own load is returned as it is, so a kit's
+/// timing is the file's; when it fails, the fallback it leads to is paid.
 export function xtermStandInSwitch<T extends { loadGhosttyKit: () => Promise<unknown> }>(module: T): T {
   const load = module.loadGhosttyKit;
   return {
     ...module,
-    loadGhosttyKit: (() => (standIn.on ? Promise.reject(new XtermStandInRequested()) : load())) as T["loadGhosttyKit"],
+    loadGhosttyKit: (() => {
+      if (standIn.on) return requestXtermStandIn();
+      const loading = load();
+      loading.catch(() => {
+        route.paid += 1;
+      });
+      return loading;
+    }) as T["loadGhosttyKit"],
   };
 }

@@ -109,10 +109,9 @@ pub struct TerminalConfig {
     /// ones; a connection already running is left alone.
     #[serde(default)]
     pub tmux: TerminalTmuxConfig,
-    /// Whether xterm.js terminals visually obscure the values of
-    /// secret-looking `NAME=value` assignments. The buffer remains
-    /// cleartext so selection, copy, replay, and snapshots are unchanged.
-    /// Ghostty terminals do not support xterm decorations and ignore this.
+    /// Whether terminals visually obscure the values of secret-looking
+    /// `NAME=value` assignments. The buffer remains cleartext so selection,
+    /// copy, replay, and snapshots are unchanged.
     ///
     /// `None` is a choice nobody made. It is left out of `server.toml` and of
     /// the preferences a page reads, and a page that finds no choice masks by

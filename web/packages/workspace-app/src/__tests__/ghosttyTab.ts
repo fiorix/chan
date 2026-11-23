@@ -179,6 +179,23 @@ export const ghosttyFixture: GhosttyRuntime = { module: null, terminals: [] };
 
 let coreCompiled: Promise<void> | null = null;
 
+/// Set while a case holds the fixture's loads back.
+let heldLoads: { until: Promise<void>; release(): void } | null = null;
+
+/// Hold every fixture load until the returned release runs, or until the
+/// next `resetTerminals`: a load as slow as the case needs, for a wait that
+/// must outlast it.
+export function holdGhosttyLoads(): () => void {
+  let release = () => {};
+  const until = new Promise<void>((resolve) => (release = resolve));
+  const held = { until, release };
+  heldLoads = held;
+  return () => {
+    if (heldLoads === held) heldLoads = null;
+    held.release();
+  };
+}
+
 /// The `vi.mock("../terminal/backend", ...)` factory. Every terminal opens on
 /// the widget, as in the product, and the loader hands out the vendored core
 /// instead of fetching it.
@@ -193,6 +210,7 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
     ...actual,
     loadGhosttyKit: async (): Promise<GhosttyKit> => {
       await coreCompiled;
+      if (heldLoads) await heldLoads.until;
       return fixtureKit(actual.ghosttyKitFrom);
     },
   };
@@ -242,6 +260,21 @@ export async function openedGhostty(within: Node = document): Promise<Terminal> 
   );
 }
 
+/// The fixture terminal open in a test that seated one through the app (a
+/// layout, a command, a pane), rather than with `mountGhosttyTerminal`. A
+/// file whose fixture mocks did not apply would otherwise finish before the
+/// real loader fails, every terminal lost and no report to fail on: this
+/// refuses such a file, and waits for the widget.
+export async function seatedGhostty(within: Node = document): Promise<Terminal> {
+  if (!ghosttyFixtureDeclared()) {
+    throw new Error(
+      'seatedGhostty needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
+        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+    );
+  }
+  return openedGhostty(within);
+}
+
 /// Type a key into the terminal: the keydown goes to the element the widget
 /// focuses, where the app's key handling listens ahead of the widget's own.
 /// What the key did is what the product shows for it: the input frames on
@@ -256,6 +289,14 @@ export function pressInGhostty(term: Terminal, init: KeyboardEventInit): Keyboar
 
 function resetGhosttyFixture(): void {
   ghosttyFixture.terminals.splice(0);
+  // A terminal the test never disposed would keep every later 2D context of
+  // the file on the software canvas.
+  servedTerminals.clear();
+  giveCanvasesBack();
+  if (heldLoads) {
+    heldLoads.release();
+    heldLoads = null;
+  }
 }
 
 /// Data the terminal emits as typed input, as a key or a paste does.
@@ -273,33 +314,24 @@ export function ghosttyHasFocus(term: Terminal): boolean {
 function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
   if (!ghosttyFixture.module) throw new Error("the vendored core did not compile");
   class FixtureTerminal extends Terminal {
-    #open = false;
-
     constructor(...args: ConstructorParameters<typeof Terminal>) {
       super(...args);
       ghosttyFixture.terminals.push(this);
     }
 
     override open(parent: HTMLElement): void {
-      serveCanvases();
-      this.#open = true;
+      serveCanvases(this);
       try {
         super.open(parent);
       } catch (error) {
-        this.#close();
+        releaseCanvases(this);
         throw error;
       }
     }
 
     override dispose(): void {
       super.dispose();
-      this.#close();
-    }
-
-    #close(): void {
-      if (!this.#open) return;
-      this.#open = false;
-      releaseCanvases();
+      releaseCanvases(this);
     }
   }
   return kitFrom(ghosttyFixture.module, { Terminal: FixtureTerminal });
@@ -310,14 +342,16 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
 // context gets a software one, since the widget also measures its font on a
 // detached canvas; any other context id gets the environment's own answer,
 // and so does every canvas once the last terminal closes. A test that
-// installed its own context (`installSoftwareCanvas`) keeps it.
+// installed its own context (`installSoftwareCanvas`) keeps it. A reset
+// ends the serving whatever is still open, and a terminal disposed after it
+// takes nothing back.
 const softwareContexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
-let openTerminals = 0;
+const servedTerminals = new Set<Terminal>();
 let environmentGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 let servedGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 
-function serveCanvases(): void {
-  openTerminals += 1;
+function serveCanvases(term: Terminal): void {
+  servedTerminals.add(term);
   const current = HTMLCanvasElement.prototype.getContext;
   if (current === servedGetContext || vi.isMockFunction(current)) return;
   environmentGetContext = current;
@@ -325,9 +359,13 @@ function serveCanvases(): void {
   HTMLCanvasElement.prototype.getContext = servedGetContext;
 }
 
-function releaseCanvases(): void {
-  openTerminals -= 1;
-  if (openTerminals > 0 || !environmentGetContext) return;
+function releaseCanvases(term: Terminal): void {
+  if (!servedTerminals.delete(term) || servedTerminals.size > 0) return;
+  giveCanvasesBack();
+}
+
+function giveCanvasesBack(): void {
+  if (!environmentGetContext) return;
   if (HTMLCanvasElement.prototype.getContext === servedGetContext) {
     HTMLCanvasElement.prototype.getContext = environmentGetContext;
   }

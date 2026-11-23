@@ -37,6 +37,7 @@ vi.mock("./demo/socket", async (importOriginal) => {
 });
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { resetLayout, terminalTab } from "./__tests__/tabs";
 import { sessionWindowId } from "./api/client";
 import { teardown } from "./state/store.svelte";
@@ -120,5 +121,6 @@ describe("the survey overlays converge on what the server still waits on", () =>
 
     expect(surveyFor(TERMINAL)?.surveyId).toBe("survey-vsWLMCT33cKSYSRvZGiV58eLQaDKamrt");
     expect(overlayBody()).toContain("still open when the window comes back");
+    await seatedGhostty();
   });
 });

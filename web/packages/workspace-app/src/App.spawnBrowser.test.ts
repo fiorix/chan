@@ -31,6 +31,7 @@ vi.mock("./state/windowCaps", async (importOriginal) => {
 });
 
 import { demoData, hostCommand, mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { filesContext, filesContextFrom } from "./state/fileContext.svelte";
 import { browserSelection, treeExpanded } from "./state/store.svelte";
@@ -77,6 +78,7 @@ describe("a new Files tab", () => {
     expect(tab.expanded).toEqual(["notes", "notes/sub"]);
     expect(browserSelection.showWorkspace).toBe(false);
     expect(treeExpanded.map).toMatchObject({ notes: true, "notes/sub": true });
+    await seatedGhostty();
   });
 
   test("selects a doc inside its parent, which is expanded and the doc is not", async () => {

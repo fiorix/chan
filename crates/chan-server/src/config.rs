@@ -433,9 +433,25 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let first = tmp.path().join("server.toml");
         let second = tmp.path().join("other.toml");
+        let kept = tmp.path().join("kept.toml");
+        let without = tmp.path().join("without.toml");
         std::fs::write(&first, "[terminal]\nghostty = false\n").unwrap();
         std::fs::write(&second, "[terminal]\nghostty = false\nfont_size = 12\n").unwrap();
+        std::fs::write(&kept, "[terminal]\nghostty = true\n").unwrap();
+        std::fs::write(&without, "[terminal]\nfont_size = 12\n").unwrap();
         let warned = AtomicBool::new(false);
+
+        // A process that starts on a file without a stored false still warns
+        // when one is added later.
+        for quiet in [&kept, &without, &tmp.path().join("missing.toml")] {
+            let (warnings, _) = load_warnings(quiet, &warned);
+            assert!(warnings.is_empty(), "{}: {warnings:?}", quiet.display());
+            assert!(
+                !warned.load(Ordering::Relaxed),
+                "{} spent the warning",
+                quiet.display()
+            );
+        }
         let (mut warnings, _) = load_warnings(&first, &warned);
         warnings.extend(load_warnings(&first, &warned).0);
         warnings.extend(load_warnings(&second, &warned).0);

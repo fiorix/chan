@@ -20,6 +20,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { clearRecentlyClosedTabsForTest, layout, localTabDropKeysForTest, type LeafNode } from "../state/tabs.svelte";
 
@@ -106,4 +107,5 @@ test("a pressed terminal tab dropped on the right edge of the only pane splits i
   expect.soft([...warn.mock.calls, ...error.mock.calls]).toEqual([]);
   expect.soft(leaves().map((pane) => pane.tabs.map((t) => t.id))).toEqual([["first"], ["second"]]);
   expect.soft(localTabDropKeysForTest()).toEqual([]);
+  await seatedGhostty();
 });
