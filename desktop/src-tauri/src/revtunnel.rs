@@ -19,15 +19,22 @@
 //! at its pinned proxy origin with the browser session cookie and the exact
 //! external `Origin`, which is what the window feed's socket already carries,
 //! so a tunnel socket is accepted wherever that feed is.
+//!
+//! Either shape's sockets take the route the feeds take, the process's
+//! WireGuard decision, so a tunnel also reaches its devserver wherever that
+//! feed does: a gateway's tenant name that only the fabric's proxy can carry
+//! needs no DNS on this machine for a tunnel either.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use chan_revtunnel::client::{ClientConfig, TunnelHandle};
+use chan_revtunnel::client::{ClientConfig, ConnectFuture, Transport, TunnelHandle};
 use chan_revtunnel::{Proto, TunnelOpen, TunnelSpec};
 use tauri::State;
+use tokio_tungstenite::tungstenite::http::Uri;
 
 use crate::devserver::DevserverConn;
+use crate::wireguard::WsRoute;
 use crate::AppState;
 
 /// Live tunnel listeners keyed by tunnel id, so a later teardown path can
@@ -74,6 +81,44 @@ fn conn_for_window(state: &AppState, label: &str) -> Result<DevserverConn, Strin
         .ok_or_else(|| "the devserver behind this window is not connected".to_string())
 }
 
+/// The route of every tunnel socket, control and data: the dial the
+/// process's WireGuard fabric decides, as the window feeds take it. A host
+/// that is not loopback is reached by a CONNECT through the fabric's proxy,
+/// which carries a gateway's names into their tunnel with no lookup on this
+/// machine; a loopback host, or a process with no fabric, is dialed directly.
+/// The decision is read at each dial. A CONNECT the proxy refuses fails that
+/// socket: a host the fabric routes is never dialed around it.
+struct FabricTransport {
+    route: Box<RouteOf>,
+}
+
+/// Where a WebSocket dial of a URL goes, the question
+/// [`crate::wireguard::ws_route`] answers for the process.
+type RouteOf = dyn Fn(&Uri) -> Option<WsRoute> + Send + Sync;
+
+impl FabricTransport {
+    fn of_process() -> Arc<dyn Transport> {
+        Arc::new(Self {
+            route: Box::new(crate::wireguard::ws_route),
+        })
+    }
+}
+
+impl Transport for FabricTransport {
+    fn connect<'a>(&'a self, uri: &'a Uri) -> ConnectFuture<'a> {
+        Box::pin(async move {
+            match (self.route)(uri) {
+                None => Ok(None),
+                Some(route) => {
+                    crate::wireguard::connect_through(route.proxy, &route.host, route.port)
+                        .await
+                        .map(Some)
+                }
+            }
+        })
+    }
+}
+
 /// Dial target and credentials for a directly attached devserver: the tunnel
 /// endpoint the desktop already dials for everything else, authenticated by
 /// the devserver-level bearer.
@@ -93,6 +138,7 @@ fn raw_client_config(
         half_close,
         // A `ws://` origin runs no TLS.
         connector: None,
+        transport: Some(FabricTransport::of_process()),
     }
 }
 
@@ -120,8 +166,10 @@ fn gateway_client_config(
         tunnel_id,
         spec,
         half_close,
-        // The gateway is verified as the window feed verifies it.
+        // The gateway is verified as the window feed verifies it, over the
+        // route the window feed takes to it.
         connector: Some(crate::tls::ws_connector()?),
+        transport: Some(FabricTransport::of_process()),
     })
 }
 
@@ -279,6 +327,7 @@ mod tests {
         assert_eq!(cfg.origin, None);
         assert!(cfg.half_close);
         assert!(cfg.connector.is_none(), "a ws:// dial runs no TLS");
+        assert!(cfg.transport.is_some(), "the fabric decides the route");
     }
 
     #[test]
@@ -315,6 +364,8 @@ mod tests {
             cfg.connector,
             Some(tokio_tungstenite::Connector::Rustls(_))
         ));
+        // The route is the fabric's, a decision apart from that trust.
+        assert!(cfg.transport.is_some(), "the fabric decides the route");
     }
 
     #[test]
@@ -482,6 +533,342 @@ mod tests {
             ]
         );
         server.abort();
+    }
+
+    /// What one upgrade to the tenant fixture carried.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Upgrade {
+        /// The request target: path and query.
+        target: String,
+        host: Option<String>,
+        cookie: Option<String>,
+        origin: Option<String>,
+        authorization: Option<String>,
+    }
+
+    /// A devserver stand-in on loopback: it records every upgrade, hands the
+    /// control socket's text frames to the test, and answers each data
+    /// socket's binary frames with `re:` and the bytes.
+    struct Tenant {
+        addr: std::net::SocketAddr,
+        upgrades: Arc<Mutex<Vec<Upgrade>>>,
+        control: tokio::sync::mpsc::Receiver<String>,
+    }
+
+    impl Tenant {
+        async fn start() -> Self {
+            use futures::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::handshake::server::Request;
+            use tokio_tungstenite::tungstenite::Message;
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let upgrades = Arc::new(Mutex::new(Vec::new()));
+            let (control_tx, control) = tokio::sync::mpsc::channel(8);
+            let seen = Arc::clone(&upgrades);
+            tokio::spawn(async move {
+                while let Ok((sock, _)) = listener.accept().await {
+                    let seen = Arc::clone(&seen);
+                    let control_tx = control_tx.clone();
+                    tokio::spawn(async move {
+                        let mut upgrade = None;
+                        let accepted = tokio_tungstenite::accept_hdr_async(
+                            sock,
+                            #[allow(clippy::result_large_err)]
+                            |request: &Request, response| {
+                                let header = |name: &str| {
+                                    request
+                                        .headers()
+                                        .get(name)
+                                        .map(|value| value.to_str().unwrap().to_string())
+                                };
+                                upgrade = Some(Upgrade {
+                                    target: request
+                                        .uri()
+                                        .path_and_query()
+                                        .map(|target| target.to_string())
+                                        .unwrap_or_default(),
+                                    host: header("host"),
+                                    cookie: header("cookie"),
+                                    origin: header("origin"),
+                                    authorization: header("authorization"),
+                                });
+                                Ok(response)
+                            },
+                        )
+                        .await;
+                        let (Ok(mut ws), Some(upgrade)) = (accepted, upgrade) else {
+                            return;
+                        };
+                        let is_control = upgrade.target.starts_with(CONTROL_PATH);
+                        seen.lock().unwrap().push(upgrade);
+                        while let Some(Ok(frame)) = ws.next().await {
+                            let open = match frame {
+                                Message::Text(text) if is_control => {
+                                    let _ = control_tx.send(text.to_string()).await;
+                                    true
+                                }
+                                Message::Binary(bytes) => {
+                                    let answer = [b"re:".as_slice(), &bytes].concat();
+                                    ws.send(Message::binary(answer)).await.is_ok()
+                                }
+                                Message::Close(_) => false,
+                                _ => true,
+                            };
+                            if !open {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            Self {
+                addr,
+                upgrades,
+                control,
+            }
+        }
+
+        fn upgrades(&self) -> Vec<Upgrade> {
+            self.upgrades.lock().unwrap().clone()
+        }
+
+        async fn ready(&mut self) -> chan_revtunnel::ControlFrame {
+            let text = within("the ready frame", self.control.recv())
+                .await
+                .expect("the control socket reached the tenant");
+            serde_json::from_str(&text).expect("a control frame")
+        }
+    }
+
+    /// A CONNECT proxy standing where the fabric's stands. It records each
+    /// request line and, when it carries, answers 200 and splices the stream
+    /// to `upstream` whatever authority was named, as the fabric's proxy
+    /// carries a mapped name into its tunnel; otherwise it answers 403.
+    struct FabricProxy {
+        addr: std::net::SocketAddr,
+        connects: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FabricProxy {
+        async fn start(upstream: std::net::SocketAddr, carries: bool) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let connects = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&connects);
+            tokio::spawn(async move {
+                while let Ok((mut client, _)) = listener.accept().await {
+                    let seen = Arc::clone(&seen);
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        while !head.ends_with(b"\r\n\r\n") {
+                            let Ok(byte) = client.read_u8().await else {
+                                return;
+                            };
+                            head.push(byte);
+                        }
+                        let head = String::from_utf8_lossy(&head);
+                        seen.lock()
+                            .unwrap()
+                            .push(head.lines().next().unwrap_or("").to_string());
+                        if !carries {
+                            let _ = client
+                                .write_all(
+                                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\
+                                      Connection: close\r\n\r\n",
+                                )
+                                .await;
+                            return;
+                        }
+                        if client
+                            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(upstream).await
+                        else {
+                            return;
+                        };
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                    });
+                }
+            });
+            Self { addr, connects }
+        }
+
+        fn connects(&self) -> Vec<String> {
+            self.connects.lock().unwrap().clone()
+        }
+
+        /// The fabric's routing decision for a process whose proxy is this
+        /// one: the host classification the window feeds dial by.
+        fn transport(&self) -> Arc<dyn Transport> {
+            let proxy = self.addr;
+            Arc::new(FabricTransport {
+                route: Box::new(move |uri| crate::wireguard::ws_route_with(Some(proxy), uri)),
+            })
+        }
+    }
+
+    async fn within<T>(what: &str, future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), future)
+            .await
+            .unwrap_or_else(|_| panic!("{what} did not finish"))
+    }
+
+    /// One caller's round trip through a tunnel's listener.
+    async fn round_trip(bound: std::net::SocketAddr, bytes: &[u8]) -> tokio::net::TcpStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut caller = within(
+            "the caller's connect",
+            tokio::net::TcpStream::connect(bound),
+        )
+        .await
+        .expect("the tunnel's listener accepts");
+        caller.write_all(bytes).await.unwrap();
+        let answer = [b"re:".as_slice(), bytes].concat();
+        let mut back = vec![0u8; answer.len()];
+        within("the tenant's answer", caller.read_exact(&mut back))
+            .await
+            .expect("the answer crosses the data socket");
+        assert_eq!(back, answer);
+        caller
+    }
+
+    /// The spec of a tunnel on a listener port the OS picks.
+    fn any_port_spec() -> TunnelSpec {
+        TunnelSpec {
+            desktop_port: 0,
+            ..spec()
+        }
+    }
+
+    /// A tenant name no resolver answers (RFC 6761 reserves `.invalid`), on a
+    /// port nothing here listens on: the tenant is reached through the proxy
+    /// or not at all.
+    const TENANT_AUTHORITY: &str = "alice--0123456789ab.p1.proxy.chan.invalid:8080";
+
+    #[tokio::test]
+    async fn a_gateway_tunnel_reaches_a_tenant_only_the_fabric_proxy_can_name() {
+        let mut tenant = Tenant::start().await;
+        let proxy = FabricProxy::start(tenant.addr, true).await;
+        let conn = gateway_conn(&format!("http://{TENANT_AUTHORITY}"));
+        let mut cfg = gateway_client_config(
+            &conn,
+            "__Host-devserver_gate=g".into(),
+            "t-1".into(),
+            any_port_spec(),
+            true,
+        )
+        .unwrap();
+        cfg.transport = Some(proxy.transport());
+
+        let handle = within("the tunnel's open", chan_revtunnel::client::open(cfg))
+            .await
+            .expect("the control socket goes through the proxy");
+        assert_eq!(
+            tenant.ready().await,
+            chan_revtunnel::ControlFrame::Ready {
+                bound: handle.bound.to_string()
+            }
+        );
+        // Two forwarded connections, the first still open while the second
+        // is served.
+        let first = round_trip(handle.bound, b"one").await;
+        let second = round_trip(handle.bound, b"two").await;
+
+        // The control socket and each data socket asked the proxy for the
+        // tenant's own authority.
+        assert_eq!(
+            proxy.connects(),
+            vec![format!("CONNECT {TENANT_AUTHORITY} HTTP/1.1"); 3]
+        );
+        // Inside the route every upgrade is the one a direct dial sends: the
+        // tenant's host, the session cookie and the external origin.
+        let upgrade = |target: &str| Upgrade {
+            target: target.to_string(),
+            host: Some(TENANT_AUTHORITY.to_string()),
+            cookie: Some("__Host-devserver_gate=g".into()),
+            origin: Some(format!("http://{TENANT_AUTHORITY}")),
+            authorization: None,
+        };
+        assert_eq!(
+            tenant.upgrades(),
+            [
+                upgrade("/api/library/tunnel/control?tunnel=t-1"),
+                upgrade("/api/library/tunnel/conn?tunnel=t-1&conn=c0&half_close=true"),
+                upgrade("/api/library/tunnel/conn?tunnel=t-1&conn=c1&half_close=true"),
+            ]
+        );
+        drop((first, second));
+        handle.stop();
+        within("the tunnel's end", handle.wait()).await;
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_the_fabric_proxy_refuses_does_not_open() {
+        let tenant = Tenant::start().await;
+        let proxy = FabricProxy::start(tenant.addr, false).await;
+        let conn = gateway_conn(&format!("http://{TENANT_AUTHORITY}"));
+        let mut cfg = gateway_client_config(
+            &conn,
+            "__Host-devserver_gate=g".into(),
+            "t-1".into(),
+            any_port_spec(),
+            true,
+        )
+        .unwrap();
+        cfg.transport = Some(proxy.transport());
+
+        let err = within("the tunnel's open", chan_revtunnel::client::open(cfg))
+            .await
+            .unwrap_err();
+        assert!(err.contains("connect tunnel control socket"), "{err}");
+        assert!(err.contains("403"), "the proxy's refusal is named: {err}");
+        assert_eq!(
+            proxy.connects(),
+            [format!("CONNECT {TENANT_AUTHORITY} HTTP/1.1")]
+        );
+        assert_eq!(tenant.upgrades(), []);
+    }
+
+    #[tokio::test]
+    async fn a_loopback_devserver_is_dialed_without_the_fabric_proxy() {
+        // A devserver on this machine must not depend on the proxy being up:
+        // with a fabric in the process its tunnel sockets still dial it
+        // directly, under its own bearer.
+        let mut tenant = Tenant::start().await;
+        let proxy = FabricProxy::start(tenant.addr, false).await;
+        let conn = DevserverConn {
+            port: tenant.addr.port(),
+            ..raw_conn()
+        };
+        let mut cfg = raw_client_config(&conn, "t-1".into(), any_port_spec(), true);
+        cfg.transport = Some(proxy.transport());
+
+        let handle = within("the tunnel's open", chan_revtunnel::client::open(cfg))
+            .await
+            .expect("a loopback devserver is dialed directly");
+        assert!(matches!(
+            tenant.ready().await,
+            chan_revtunnel::ControlFrame::Ready { .. }
+        ));
+        let _caller = round_trip(handle.bound, b"local").await;
+        assert_eq!(proxy.connects(), Vec::<String>::new());
+        let upgrades = tenant.upgrades();
+        assert_eq!(upgrades.len(), 2);
+        for upgrade in upgrades {
+            assert_eq!(upgrade.host, Some(tenant.addr.to_string()));
+            assert_eq!(
+                upgrade.authorization.as_deref(),
+                Some("Bearer devserver-token")
+            );
+        }
     }
 
     #[tokio::test]

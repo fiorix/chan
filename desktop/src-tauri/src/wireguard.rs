@@ -4,10 +4,11 @@
 //!
 //! The proxy is bound at start, before any HTTP client or webview exists,
 //! whether or not a gateway carries a file, and lives for the process. The
-//! three legs to a gateway, the HTTP clients, the window feed's WebSocket
-//! and the webviews, all know how to dial through an HTTP proxy, so one
-//! proxy puts them inside the tunnels with no interface, route or privilege
-//! on the host. Its address is the one thing decided once per process,
+//! three legs to a gateway, the HTTP clients, the WebSockets (the window
+//! feeds and the `cs tunnel` sockets) and the webviews, all know how to
+//! dial through an HTTP proxy, so one proxy puts them inside the tunnels
+//! with no interface, route or privilege on the host. Its address is the
+//! one thing decided once per process,
 //! because the webview proxy is: WebView2 takes it as a browser argument
 //! shared by every webview of the process, so the launcher and every window
 //! carry the same value. What the proxy routes is not decided at start: the
@@ -51,7 +52,8 @@ use crate::config::{Gateway, WireguardEnrollment};
 const DIRECT_HOSTS: &str = "127.0.0.0/8,::1,localhost";
 
 /// A CONNECT exchange, connect included, is bounded so a proxy that stops
-/// answering fails the feed round instead of holding it.
+/// answering fails the feed round or the tunnel socket instead of holding
+/// it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A CONNECT response head longer than this without its blank line is a
@@ -997,7 +999,7 @@ pub struct WsRoute {
     pub port: u16,
 }
 
-fn ws_route_with(proxy: Option<SocketAddr>, uri: &Uri) -> Option<WsRoute> {
+pub(crate) fn ws_route_with(proxy: Option<SocketAddr>, uri: &Uri) -> Option<WsRoute> {
     let proxy = proxy?;
     let host = uri
         .host()?
@@ -1045,8 +1047,9 @@ async fn connect_through_unbounded(
     port: u16,
 ) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy).await?;
-    // The feed's frames are small and waited on; a delayed segment is a
-    // round trip added to each.
+    // A feed's frames are small and waited on, and a tunnel socket carries
+    // a caller's bytes as they come; a delayed segment is a round trip
+    // added to each.
     stream.set_nodelay(true)?;
     // An IPv6 literal needs its brackets back in the authority.
     let authority = if host.contains(':') {

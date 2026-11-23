@@ -10,7 +10,7 @@ The callers and what each keeps of its own:
 
 - chan-desktop's `wireguard::client_builder`, the builder of every reqwest 0.12 client of the desktop (sign-in, revoke, discovery, the roster, the devserver polls and probes, native transfers): ALPN `http/1.1`, with the process's WireGuard proxy decision, each client's timeouts and redirect policy unchanged.
 - chan-desktop's window feeds (`window_watcher_wiring::ws_connect`), dialed directly or through the WireGuard proxy's CONNECT: a tokio-tungstenite `Connector::Rustls` with no ALPN, the route unchanged.
-- chan-desktop's `cs tunnel` sockets to a gateway-attached devserver, through chan-revtunnel's `ClientConfig::connector`: the same connector. A directly attached devserver is dialed at `ws://` and runs no TLS.
+- chan-desktop's `cs tunnel` sockets to a gateway-attached devserver, through chan-revtunnel's `ClientConfig::connector`, dialed directly or through the WireGuard proxy's CONNECT as `ClientConfig::transport` decides: the same connector, the route unchanged. A directly attached devserver is dialed at `ws://` and runs no TLS.
 - chan-desktop's updater, through `tauri-plugin-updater`'s `configure_client` and reqwest 0.13's `tls_backend_preconfigured` (`tls::updater_client`): ALPN `http/1.1`, for the check and the download, with the plugin's own timeout, proxy and headers.
 - chan-tunnel-client's `build_tls_config`: ALPN `h2`, built once per `run` and reused across reconnects.
 - wireguard-agent's `IdentityClient`: ALPN `http/1.1`, with its 5-second total and 2-second connect timeouts and no redirects.

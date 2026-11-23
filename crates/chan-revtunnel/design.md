@@ -26,6 +26,14 @@ flowchart TB
 
 Both WebSocket paths sit under `/api/library/`, because `/api/devserver/` is not forwarded on the gateway's public wildcard and a gateway-attached desktop must be able to reach them.
 
+## The route of a socket
+
+The desktop client dials the control socket and every data socket the same way, and where their bytes travel is the embedder's decision, not the crate's. `ClientConfig::transport` is asked before each dial with the socket's full URL. It answers with a TCP stream already connected toward that URL's authority, or selects the direct dial, or fails the dial; a failed route is never answered by dialing directly, so a host the embedder routes is not reached around its route. Because the question is asked at each dial, a tunnel never dials by a route it remembered, and a data socket opened long after the tunnel did takes the route that holds then.
+
+The route decides nothing else. Over a carried stream the client runs the TLS and WebSocket handshakes it runs over a direct one, addressed to the URL's own host: the same `Host`, the same cookie and Origin or bearer, and the same TLS server name. Verification stays with `ClientConfig::connector`, a separate setting, so a transport cannot widen what a tunnel trusts and a connector cannot move where it dials. Without a transport every socket is dialed directly.
+
+chan-desktop supplies its WireGuard routing decision, the one its window feeds dial by: a CONNECT through the fabric's proxy for a host that is not loopback, the direct dial otherwise. A gateway-attached devserver's tenant name can be one only that proxy carries, with no DNS on the desktop machine, and the tunnel reaches it as the window does. The trait lives in the client half, so the devserver half links neither it nor any transport.
+
 ## The spec
 
 A spec reads the way `ssh -R` reads from the machine the command runs on: the listener end first (the desktop), the destination end second (the devserver host), and the two ends are named that way in every error, since "local" and "remote" invert depending on where the reader stands. One side alone names both ends; an optional bind address comes first, with an IPv6 literal bracketed or not, which works because the last two colon fields are always the ports. The bind address defaults to loopback and a non-loopback bind parses on purpose: policy lives at the edges, where the CLI and the desktop warn, so the parser stays a parser.

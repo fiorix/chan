@@ -7,13 +7,16 @@
 //! also what makes the acceptance tests runnable on a machine with no display
 //! server, which is where this code has to be verified.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::bridge::{splice, splice_half_close};
@@ -52,6 +55,31 @@ fn is_connection_error(e: &std::io::Error) -> bool {
     )
 }
 
+/// What [`Transport::connect`] resolves to: the stream a routed dial runs
+/// over, `None` for a direct dial, or the I/O error the route met.
+pub type ConnectFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<Option<TcpStream>>> + Send + 'a>>;
+
+/// Where a tunnel socket's TCP stream comes from when the machine's own dial
+/// to the URL's authority is not the whole answer: the embedder reaches the
+/// devserver through a proxy, or through a tunnel inside the process. It
+/// decides the route and nothing else. The URL, the `Host` header, the
+/// credentials and the TLS server name stay the ones [`ClientConfig`] names,
+/// and TLS stays [`ClientConfig::connector`]'s job.
+///
+/// The client asks before every dial, the control socket's and each data
+/// socket's, so an embedder's routing policy is read when the dial happens
+/// and a tunnel never dials by a route it remembered.
+pub trait Transport: Send + Sync {
+    /// The stream for a dial of `uri`, a tunnel socket's full `ws://` or
+    /// `wss://` URL. `Ok(Some(stream))` is a stream already connected toward
+    /// that URL's authority: the client runs TLS over it when the scheme asks
+    /// for it, then the WebSocket handshake, both addressed to the URL's own
+    /// host. `Ok(None)` selects the direct dial. An error fails the dial: the
+    /// client never answers a failed route by dialing directly.
+    fn connect<'a>(&'a self, uri: &'a Uri) -> ConnectFuture<'a>;
+}
+
 /// Everything the desktop needs to serve one tunnel.
 pub struct ClientConfig {
     /// The devserver's WebSocket origin, e.g. `ws://127.0.0.1:8787`. The
@@ -72,6 +100,9 @@ pub struct ClientConfig {
     /// the gateway as the caller's other clients do. `None` keeps
     /// tokio-tungstenite's own connector, over the bundled roots.
     pub connector: Option<tokio_tungstenite::Connector>,
+    /// The route of every tunnel socket, asked at each dial. `None` dials
+    /// each socket directly.
+    pub transport: Option<Arc<dyn Transport>>,
 }
 
 /// A running tunnel. Dropping the handle requests shutdown, as does [`TunnelHandle::stop`]. Await [`TunnelHandle::wait`] to join the task after a stop request or wait for the devserver to close it.
@@ -280,6 +311,10 @@ async fn serve_conn(
     Ok(())
 }
 
+/// Open one tunnel socket, control or data, over the route the transport
+/// names for it now. A routed stream carries the same TLS and WebSocket
+/// handshakes the direct dial runs, for the same host, so the route changes
+/// how the bytes travel and not who is verified or what is presented.
 async fn dial(
     cfg: &ClientConfig,
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
@@ -290,8 +325,33 @@ async fn dial(
     ),
     tokio_tungstenite::tungstenite::Error,
 > {
-    tokio_tungstenite::connect_async_tls_with_config(request, None, false, cfg.connector.clone())
-        .await
+    let routed = match &cfg.transport {
+        Some(transport) => transport
+            .connect(request.uri())
+            .await
+            .map_err(tokio_tungstenite::tungstenite::Error::Io)?,
+        None => None,
+    };
+    match routed {
+        Some(stream) => {
+            tokio_tungstenite::client_async_tls_with_config(
+                request,
+                stream,
+                None,
+                cfg.connector.clone(),
+            )
+            .await
+        }
+        None => {
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                None,
+                false,
+                cfg.connector.clone(),
+            )
+            .await
+        }
+    }
 }
 
 fn data_url(cfg: &ClientConfig, conn_id: &str) -> String {
@@ -536,6 +596,7 @@ mod tests {
             spec,
             half_close: false,
             connector: None,
+            transport: None,
         }
     }
 
@@ -903,5 +964,563 @@ mod tests {
             .expect("legacy full-duplex transfer must not wedge");
         assert_eq!(received_request, request);
         assert_eq!(received_response, response);
+    }
+
+    /// What one upgrade to a fixture carried.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Upgrade {
+        /// The request target: path and query.
+        target: String,
+        host: Option<String>,
+        cookie: Option<String>,
+        origin: Option<String>,
+    }
+
+    impl Upgrade {
+        fn of(request: &tokio_tungstenite::tungstenite::handshake::server::Request) -> Self {
+            let header = |name: &str| {
+                request
+                    .headers()
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_string())
+            };
+            Self {
+                target: request
+                    .uri()
+                    .path_and_query()
+                    .map(|target| target.to_string())
+                    .unwrap_or_default(),
+                host: header("host"),
+                cookie: header("cookie"),
+                origin: header("origin"),
+            }
+        }
+
+        fn is_control(&self) -> bool {
+            self.target.starts_with(CONTROL_PATH)
+        }
+    }
+
+    /// What a fixture answers a data frame with, so a caller reading it back
+    /// knows the bytes went to the fixture and returned from it.
+    fn answer(bytes: &[u8]) -> Vec<u8> {
+        [b"re:".as_slice(), bytes].concat()
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    async fn within<T>(what: &str, future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(WAIT, future)
+            .await
+            .unwrap_or_else(|_| panic!("{what} did not finish"))
+    }
+
+    /// A devserver stand-in on loopback: it records every upgrade, hands the
+    /// control socket's text frames to the test, and answers each data
+    /// socket's binary frames.
+    struct Tenant {
+        addr: SocketAddr,
+        upgrades: Arc<std::sync::Mutex<Vec<Upgrade>>>,
+        control: mpsc::Receiver<String>,
+    }
+
+    impl Tenant {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let upgrades = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (control_tx, control) = mpsc::channel(8);
+            let seen = upgrades.clone();
+            tokio::spawn(async move {
+                while let Ok((sock, _)) = listener.accept().await {
+                    let seen = seen.clone();
+                    let control_tx = control_tx.clone();
+                    tokio::spawn(async move {
+                        let mut upgrade = None;
+                        let accepted = tokio_tungstenite::accept_hdr_async(
+                            sock,
+                            #[allow(clippy::result_large_err)]
+                            |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                             response| {
+                                upgrade = Some(Upgrade::of(request));
+                                Ok(response)
+                            },
+                        )
+                        .await;
+                        let (Ok(mut ws), Some(upgrade)) = (accepted, upgrade) else {
+                            return;
+                        };
+                        seen.lock().unwrap().push(upgrade.clone());
+                        while let Some(Ok(frame)) = ws.next().await {
+                            let open = match frame {
+                                Message::Text(text) if upgrade.is_control() => {
+                                    let _ = control_tx.send(text.to_string()).await;
+                                    true
+                                }
+                                Message::Binary(bytes) => {
+                                    ws.send(Message::binary(answer(&bytes))).await.is_ok()
+                                }
+                                Message::Close(_) => false,
+                                _ => true,
+                            };
+                            if !open {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            Self {
+                addr,
+                upgrades,
+                control,
+            }
+        }
+
+        fn upgrades(&self) -> Vec<Upgrade> {
+            self.upgrades.lock().unwrap().clone()
+        }
+
+        async fn ready(&mut self) -> ControlFrame {
+            let text = within("the ready frame", self.control.recv())
+                .await
+                .expect("the control socket reached the fixture");
+            serde_json::from_str(&text).expect("a control frame")
+        }
+    }
+
+    /// A transport that alone reaches a fixture: each dial it carries lands on
+    /// `upstream`, whatever authority the URL names, and every dial it is
+    /// asked for is recorded. Past `carried` dials it refuses, as a proxy
+    /// that will not open the route does.
+    struct Routed {
+        upstream: SocketAddr,
+        carried: usize,
+        dials: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Routed {
+        fn to(upstream: SocketAddr) -> Arc<Self> {
+            Self::carrying(upstream, usize::MAX)
+        }
+
+        fn carrying(upstream: SocketAddr, carried: usize) -> Arc<Self> {
+            Arc::new(Self {
+                upstream,
+                carried,
+                dials: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn dials(&self) -> Vec<String> {
+            self.dials.lock().unwrap().clone()
+        }
+    }
+
+    impl Transport for Routed {
+        fn connect<'a>(&'a self, uri: &'a Uri) -> ConnectFuture<'a> {
+            Box::pin(async move {
+                let asked = {
+                    let mut dials = self.dials.lock().unwrap();
+                    dials.push(uri.to_string());
+                    dials.len()
+                };
+                if asked > self.carried {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "the test proxy refused the route",
+                    ));
+                }
+                TcpStream::connect(self.upstream).await.map(Some)
+            })
+        }
+    }
+
+    /// A transport whose policy selects the direct dial, counting the asks.
+    #[derive(Default)]
+    struct Direct(std::sync::atomic::AtomicUsize);
+
+    impl Transport for Direct {
+        fn connect<'a>(&'a self, _: &'a Uri) -> ConnectFuture<'a> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// A tenant name no resolver answers (RFC 6761 reserves `.invalid`), so a
+    /// socket reaches the fixture through the transport or not at all.
+    const TENANT: &str = "alice--0123456789ab.p1.proxy.chan.invalid";
+
+    /// One caller's round trip through a tunnel's listener: its bytes reach
+    /// the fixture over a data socket and the fixture's answer comes back.
+    async fn round_trip(bound: SocketAddr, bytes: &[u8]) -> TcpStream {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut caller = within("the caller's connect", TcpStream::connect(bound))
+            .await
+            .expect("the tunnel's listener accepts");
+        caller.write_all(bytes).await.unwrap();
+        let mut back = vec![0u8; answer(bytes).len()];
+        within("the fixture's answer", caller.read_exact(&mut back))
+            .await
+            .expect("the answer crosses the data socket");
+        assert_eq!(back, answer(bytes));
+        caller
+    }
+
+    #[tokio::test]
+    async fn a_transport_carries_the_control_socket_and_every_data_socket() {
+        let mut tenant = Tenant::start().await;
+        let transport = Routed::to(tenant.addr);
+        let base = format!("ws://{TENANT}:8443");
+        let origin = format!("https://{TENANT}:8443");
+        let mut c = cfg(&base, parse_spec("0:3000", Proto::Tcp).unwrap());
+        c.bearer = None;
+        c.cookie = Some("__Host-devserver_gate=g".into());
+        c.origin = Some(origin.clone());
+        c.transport = Some(transport.clone());
+
+        let handle = within("the tunnel's open", open(c))
+            .await
+            .expect("the control socket rides the transport");
+        assert_eq!(
+            tenant.ready().await,
+            ControlFrame::Ready {
+                bound: handle.bound.to_string()
+            }
+        );
+
+        // Two connections, the first still open while the second is served:
+        // each data socket is its own dial, asked of the transport anew.
+        let first = round_trip(handle.bound, b"one").await;
+        let second = round_trip(handle.bound, b"two").await;
+
+        let control = format!("{base}{CONTROL_PATH}?{TUNNEL_PARAM}=tun-test");
+        let data =
+            |conn: &str| format!("{base}{CONN_PATH}?{TUNNEL_PARAM}=tun-test&{CONN_PARAM}={conn}");
+        assert_eq!(transport.dials(), [control, data("c0"), data("c1")]);
+
+        // The route changed how the bytes travel and nothing they say: each
+        // upgrade names the tenant and carries the session it was given.
+        let upgrade = |target: String| Upgrade {
+            target,
+            host: Some(format!("{TENANT}:8443")),
+            cookie: Some("__Host-devserver_gate=g".into()),
+            origin: Some(origin.clone()),
+        };
+        assert_eq!(
+            tenant.upgrades(),
+            [
+                upgrade(format!("{CONTROL_PATH}?{TUNNEL_PARAM}=tun-test")),
+                upgrade(format!(
+                    "{CONN_PATH}?{TUNNEL_PARAM}=tun-test&{CONN_PARAM}=c0"
+                )),
+                upgrade(format!(
+                    "{CONN_PATH}?{TUNNEL_PARAM}=tun-test&{CONN_PARAM}=c1"
+                )),
+            ]
+        );
+
+        let bound = handle.bound;
+        handle.stop();
+        within("the tunnel's end", handle.wait()).await;
+        assert!(
+            TcpStream::connect(bound).await.is_err(),
+            "a stopped tunnel left its listener bound"
+        );
+        drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn a_transport_that_selects_the_direct_dial_keeps_it() {
+        let mut tenant = Tenant::start().await;
+        let transport = Arc::new(Direct::default());
+        let mut c = cfg(
+            &format!("ws://{}", tenant.addr),
+            parse_spec("0:3000", Proto::Tcp).unwrap(),
+        );
+        c.transport = Some(transport.clone());
+
+        let handle = within("the tunnel's open", open(c))
+            .await
+            .expect("a direct route dials the URL's own authority");
+        assert!(matches!(tenant.ready().await, ControlFrame::Ready { .. }));
+        let _caller = round_trip(handle.bound, b"direct").await;
+        assert_eq!(
+            transport.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the policy is asked for the control socket and for the data socket"
+        );
+        assert_eq!(
+            tenant.upgrades()[0].host,
+            Some(tenant.addr.to_string()),
+            "a direct dial names the authority it dialed"
+        );
+    }
+
+    /// A port nothing listens on, free at the time of asking.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn a_refused_route_fails_the_control_dial_without_a_direct_one() {
+        // The fixture is reachable directly at the URL's own authority, so a
+        // client that answered the refusal by dialing directly would open.
+        let tenant = Tenant::start().await;
+        let transport = Routed::carrying(tenant.addr, 0);
+        let port = free_port();
+        let mut c = cfg(
+            &format!("ws://{}", tenant.addr),
+            parse_spec(&format!("{port}:3000"), Proto::Tcp).unwrap(),
+        );
+        c.transport = Some(transport.clone());
+
+        let err = within("the tunnel's open", open(c)).await.unwrap_err();
+        assert!(err.contains("connect tunnel control socket"), "{err}");
+        assert!(err.contains("the test proxy refused the route"), "{err}");
+        assert_eq!(transport.dials().len(), 1);
+        assert_eq!(tenant.upgrades(), [], "nothing was dialed directly");
+        // Nothing was bound for a tunnel that never opened.
+        TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("a refused tunnel leaves its port free");
+    }
+
+    #[tokio::test]
+    async fn a_refused_route_ends_one_connection_without_a_direct_dial() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The control socket is carried and every later route is refused,
+        // while the fixture stays reachable directly.
+        let mut tenant = Tenant::start().await;
+        let transport = Routed::carrying(tenant.addr, 1);
+        let mut c = cfg(
+            &format!("ws://{}", tenant.addr),
+            parse_spec("0:3000", Proto::Tcp).unwrap(),
+        );
+        c.transport = Some(transport.clone());
+        let handle = within("the tunnel's open", open(c))
+            .await
+            .expect("the control socket is carried");
+        assert!(matches!(tenant.ready().await, ControlFrame::Ready { .. }));
+
+        let mut caller = TcpStream::connect(handle.bound).await.unwrap();
+        caller.write_all(b"lost").await.unwrap();
+        let mut back = Vec::new();
+        // The connection closes, by a FIN or a reset, with nothing answered.
+        let _ = within("the caller's close", caller.read_to_end(&mut back)).await;
+        assert_eq!(back, b"", "a refused route answered the caller");
+        assert_eq!(transport.dials().len(), 2);
+        assert_eq!(
+            tenant.upgrades().len(),
+            1,
+            "the data socket was dialed directly after its route was refused"
+        );
+    }
+
+    /// A devserver stand-in behind TLS, presenting one leaf. It records the
+    /// server name each client asked for beside the upgrade, hands the
+    /// control socket's text frames to the test, and answers data frames.
+    struct TlsTenant {
+        addr: SocketAddr,
+        upgrades: Arc<std::sync::Mutex<Vec<(String, Upgrade)>>>,
+        control: std::sync::mpsc::Receiver<String>,
+    }
+
+    impl TlsTenant {
+        fn start(leaf: &chan_tls::testing::pki::Issued) -> Self {
+            use chan_tls::rustls;
+
+            let config = Arc::new(
+                rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![leaf.cert.clone()], leaf.key.clone_key())
+                .unwrap(),
+            );
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let upgrades = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (control_tx, control) = std::sync::mpsc::channel();
+            let seen = upgrades.clone();
+            std::thread::spawn(move || {
+                for socket in listener.incoming() {
+                    let Ok(socket) = socket else { continue };
+                    let config = config.clone();
+                    let seen = seen.clone();
+                    let control_tx = control_tx.clone();
+                    std::thread::spawn(move || {
+                        Self::serve(socket, config, &seen, &control_tx);
+                    });
+                }
+            });
+            Self {
+                addr,
+                upgrades,
+                control,
+            }
+        }
+
+        fn serve(
+            socket: std::net::TcpStream,
+            config: Arc<chan_tls::rustls::ServerConfig>,
+            seen: &std::sync::Mutex<Vec<(String, Upgrade)>>,
+            control_tx: &std::sync::mpsc::Sender<String>,
+        ) {
+            use chan_tls::rustls;
+            use tokio_tungstenite::tungstenite;
+
+            // A read that outlives the test ends the thread.
+            let _ = socket.set_read_timeout(Some(WAIT));
+            let tls =
+                rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
+            let mut upgrade = None;
+            let accepted = tungstenite::accept_hdr(
+                tls,
+                #[allow(clippy::result_large_err)]
+                |request: &tungstenite::handshake::server::Request, response| {
+                    upgrade = Some(Upgrade::of(request));
+                    Ok(response)
+                },
+            );
+            // A client that refuses the certificate never finishes either
+            // handshake.
+            let Ok(mut ws) = accepted else {
+                return;
+            };
+            let Some(upgrade) = upgrade else {
+                return;
+            };
+            let server_name = ws.get_ref().conn.server_name().unwrap_or("").to_string();
+            seen.lock().unwrap().push((server_name, upgrade.clone()));
+            while let Ok(frame) = ws.read() {
+                let open = match frame {
+                    Message::Text(text) if upgrade.is_control() => {
+                        let _ = control_tx.send(text.to_string());
+                        true
+                    }
+                    Message::Binary(bytes) => ws.send(Message::binary(answer(&bytes))).is_ok(),
+                    Message::Close(_) => false,
+                    _ => true,
+                };
+                if !open {
+                    break;
+                }
+            }
+        }
+
+        fn upgrades(&self) -> Vec<(String, Upgrade)> {
+            self.upgrades.lock().unwrap().clone()
+        }
+    }
+
+    /// A client config whose only root is `ca`.
+    fn trusting(ca: &chan_tls::testing::pki::Issued) -> chan_tls::rustls::ClientConfig {
+        use chan_tls::rustls;
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.cert.clone()).unwrap();
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+    }
+
+    fn rustls_connector(config: chan_tls::rustls::ClientConfig) -> tokio_tungstenite::Connector {
+        tokio_tungstenite::Connector::Rustls(Arc::new(config))
+    }
+
+    fn wss_cfg(transport: Arc<Routed>, connector: tokio_tungstenite::Connector) -> ClientConfig {
+        let mut c = cfg(
+            &format!("wss://{TENANT}"),
+            parse_spec("0:3000", Proto::Tcp).unwrap(),
+        );
+        c.connector = Some(connector);
+        c.transport = Some(transport);
+        c
+    }
+
+    #[tokio::test]
+    async fn a_carried_wss_tunnel_verifies_the_tenant_with_the_connector_it_is_given() {
+        let ca = chan_tls::testing::pki::ca("chan revtunnel test CA");
+        let tenant = TlsTenant::start(&chan_tls::testing::pki::leaf_for(&ca, TENANT));
+        let transport = Routed::to(tenant.addr);
+        let (config, handshakes) = chan_tls::testing::recording(trusting(&ca));
+
+        let handle = within(
+            "the tunnel's open",
+            open(wss_cfg(transport.clone(), rustls_connector(config))),
+        )
+        .await
+        .expect("the connector's root verifies the tenant's leaf");
+        let ready = tenant.control.recv_timeout(WAIT).expect("the ready frame");
+        assert_eq!(
+            serde_json::from_str::<ControlFrame>(&ready).unwrap(),
+            ControlFrame::Ready {
+                bound: handle.bound.to_string()
+            }
+        );
+        let _caller = round_trip(handle.bound, b"over tls").await;
+
+        // Both sockets asked TLS for the tenant, the name the URL holds, and
+        // never for the address the transport reached.
+        assert_eq!(handshakes.server_names(), [TENANT, TENANT]);
+        let upgrades = tenant.upgrades();
+        assert_eq!(upgrades.len(), 2);
+        for (server_name, upgrade) in &upgrades {
+            assert_eq!(server_name, TENANT);
+            assert_eq!(upgrade.host.as_deref(), Some(TENANT));
+        }
+        assert!(upgrades[0].1.is_control() && !upgrades[1].1.is_control());
+        assert_eq!(transport.dials().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_carried_wss_tunnel_refuses_a_certificate_its_connector_does_not_verify() {
+        let ca = chan_tls::testing::pki::ca("chan revtunnel test CA");
+
+        // The shared trust decision holds no root for this CA: the leaf is
+        // refused though it names the tenant.
+        let tenant = TlsTenant::start(&chan_tls::testing::pki::leaf_for(&ca, TENANT));
+        let transport = Routed::to(tenant.addr);
+        let shared = rustls_connector(chan_tls::client_config().unwrap());
+        let err = within(
+            "the tunnel's open",
+            open(wss_cfg(transport.clone(), shared)),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("connect tunnel control socket"), "{err}");
+        assert_eq!(transport.dials().len(), 1, "the route was carried");
+        assert_eq!(tenant.upgrades(), []);
+
+        // A trusted CA's leaf for another name is refused too. The leaf also
+        // names 127.0.0.1, the address the transport reached, so a client
+        // verifying the route's peer instead of the tenant would accept it.
+        let other = TlsTenant::start(&chan_tls::testing::pki::leaf_for(
+            &ca,
+            "bob--ba9876543210.p1.proxy.chan.invalid",
+        ));
+        let transport = Routed::to(other.addr);
+        let err = within(
+            "the tunnel's open",
+            open(wss_cfg(transport.clone(), rustls_connector(trusting(&ca)))),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("connect tunnel control socket"), "{err}");
+        assert_eq!(transport.dials().len(), 1, "the route was carried");
+        assert_eq!(other.upgrades(), []);
     }
 }

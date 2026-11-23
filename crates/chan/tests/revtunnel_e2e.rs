@@ -775,6 +775,7 @@ impl TunnelRig {
                 spec,
                 half_close,
                 connector: None,
+                transport: None,
             }),
         )
         .await
