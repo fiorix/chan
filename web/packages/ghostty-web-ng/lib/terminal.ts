@@ -1676,7 +1676,7 @@ export class Terminal {
   private handlePointerMove = (event: PointerEvent): void => {
     if (!this.matchesScrollbarPointer(event)) return;
     const drag = this.scrollbarDrag!;
-    if (!this.canvas?.isConnected || !this.canvas.hasPointerCapture(drag.id)) {
+    if (event.buttons === 0 || !this.canvas?.isConnected || !this.canvas.hasPointerCapture(drag.id)) {
       this.endScrollbarDrag();
       return;
     }

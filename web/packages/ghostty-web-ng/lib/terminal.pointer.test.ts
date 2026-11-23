@@ -260,6 +260,24 @@ describe('captured selection lifecycle', () => {
 });
 
 describe('report and bypass completion', () => {
+  test.each([0, 1, 2])('default-prevented button %i under DECSET 1000 belongs to the embedder', async (button) => {
+    const { term, host, canvas, capture, reports, write } = await open('https://example.com');
+    const activated: string[] = [];
+    term.onLinkActivate((link) => activated.push(link.target));
+    term.write('\x1b[?1000h\x1b[?1006h');
+    host.addEventListener('pointerdown', (event) => event.preventDefault(), { capture: true });
+    const press = rawPointer(canvas, 'pointerdown', 17, 1, { button, buttons: [1, 4, 2][button] });
+    rawPointer(canvas, 'pointermove', 25, 1, { buttons: [1, 4, 2][button] });
+    rawPointer(canvas, 'pointerup', 17, 1, { button });
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, button, detail: 1, clientX: 17, clientY: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(press.defaultPrevented).toBe(true);
+    expect(capture).not.toHaveBeenCalled();
+    expect(reports).toEqual([]);
+    expect(activated).toEqual([]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   test.each([0, 1, 2])('a reported button %i releases outside once, with no held-button motion left', async (button) => {
     const { term, canvas, reports, write } = await open();
     term.write('\x1b[?1002h\x1b[?1006h');
@@ -598,7 +616,7 @@ describe('captured scrollbar lifecycle', () => {
     }
     expect(term.viewport.offset).toBe(before);
     expect(release).not.toHaveBeenCalled();
-    rawPointer(canvas, 'pointermove', x, y - 5, { buttons: 0 });
+    rawPointer(canvas, 'pointermove', x, y - 5);
     expect(term.viewport.offset).toBeGreaterThan(before);
     rawPointer(canvas, 'pointerup', x, y - 5);
     expect(release).toHaveBeenCalledExactlyOnceWith(7);
@@ -613,6 +631,27 @@ describe('captured scrollbar lifecycle', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(canvas.style.userSelect).not.toBe('none');
     expect(term.viewport.offset).toBe(before);
+  });
+
+  test.each([1, 2])('non-left button %i on the strip reaches the canvas and program reports', async (button) => {
+    const { term, canvas, reports, write, height, geometry } = await scrollbar();
+    term.write('\x1b[?1000h\x1b[?1006h');
+    const { x, y } = geometry();
+    const before = term.viewport.offset;
+    const onCanvas = vi.fn();
+    canvas.addEventListener('pointerdown', onCanvas);
+    const press = rawPointer(canvas, 'pointerdown', x, y, { button, buttons: [1, 4, 2][button] });
+    rawPointer(canvas, 'pointermove', x, y - 10, { buttons: [1, 4, 2][button] });
+    rawPointer(canvas, 'pointerup', x, y - 10, { button });
+    expect(press.defaultPrevented).toBe(false);
+    expect(onCanvas).toHaveBeenCalledOnce();
+    expect(term.viewport.offset).toBe(before);
+    expect(canvas.style.userSelect).not.toBe('none');
+    expect(reports).toEqual([
+      `\x1b[<${button};40;${Math.floor(y / height) + 1}M`,
+      `\x1b[<${button};40;${Math.floor((y - 10) / height) + 1}m`,
+    ]);
+    expect(write).not.toHaveBeenCalled();
   });
 
   test.each(['throw', 'false'])('capture failure (%s) abandons the thumb without losing selection', async (failure) => {
@@ -715,15 +754,24 @@ describe('captured scrollbar lifecycle', () => {
     expect(term.viewport.offset).toBe(before);
   });
 
-  test('a thumb owns buttonless captured moves even in all-motion reporting mode', async () => {
-    const { term, canvas, reports, geometry } = await scrollbar();
+  test('a buttonless move ends the thumb without scrolling or reporting and held moves keep it active', async () => {
+    const { term, canvas, captured, release, reports, geometry } = await scrollbar();
     term.write('\x1b[?1003h\x1b[?1006h');
     const { x, y } = geometry();
     const before = term.viewport.offset;
     rawPointer(canvas, 'pointerdown', x, y);
-    rawPointer(canvas, 'pointermove', x, y - 4, { buttons: 0 });
-    rawPointer(canvas, 'pointerup', x, y - 4);
+    rawPointer(canvas, 'pointermove', x, y - 2);
     expect(term.viewport.offset).toBeGreaterThan(before);
+    expect(captured.has(7)).toBe(true);
+    const held = term.viewport.offset;
+    rawPointer(canvas, 'pointermove', x, y - 4, { buttons: 0 });
+    expect(term.viewport.offset).toBe(held);
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+    expect(captured.has(7)).toBe(false);
+    expect(canvas.style.userSelect).toBe('');
+    rawPointer(canvas, 'pointermove', x, y - 8);
+    rawPointer(canvas, 'pointerup', x, y - 8);
+    expect(term.viewport.offset).toBe(held);
     expect(reports).toEqual([]);
   });
 });
