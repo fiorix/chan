@@ -199,9 +199,16 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
 }
 
 /// The `vi.mock("../terminal/ghosttyCompat", ...)` factory: jsdom has no font
-/// metrics to align the widget's cells with.
+/// metrics, so the cell measure and the grid alignment built on it are
+/// stubbed. The glyph painter and the overlay scrollbar are the product's,
+/// over the software context.
 export async function ghosttyCompatModule(importOriginal: <T>() => Promise<T>) {
-  return { ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()), ...ghosttyCompatStubs() };
+  const { measureXtermCellDimensions, alignGhosttyRendererToXterm } = ghosttyCompatStubs();
+  return {
+    ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
+    measureXtermCellDimensions,
+    alignGhosttyRendererToXterm,
+  };
 }
 
 /// Mount `TerminalTab` for a seated tab, as `mountTerminal` does, and return

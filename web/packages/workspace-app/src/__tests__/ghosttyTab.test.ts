@@ -36,6 +36,7 @@ installTerminalDom();
 
 afterEach(() => {
   resetTerminals();
+  vi.restoreAllMocks();
 });
 
 async function opened() {
@@ -55,6 +56,13 @@ test("the checked mount returns the fixture's widget, open in the tab, and no st
   expect(term.element && target.contains(term.element)).toBe(true);
   expect(ghosttyFixture.terminals).toEqual([term]);
   expect(xterm.terminals).toHaveLength(0);
+});
+
+test("the product's glyph painter and overlay scrollbar install on the fixture's widget", async () => {
+  const warn = vi.spyOn(console, "warn");
+  await opened();
+  const hooks = warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web"));
+  expect(hooks, "no compat hook failed open").toEqual([]);
 });
 
 test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {
