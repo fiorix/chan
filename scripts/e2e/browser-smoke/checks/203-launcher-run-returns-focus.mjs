@@ -6,8 +6,8 @@
 // it flips a flag in place and leaves the launcher open on its row, which
 // then reads on, and Escape hands the keyboard back. Rename terminal opens a
 // prompt that outlives the launcher: after Escape the keyboard must be back
-// in the terminal. One arm per engine the terminal preference can store; each
-// arm types a marker before the launcher and after each command and reads the
+// in the terminal. The Ghostty arm types a marker before the launcher and
+// after each command and reads the
 // PTY's scrollback for the shell's answer, which is the only proof that keys
 // reach the program.
 //
@@ -18,7 +18,6 @@
 // server's roster before the toggle.
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
@@ -33,7 +32,7 @@ function check(condition, message) {
 }
 
 /// Where the keyboard is: the active element and whether it sits inside the
-/// active terminal tab's host, where both engines keep their input element.
+/// active terminal tab's host, which holds its input element.
 async function keyboardOwner(page) {
   return page.evaluate((launcher) => {
     const active = document.activeElement;
@@ -206,14 +205,12 @@ export default {
     const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
       cwd: ctx.workspaceDir, env, timeout: 30_000,
     });
-    const originalPrefs = await readTerminalPrefs(page, token);
     const details = { arms: [] };
     const opened = [];
     try {
-      for (const engine of ["xterm", "ghostty"]) {
+      for (const engine of ["ghostty"]) {
         // The tab's name doubles as its group's.
         const name = `LauncherFocus203${engine}`;
-        await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
         await openAttachedTerminal(ctx, page, cs, windowId, name, engine, ["--tab-group", name]);
         opened.push(name);
         await waitSoleMember(page, token, name, name, `${engine}: before Group broadcast`);
@@ -271,12 +268,12 @@ export default {
         await broadcastOff(page, token, name);
         details.arms.push(arm);
         console.log(`[smoke]   arm ${JSON.stringify(arm)}`);
-        // The tab leaves the page before the engine switches, or the saved
-        // layout respawns the session under the next preference.
+        // Wait for the tab to leave the saved layout before returning.
         await cs(["close", "--tab-name", name]);
         opened.pop();
         await tabGone(page, name);
       }
+      check(JSON.stringify(details.arms.map((arm) => arm.engine)) === JSON.stringify(["ghostty"]), "Ghostty launcher arm incomplete");
       details.engine = await page.browser().version();
       return details;
     } finally {
@@ -286,7 +283,6 @@ export default {
       for (const name of opened.reverse()) {
         await cs(["close", "--tab-name", name]).catch(() => {});
       }
-      await restoreTerminalPrefs(ctx, page, token, originalPrefs);
     }
   },
 };

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { openAttachedTerminal } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const matchesChanges = (terminal, changes) => Object.entries(changes).every(
@@ -19,7 +20,14 @@ export async function readTerminalPrefs(page, token) {
   }, token);
 }
 
-export async function writeTerminalPrefs(page, token, changes) {
+export function writeTerminalPrefs(page, token, changes) {
+  if (Object.hasOwn(changes, "ghostty")) {
+    throw new Error("retired terminal preference ghostty; use openLegacyConfiguredTerminal for compatibility checks");
+  }
+  return writeCurrentTerminalPrefs(page, token, changes);
+}
+
+async function writeCurrentTerminalPrefs(page, token, changes) {
   let patchIssued = false;
   let lastRefresh = "no workspace request issued after PATCH";
   const postPatchRequests = new Set();
@@ -54,12 +62,13 @@ export async function writeTerminalPrefs(page, token, changes) {
       const got = await fetch("/api/config", { headers });
       if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
       const config = await got.json();
+      const { ghostty: _legacy, ...terminal } = config.preferences.terminal;
       const response = await fetch("/api/config", {
         method: "PATCH",
         headers,
         body: JSON.stringify({
           expected_revision: config.revision,
-          preferences: { terminal: { ...config.preferences.terminal, ...patch } },
+          preferences: { terminal: { ...terminal, ...patch } },
         }),
       });
       if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
@@ -99,13 +108,46 @@ export async function assertTerminalPrefs(ctx, expected) {
 }
 
 export async function restoreTerminalPrefs(ctx, page, token, original) {
+  const { ghostty: _legacy, ...current } = original;
   await writeTerminalPrefs(page, token, {
-    ...original,
+    ...current,
     secret_masking: original.secret_masking ?? null,
   });
   await assertTerminalPrefs(ctx, {
-    ghostty: original.ghostty,
     mouse_capture: original.mouse_capture,
     secret_masking: original.secret_masking,
   });
+}
+
+// Compatibility writes deliberately carry the retired key. Prove the server
+// drops it from canonical readback before opening a fresh Ghostty surface.
+export function openLegacyConfiguredTerminal(ctx, page, cs, windowId, name, ghostty, newArgs = []) {
+  if (typeof ghostty !== "boolean") throw new TypeError("legacy terminal.ghostty must be a boolean");
+  return openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArgs);
+}
+
+async function openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArgs) {
+  const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+  await page.evaluate(async ({ token, ghostty }) => {
+    const headers = { "content-type": "application/json" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const got = await fetch("/api/config", { headers });
+    if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
+    const config = await got.json();
+    const response = await fetch("/api/config", {
+      method: "PATCH", headers,
+      body: JSON.stringify({
+        expected_revision: config.revision,
+        preferences: { terminal: { ...config.preferences.terminal, ghostty } },
+      }),
+    });
+    if (!response.ok) throw new Error(`legacy terminal.ghostty PATCH -> ${response.status}`);
+    const canonical = await fetch("/api/config", { headers });
+    if (!canonical.ok) throw new Error(`canonical GET /api/config -> ${canonical.status}`);
+    const terminal = (await canonical.json()).preferences?.terminal;
+    if (!terminal || Object.hasOwn(terminal, "ghostty")) {
+      throw new Error("legacy terminal.ghostty survived canonical readback");
+    }
+  }, { token, ghostty });
+  return openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", newArgs);
 }

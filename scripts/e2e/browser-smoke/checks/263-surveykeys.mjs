@@ -6,7 +6,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { basename, join } from "node:path";
 import { dispatchCommand, readPaneStripPreference, writePaneStripPreference } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { recordedSince } from "../lib/pty-recorder.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
@@ -102,7 +101,6 @@ async function runEngine(ctx, backend, directory, save) {
   const cs = (args, options = {}) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
     cwd: ctx.workspaceDir, env, timeout: 75_000, ...options,
   });
-  let originalPrefs = null;
   let originalStrip = null;
   let target;
   let away;
@@ -219,10 +217,8 @@ async function runEngine(ctx, backend, directory, save) {
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
     await ctx.waitWindowLive(windowId);
-    originalPrefs = await readTerminalPrefs(page, token);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
     requested.push(names.target);
     target = await openAttachedTerminal(ctx, page, cs, windowId, names.target, backend, [
       "--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(files.target)}`,
@@ -260,10 +256,6 @@ async function runEngine(ctx, backend, directory, save) {
       try { await until("survey process exits during cleanup", () => handle.result, 15_000); }
       catch (error) { run.cleanupErrors.push(describeError(error)); }
     }
-    if (originalPrefs) {
-      try { await writeTerminalPrefs(page, token, { ghostty: originalPrefs.ghostty }); }
-      catch (error) { run.cleanupErrors.push(`restore backend: ${describeError(error)}`); }
-    }
     if (originalStrip?.on) {
       try { await writePaneStripPreference(page, token, true); }
       catch (error) { run.cleanupErrors.push(`restore pane strip: ${describeError(error)}`); }
@@ -286,7 +278,7 @@ export default {
     };
     const directory = mkdtempSync(join(ctx.workspaceDir, ".surveykeys-263-"));
     try {
-      for (const backend of ["xterm", "ghostty"]) await runEngine(ctx, backend, directory, save);
+      await runEngine(ctx, "ghostty", directory, save);
     } finally {
       try { rmSync(directory, { recursive: true, force: true }); }
       catch (error) { report.cleanupErrors.push(describeError(error)); }
@@ -294,7 +286,7 @@ export default {
     }
     const failed = report.engines.filter((engine) => engine.setup !== "observed" || engine.setupErrors.length || engine.pageErrors.length || engine.cleanupErrors.length || engine.legs.length !== 3 ||
       engine.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length));
-    if (failed.length || report.engines.length !== 2 || report.cleanupErrors.length) {
+    if (failed.length || JSON.stringify(report.engines.map((engine) => engine.backend)) !== JSON.stringify(["ghostty"]) || report.cleanupErrors.length) {
       throw Object.assign(new Error(`survey keyboard contract failed: ${failed.map((engine) => engine.backend).join(", ") || "incomplete run or cleanup"}`), { smokeDetails: report });
     }
     return report;
