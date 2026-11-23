@@ -1,14 +1,13 @@
 // Text pasted into a terminal, by the paste chord and by the body menu's
-// Paste row, reaches the program once, with the same bytes on both engines,
+// Paste row, reaches the program once with the expected bytes,
 // bracketed when the program asked for it and plain when it did not.
 //
 // Engine: headless Chrome through puppeteer-core; the result names the
 // browser's version. It says nothing about WebKit, where chan-desktop reads
 // the clipboard natively for the menu's row.
 //
-// In a window of its own, terminals on xterm.js and then on ghostty
-// (terminal.ghostty written before each and restored after) each run a shell
-// that turns into a raw recorder of every byte its PTY receives: one asks for
+// In a window of its own, two Ghostty terminals each run a shell that turns
+// into a raw recorder of every byte its PTY receives: one asks for
 // bracketed paste (DECSET 2004) first, the other does not. Four pastes per
 // terminal, two texts by each of two paths. Each text names its leg; the plain
 // one has a space, an LF and a CRLF, and the hostile one, check 223's, would
@@ -19,29 +18,24 @@
 //            Ctrl+Shift+V is pressed on the focused terminal with the devtools
 //            key event's paste command, so Chrome fires a trusted paste
 //            carrying its clipboard's text. chan matches the chord and leaves
-//            the browser's paste to the engine's own listener.
-//   menu  -- a right-click opens the body menu, which names its engine, and
-//            its Paste row reads the clipboard itself and pastes through the
-//            engine's paste.
+//            the browser's paste to the terminal's own listener.
+//   menu  -- a right-click opens the body menu, whose Paste row reads the
+//            clipboard itself and pastes through the terminal's paste API.
 //
 // The PTY must read the text once, between ESC[200~ and ESC[201~ under
 // bracketed paste and bare without it, with each line break a CR, the byte
-// Enter sends: xterm.js rewrites each \n and \r\n as \r before it brackets
-// the text (prepareTextForTerminal), and chan's ghostty paste does the same
-// (ghosttyPaste.ts) where ghostty-web would send the text as the clipboard
-// holds it. In the hostile text ESC, Ctrl+C and the other bytes the ghostty
-// core's paste encoder replaces reach the PTY as spaces on both engines, so
-// its ESC[201~ cannot end the bracket: chan cleans an xterm.js paste with the
-// encoder's byte set before xterm.js frames it (xtermPaste.ts). A capture
-// listener records the trusted paste events the page saw for the chord.
+// Enter sends. Each LF and CRLF becomes CR, and the hostile text's ESC and
+// Ctrl+C become spaces, so its ESC[201~ cannot end the bracket. These byte
+// expectations are fixed here, independently of the terminal's paste
+// implementation. A capture listener records the trusted paste events the
+// page saw for the chord.
 
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
+import { closeEveryTerminal } from "../lib/pane-strip.mjs";
 import { startRecorder } from "../lib/pty-recorder.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
-import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const TERMINAL = ".pane .terminal-tab.active";
@@ -133,12 +127,11 @@ async function settledTerminalCount(page) {
   return last;
 }
 
-/// Open a terminal on `engine` in the window's pane and wait for its renderer.
-async function openTerminal(page, engine) {
+/// Open a Ghostty terminal in the window's pane and wait for its renderer.
+async function openTerminal(ctx, page, cs, windowId, name) {
   const before = await settledTerminalCount(page);
-  await dispatchCommand(page, "app.terminal.toggle");
+  await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
   // A moment for the shell's prompt; keys typed before it wait in the PTY.
   await sleep(1_000);
 }
@@ -174,13 +167,12 @@ function legText(kind, label, bracketed) {
 
 /// One paste over the recorder: write the `kind` text to the clipboard, paste
 /// it by `how`, and return what the PTY read and what the page saw.
-async function pasteLeg(ctx, page, file, engine, mode, how, kind, failures) {
+async function pasteLeg(ctx, page, file, mode, how, kind, failures) {
   const bracketed = mode === "bracketed";
-  const { text, want, end } = legText(kind, `${how} ${engine} ${mode} ${kind}`, bracketed);
+  const { text, want, end } = legText(kind, `${how} ghostty ${mode} ${kind}`, bracketed);
   await writeClipboardText(page, text);
   const offset = statSync(file).size;
   const events = await page.evaluate(() => window.__pastes216.length);
-  let menuEngine = null;
   if (how === "chord") {
     if (!(await focusOnTerminal(page))) {
       const host = await centreOf(page, `${TERMINAL} .terminal-host`);
@@ -192,18 +184,13 @@ async function pasteLeg(ctx, page, file, engine, mode, how, kind, failures) {
     const host = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(host.x, host.y, { button: "right" });
     await page.waitForSelector(MENU, { visible: true, timeout: 10_000 });
-    menuEngine = await page.$eval(`${MENU} .terminal-backend-label`, (el) => el.getAttribute("data-terminal-backend"));
-    await ctx.shot(`216-${engine}-${mode}-menu-${kind}`, page);
+    await ctx.shot(`216-ghostty-${mode}-menu-${kind}`, page);
     await clickMenuPaste(page);
   }
   const pty = await pastedSince(file, offset, end);
   const seen = await page.evaluate((from) => window.__pastes216.slice(from), events);
-  const leg = `${engine}-${mode}-${how}-${kind}`;
+  const leg = `ghostty-${mode}-${how}-${kind}`;
   const result = { leg, text, pty: pty.bytes, complete: pty.complete, events: seen, focus: await focusOnTerminal(page) };
-  if (menuEngine !== null) {
-    result.menuEngine = menuEngine;
-    if (menuEngine !== engine) failures.push(`${leg}: the body menu names the engine ${menuEngine}, not ${engine}`);
-  }
   if (pty.bytes !== want) {
     failures.push(`${leg}: the PTY read ${JSON.stringify(pty.bytes)}, not ${JSON.stringify(want)}`);
   }
@@ -220,37 +207,38 @@ async function pasteLeg(ctx, page, file, engine, mode, how, kind, failures) {
 export default {
   name: "terminal-text-paste",
   async run(ctx) {
+    if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+    const windowId = `text-paste-216-${RUN}`;
+    const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+      cwd: ctx.workspaceDir,
+      env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
+      timeout: 60_000,
+    });
     const dir = mkdtempSync(join(tmpdir(), "chan-paste-216-"));
     const page = await ctx.browser.newPage();
     const failures = [];
-    const result = { browser: await ctx.browser.browser().version(), legs: [] };
-    let prefs = null;
+    const result = { backend: "ghostty", browser: await ctx.browser.browser().version(), legs: [] };
     let primary = null;
     try {
       await page.setViewport({ width: 1280, height: 800 });
       await page.bringToFront();
       const url = new URL(ctx.serverUrl);
-      url.searchParams.set("w", `text-paste-216-${RUN}`);
+      url.searchParams.set("w", windowId);
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
-      // This fresh window must subscribe before a preference write broadcasts.
-      await ctx.waitWindowLive(url.searchParams.get("w"));
+      await ctx.waitWindowLive(windowId);
       await page.evaluate(recordPastes);
-      prefs = await readTerminalPrefs(page, token);
-      for (const engine of ["xterm", "ghostty"]) {
-        await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
-        for (const mode of ["bracketed", "unbracketed"]) {
-          await openTerminal(page, engine);
-          const file = join(dir, `${engine}-${mode}.bytes`);
-          await startRecorder(page, file, { bracketedPaste: mode === "bracketed" });
-          for (const how of ["chord", "menu"]) {
-            for (const kind of ["plain", "hostile"]) {
-              result.legs.push(await pasteLeg(ctx, page, file, engine, mode, how, kind, failures));
-            }
+      for (const mode of ["bracketed", "unbracketed"]) {
+        await openTerminal(ctx, page, cs, windowId, `Paste216-${RUN}-${mode}`);
+        const file = join(dir, `ghostty-${mode}.bytes`);
+        await startRecorder(page, file, { bracketedPaste: mode === "bracketed" });
+        for (const how of ["chord", "menu"]) {
+          for (const kind of ["plain", "hostile"]) {
+            result.legs.push(await pasteLeg(ctx, page, file, mode, how, kind, failures));
           }
-          await ctx.shot(`216-${engine}-${mode}`, page);
         }
+        await ctx.shot(`216-ghostty-${mode}`, page);
       }
       for (const leg of result.legs) {
         console.log(`[smoke]   ${leg.leg}: PTY ${JSON.stringify(leg.pty)}; paste events ${JSON.stringify(leg.events.map((e) => ({ trusted: e.trusted, types: e.types })))}`);
@@ -265,7 +253,6 @@ export default {
     } finally {
       const cleanups = [
         () => closeEveryTerminal(page, "cleanup", token),
-        async () => { if (prefs) await writeTerminalPrefs(page, token, { ghostty: prefs.ghostty }); },
         () => page.evaluate(() => navigator.clipboard.writeText("")),
         () => page.close(),
       ];
