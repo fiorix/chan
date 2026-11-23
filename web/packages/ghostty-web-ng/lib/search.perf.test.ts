@@ -221,6 +221,8 @@ describe.skipIf(!output)('maximum-history search work', () => {
     const exactCount = () => expect(terminal!.search.state.total).toBe(
       terminal!.core!.plainText()!.split(query).length - 1);
     exactCount();
+    measure('newest-reveal', () => terminal!.viewport.reveal(
+      terminal!.highlights.get('search-active')!.ranges[0].start.absoluteRow));
     for (let i = 0; i < 10; i++) measure('newest-paint', () => animationFrame());
     measure('oldest-step', () => terminal!.search.step(query, 'newer'));
     expect(terminal.search.state.index).toBe(terminal.search.state.total);
@@ -235,6 +237,8 @@ describe.skipIf(!output)('maximum-history search work', () => {
     const samples = results.at(-1)!.samples;
     expect(samples.some(s => s.owner > 0 && s.fetched > 0), 'live owner/result instrumentation').toBe(true);
     expect(samples.some(s => s.paint > 0 && s.lookups > 0), 'live highlight paint instrumentation').toBe(true);
+    expect(samples.filter(s => s.phase === 'newest-paint' || s.phase === 'oldest-paint')
+      .every(s => s.spans > 0), 'both history-end paint phases contain visible highlights').toBe(true);
     expect(Math.max(...samples.map(s => s.total)), 'total owner plus highlight paint, milliseconds').toBeLessThanOrEqual(12);
   }, 600_000);
 
