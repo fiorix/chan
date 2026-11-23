@@ -3,6 +3,7 @@
 // before echoing it, so an output-side scroll cannot stand in for input.
 // SGR and X10 mouse/wheel reports must also preserve the history view.
 
+import assert from "node:assert/strict";
 import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,6 +48,7 @@ async function readViewport(page, hostQuery) {
       bottom: offset === 0,
       offset,
       history,
+      cols: term.cols,
       rows: Array.from({ length: term.rows }, (_, row) => rowText(first + row)),
       cursorRow: rowText(history + cursor.y),
       cursorX: cursor.x,
@@ -164,10 +166,12 @@ export default {
               throw new Error(`ghostty/${encoding}/${kind}: enabling mouse reports moved history`);
             }
             const surface = `${hostQuery} > canvas`;
-            const position = await page.$eval(surface, (node) => {
+            const column = encoding === "x10" && kind === "mouse" ? 120 : 1;
+            assert.ok(report.before.cols >= column, `the terminal grid fits X10 test column ${column}`);
+            const position = await page.$eval(surface, (node, { column, cols, rows }) => {
               const rect = node.getBoundingClientRect();
-              return { x: rect.left + 5, y: rect.top + 8 };
-            });
+              return { x: rect.left + rect.width / cols * (column - 0.5), y: rect.top + rect.height / rows * 0.5 };
+            }, { column, cols: report.before.cols, rows: report.before.rows.length });
             await page.mouse.move(position.x, position.y);
             const inputIndex = fixture.records.length;
             const button = kind === "mouse" ? 0 : 64;
@@ -177,10 +181,19 @@ export default {
             try {
               if (kind === "mouse") await page.mouse.down();
               else await page.mouse.wheel({ deltaY: -120 });
-              await fixture.waitFor(() => pattern.test(pointerInputSince(fixture, inputIndex))).catch((error) => {
-                throw new Error(`ghostty/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
-              });
-              report.input = pointerInputSince(fixture, inputIndex);
+              if (encoding === "x10" && kind === "mouse") {
+                // X10 adds 32 to the button and one-based coordinates:
+                // button 0, column 120, row 1 must include the raw byte 152.
+                report.expectedBytes = [0x1b, 0x5b, 0x4d, 32, 152, 33];
+                report.input = (await drainPointerInput(fixture, "", inputIndex)).input;
+                report.inputBytes = [...Buffer.from(report.input, "latin1")];
+                assert.deepEqual(report.inputBytes, report.expectedBytes, "X10 column 120 is encoded as one raw coordinate byte");
+              } else {
+                await fixture.waitFor(() => pattern.test(pointerInputSince(fixture, inputIndex))).catch((error) => {
+                  throw new Error(`ghostty/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
+                });
+                report.input = pointerInputSince(fixture, inputIndex);
+              }
               await frame(page);
               await frame(page);
               report.after = await read();

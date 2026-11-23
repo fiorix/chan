@@ -12,6 +12,8 @@ export function pointerInputSince(fixture, index) {
 
 // The cursor reply follows the gesture through the real PTY. Silence from
 // a stalled or disconnected recorder cannot satisfy a no-report assertion.
+// Output strings use UTF-8 (callers send ASCII controls/text); recorded input
+// is decoded as Latin-1 to preserve arbitrary X10 coordinate bytes exactly.
 export async function drainPointerInput(fixture, bytes = "", index = fixture.records.length) {
   await fixture.send("bytes", { base64: Buffer.from(bytes + "\x1b[6n").toString("base64") });
   await fixture.waitFor(() => CPR.test(pointerInputSince(fixture, index)));
