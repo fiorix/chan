@@ -358,3 +358,17 @@ test("clipboard capture observes text and item writes, preserves rejection, and 
   assert.equal(clipboard.writeText, writeText);
   assert.equal(clipboard.write, write);
 });
+
+test("runPointerCheck rejects a pageerror emitted inside a successful stub leg", async (t) => {
+  const f = checkFixture(t);
+  await assert.rejects(runPointerCheck(f.ctx, 901, async ({ page, leg }) => {
+    await leg("selection", async () => { page.emit("pageerror", new Error("stub selection pageerror")); });
+  }), (error) => {
+    assert.match(error.message, /page errors: stub selection pageerror/);
+    assert.notEqual(error.smokeSkip, true);
+    assert.equal(error.smokeDetails.legs.selection.status, "passed");
+    assert.deepEqual(error.smokeDetails.pageErrors, ["stub selection pageerror"]);
+    assert.deepEqual(f.saved(), error.smokeDetails);
+    return true;
+  });
+});
