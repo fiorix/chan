@@ -1,10 +1,9 @@
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
+import { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, expect, test, vi } from "vitest";
 import { ghosttyCellMetrics, ghosttyCore, installSoftwareCanvas } from "../__tests__/ghosttyTab";
 import { expectPixel, sourceOver } from "../__tests__/softwareCanvas";
-import { installGhosttyOverlayScrollbar } from "./ghosttyCompat";
 import { GhosttyViewportController } from "./ghosttyViewport";
 
 let vendored: WebAssembly.Module;
@@ -23,7 +22,6 @@ test("fractional output keeps the scrollbar visible and repaints every row until
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   vi.stubGlobal("devicePixelRatio", 1);
   const paint = installSoftwareCanvas();
-  const render = vi.spyOn(CanvasRenderer.prototype, "render");
   const host = document.createElement("div");
   document.body.append(host);
   const term = new Terminal({
@@ -31,14 +29,11 @@ test("fractional output keeps the scrollbar visible and repaints every row until
     cols: 20,
     rows: 8,
     cursorBlink: false,
+    scrollbar: "overlay",
     theme: { background: "#101010", foreground: "#e0e0e0" },
   });
   try {
     term.open(host);
-    // The spy observes the renderer the widget actually opens.
-    const renderer = render.mock.contexts[0];
-    if (!(renderer instanceof CanvasRenderer)) throw new Error("the widget did not render on its canvas");
-    expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);
     const context = paint.context(host);
     const clears = vi.spyOn(context, "clearRect");
     const { width, height } = ghosttyCellMetrics(term);

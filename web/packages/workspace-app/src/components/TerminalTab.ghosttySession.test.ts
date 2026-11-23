@@ -23,10 +23,6 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   const { recordingKit } = await import("../__tests__/ghosttyTab");
   return { ...actual, loadGhosttyKit: async () => recordingKit(ghostty, actual.ghosttyKitFrom) };
 });
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  ...(await import("../__tests__/ghosttyTab")).ghosttyCompatStubs(),
-}));
 
 import TerminalTab from "./TerminalTab.svelte";
 import {

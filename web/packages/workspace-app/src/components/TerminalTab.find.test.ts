@@ -41,8 +41,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 installTerminalDom();
 
@@ -829,14 +827,15 @@ describe("terminal find on the ghostty backend", () => {
 
   /// The user's drag over the terminal from one screen cell to another,
   /// handled by ghostty-web's own pointer code; returns the clipboard writes
-  /// its release made. The canvas has the grid's size, 8 by 19 pixels a cell.
+  /// its release made. The canvas uses the widget's current CSS-pixel grid.
   function drag(term: Terminal, from: { col: number; row: number }, to: { col: number; row: number }) {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const canvas = term.element!.querySelector("canvas")!;
     modelPointerCapture(canvas);
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
-    const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 19 + 1 });
+    const { width, height } = term.getMetrics()!;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * width, term.rows * height));
+    const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * width + 1, clientY: cell.row * height + 1 });
     try {
       mousePointer(canvas, "pointerdown", at(from));
       mousePointer(canvas, "pointermove", at(to));

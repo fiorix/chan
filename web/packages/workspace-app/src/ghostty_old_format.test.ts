@@ -29,7 +29,7 @@ const FORBIDDEN: [string, RegExp][] = [
 describe("ghostty-web's binding and cell format stay out of the app", () => {
   test("the scan reads the app's terminal sources", () => {
     expect(Object.keys(sources)).toEqual(
-      expect.arrayContaining(["./terminal/backend.ts", "./terminal/ghosttyCompat.ts", "./components/TerminalTab.svelte"]),
+      expect.arrayContaining(["./terminal/backend.ts", "./terminal/ghosttyViewport.ts", "./components/TerminalTab.svelte"]),
     );
   });
 

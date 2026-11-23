@@ -49,8 +49,6 @@ import {
 
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 installTerminalDom();
 
@@ -110,6 +108,12 @@ async function renderGhostty(command = COMMAND) {
   await tick();
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
   const term = await openedGhostty(target);
+  const metrics = term.getMetrics()!;
+  const surface = canvas(term);
+  modelPointerCapture(surface);
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(0, 0, term.cols * metrics.width, term.rows * metrics.height),
+  );
   const socket = TerminalSocket.all[0]!;
   await attach(socket);
   await output(socket, `\x1b[2J\x1b[3J\x1b[H${command}\r\n$ `);
@@ -125,12 +129,15 @@ function canvas(term: Terminal): HTMLCanvasElement {
 /// ghostty-web's own pointer code; its release copies.
 function drag(term: Terminal, from: { col: number; row: number }, to: { col: number; row: number }): void {
   const surface = canvas(term);
-  modelPointerCapture(surface);
-  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
-  const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 19 + 1 });
+  const at = (cell: { col: number; row: number }) => cellPoint(term, cell.col, cell.row);
   mousePointer(surface, "pointerdown", at(from));
   mousePointer(surface, "pointermove", at(to));
   mousePointer(surface, "pointerup", at(to));
+}
+
+function cellPoint(term: Terminal, col: number, row: number) {
+  const { width, height } = term.getMetrics()!;
+  return { clientX: col * width + 1, clientY: row * height + 1 };
 }
 
 /// Where chan's writer puts a copy on each platform, and what reads it back.
@@ -205,7 +212,7 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
   test("a double click copies the word under it through chan's writer", async () => {
     const { term } = await renderGhostty();
     platform.enter();
-    canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, clientX: 3 * 8 + 1, clientY: 1 }));
+    canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, ...cellPoint(term, 3, 0) }));
     await tick();
     expect(platform.takeWrites()).toEqual(["curl"]);
     platform.expectNoBypass();
@@ -216,7 +223,7 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
     platform.enter();
     const click = (detail: number, col: number, row: number) =>
       canvas(term).dispatchEvent(
-        new MouseEvent("click", { bubbles: true, detail, clientX: col * 8 + 1, clientY: row * 19 + 1 }),
+        new MouseEvent("click", { bubbles: true, detail, ...cellPoint(term, col, row) }),
       );
     click(2, 10, 0);
     await tick();
@@ -303,7 +310,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     ]);
     invoke.mockClear();
     for (const [detail, text] of [[2, PATH], [3, PATH_COMMAND]] as const) {
-      canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail, clientX: 25, clientY: 20 }));
+      canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail, ...cellPoint(term, 3, 1) }));
       await tick();
       expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text }], ["write_primary_selection", { text }]]);
       invoke.mockClear();

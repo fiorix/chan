@@ -18,8 +18,6 @@ vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 vi.mock("./terminal/backend", async (importOriginal) =>
   (await import("./__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { api, sessionWindowId } from "./api/client";
 import { setSocketFactory } from "./api/transport";
@@ -166,8 +164,8 @@ beforeEach(async () => {
   // folds to 121 by 40; the 1210 by 800 box is the ask's trigger, not its
   // size.
   hostGrid = { cols: 60, rows: 40 };
-  // The shared software canvas measures an 8 by 19 CSS-pixel cell.
-  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+  // The software canvas measures 8 by 19 CSS pixels before the 1.2 line height.
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19 * 1.2]] as const) {
     const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
     vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
       return this.classList.contains("terminal-host") ? hostGrid[axis] * cell : original.call(this);

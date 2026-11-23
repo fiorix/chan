@@ -8,8 +8,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import TerminalTab from "../components/TerminalTab.svelte";

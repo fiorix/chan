@@ -19,8 +19,6 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { seatedGhostty } from "../__tests__/ghosttyTab";

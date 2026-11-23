@@ -163,8 +163,8 @@ export function failOnTerminalInitFailures(): void {
   ];
   throw new Error(
     "a mounted terminal failed to initialize: open it on the real widget through the shared fixture in " +
-      'src/__tests__/ghosttyTab.ts (vi.mock "../terminal/backend" with ghosttyBackendModule and ' +
-      `"../terminal/ghosttyCompat" with ghosttyCompatModule). In ${expect.getState().testPath ?? "this file"}. ` +
+      'src/__tests__/ghosttyTab.ts (vi.mock "../terminal/backend" with ghosttyBackendModule). ' +
+      `In ${expect.getState().testPath ?? "this file"}. ` +
       found.join(". "),
   );
 }

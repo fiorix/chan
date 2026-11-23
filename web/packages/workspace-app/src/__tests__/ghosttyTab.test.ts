@@ -14,8 +14,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./terminalTab")).we
 vi.mock("@xterm/addon-webgl", async () => (await import("./terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("./ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("./ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "../components/TerminalTab.svelte";
 import {
@@ -63,18 +61,6 @@ test("the checked mount returns the fixture's widget, open in the tab, and no st
   expect(term.element && target.contains(term.element)).toBe(true);
   expect(ghosttyFixture.terminals).toEqual([term]);
   expect(xterm.terminals).toHaveLength(0);
-});
-
-test("the product's glyph painter and overlay scrollbar install on the fixture's widget", async () => {
-  const compat = await import("../terminal/ghosttyCompat");
-  const actual = await vi.importActual<typeof import("../terminal/ghosttyCompat")>("../terminal/ghosttyCompat");
-  expect(compat.installGhosttyCustomGlyphs, "the product's glyph painter").toBe(actual.installGhosttyCustomGlyphs);
-  expect(compat.installGhosttyOverlayScrollbar, "the product's overlay scrollbar").toBe(actual.installGhosttyOverlayScrollbar);
-
-  const warn = vi.spyOn(console, "warn");
-  await opened();
-  const hooks = warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web"));
-  expect(hooks, "no compat hook failed open").toEqual([]);
 });
 
 // The widget dials once it has loaded and opened, so the mount waits for the

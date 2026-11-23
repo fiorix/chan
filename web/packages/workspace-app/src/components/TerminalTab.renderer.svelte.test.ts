@@ -15,8 +15,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
@@ -57,8 +55,9 @@ function watchRows(term: Terminal) {
   const canvas = term.element!.querySelector("canvas")!;
   const context = canvas.getContext("2d")!;
   const clears = vi.spyOn(context, "clearRect");
-  const width = canvas.width / devicePixelRatio;
-  const height = canvas.height / devicePixelRatio / term.rows;
+  const metrics = term.getMetrics()!;
+  const width = metrics.width * term.cols;
+  const height = metrics.height;
   return {
     clear: () => clears.mockClear(),
     fullPasses: () => clears.mock.calls.filter(([x, y, w, h]) =>

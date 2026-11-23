@@ -26,8 +26,6 @@ vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 vi.mock("./terminal/backend", async (importOriginal) =>
   (await import("./__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 // The capabilities are fixed per window at load; a mutable copy lets one
 // window stand in for one that lacks a surface.

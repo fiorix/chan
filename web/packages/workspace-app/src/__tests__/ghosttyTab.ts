@@ -3,12 +3,10 @@
 // can load this module while those modules are still initializing.
 //
 // The shared fixture, at the end, is how a mounted test opens a terminal:
-// a file declares its two factories,
+// a file declares its loader factory,
 //
 //   vi.mock("../terminal/backend", async (importOriginal) =>
 //     (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-//   vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-//     (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 //
 // and every terminal it opens, through `mountGhosttyTerminal`, which returns
 // it, through `mountTerminal` or through the app, is the widget over the
@@ -51,15 +49,6 @@ export function recordingKit(runtime: GhosttyRuntime, kitFrom: typeof ghosttyKit
     }
   }
   return kitFrom(runtime.module, { Terminal: RecordedTerminal });
-}
-
-export function ghosttyCompatStubs() {
-  return {
-    measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-    alignGhosttyRendererToXterm: () => true,
-    installGhosttyCustomGlyphs: () => true,
-    installGhosttyOverlayScrollbar: () => true,
-  };
 }
 
 /// The caller owns mock/global restoration. Frames advance only by frame().
@@ -216,19 +205,6 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
   };
 }
 
-/// The `vi.mock("../terminal/ghosttyCompat", ...)` factory: jsdom has no font
-/// metrics, so the cell measure and the grid alignment built on it are
-/// stubbed. The glyph painter and the overlay scrollbar are the product's,
-/// over the software context.
-export async function ghosttyCompatModule(importOriginal: <T>() => Promise<T>) {
-  const { measureXtermCellDimensions, alignGhosttyRendererToXterm } = ghosttyCompatStubs();
-  return {
-    ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-    measureXtermCellDimensions,
-    alignGhosttyRendererToXterm,
-  };
-}
-
 /// Mount `TerminalTab` for a seated tab, as `mountTerminal` does, and return
 /// the fixture's widget it opened. Throws before mounting unless the file
 /// declared the fixture, so a file whose mocks did not apply fails rather
@@ -240,8 +216,7 @@ export async function mountGhosttyTerminal(
 ): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: Terminal }> {
   if (!ghosttyFixtureDeclared()) {
     throw new Error(
-      'mountGhosttyTerminal needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
-        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+      'mountGhosttyTerminal needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule',
     );
   }
   const { target, component } = await mountTerminal(TerminalTab, tab, props);
@@ -268,8 +243,7 @@ export async function openedGhostty(within: Node = document): Promise<Terminal> 
 export async function seatedGhostty(within: Node = document): Promise<Terminal> {
   if (!ghosttyFixtureDeclared()) {
     throw new Error(
-      'seatedGhostty needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
-        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+      'seatedGhostty needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule',
     );
   }
   return openedGhostty(within);

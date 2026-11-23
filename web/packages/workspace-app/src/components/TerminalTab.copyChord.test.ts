@@ -18,8 +18,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { pressInPage } from "../__tests__/keys";

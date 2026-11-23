@@ -178,12 +178,6 @@
     type TerminalBackend,
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
-  import {
-    alignGhosttyRendererToXterm,
-    installGhosttyCustomGlyphs,
-    installGhosttyOverlayScrollbar,
-    measureXtermCellDimensions,
-  } from "../terminal/ghosttyCompat";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
@@ -223,7 +217,6 @@
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
-  import { ghosttyCopyScrollback, installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { sessionRunsMuse } from "../terminal/drawnWraps";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
@@ -661,7 +654,6 @@
   // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
   // ghostty backend.
   let ghosttyKeyParity: (() => void) | null = null;
-  let ghosttyClickExtents: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path) and the one
@@ -1341,11 +1333,17 @@
     );
     if (backend === "ghostty" && ghosttyKit && ghosttyInstance) {
       // Ghostty backend: Ghostty's WASM VT parser + its own canvas
-      // renderer (no xterm addons exist for it). Options are limited to
-      // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
-      // uses its own metrics), no macOptionIsMeta / tabStopWidth.
+      // renderer (no xterm addons exist for it).
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
+        copy: (text: string) => {
+          void copyToClipboard(text);
+          if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
+        },
+        joinDrawnWraps: runsMuse,
+        lineHeight: 1.2,
+        boxGlyphs: true,
+        scrollbar: "overlay",
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
@@ -1360,7 +1358,7 @@
       term = ghosttyTerm;
       ghosttyTerm.onLinkActivate(onGhosttyLink);
       // Ghostty's auto-hiding scrollbar is painted onto the content without
-      // clearing it (see installGhosttyOverlayScrollbar), so the columns under
+      // clearing it, so the columns under
       // it stay readable and there is no gutter to hold back. Reserving width
       // here could not help in any case: the overlay is anchored to the canvas,
       // not to the host, so a narrower grid just moves the content it covers.
@@ -1476,56 +1474,6 @@
     // Neither backend's open() takes the keyboard; a terminal in the focused
     // pane is focused once start() has wired it, below.
     term.open(host);
-    if (backend === "ghostty") {
-      const ghosttyTerm = term as GhosttyTerminal;
-      const renderer = ghosttyTerm.renderer;
-      const targetCell = measureXtermCellDimensions(
-        host,
-        fontFamily,
-        rendererFontSize,
-        1.2,
-      );
-      if (
-        !renderer ||
-        !targetCell ||
-        !alignGhosttyRendererToXterm(
-          renderer,
-          targetCell,
-          ghosttyTerm.cols,
-          ghosttyTerm.rows,
-        )
-      ) {
-        console.warn(
-          "[chan] ghostty-web renderer metrics unavailable; using its native font spacing.",
-        );
-      }
-      if (renderer && !installGhosttyCustomGlyphs(renderer)) {
-        console.warn(
-          "[chan] ghostty-web text hook unavailable; using font-rendered box glyphs.",
-        );
-      }
-      if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
-        console.warn(
-          "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
-        );
-      }
-      // ghostty-web's own copies (mouse release, double and triple click)
-      // write through the same writer as the chord and the menu.
-      if (!installGhosttySelection(ghosttyTerm, (text) => {
-        void copyToClipboard(text);
-        if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
-      }, runsMuse)) {
-        console.warn(
-          "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
-        );
-      }
-      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm, runsMuse);
-      if (!ghosttyClickExtents) {
-        console.warn(
-          "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
-        );
-      }
-    }
     host.addEventListener("keydown", noteInterruptKey, true);
     if (backend === "ghostty") {
       ghosttyKeyParity = installGhosttyKeyParity(host, {
@@ -2853,8 +2801,6 @@
     primarySelectionCleanup = null;
     ghosttyKeyParity?.();
     ghosttyKeyParity = null;
-    ghosttyClickExtents?.();
-    ghosttyClickExtents = null;
     ghosttyReportedFocus = null;
     host?.removeEventListener("keydown", noteInterruptKey, true);
     host?.removeEventListener("focusin", onGhosttyFocusChange);
@@ -2973,13 +2919,12 @@
 
   /// Scrollback text for the copy actions. The xterm backend serializes
   /// through the SerializeAddon (ANSI styling preserved). The ghostty
-  /// backend has no serialize addon; its core formats the history and the
-  /// rows as plain text (`ghosttyCopyScrollback`), styling lost: one call,
-  /// and a call more for each row in a session that runs Muse.
+  /// widget formats the history and screen as plain text through
+  /// getScrollbackText(), applying the current drawn-wrap policy.
   function scrollbackText(): string {
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal | null;
-      return ghosttyTerm ? ghosttyCopyScrollback(ghosttyTerm, runsMuse()) : "";
+      return ghosttyTerm?.getScrollbackText() ?? "";
     }
     return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
   }

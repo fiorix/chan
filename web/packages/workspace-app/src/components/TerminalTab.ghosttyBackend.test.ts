@@ -36,22 +36,12 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     return kit;
   }) };
 });
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) => {
-  const fixture = await (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal);
-  return {
-    ...fixture,
-    alignGhosttyRendererToXterm: vi.fn(fixture.alignGhosttyRendererToXterm),
-    installGhosttyCustomGlyphs: vi.fn(fixture.installGhosttyCustomGlyphs),
-    installGhosttyOverlayScrollbar: vi.fn(fixture.installGhosttyOverlayScrollbar),
-  };
-});
 vi.mock("../terminal/ghosttyTheme", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/ghosttyTheme")>();
   return { ...actual, applyGhosttyTheme: vi.fn(actual.applyGhosttyTheme) };
 });
 
 import { loadGhosttyKit } from "../terminal/backend";
-import { alignGhosttyRendererToXterm, installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar } from "../terminal/ghosttyCompat";
 import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
 import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { Osc52Bridge } from "../terminal/osc52Bridge";
@@ -266,29 +256,20 @@ describe("choosing the backend", () => {
 });
 
 describe("the mount", () => {
-  test("instantiate its own wasm, open, align to xterm's cell, install the hooks, then dial", async () => {
+  test("instantiate its own wasm, construct with widget options, open, then dial", async () => {
     const { term } = await mountGhostty();
     expect(observed.events.indexOf("instantiate")).toBeLessThan(observed.events.indexOf("open"));
     expect(observed.events.indexOf("open")).toBeLessThan(observed.events.indexOf("dial"));
-    const calls = [alignGhosttyRendererToXterm, installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar]
-      .map((hook) => vi.mocked(hook).mock.invocationCallOrder[0]!);
-    expect(calls.every(Number.isFinite)).toBe(true);
-    expect(calls).toEqual([...calls].sort((a, b) => a - b));
-    expect(installGhosttyCustomGlyphs).toHaveBeenCalledWith(term.renderer);
-    expect(installGhosttyOverlayScrollbar).toHaveBeenCalledWith(term.renderer);
+    expect(term.options).toMatchObject({
+      lineHeight: 1.2, boxGlyphs: true, scrollbar: "overlay",
+      copy: expect.any(Function), joinDrawnWraps: expect.any(Function),
+    });
   });
 
   test("the terminal is built on the wasm instance its own spawn created", async () => {
     await mountGhostty();
     expect(observed.instances).toHaveLength(1);
     expect(vi.mocked(observed.instances[0]!.createTerminal).mock.results[0]?.value).toBe(ghosttyFixture.terminals[0]!.wasmTerm);
-  });
-
-  test("a renderer without the alignment hook is kept, with a warning", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.mocked(alignGhosttyRendererToXterm).mockReturnValueOnce(null);
-    await mountGhostty();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("renderer metrics unavailable"))).toBe(true);
   });
 
   test("a resize fits with chan's own measurement", async () => {

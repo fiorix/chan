@@ -27,8 +27,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 vi.mock("../terminal/resize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/resize")>();
   return {
@@ -130,8 +128,8 @@ function cleanup() {
 describe("widget size ownership", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
-    // The software canvas measures cells at 8 by 19 CSS pixels.
-    for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+    // The software canvas measures 8 by 19 CSS pixels before the 1.2 line height.
+    for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19 * 1.2]] as const) {
       const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
       vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
         return this.classList.contains("terminal-host") ? (measurement.grid?.[axis] ?? 0) * cell : original.call(this);

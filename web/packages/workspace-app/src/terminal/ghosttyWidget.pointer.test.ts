@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The installed ghostty selection adapter over the widget's pointer
+// The configured copy callback over the widget's pointer
 // handling: a tap copies nothing, a drag ended by capture loss copies once,
 // and an interrupted drag keeps its selection without copying. The widget's
 // own suite pins the pointer contract itself (element-scoped handling,
@@ -9,7 +9,6 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { installGhosttySelection } from "./ghosttySelection";
 import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
@@ -40,26 +39,25 @@ afterEach(() => {
 });
 
 /// A ghostty-web terminal on the vendored core, opened in a host, with
-/// chan's selection adapter installed; `writes` holds each copy's text.
+/// a copy callback; `writes` holds each copy's text.
 async function openTerminal() {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
+  const writes: string[] = [];
+  const term = new Terminal({ copy: (text) => void writes.push(text), cols: COLS, rows: ROWS, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
   const host = document.createElement("div");
   document.body.append(host);
   term.open(host);
   opened.push(term);
   const canvas = host.querySelector("canvas");
-  if (!canvas || !term.renderer) throw new Error("ghostty-web opened no canvas");
-  const metrics = term.renderer.getMetrics();
+  if (!canvas || !term.getMetrics()) throw new Error("ghostty-web opened no canvas");
+  const metrics = term.getMetrics()!;
   vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, COLS * metrics.width, ROWS * metrics.height));
   modelPointerCapture(canvas);
-  const writes: string[] = [];
-  expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
   term.write("hello world\r\nsecond row");
   return { term, canvas, writes };
 }
 
-describe("the ghostty selection adapter over the widget's pointer handling", () => {
+describe("the copy callback over the widget's pointer handling", () => {
   test("a press with a below-threshold move selects and copies nothing", async () => {
     const { term, canvas, writes } = await openTerminal();
     mousePointer(canvas, "pointerdown", { clientX: 1, clientY: 1 });

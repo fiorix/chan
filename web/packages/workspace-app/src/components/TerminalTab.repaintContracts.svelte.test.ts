@@ -11,8 +11,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
@@ -61,8 +59,9 @@ test("revealing an unfocused tab repaints every row without a resize or focus ch
   const grid = { cols: term.cols, rows: term.rows };
   const canvas = term.element!.querySelector("canvas")!;
   const clears = vi.spyOn(canvas.getContext("2d")!, "clearRect");
-  const width = canvas.width / devicePixelRatio;
-  const height = canvas.height / devicePixelRatio / grid.rows;
+  const metrics = term.getMetrics()!;
+  const width = metrics.width * grid.cols;
+  const height = metrics.height;
 
   props.active = true;
   flushSync();

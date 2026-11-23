@@ -14,8 +14,6 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
@@ -41,10 +39,10 @@ vi.mock("../terminal/resize", async (importOriginal) => {
 installTerminalDom();
 
 let hostSize: { cols: number; rows: number } | null = null;
-// The shared software canvas measures an 8 by 19 CSS-pixel cell.
+// The software canvas measures 8 by 19 CSS pixels before the 1.2 line height.
 beforeEach(() => {
   vi.useFakeTimers();
-  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19 * 1.2]] as const) {
     const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
     vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
       return this.classList.contains("terminal-host") ? (hostSize?.[axis] ?? 0) * cell : original.call(this);

@@ -7,9 +7,8 @@
 // blur may hold the keyboard: a CSV cell being edited, a tab being renamed, a
 // chord being captured. TerminalTab is mounted on ghostty-web's own Terminal
 // over the binding on the vendored core, so what the open does to the
-// keyboard is the widget's; only the renderer hooks a software canvas cannot
-// serve are stubbed. Each reading waits 20 ms, so a focus that lands after
-// the open would be seen.
+// keyboard is the widget's. Rendering uses a software canvas. Each reading
+// waits 20 ms, so a focus that lands after the open would be seen.
 
 import { readFileSync } from "node:fs";
 import { flushSync, mount, tick, unmount } from "svelte";
@@ -28,13 +27,6 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   const widget = await import("@chan/ghostty-web-ng");
   return { ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, widget) };
 });
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-}));
 
 import TerminalTab from "./TerminalTab.svelte";
 import CsvTable from "../editor/CsvTable.svelte";

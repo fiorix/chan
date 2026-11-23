@@ -9,7 +9,6 @@ import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import { transparentColor } from "./backgroundOpacity";
-import { alignGhosttyRendererToXterm, type CellDimensions } from "./ghosttyCompat";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
@@ -728,13 +727,14 @@ describe("the ghostty renderer's underline styles and overline", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   /// A terminal built from THEME as open() builds it, its core and its
   /// renderer, written `bytes` with the cursor hidden. The font measures
-  /// `fontWidth` pixels a character; with `cell`, the renderer is aligned to
-  /// that cell as TerminalTab aligns it to xterm.js's grid.
-  async function painted(bytes: string, { fontWidth = 8, cell }: { fontWidth?: number; cell?: CellDimensions } = {}) {
+  /// `fontWidth` pixels a character; `fontBoxHeight` supplies the measured
+  /// font box for checking decorations in a shorter cell.
+  async function painted(bytes: string, { fontWidth = 8, fontBoxHeight }: { fontWidth?: number; fontBoxHeight?: number } = {}) {
     const contexts = new WeakMap<HTMLCanvasElement, PathRecordingContext>();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
       function (this: HTMLCanvasElement) {
@@ -745,6 +745,15 @@ describe("the ghostty renderer's underline styles and overline", () => {
         return created as unknown as CanvasRenderingContext2D;
       } as unknown as typeof HTMLCanvasElement.prototype.getContext,
     );
+    if (fontBoxHeight !== undefined) {
+      vi.stubGlobal("OffscreenCanvas", class {
+        getContext() {
+          return {
+            measureText: () => ({ width: fontWidth, fontBoundingBoxAscent: fontBoxHeight, fontBoundingBoxDescent: 0 }),
+          };
+        }
+      });
+    }
     const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
     const term = new Terminal({ ghostty: vt, cols, rows, theme: THEME });
     const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
@@ -752,7 +761,6 @@ describe("the ghostty renderer's underline styles and overline", () => {
     const canvas = document.createElement("canvas");
     const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme: THEME });
     renderer.resize(cols, rows);
-    if (cell) expect(alignGhosttyRendererToXterm(renderer, cell, cols, rows), "aligned").not.toBeNull();
     term.renderer = renderer;
     term.wasmTerm.write("\x1b[?25l" + bytes);
     const context = contexts.get(canvas)!;
@@ -961,11 +969,11 @@ describe("the ghostty renderer's underline styles and overline", () => {
     }
   });
 
-  test("a double or curly underline keeps inside a cell aligned shorter than the font's", async () => {
-    // The font's cell is 19 pixels with its baseline at 14; aligned to a
-    // 17-pixel cell the baseline moves up a pixel, and a second line two
+  test("a double or curly underline keeps inside a cell measured shorter than its ink", async () => {
+    // The ink's padded cell is 19 pixels with its baseline at 14; a
+    // 17-pixel font box moves the baseline up a pixel, and a second line two
     // rows below a single underline's would reach past the cell's bottom.
-    const screen = await painted(ROW, { cell: { width: 8, height: 17 } });
+    const screen = await painted(ROW, { fontBoxHeight: 17 });
     const { height, baseline } = screen.metrics;
     expect([height, baseline]).toEqual([17, 13]);
     screen.frame();

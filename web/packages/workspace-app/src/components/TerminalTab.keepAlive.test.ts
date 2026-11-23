@@ -19,8 +19,6 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { Terminal } from "@chan/ghostty-web-ng";
@@ -142,12 +140,13 @@ function liveHostRenderer(): Terminal | undefined {
   return ghosttyFixture.terminals.find((t) => t.element?.isConnected && root?.contains(t.element));
 }
 
-// The shared software canvas measures an 8 by 19 CSS-pixel cell.
+// Size the host in the live widget's CSS-pixel cells.
 function hostSize(root: HTMLElement, cols: number, rows: number): void {
   const host = root.querySelector<HTMLElement>(".terminal-host")!;
+  const { width, height } = ghosttyFixture.terminals.find((term) => term.element === host)!.getMetrics()!;
   Object.defineProperties(host, {
-    clientWidth: { configurable: true, value: cols * 8 },
-    clientHeight: { configurable: true, value: rows * 19 },
+    clientWidth: { configurable: true, value: cols * width },
+    clientHeight: { configurable: true, value: rows * height },
   });
 }
 
