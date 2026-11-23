@@ -355,7 +355,16 @@ describe('report and bypass completion', () => {
     expect(reports).toEqual([]);
     expect(write).toHaveBeenCalledTimes(button === 0 ? 1 : 0);
     pointer(canvas, 'pointermove', 1, 1, { buttons: 0 });
-    expect(reports).toEqual(['\x1b[<32;1;1M']);
+    expect(reports).toEqual(['\x1b[<35;1;1M']);
+  });
+
+  test('any-motion hover after a reported release carries the no-button code', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointerup', 17, 1);
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<0;3;1m', '\x1b[<35;5;1M']);
   });
 
   test.each(['pointercancel', 'lostpointercapture', 'uncaptured', 'reattached', 'recapture'])('a report-only %s releases at its last position and leaves no held button or copy', async (end) => {
@@ -445,7 +454,7 @@ describe('report and bypass completion', () => {
     pointer(canvas, 'pointerup');
     term.write('\x1b[?1003h\x1b[?1006h');
     pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
-    expect(reports).toEqual(['\x1b[<32;5;1M']);
+    expect(reports).toEqual(['\x1b[<35;5;1M']);
   });
 
   test('a chorded release while tracking is off stays cleared when tracking resumes', async () => {
