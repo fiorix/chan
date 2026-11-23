@@ -5,7 +5,7 @@
 // built-in copy chord: the selection goes to the clipboard, and with nothing
 // selected nothing does. The menu's row and the launcher's row for the same
 // command still copy the scrollback then. The real App is mounted over the
-// demo transport with the stand-in xterm, so the key takes the path a
+// demo transport with the shared Ghostty widget, so the key takes the path a
 // pressed chord takes.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -17,12 +17,15 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { pressInPage } from "../__tests__/keys";
 import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
-import { xterm, type FakeTerminal } from "../__tests__/xterm";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyFixture, openedGhostty } from "../__tests__/ghosttyTab";
 import { commandById, commandTitle } from "../state/commands";
 import { assignOverride, hydrateOverrides } from "../state/keymapOverrides.svelte";
 import { launcherPanel } from "../state/store.svelte";
@@ -31,7 +34,7 @@ import type { Tab } from "../state/tabs.svelte";
 stubAppEnvironment();
 
 const ASSIGNED = { key: "j", code: "KeyJ", ctrlKey: true, altKey: true } as const;
-const SCROLLBACK = "line one\nline two";
+const SCROLLBACK = "selected text\nline two";
 
 const clipboard = { writeText: vi.fn(async (_text: string) => {}), readText: vi.fn(async () => "") };
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
@@ -43,8 +46,7 @@ beforeEach(async () => {
 afterEach(async () => {
   hydrateOverrides(null);
   launcherPanel.open = false;
-  xterm.serialized = "";
-  xterm.terminals.splice(0);
+  ghosttyFixture.terminals.splice(0);
   clipboard.writeText.mockClear();
   await settle();
   await unmountApp();
@@ -52,13 +54,14 @@ afterEach(async () => {
 
 /// Seat `tabs` in the window's one pane and return the terminal the first
 /// of them mounted, with scrollback to copy.
-async function seed(...tabs: Tab[]): Promise<FakeTerminal> {
-  xterm.terminals.splice(0);
+async function seed(...tabs: Tab[]): Promise<Terminal> {
+  ghosttyFixture.terminals.splice(0);
   resetLayout(tabs);
-  await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+  await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(1));
   await settle();
-  xterm.serialized = SCROLLBACK;
-  return xterm.terminals[0]!;
+  const term = await openedGhostty();
+  term.write("\x1b[2J\x1b[H" + SCROLLBACK.replaceAll("\n", "\r\n"));
+  return term;
 }
 
 /// Every text written to the clipboard so far.
@@ -102,7 +105,8 @@ describe("a chord assigned to the terminal's Copy", () => {
   test("copies the selection", async () => {
     const term = await seed(terminalTab({ id: "shell" }));
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-    term.selection = "selected text";
+    term.select(0, 0, "selected text".length);
+    expect(term.getSelection()).toBe("selected text");
 
     const { event } = pressInPage(ASSIGNED);
 
@@ -113,7 +117,7 @@ describe("a chord assigned to the terminal's Copy", () => {
   test("does nothing with nothing selected, where the menu's row and the launcher's row copy the scrollback", async () => {
     const term = await seed(terminalTab({ id: "shell" }));
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-    term.selection = "";
+    term.clearSelection();
 
     const { event } = pressInPage(ASSIGNED);
     expect(event.defaultPrevented, "the app took the key").toBe(true);
@@ -130,19 +134,21 @@ describe("a chord assigned to the terminal's Copy", () => {
   test("leaves the next run of the command a row's", async () => {
     const term = await seed(terminalTab({ id: "shell" }));
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-    term.selection = "selected text";
+    term.select(0, 0, "selected text".length);
+    expect(term.getSelection()).toBe("selected text");
     pressInPage(ASSIGNED);
     await copied(["selected text"]);
 
-    term.selection = "";
+    term.clearSelection();
     runCopy();
     await copied(["selected text", SCROLLBACK]);
   });
 
   test("is not the terminal's while another tab holds the pane", async () => {
-    await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }), terminalTab({ id: "shell" }));
+    const term = await seed(fileTab({ id: "doc", path: "README.md", content: "hello", saved: "hello" }), terminalTab({ id: "shell" }));
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-    xterm.terminals[0]!.selection = "selected text";
+    term.select(0, 0, "selected text".length);
+    expect(term.getSelection()).toBe("selected text");
 
     const { event } = pressInPage(ASSIGNED);
 
