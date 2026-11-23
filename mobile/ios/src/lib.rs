@@ -30,7 +30,10 @@ pub(crate) mod runtime_capability;
 pub(crate) mod serve;
 pub(crate) mod state;
 pub(crate) mod terminal_opacity;
+#[cfg(any(target_os = "ios", test))]
+pub(crate) mod webview_proxy;
 pub(crate) mod window_ops;
+pub(crate) mod wireguard;
 pub(crate) mod wireguard_keys;
 
 pub(crate) use state::{AppState, DevserverFeed};
@@ -108,7 +111,14 @@ pub(crate) async fn teardown_devserver_connection<R: tauri::Runtime>(
     state: &AppState,
     id: &str,
 ) {
-    state.devservers.remove(id);
+    if state.devservers.remove(id).is_some_and(|conn| {
+        conn.gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.access.is_some())
+    }) {
+        state.bump_native_policy_generation(id);
+        wireguard::stop_selected(app, state, id);
+    }
     // A full teardown reaps the control terminal, so the reconnect
     // block must not outlive it: the block's invariant is that a kept
     // "process exited" terminal exists for the user to close.
@@ -202,6 +212,7 @@ fn gateway_display_name(configured_label: &str, gateway_url: &str, proxy_origin:
 /// entry through the gateway with the explicit `(owner, devserver_id)` target
 /// and narrate failures (a 401 runs the gateway cascade; an offline row emits
 /// a devserver-sourced notice beside the failed connect).
+#[cfg(test)]
 async fn rostered_conn<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
@@ -209,6 +220,27 @@ async fn rostered_conn<R: tauri::Runtime>(
     gateway_id: &str,
     owner: &str,
     devserver_id: &str,
+) -> Result<devserver::DevserverConn, String> {
+    rostered_conn_at_generation(
+        app,
+        state,
+        id,
+        gateway_id,
+        owner,
+        devserver_id,
+        state.native_policy_generation(id),
+    )
+    .await
+}
+
+async fn rostered_conn_at_generation<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    id: &str,
+    gateway_id: &str,
+    owner: &str,
+    devserver_id: &str,
+    generation: u64,
 ) -> Result<devserver::DevserverConn, String> {
     let row = require_rostered_native_policy(state, gateway_id, owner, devserver_id)?;
     let Some(discovery) = state.gateway_manager.discovery(gateway_id) else {
@@ -218,7 +250,8 @@ async fn rostered_conn<R: tauri::Runtime>(
     let Some(pat) = auth::load_gateway_pat(&discovery.identity_origin)? else {
         return Err("the gateway sign-in is missing - reconnect the gateway".into());
     };
-    let gateway = match devserver::gateway_conn(
+    let access = wireguard::AccessGuard::new(state, id, gateway_id, generation)?;
+    let gateway = match devserver::gateway_conn_guarded(
         &discovery,
         pat.secret,
         Some(devserver::GatewayEntryTarget {
@@ -226,6 +259,7 @@ async fn rostered_conn<R: tauri::Runtime>(
             owner: owner.to_string(),
             devserver_id: devserver_id.to_string(),
         }),
+        access,
     )
     .await
     {
@@ -463,7 +497,16 @@ async fn connect_rostered_devserver_inner<R: tauri::Runtime>(
         )
     };
     recheck()?;
-    let conn = rostered_conn(app, state, id, gateway_id, owner, devserver_id).await?;
+    let conn = rostered_conn_at_generation(
+        app,
+        state,
+        id,
+        gateway_id,
+        owner,
+        devserver_id,
+        policy_generation,
+    )
+    .await?;
 
     let proxy_origin = conn
         .gateway
@@ -471,6 +514,11 @@ async fn connect_rostered_devserver_inner<R: tauri::Runtime>(
         .expect("rostered connections are gateway-backed")
         .proxy_origin
         .clone();
+    recheck()?;
+    conn.gateway
+        .as_ref()
+        .expect("gateway connection")
+        .require_access()?;
     runtime_capability::mint_exact_origin_grant(app, &proxy_origin)
         .map_err(|e| format!("granting native access for this devserver failed: {e}"))?;
     recheck()?;
@@ -814,9 +862,12 @@ mod tests {
                 native_trust: Vec::new(),
                 wireguard: None,
                 wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
                 wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
@@ -947,9 +998,12 @@ mod tests {
                 native_trust: Vec::new(),
                 wireguard: None,
                 wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
                 wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
@@ -1071,9 +1125,12 @@ mod tests {
                 native_trust: Vec::new(),
                 wireguard: None,
                 wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
                 wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
@@ -1199,9 +1256,12 @@ mod tests {
                 native_trust: Vec::new(),
                 wireguard: None,
                 wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
                 wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();

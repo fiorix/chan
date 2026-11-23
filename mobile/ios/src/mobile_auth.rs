@@ -165,19 +165,25 @@ pub(crate) async fn mobile_open_devserver(
     let app = mobile_app_handle()
         .ok_or_else(|| "the mobile app handle is not ready; connect again".to_string())?;
     let conn = mobile_gateway_conn(&state.devservers, id)?;
+    let epoch = conn
+        .gateway
+        .as_ref()
+        .map(|gateway| gateway.begin_operation())
+        .transpose()?
+        .flatten();
     let record =
         crate::devserver::mint_library_window_with_start(&conn, kind, path, start_terminal).await?;
     let target = crate::devserver::window_navigation_url(&conn, &record).await?;
+    if let Some(gateway) = &conn.gateway {
+        gateway.require_operation(epoch)?;
+    }
     crate::devserver::install_gateway_webview_session(&app, &conn, None)?;
     let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
     let webview = app
         .get_webview_window("main")
         .or_else(|| app.webview_windows().into_values().next())
         .ok_or_else(|| "no webview to open the devserver in".to_string())?;
-    webview
-        .navigate(url)
-        .map_err(|e| format!("opening the devserver: {e}"))?;
-    Ok(())
+    crate::wireguard::navigate(&app, state, id, &conn, webview, url, epoch).await
 }
 
 /// Navigate `"main"` to an already-existing remote window record on a connected
@@ -199,16 +205,22 @@ pub(crate) async fn mobile_open_existing_window_with_app<R: tauri::Runtime>(
     record: &chan_server::WindowRecord,
 ) -> Result<(), String> {
     let conn = mobile_gateway_conn(&state.devservers, id)?;
+    let epoch = conn
+        .gateway
+        .as_ref()
+        .map(|gateway| gateway.begin_operation())
+        .transpose()?
+        .flatten();
     let target = crate::devserver::window_navigation_url(&conn, record).await?;
+    if let Some(gateway) = &conn.gateway {
+        gateway.require_operation(epoch)?;
+    }
     crate::devserver::install_gateway_webview_session(app, &conn, None)?;
     let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
     let webview = app
         .get_webview_window("main")
         .ok_or_else(|| "no main webview to open the devserver in".to_string())?;
-    webview
-        .navigate(url)
-        .map_err(|e| format!("opening the devserver: {e}"))?;
-    Ok(())
+    crate::wireguard::navigate(app, state, id, &conn, webview, url, epoch).await
 }
 
 /// The loopback launcher URL back-to-Computers navigates home to: the
@@ -239,6 +251,10 @@ pub(crate) fn mobile_back_to_computers(
     state: tauri::State<'_, Arc<crate::AppState>>,
 ) -> Result<(), String> {
     let url = mobile_launcher_url(state.inner())?;
+    state
+        .navigation_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    state.selected_wireguard.lock().unwrap().take();
     window
         .navigate(url)
         .map_err(|e| format!("returning to Computers: {e}"))?;
@@ -610,16 +626,69 @@ mod ios {
         impl MobileLifecycleObserver {
             #[unsafe(method(mobileAppDidEnterBackground:))]
             fn did_enter_background(&self, _notification: &NSNotification) {
+                if let Some(fabric) = self.ivars().1.gateway_manager.fabric.get() { fabric.suspend(); }
                 crate::gateway::set_roster_poll_suspended(&self.ivars().1, true);
             }
 
             #[unsafe(method(mobileAppWillEnterForeground:))]
             fn will_enter_foreground(&self, _notification: &NSNotification) {
-                crate::gateway::set_roster_poll_suspended(&self.ivars().1, false);
-                crate::gateway::resync_roster_polls(&self.ivars().0, &self.ivars().1);
+                let (app, state) = self.ivars().clone();
+                let ticket = state.gateway_manager.fabric.get().map(|fabric| fabric.resume_ticket());
+                tauri::async_runtime::spawn(async move {
+                    let ready = resume_wireguard(&state, ticket).await;
+                    if let (Some(fabric), Some(ticket)) = (state.gateway_manager.fabric.get(), ticket) {
+                        if fabric.resume_ticket() != ticket { return; }
+                        if !fabric.resume(ticket) { return; }
+                    }
+                    if let Err(error) = ready { tracing::warn!(%error, "foreground WireGuard access remains parked"); }
+                    // Public identity polling also serves gateways without WireGuard.
+                    crate::gateway::set_roster_poll_suspended(&state, false);
+                    crate::gateway::resync_roster_polls(&app, &state);
+                });
             }
         }
     );
+
+    async fn resume_wireguard(state: &crate::AppState, ticket: Option<u64>) -> Result<(), String> {
+        let (Some(fabric), Some(ticket)) = (state.gateway_manager.fabric.get(), ticket) else {
+            return Ok(());
+        };
+        let ids = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .map_err(|error| error.to_string())?
+            .gateways
+            .into_iter()
+            .filter(|gateway| gateway.enabled)
+            .map(|gateway| gateway.id)
+            .collect::<Vec<_>>();
+        let mut refused = None;
+        for id in ids {
+            let result = async {
+                fabric.settled_gateway(&id).await?;
+                crate::wireguard::reconcile_saved(state, &id)?;
+                fabric.settled_gateway(&id).await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    if !fabric.resume_gateway(&id, ticket) {
+                        return Err("WireGuard: foreground attempt superseded".into());
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(gateway = %id, %error, "gateway foreground recovery refused");
+                    refused = Some(error);
+                }
+            }
+        }
+        match refused {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 
     impl MobileLifecycleObserver {
         fn new(app: tauri::AppHandle, state: Arc<crate::AppState>) -> Retained<Self> {

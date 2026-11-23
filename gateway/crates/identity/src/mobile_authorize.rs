@@ -16,7 +16,7 @@
 //!   * `GET  /mobile/authorize?<query>` -- entry point. Validates the
 //!     query (`redirect_uri` pinned to `chan://auth/callback`,
 //!     `code_challenge` + `S256` method, `state`, `label`, sole scope
-//!     `mobile.account`, `expires_in`, and absence of
+//!     `mobile.account`, `expires_in`, and optional
 //!     `wireguard_public_key`), clears any pending desktop authorize
 //!     stash in the session, stashes [`AuthorizeParams`] under
 //!     `mobile_authorize`, and redirects: to `/` if unauthenticated, or
@@ -33,8 +33,8 @@
 //!   * `POST /mobile/authorize/redeem` -- swaps `{code, code_verifier}`
 //!     against `state.mobile_redemptions` only, writes the
 //!     `mobile.redeem` audit row, and returns `{id, secret, label,
-//!     expires_at}`. Codes in `desktop_redemptions` are never visible
-//!     here and vice versa.
+//!     expires_at}` with optional WireGuard enrollment parameters. Codes
+//!     in `desktop_redemptions` are never visible here and vice versa.
 
 use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
@@ -84,15 +84,15 @@ const MAX_STATE_LEN: usize = 256;
 /// can redirect without repeating the literal.
 pub const CONSENT_PATH: &str = "/mobile/authorize/consent";
 
-/// What `/mobile/authorize/redeem` answers with, once per code. Mobile
-/// does not offer gateway WireGuard enrollment, so no `wireguard` field
-/// exists on this wire shape.
+/// What `/mobile/authorize/redeem` answers with, once per code.
 #[derive(Debug, Clone, Serialize)]
 pub struct MobileRedeemPayload {
     pub id: Uuid,
     pub secret: String,
     pub label: String,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<crate::wireguard::Parameters>,
 }
 
 /// Validate the registered mobile `redirect_uri` by parsed-component
@@ -154,15 +154,12 @@ pub struct AuthorizeParams {
     code_challenge: String,
     scopes: Vec<String>,
     expires_in_secs: i64,
+    #[serde(default)]
+    wireguard_public_key: Option<String>,
 }
 
-fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
+fn validate(q: AuthorizeQuery, enrollment_offered: bool) -> Result<AuthorizeParams> {
     validate_mobile_redirect_uri(&q.redirect_uri)?;
-    if q.wireguard_public_key.is_some() {
-        return Err(Error::BadRequest(
-            "wireguard enrollment not supported on mobile".into(),
-        ));
-    }
     if q.code_challenge_method != "S256" {
         return Err(Error::BadRequest("invalid code_challenge_method".into()));
     }
@@ -188,6 +185,18 @@ fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
         Some(n) if n > 0 => n.clamp(MIN_EXPIRES_IN_SECS, MAX_EXPIRES_IN_SECS),
         _ => return Err(Error::BadRequest("invalid expires_in".into())),
     };
+    let wireguard_public_key = q
+        .wireguard_public_key
+        .as_deref()
+        .map(|raw| {
+            let key = gateway_common::wireguard::canonical_public_key(raw)
+                .ok_or_else(|| Error::BadRequest("invalid wireguard_public_key".into()))?;
+            if !enrollment_offered {
+                return Err(Error::BadRequest("wireguard enrollment not offered".into()));
+            }
+            Ok(key)
+        })
+        .transpose()?;
     Ok(AuthorizeParams {
         redirect_uri: MOBILE_CALLBACK_URI.to_string(),
         state: q.state,
@@ -195,6 +204,7 @@ fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
         code_challenge: q.code_challenge,
         scopes: vec![MOBILE_ACCOUNT_SCOPE.to_string()],
         expires_in_secs,
+        wireguard_public_key,
     })
 }
 
@@ -208,7 +218,8 @@ pub fn success_url(params: &AuthorizeParams, code: &str) -> String {
 }
 
 /// Build the error callback target carrying `error` and `state` as query
-/// parameters (`account_blocked`, `oauth_denied`, `user_cancelled`).
+/// parameters (`account_blocked`, `oauth_denied`, `user_cancelled`,
+/// `wireguard_enroll_failed`).
 pub fn error_url(params: &AuthorizeParams, reason: &str) -> String {
     let mut query = String::new();
     push_pair(&mut query, "error", reason);
@@ -299,12 +310,25 @@ fn handoff_response(kind: &Handoff, target: &str) -> Response {
         .into_response()
 }
 
+enum Completion {
+    Success(String),
+    WireguardEnrollmentFailed,
+}
+
 async fn complete(
     state: &AppState,
     headers: &HeaderMap,
     params: &AuthorizeParams,
     user: &User,
-) -> Result<String> {
+) -> Result<Completion> {
+    let enrollment = if params.wireguard_public_key.is_some() {
+        let Some(config) = state.cfg.wireguard.as_ref() else {
+            return Ok(Completion::WireguardEnrollmentFailed);
+        };
+        Some(config)
+    } else {
+        None
+    };
     let expires_at: DateTime<Utc> = Utc::now() + chrono::Duration::seconds(params.expires_in_secs);
     let CreatedToken { token, secret } = state
         .api_tokens
@@ -323,6 +347,31 @@ async fn complete(
             tracing::warn!(error = ?e, user = %user.username, "mobile authorize mint failed");
             e
         })?;
+    let wireguard = if let (Some(config), Some(key)) =
+        (enrollment, params.wireguard_public_key.as_deref())
+    {
+        match state
+            .cfg
+            .profile_client
+            .enroll_wireguard_peer(user.id, token.id, key, &config.first().ingress.id)
+            .await
+        {
+            Ok(peer) => Some(config.parameters(peer.addresses)),
+            Err(error) => {
+                tracing::warn!(%error, token_id = %token.id, "mobile WireGuard enrollment failed");
+                if let Err(error) = state
+                    .api_tokens
+                    .revoke(user.id, token.id, &request_meta(headers))
+                    .await
+                {
+                    tracing::error!(%error, token_id = %token.id, "failed to revoke undelivered mobile token");
+                }
+                return Ok(Completion::WireguardEnrollmentFailed);
+            }
+        }
+    } else {
+        None
+    };
     crate::http::register_devserver_row(state, user.id, &secret, &params.label, &params.scopes)
         .await;
     let code = state.mobile_redemptions.insert(
@@ -331,11 +380,11 @@ async fn complete(
             secret,
             label: token.label,
             expires_at: token.expires_at,
-            wireguard: None,
+            wireguard,
         },
         params.code_challenge.clone(),
     );
-    Ok(success_url(params, &code))
+    Ok(Completion::Success(success_url(params, &code)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,6 +418,7 @@ pub async fn redeem(
         secret: payload.secret,
         label: payload.label,
         expires_at: payload.expires_at,
+        wireguard: payload.wireguard,
     }))
 }
 
@@ -379,7 +429,7 @@ pub async fn authorize(
     session: Session,
     Query(q): Query<AuthorizeQuery>,
 ) -> Result<Redirect> {
-    let params = validate(q)?;
+    let params = validate(q, state.cfg.wireguard.is_some())?;
     let uid = current_user_id_optional(&state, &session).await?;
     crate::desktop_authorize::clear_pending(&session).await?;
     session
@@ -426,7 +476,16 @@ pub async fn consent(State(state): State<AppState>, session: Session) -> Result<
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert mobile_csrf: {e}")))?;
 
-    let html = render_consent_html(&params, &user, &csrf);
+    if params.wireguard_public_key.is_some() && state.cfg.wireguard.is_none() {
+        return Err(Error::BadRequest("wireguard enrollment not offered".into()));
+    }
+    let ingresses = state
+        .cfg
+        .wireguard
+        .as_ref()
+        .map(|config| config.ingresses())
+        .unwrap_or_default();
+    let html = render_consent_html(&params, &user, &csrf, ingresses);
     Ok((pages::security_headers(), Html(html)).into_response())
 }
 
@@ -474,8 +533,13 @@ pub async fn confirm(
                     &error_url(&params, "account_blocked"),
                 ));
             }
-            let url = complete(&state, &headers, &params, &user).await?;
-            Ok(handoff_response(&Handoff::Success, &url))
+            Ok(match complete(&state, &headers, &params, &user).await? {
+                Completion::Success(url) => handoff_response(&Handoff::Success, &url),
+                Completion::WireguardEnrollmentFailed => handoff_response(
+                    &Handoff::Error,
+                    &error_url(&params, "wireguard_enroll_failed"),
+                ),
+            })
         }
         "deny" => Ok(handoff_response(
             &Handoff::Cancelled,
@@ -485,7 +549,12 @@ pub async fn confirm(
     }
 }
 
-fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> String {
+fn render_consent_html(
+    params: &AuthorizeParams,
+    user: &User,
+    csrf: &str,
+    ingresses: &[crate::wireguard::IngressRoutes],
+) -> String {
     let display = user
         .display_name
         .as_deref()
@@ -493,6 +562,29 @@ fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> Str
         .unwrap_or(&user.username);
     let scopes = params.scopes.join(", ");
     let expires_phrase = humanize_expires(params.expires_in_secs);
+    let (wireguard_rows, wireguard_blurb) = match (&params.wireguard_public_key, ingresses) {
+        (Some(key), [_, ..]) => {
+            let mut rows = format!("      <div class=\"row\"><span class=\"k\">WireGuard key</span><span class=\"v\" style=\"font-family:monospace\">{}</span></div>\n", pages::html_escape(key));
+            // The id sits in the value cell, which wraps a long word; the
+            // label cell does not.
+            for route in ingresses {
+                rows.push_str(&format!(
+                    "      <div class=\"row\"><span class=\"k\">WireGuard ingress</span><span class=\"v\">{} at {}</span></div>\n",
+                    pages::html_escape(&route.ingress.id),
+                    pages::html_escape(&route.ingress.endpoint),
+                ));
+            }
+            let enrolled_with = match ingresses.len() {
+                1 => "the gateway's WireGuard ingress listed above; revoking the token removes it".to_owned(),
+                count => format!("the gateway's {count} WireGuard ingresses listed above; revoking the token removes it from all of them"),
+            };
+            (
+                rows,
+                format!("<p class=\"muted\">Approving also enrolls the device's WireGuard key with {enrolled_with}.</p>\n    "),
+            )
+        }
+        _ => (String::new(), String::new()),
+    };
     let body = format!(
         r#"
     <span class="mark" aria-hidden="true"></span>
@@ -504,8 +596,8 @@ fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> Str
       <div class="row"><span class="k">Calls itself</span><span class="v">{label}</span></div>
       <div class="row"><span class="k">Scopes</span><span class="v">{scopes}</span></div>
       <div class="row"><span class="k">Expires in</span><span class="v">{expires_phrase}</span></div>
-    </div>
-    <p class="muted small">It will receive the result in the Chan app at chan://auth/callback.</p>
+{wireguard_rows}    </div>
+    {wireguard_blurb}<p class="muted small">It will receive the result in the Chan app at chan://auth/callback.</p>
     <form method="post" action="/mobile/authorize/confirm">
       <input type="hidden" name="csrf" value="{csrf}">
       <button class="btn" type="submit" name="action" value="deny">Cancel</button>
@@ -542,6 +634,7 @@ mod tests {
             code_challenge: RFC_CHALLENGE.into(),
             scopes: vec!["mobile.account".into()],
             expires_in_secs: 30 * 86_400,
+            wireguard_public_key: None,
         }
     }
 
@@ -646,7 +739,7 @@ mod tests {
     fn validates_mobile_query_and_normalizes_redirect_uri() {
         let mut q = base_query();
         q.redirect_uri = "chan://@auth:/callback".into();
-        let p = validate(q).unwrap();
+        let p = validate(q, false).unwrap();
         assert_eq!(p.redirect_uri, "chan://auth/callback");
         assert_eq!(p.scopes, vec!["mobile.account".to_string()]);
         assert_eq!(p.expires_in_secs, 2_592_000);
@@ -666,28 +759,55 @@ mod tests {
         ] {
             let mut q = base_query();
             q.redirect_uri = bad.into();
-            assert!(validate(q).is_err(), "{bad:?} should reject");
+            assert!(validate(q, false).is_err(), "{bad:?} should reject");
         }
     }
 
     #[test]
-    fn validate_rejects_wireguard_public_key_explicitly() {
-        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
-        for supplied in [key, String::new(), "not-a-key".into()] {
-            let mut q = base_query();
-            q.wireguard_public_key = Some(supplied);
-            assert!(matches!(
-                validate(q),
-                Err(Error::BadRequest(msg)) if msg == "wireguard enrollment not supported on mobile"
-            ));
+    fn validates_wireguard_public_key() {
+        let key = base64::engine::general_purpose::STANDARD.encode([7; 32]);
+        for invalid in [
+            key[..43].to_owned(),
+            format!("{key}="),
+            "!".repeat(44),
+            base64::engine::general_purpose::STANDARD.encode([7; 31]),
+        ] {
+            let mut query = base_query();
+            query.wireguard_public_key = Some(invalid);
+            assert!(
+                matches!(validate(query, true), Err(Error::BadRequest(message)) if message == "invalid wireguard_public_key")
+            );
         }
+        let mut query = base_query();
+        query.wireguard_public_key = Some(key.clone());
+        assert!(
+            matches!(validate(query, false), Err(Error::BadRequest(message)) if message == "wireguard enrollment not offered")
+        );
+        let mut query = base_query();
+        query.wireguard_public_key = Some(key.clone());
+        let params = validate(query, true).unwrap();
+        assert_eq!(params.wireguard_public_key.as_ref(), Some(&key));
+        let mut stored = serde_json::to_value(params).unwrap();
+        assert_eq!(stored["wireguard_public_key"], key);
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("wireguard_public_key");
+        assert!(serde_json::from_value::<AuthorizeParams>(stored)
+            .unwrap()
+            .wireguard_public_key
+            .is_none());
+        assert!(validate(base_query(), false)
+            .unwrap()
+            .wireguard_public_key
+            .is_none());
     }
 
     #[test]
     fn validate_accepts_only_sole_mobile_account_scope() {
         let mut ok = base_query();
         ok.scopes = Some(" mobile.account ".into());
-        assert_eq!(validate(ok).unwrap().scopes, vec!["mobile.account"]);
+        assert_eq!(validate(ok, false).unwrap().scopes, vec!["mobile.account"]);
 
         for bad in [
             None,
@@ -708,7 +828,7 @@ mod tests {
             q.scopes = bad.clone();
             assert!(
                 matches!(
-                    validate(q),
+                    validate(q, false),
                     Err(Error::BadRequest(msg)) if msg == "invalid scopes"
                 ),
                 "{bad:?} should reject"
@@ -721,7 +841,7 @@ mod tests {
         for ok in ["!".to_string(), "x".repeat(MAX_STATE_LEN)] {
             let mut q = base_query();
             q.state = ok.clone();
-            assert_eq!(validate(q).unwrap().state, ok);
+            assert_eq!(validate(q, false).unwrap().state, ok);
         }
         for bad in [
             String::new(),
@@ -736,7 +856,7 @@ mod tests {
             let mut q = base_query();
             q.state = bad.clone();
             assert!(
-                matches!(validate(q), Err(Error::BadRequest(msg)) if msg == "invalid state"),
+                matches!(validate(q, false), Err(Error::BadRequest(msg)) if msg == "invalid state"),
                 "{bad:?} should reject"
             );
         }
@@ -746,17 +866,17 @@ mod tests {
     fn validate_enforces_trimmed_label_bounds() {
         let mut q = base_query();
         q.label = "  iPhone  ".into();
-        assert_eq!(validate(q).unwrap().label, "iPhone");
+        assert_eq!(validate(q, false).unwrap().label, "iPhone");
 
         let mut max_q = base_query();
         max_q.label = "a".repeat(64);
-        assert_eq!(validate(max_q).unwrap().label.len(), 64);
+        assert_eq!(validate(max_q, false).unwrap().label.len(), 64);
 
         for bad in [String::new(), "   ".into(), "a".repeat(65)] {
             let mut q = base_query();
             q.label = bad.clone();
             assert!(
-                matches!(validate(q), Err(Error::BadRequest(msg)) if msg == "invalid label"),
+                matches!(validate(q, false), Err(Error::BadRequest(msg)) if msg == "invalid label"),
                 "{bad:?} should reject"
             );
         }
@@ -768,7 +888,7 @@ mod tests {
             let mut q = base_query();
             q.expires_in = bad;
             assert!(
-                matches!(validate(q), Err(Error::BadRequest(msg)) if msg == "invalid expires_in"),
+                matches!(validate(q, false), Err(Error::BadRequest(msg)) if msg == "invalid expires_in"),
                 "{bad:?} should reject"
             );
         }
@@ -784,7 +904,11 @@ mod tests {
         ] {
             let mut q = base_query();
             q.expires_in = Some(input);
-            assert_eq!(validate(q).unwrap().expires_in_secs, expected, "{input}");
+            assert_eq!(
+                validate(q, false).unwrap().expires_in_secs,
+                expected,
+                "{input}"
+            );
         }
     }
 
@@ -793,7 +917,7 @@ mod tests {
         for bad_method in ["plain", "s256", "S384", ""] {
             let mut q = base_query();
             q.code_challenge_method = bad_method.into();
-            assert!(validate(q).is_err(), "{bad_method}");
+            assert!(validate(q, false).is_err(), "{bad_method}");
         }
         for bad_challenge in [
             String::new(),
@@ -805,7 +929,7 @@ mod tests {
         ] {
             let mut q = base_query();
             q.code_challenge = bad_challenge.clone();
-            assert!(validate(q).is_err(), "{bad_challenge}");
+            assert!(validate(q, false).is_err(), "{bad_challenge}");
         }
     }
 
@@ -861,7 +985,7 @@ mod tests {
         let mut user = consent_user();
         user.display_name = Some("<b>Alice</b>".into());
 
-        let html = render_consent_html(&p, &user, "csrf-token");
+        let html = render_consent_html(&p, &user, "csrf-token", &[]);
         assert!(
             html.contains("<title>Authorize a mobile app</title>"),
             "{html}"
@@ -920,12 +1044,42 @@ mod tests {
     }
 
     #[test]
+    fn consent_html_escapes_the_key_and_lists_every_ingress() {
+        let mut p = params();
+        p.wireguard_public_key = Some("<key & 'quoted'>".into());
+        let ingress = |id: &str, endpoint: &str| crate::wireguard::IngressRoutes {
+            ingress: gateway_common::wireguard::Ingress {
+                id: id.into(),
+                endpoint: endpoint.into(),
+                public_key: String::new(),
+            },
+            hosts: Vec::new(),
+        };
+        let ingresses = [
+            ingress("<id\">", "<endpoint&>:51820"),
+            ingress("second", "second.example:51820"),
+        ];
+        let html = render_consent_html(&p, &consent_user(), "csrf-token", &ingresses);
+        assert!(html.contains("&lt;key &amp; &#39;quoted&#39;&gt;"));
+        assert!(html.contains("&lt;id&quot;&gt; at &lt;endpoint&amp;&gt;:51820"));
+        assert!(html.contains("second at second.example:51820"));
+        assert!(html.contains("gateway's 2 WireGuard ingresses"));
+        assert!(html.contains("device's WireGuard key"));
+        for raw in ["<key", "<id", "<endpoint"] {
+            assert!(!html.contains(raw));
+        }
+        let without_key = render_consent_html(&params(), &consent_user(), "csrf-token", &ingresses);
+        assert!(!without_key.contains("WireGuard"));
+    }
+
+    #[test]
     fn mobile_redeem_payload_omits_wireguard_and_preserves_null_expires_at() {
         let wire = serde_json::to_value(MobileRedeemPayload {
             id: Uuid::nil(),
             secret: "chan_pat_AAAA".into(),
             label: "iphone".into(),
             expires_at: None,
+            wireguard: None,
         })
         .unwrap();
         assert_eq!(

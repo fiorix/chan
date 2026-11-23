@@ -37,9 +37,8 @@ serde_json = { workspace = true }
 # The workspace library: config paths, the library registry the embedded
 # host opens, and atomic file writes for the config store.
 chan-workspace = { workspace = true, default-features = false }
-# The wg-quick reader src/config.rs validates gateway tunnel files
-# with, shared with the desktop. No fabric runs on iOS; the file is
-# validated and stored, never adopted.
+# Userspace tunnels and the stable loopback proxy shared by native HTTP
+# and the WebView. No operating-system VPN interface is installed.
 chan-wireguard = { workspace = true }
 # WireGuard enrollment helpers in src/config.rs: base64 key encoding,
 # SHA-256 file digests, and OS randomness for key generation.
@@ -72,7 +71,7 @@ tokio-util = { workspace = true }
 # targets. `NSURL` reaches auth's authorize URL, `NSNotificationCenter`
 # its lifecycle observer.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSHTTPCookie", "NSEnumerator", "NSError", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
 # Blocks for the authentication session's completion handler. The
 # version wry already links, so Cargo builds no second copy.
 block2 = "0.6"

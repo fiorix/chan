@@ -10,6 +10,7 @@
 //! lifecycle) and is not carried here.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::{ConfigStore, DevserverRemoveHook, GatewayRemoveHook};
@@ -26,6 +27,8 @@ pub type DevserverReconnectHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// Process-wide state. Shared via `Arc` because Tauri commands and
 /// background runtime owners need the same state handle.
 pub struct AppState {
+    pub(crate) selected_wireguard: Mutex<Option<crate::wireguard::Selected>>,
+    pub(crate) navigation_epoch: AtomicU64,
     /// Shared config handle. An `Arc<Mutex<...>>` (not a bare `Mutex`)
     /// so the launcher's config registries, installed into the embedded
     /// host, write the SAME config the app's own commands read: every
@@ -69,6 +72,10 @@ pub struct AppState {
     /// tear it down, while a connect that starts later observes the
     /// revoked policy before any entry or capability work.
     native_policy_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// WebKit writes can finish after their caller times out. Exact-origin
+    /// serialization survives replacement of the native connection.
+    #[cfg(any(target_os = "ios", test))]
+    native_cookie_writers: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Monotonic policy generation per synthesized row. Connect
     /// captures it before entry work and rechecks it immediately
     /// before registration; trust revocation and roster invalidation
@@ -122,6 +129,8 @@ impl AppState {
     /// devserver flows.
     pub(crate) fn with_store(store: Arc<Mutex<ConfigStore>>) -> Self {
         Self {
+            selected_wireguard: Mutex::new(None),
+            navigation_epoch: AtomicU64::new(0),
             store,
             embedded: OnceLock::new(),
             devservers: Arc::new(DevserverConns::default()),
@@ -130,6 +139,8 @@ impl AppState {
             control_terminal_runs: Mutex::new(HashMap::new()),
             control_terminal_dead: Mutex::new(HashSet::new()),
             native_policy_locks: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "ios", test))]
+            native_cookie_writers: Mutex::new(HashMap::new()),
             native_policy_generations: Mutex::new(HashMap::new()),
             devserver_remove_hook: Arc::new(OnceLock::new()),
             devserver_reconnect_hook: Arc::new(OnceLock::new()),
@@ -156,13 +167,42 @@ impl AppState {
         )
     }
 
+    #[cfg(any(target_os = "ios", test))]
+    pub(crate) fn cookie_writer(
+        &self,
+        origin: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        let writer = Arc::clone(
+            self.native_cookie_writers
+                .lock()
+                .unwrap()
+                .entry(origin.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        );
+        writer
+            .try_lock_owned()
+            .map_err(|_| "a previous gateway cookie write is still pending; connect again".into())
+    }
+
     pub(crate) fn native_policy_generation(&self, id: &str) -> u64 {
-        self.native_policy_generations
+        *self
+            .native_policy_generations
             .lock()
             .unwrap()
-            .get(id)
-            .copied()
-            .unwrap_or(0)
+            .entry(id.to_string())
+            .or_insert(0)
+    }
+
+    pub(crate) fn invalidate_gateway_native(&self, gateway: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (id, generation) in self.native_policy_generations.lock().unwrap().iter_mut() {
+            if crate::gateway::parse_synthesized_id(id).is_some_and(|(held, _, _)| held == gateway)
+            {
+                *generation += 1;
+                ids.push(id.clone());
+            }
+        }
+        ids
     }
 
     pub(crate) fn bump_native_policy_generation(&self, id: &str) -> u64 {

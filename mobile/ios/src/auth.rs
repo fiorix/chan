@@ -21,13 +21,11 @@
 //! `{code, code_verifier}` for the PAT (`POST /mobile/authorize/redeem`
 //! against the identity origin held in the slot, never one named by the
 //! callback URL), commits the PAT under the connect attempt's credential
-//! lock, and continues that same attempt. The commit keeps the PAT or
-//! nothing: a refused answer, a failed store, and a cancel (before the
-//! commit, or during it, which then undoes it, putting back the token
-//! it replaced, unless a replacing connect waits for the PAT) keep
-//! nothing of this sign-in, and its PAT is then revoked at the identity
-//! origin (`DELETE /mobile/v1/token`), with itself as the bearer. Only a
-//! current attempt emits `auth-changed` or `auth-error`.
+//! lock, and continues that same attempt. An unkept credential receives an
+//! awaited bounded self-revoke at `DELETE /mobile/v1/token`. Once validated
+//! parameters and PAT are durably kept, clearing enrollment uncertainty is
+//! activation: a clear failure parks this callback without giving back its
+//! stored credential. Only a current attempt emits auth state changes.
 //!
 //! PKCE (RFC 7636, S256): the `code_verifier` is 32 CSPRNG bytes
 //! encoded base64url-no-pad to a 43-char ASCII string; that STRING is
@@ -62,7 +60,14 @@ use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
 use tokio::sync::watch;
 
-use crate::gateway::GatewayAttempt;
+use crate::gateway::{CredentialOutcome, GatewayAttempt};
+
+#[derive(Clone)]
+struct Enrolling {
+    marker: crate::config::PendingEnrollment,
+    key_file: std::path::PathBuf,
+    entry: crate::devserver::WireguardDiscovery,
+}
 
 #[derive(Clone)]
 struct GatewaySignin {
@@ -89,6 +94,8 @@ pub(super) struct SigninTestHooks {
     pub before_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs inside the credential commit, under its lock, before any write.
     pub commit_started: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub before_decision: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub activation_started: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Event emitted after a successful gateway sign-in callback. The launcher
@@ -183,6 +190,7 @@ struct PendingAuth {
     /// `Debug` so it never reaches a log line; its only wire appearance
     /// is the redeem POST body.
     code_verifier: String,
+    enrolling: Option<Enrolling>,
     /// When this slot was installed. The expiry timer and the callback
     /// path treat a slot older than [`SLOT_TTL`] as absent.
     created_at: Instant,
@@ -490,7 +498,17 @@ fn launch_signin<R: tauri::Runtime>(
     let port = 0u16;
     let label = format!("chan-ios @ {}", hostname());
     let redirect_uri = crate::mobile_auth::MOBILE_REDIRECT_URI.to_string();
-    let url = authorize_url(discovery, &redirect_uri, &state_nonce, label, challenge)?;
+    let enrolling = enrolling_key(app_state, id, discovery, attempt, &state_nonce)?;
+    let url = authorize_url(
+        discovery,
+        &redirect_uri,
+        &state_nonce,
+        label,
+        challenge,
+        enrolling
+            .as_ref()
+            .map(|enrolling| enrolling.marker.public_key.as_str()),
+    )?;
     let gateway = GatewaySignin {
         id: id.into(),
         attempt: Arc::clone(attempt),
@@ -502,6 +520,7 @@ fn launch_signin<R: tauri::Runtime>(
         identity_origin: discovery.identity_origin.clone(),
         gateway: gateway.clone(),
         code_verifier: verifier,
+        enrolling,
         created_at: Instant::now(),
         shutdown: shutdown_tx,
         port,
@@ -535,18 +554,130 @@ fn launch_signin<R: tauri::Runtime>(
     }
 }
 
+fn enrolling_key(
+    state: &crate::AppState,
+    id: &str,
+    discovery: &crate::devserver::GatewayDiscovery,
+    attempt: &Arc<GatewayAttempt>,
+    attempt_id: &str,
+) -> Result<Option<Enrolling>, String> {
+    attempt.prepare_credentials(|| {
+        let mut store = state.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        let gateway = cfg
+            .gateways
+            .iter_mut()
+            .find(|gateway| gateway.id == id)
+            .ok_or("gateway was removed")?;
+        if gateway.wireguard.is_some() || gateway.wireguard_public_key.is_none() {
+            return Ok(None);
+        }
+        let entry = discovery
+            .wireguard
+            .as_ref()
+            .filter(|entry| entry.mobile_enrollment)
+            .ok_or("this gateway does not support mobile WireGuard enrollment")?;
+        entry.validate()?;
+        let fabric = state
+            .gateway_manager
+            .fabric
+            .get()
+            .ok_or("WireGuard: transport is unavailable")?;
+        fabric.capability()?;
+        let public_key = gateway
+            .wireguard_public_key
+            .clone()
+            .expect("selected key checked");
+        if gateway
+            .wireguard_pending_enrollment
+            .as_ref()
+            .is_some_and(|pending| pending.public_key == public_key)
+        {
+            return Err(crate::wireguard_keys::FRESH_KEY_REQUIRED.into());
+        }
+        validate_enrollment_offer(entry)?;
+        let key_file = crate::wireguard_keys::selected_path(&store.wireguard_dir(), gateway)?;
+        let key = crate::wireguard_keys::read_key_file(&key_file)?;
+        if base64::engine::general_purpose::STANDARD
+            .encode(chan_wireguard::x25519::PublicKey::from(&key).as_bytes())
+            != public_key
+        {
+            return Err("WireGuard: the selected key file changed; generate a fresh key".into());
+        }
+        let marker = crate::config::PendingEnrollment {
+            attempt_id: attempt_id.into(),
+            public_key,
+        };
+        gateway.wireguard_pending_enrollment = Some(marker.clone());
+        if let (Some(ingresses), Some(networks)) = (&entry.ingresses, &entry.allowed_ips) {
+            gateway
+                .wireguard_protection
+                .retain(&crate::config::WireguardProtection {
+                    hosts: ingresses
+                        .iter()
+                        .flat_map(|ingress| ingress.hosts.iter().map(|host| host.name.clone()))
+                        .collect(),
+                    networks: networks.clone(),
+                });
+        }
+        let prepared = crate::wireguard::prepare(gateway);
+        prepared.validate()?;
+        gateway.wireguard_protection = prepared.protection.clone();
+        let gateway = gateway.clone();
+        if let Err(error) = store.save(&cfg) {
+            let _ = fabric.deny(id);
+            if let Some(invalidate) = state.gateway_manager.transport_invalidate.get() {
+                invalidate(id);
+            }
+            return Err(error.to_string());
+        }
+        if let Some(invalidate) = state.gateway_manager.transport_invalidate.get() {
+            invalidate(id);
+        }
+        fabric.reconcile(&gateway, prepared)?;
+        Ok(Some(Enrolling {
+            marker,
+            key_file,
+            entry: entry.clone(),
+        }))
+    })
+}
+
+fn validate_enrollment_offer(entry: &crate::devserver::WireguardDiscovery) -> Result<(), String> {
+    let networks = entry
+        .allowed_ips
+        .as_deref()
+        .and_then(crate::wireguard_keys::cidrs)
+        .filter(|networks| !networks.is_empty());
+    let Some(networks) = networks.filter(|_| {
+        entry.ingresses.as_ref().is_some_and(|ingresses| {
+            !ingresses.is_empty() && ingresses.iter().all(|ingress| !ingress.hosts.is_empty())
+        })
+    }) else {
+        return Err(
+            "the gateway's mobile WireGuard offer must include ingress host maps and AllowedIPs"
+                .into(),
+        );
+    };
+    if networks.iter().any(|network| network.prefix == 0) {
+        return Err("automatic mobile WireGuard enrollment does not support default routes; the gateway must advertise narrower routes for its ingress addresses".into());
+    }
+    Ok(())
+}
+
 /// The gateway's mobile authorize page with the sign-in's parameters:
 /// `redirect_uri` is `chan://auth/callback`, `scopes` is `mobile.account`,
-/// and PKCE, label, and expiry ride alongside them. No WireGuard key
-/// rides: this leg enrolls nothing.
+/// and PKCE, label, and expiry ride alongside them. Only an explicitly
+/// supported mobile enrollment carries the selected public key.
 fn authorize_url(
     discovery: &crate::devserver::GatewayDiscovery,
     redirect_uri: &str,
     state_nonce: &str,
     label: String,
     challenge: String,
+    wireguard_public_key: Option<&str>,
 ) -> Result<url::Url, String> {
-    let params = vec![
+    let mut params = vec![
         ("redirect_uri", redirect_uri.to_string()),
         ("state", state_nonce.to_string()),
         ("label", label),
@@ -555,6 +686,14 @@ fn authorize_url(
         ("scopes", MOBILE_ACCOUNT_SCOPES.to_string()),
         ("expires_in", EXPIRES_IN_SECONDS.to_string()),
     ];
+    if let Some(key) = wireguard_public_key.filter(|_| {
+        discovery
+            .wireguard
+            .as_ref()
+            .is_some_and(|entry| entry.mobile_enrollment)
+    }) {
+        params.push(("wireguard_public_key", key.to_string()));
+    }
     url::Url::parse_with_params(&discovery.mobile_authorize_url, &params)
         .map_err(|e| format!("building authorize URL: {e}"))
 }
@@ -586,6 +725,8 @@ enum CallbackAction {
         code_verifier: String,
         identity_origin: String,
         account: String,
+        enrolling: Option<Box<Enrolling>>,
+        redemption: crate::gateway::RedemptionGuard,
         gateway: GatewaySignin,
         /// The taken slot's listener shutdown, fired once this callback
         /// owns the flow.
@@ -673,11 +814,17 @@ fn classify_callback(query: &str, pending: &mut Option<PendingAuth>) -> Callback
             shutdown: expected.shutdown,
         };
     }
+    let Some(redemption) = expected.gateway.attempt.begin_redemption() else {
+        let _ = expected.shutdown.send(true);
+        return CallbackAction::Ignore;
+    };
     CallbackAction::Redeem {
         code,
         code_verifier: expected.code_verifier,
         identity_origin: expected.identity_origin,
         account: expected.account,
+        enrolling: expected.enrolling.map(Box::new),
+        redemption,
         gateway: expected.gateway,
         shutdown: expected.shutdown,
     }
@@ -705,9 +852,12 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             code_verifier,
             identity_origin,
             account,
+            enrolling,
+            redemption,
             gateway,
             shutdown,
         } => {
+            let enrolling = enrolling.map(|value| *value);
             let _ = shutdown.send(true);
             gateway.attempt.accept_callback();
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
@@ -716,7 +866,7 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             // nobody can revoke. A cancelled attempt's commit refuses below,
             // and that refusal revokes the token. The redeem's own timeout
             // bounds the wait.
-            let redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
+            let mut redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
                 Ok(redeemed) => redeemed,
                 Err(RedeemError { message, minted }) => {
                     if let Some(minted) = &minted {
@@ -727,9 +877,27 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                     return;
                 }
             };
-            // The redeem answer's WireGuard parameters are ignored on
-            // this leg: no key was sent, so nothing enrolls.
-            let _ = &redeemed.wireguard;
+            let enrollment = match prepare_enrollment(
+                &state,
+                &gateway.id,
+                enrolling.as_ref(),
+                redeemed.wireguard.take(),
+            )
+            .await
+            {
+                Ok(enrollment) => enrollment,
+                Err(error) => {
+                    revoke_unkept(
+                        &gateway.id,
+                        &identity_origin,
+                        &redeemed.id,
+                        &redeemed.secret,
+                    )
+                    .await;
+                    fail_signin(&app, &state, &gateway, &error);
+                    return;
+                }
+            };
             let pat = StoredPat {
                 id: redeemed.id,
                 secret: redeemed.secret,
@@ -743,6 +911,9 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                 account,
                 pat: pat.clone(),
                 prior_pat: None,
+                enrolling,
+                enrollment,
+                recorded: None,
                 #[cfg(test)]
                 attempt: Arc::clone(&gateway.attempt),
             };
@@ -752,8 +923,8 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                 hook();
             }
             // Once this worker starts, join it even after cancellation: a
-            // commit is never abandoned midway, and one a cancel lands in is
-            // undone inside it. The worker logs to this task's subscriber,
+            // commit is never abandoned midway. Cancellation before its kept
+            // decision undoes owned writes. The worker logs to this task's subscriber,
             // where the sign-in's own lines go.
             let dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
             let committed = tokio::task::spawn_blocking(move || {
@@ -761,9 +932,20 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                 attempt.commit_credentials(&mut writes)
             })
             .await
-            .unwrap_or_else(|e| Err(format!("storing gateway credentials: {e}")));
+            .unwrap_or_else(|error| {
+                if gateway.attempt.credentials_kept() {
+                    Ok(CredentialOutcome::Kept {
+                        activation: Err(format!("activating stored gateway credentials: {error}")),
+                    })
+                } else {
+                    Err(format!("storing gateway credentials: {error}"))
+                }
+            });
             match committed {
-                Ok(true) => {
+                Ok(CredentialOutcome::Kept { activation: Ok(()) }) => {
+                    // A kept credential no longer needs compensation. Release
+                    // its redemption fence before connection teardown can wait.
+                    drop(redemption);
                     crate::gateway::resume_gateway_signin(
                         app,
                         state,
@@ -773,9 +955,16 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                     )
                     .await
                 }
-                // Cancelled before the commit or undone after it: nothing of
-                // this sign-in is kept, and the cancel's owner reports the row.
-                Ok(false) => {
+                Ok(CredentialOutcome::Kept {
+                    activation: Err(error),
+                }) => {
+                    drop(redemption);
+                    let message = format!("sign-in stored; WireGuard activation failed: {error}");
+                    fail_signin(&app, &state, &gateway, &message);
+                }
+                // A pre-decision cancellation keeps no credential; its owner
+                // reports the row after this bounded compensation finishes.
+                Ok(CredentialOutcome::Unkept) => {
                     tracing::info!(
                         gateway = %gateway.id,
                         "gateway sign-in cancelled; its credentials are not kept",
@@ -801,8 +990,8 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
     }
 }
 
-/// One credential commit: the token alone on this leg. Undo restores
-/// the prior token while this commit still owns it.
+/// Public enrollment and PAT are kept together. The durable uncertainty
+/// marker remains until both stores have accepted the owned commit.
 struct SigninWrites {
     state: Arc<crate::AppState>,
     gateway_id: String,
@@ -811,6 +1000,9 @@ struct SigninWrites {
     pat: StoredPat,
     /// The token the store held before this commit, once read.
     prior_pat: Option<Option<StoredPat>>,
+    enrolling: Option<Enrolling>,
+    enrollment: Option<crate::config::WireguardEnrollment>,
+    recorded: Option<(crate::config::Gateway, crate::config::Gateway)>,
     #[cfg(test)]
     attempt: Arc<GatewayAttempt>,
 }
@@ -829,7 +1021,10 @@ impl crate::gateway::CredentialWrites for SigninWrites {
             hook();
         }
         self.prior_pat = Some(read_stored_pat(&self.identity_origin)?);
-        self.store()?;
+        if let Err(error) = self.record_enrollment().and_then(|()| self.store()) {
+            self.undo();
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -837,7 +1032,7 @@ impl crate::gateway::CredentialWrites for SigninWrites {
         // The token goes back to what the store held before, unless a later
         // commit has stored its own since.
         match read_stored_pat(&self.identity_origin) {
-            Ok(Some(stored)) if stored.id == self.pat.id => {
+            Ok(Some(stored)) if stored.id == self.pat.id && stored.secret == self.pat.secret => {
                 let prior = self.prior_pat.take().flatten();
                 if let Err(error) =
                     put_back_gateway_pat(&self.identity_origin, &self.account, prior.as_ref())
@@ -856,6 +1051,66 @@ impl crate::gateway::CredentialWrites for SigninWrites {
                 "reading the credential store to undo a sign-in failed",
             ),
         }
+        self.undo_enrollment();
+    }
+
+    fn decide_keep(&mut self, decide: impl FnOnce() -> bool) -> Result<bool, String> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .attempt
+            .signin_hooks
+            .before_decision
+            .lock()
+            .unwrap()
+            .take()
+        {
+            hook();
+        }
+        let store = self.state.store.lock().unwrap();
+        let cfg = store.get().map_err(|error| error.to_string())?;
+        let Some(row) = cfg.gateways.iter().find(|row| row.id == self.gateway_id) else {
+            return Ok(false);
+        };
+        if let Some((_, written)) = &self.recorded {
+            if !self.owns_enrollment(row, written) {
+                return Err("WireGuard: enrollment was superseded".into());
+            }
+        }
+        let pat = read_stored_pat(&self.identity_origin)?
+            .ok_or("stored gateway credential disappeared")?;
+        if pat.id != self.pat.id || pat.secret != self.pat.secret {
+            return Err("stored gateway credential was superseded".into());
+        }
+        Ok(decide())
+    }
+
+    fn activate(&mut self) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .attempt
+            .signin_hooks
+            .activation_started
+            .lock()
+            .unwrap()
+            .take()
+        {
+            hook();
+        }
+        let Some((_, written)) = &self.recorded else {
+            return Ok(());
+        };
+        let mut store = self.state.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|error| error.to_string())?;
+        let row = cfg
+            .gateways
+            .iter_mut()
+            .find(|row| row.id == self.gateway_id)
+            .ok_or("gateway was removed")?;
+        if !self.owns_enrollment(row, written) {
+            return Err("WireGuard: enrollment was superseded".into());
+        }
+        row.wireguard_pending_enrollment = None;
+        store.save(&cfg).map_err(|error| error.to_string())
     }
 
     fn abandoned(&self) -> bool {
@@ -869,6 +1124,87 @@ impl crate::gateway::CredentialWrites for SigninWrites {
 }
 
 impl SigninWrites {
+    fn owns_enrollment(
+        &self,
+        row: &crate::config::Gateway,
+        written: &crate::config::Gateway,
+    ) -> bool {
+        row.wireguard == written.wireguard
+            && row.wireguard_public_key == written.wireguard_public_key
+            && row.wireguard_key_file == written.wireguard_key_file
+            && row.wireguard_enrolled_key == written.wireguard_enrolled_key
+            && row.wireguard_enrollment == written.wireguard_enrollment
+            && row.wireguard_pending_enrollment == written.wireguard_pending_enrollment
+    }
+
+    fn record_enrollment(&mut self) -> Result<(), String> {
+        let (Some(enrolling), Some(enrollment)) = (&self.enrolling, &self.enrollment) else {
+            return Ok(());
+        };
+        let mut store = self.state.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|error| error.to_string())?;
+        let row = cfg
+            .gateways
+            .iter_mut()
+            .find(|row| row.id == self.gateway_id)
+            .ok_or("gateway was removed")?;
+        if row.wireguard.is_some()
+            || row.wireguard_public_key.as_ref() != Some(&enrolling.marker.public_key)
+            || crate::wireguard_keys::selected_path(&store.wireguard_dir(), row)?
+                != enrolling.key_file
+            || row.wireguard_pending_enrollment.as_ref() != Some(&enrolling.marker)
+        {
+            return Err("WireGuard: enrollment was superseded".into());
+        }
+        enrollment.configs(&enrolling.marker.public_key)?;
+        let before = row.clone();
+        row.wireguard_enrolled_key = Some(enrolling.marker.public_key.clone());
+        row.wireguard_enrollment = Some(enrollment.clone());
+        let prepared = crate::wireguard::prepare(row);
+        prepared.validate()?;
+        row.wireguard_protection = prepared.protection;
+        self.recorded = Some((before, row.clone()));
+        store.save(&cfg).map_err(|error| error.to_string())
+    }
+
+    fn undo_enrollment(&mut self) {
+        let Some((before, written)) = &self.recorded else {
+            return;
+        };
+        let restore = || -> Result<(), String> {
+            let mut store = self.state.store.lock().unwrap();
+            let mut cfg = store.get().map_err(|error| error.to_string())?;
+            let Some(row) = cfg
+                .gateways
+                .iter_mut()
+                .find(|row| row.id == self.gateway_id)
+            else {
+                return Ok(());
+            };
+            if !self.owns_enrollment(row, written) {
+                return Ok(());
+            }
+            row.wireguard_enrolled_key = before.wireguard_enrolled_key.clone();
+            row.wireguard_enrollment = before.wireguard_enrollment.clone();
+            // Remote enrollment may already have rebound a previous peer.
+            // Retain uncertainty even when restoring its local parameters.
+            row.wireguard_pending_enrollment = written.wireguard_pending_enrollment.clone();
+            let saved = store.save(&cfg).map_err(|error| error.to_string());
+            // The ownership check and denial share the store guard, so an
+            // old rollback cannot revoke a newer manual transport source.
+            let denied = self
+                .state
+                .gateway_manager
+                .fabric
+                .get()
+                .map_or(Ok(()), |fabric| fabric.deny(&self.gateway_id));
+            saved.and(denied)
+        };
+        if let Err(error) = restore() {
+            tracing::warn!(gateway = %self.gateway_id, %error, "restoring an unkept WireGuard enrollment failed");
+        }
+    }
+
     fn store(&self) -> Result<(), String> {
         #[cfg(test)]
         if let Some(store) = self.attempt.signin_hooks.store.lock().unwrap().take() {
@@ -876,6 +1212,49 @@ impl SigninWrites {
         }
         store_for(&self.account, &self.pat)
     }
+}
+
+async fn prepare_enrollment(
+    state: &crate::AppState,
+    id: &str,
+    enrolling: Option<&Enrolling>,
+    params: Option<crate::wireguard_keys::EnrollmentParams>,
+) -> Result<Option<crate::config::WireguardEnrollment>, String> {
+    let Some(enrolling) = enrolling else {
+        return Ok(None);
+    };
+    let params =
+        params.ok_or("sign-in failed: the gateway returned no WireGuard parameters for the key")?;
+    let url = {
+        let store = state.store.lock().unwrap();
+        let cfg = store.get().map_err(|error| error.to_string())?;
+        let row = cfg
+            .gateways
+            .iter()
+            .find(|row| row.id == id)
+            .ok_or("gateway was removed")?;
+        if row.wireguard_pending_enrollment.as_ref() != Some(&enrolling.marker)
+            || row.wireguard_public_key.as_ref() != Some(&enrolling.marker.public_key)
+            || crate::wireguard_keys::selected_path(&store.wireguard_dir(), row)?
+                != enrolling.key_file
+        {
+            return Err("WireGuard: enrollment was superseded".into());
+        }
+        row.url.clone()
+    };
+    let current = crate::devserver::discover_gateway(&url)
+        .await
+        .map_err(|error| format!("gateway discovery failed: {error}"))?;
+    if current.wireguard.as_ref() != Some(&enrolling.entry) {
+        return Err(crate::wireguard_keys::PEER_CHANGED.into());
+    }
+    let enrollment = crate::wireguard_keys::prepare(
+        &enrolling.key_file,
+        &enrolling.marker.public_key,
+        &enrolling.entry,
+        &params,
+    )?;
+    Ok(Some(enrollment.parameters(enrolling.key_file.clone())))
 }
 
 /// Put `pat` back as the stored token for `identity_origin`, or remove the
@@ -1268,6 +1647,7 @@ pub(crate) mod tests {
             "nonce-1",
             "chan-ios @ host".into(),
             "challenge".into(),
+            None,
         )
         .unwrap();
         assert_eq!(url.origin().ascii_serialization(), "https://gw.chan.app");
@@ -1335,6 +1715,7 @@ pub(crate) mod tests {
                 id: "gw-1".into(),
                 attempt: Arc::new(GatewayAttempt::default()),
             },
+            enrolling: None,
             code_verifier: "verifier-abc".to_string(),
             created_at: Instant::now(),
             shutdown,
@@ -1694,5 +2075,789 @@ pub(crate) mod tests {
                 "{status}: the token is its own bearer"
             );
         }
+    }
+    async fn enrollment_fixture() -> (
+        tempfile::TempDir,
+        Arc<crate::AppState>,
+        Arc<GatewayAttempt>,
+        crate::devserver::GatewayDiscovery,
+        Enrolling,
+        crate::config::WireguardEnrollment,
+    ) {
+        let (dir, state) =
+            crate::gateway::tests::pat_load_test_state("https://enroll.example.test");
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Ok(()));
+        assert!(state.gateway_manager.fabric.set(fabric).is_ok());
+        let mut discovery = crate::gateway::tests::runtime_with(Vec::new()).discovery;
+        discovery.wireguard = Some(crate::devserver::WireguardDiscovery {
+            mobile_enrollment: true,
+            endpoint: "192.0.2.1:51820".into(),
+            public_key: base64::engine::general_purpose::STANDARD.encode([7; 32]),
+            allowed_ips: Some(vec!["10.7.0.1/32".into()]),
+            persistent_keepalive: Some(25),
+            ingresses: Some(vec![crate::config::WireguardIngress {
+                id: "p1".into(),
+                endpoint: "192.0.2.1:51820".into(),
+                public_key: base64::engine::general_purpose::STANDARD.encode([7; 32]),
+                hosts: vec![crate::config::WireguardHost {
+                    name: "*.p1.proxy.example.test".into(),
+                    addresses: vec!["10.7.0.1".parse().unwrap()],
+                }],
+            }]),
+        });
+        let key = {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            let key =
+                crate::wireguard_keys::generate(&store.wireguard_dir(), "gw-keychain").unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(key.public_key.clone());
+            cfg.gateways[0].wireguard_key_file = Some(key.path.clone());
+            store.save(&cfg).unwrap();
+            key
+        };
+        let attempt = Arc::new(GatewayAttempt::default());
+        let enrolling = enrolling_key(&state, "gw-keychain", &discovery, &attempt, "attempt-a")
+            .unwrap()
+            .unwrap();
+        let parameters = crate::config::WireguardEnrollment {
+            key_file: key.path,
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: Some(25),
+            ingresses: discovery
+                .wireguard
+                .as_ref()
+                .unwrap()
+                .ingresses
+                .clone()
+                .unwrap(),
+        };
+        (dir, state, attempt, discovery, enrolling, parameters)
+    }
+
+    fn enrollment_writes(
+        state: &Arc<crate::AppState>,
+        attempt: &Arc<GatewayAttempt>,
+        enrolling: Enrolling,
+        parameters: crate::config::WireguardEnrollment,
+    ) -> SigninWrites {
+        let origin = state.store.lock().unwrap().get().unwrap().gateways[0]
+            .url
+            .clone();
+        let pat = StoredPat {
+            id: "new-pat".into(),
+            secret: "new-secret".into(),
+            label: "test".into(),
+            expires_at: String::new(),
+        };
+        let store_origin = origin.clone();
+        *attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(store_origin, pat.clone());
+            Ok(())
+        }));
+        SigninWrites {
+            state: Arc::clone(state),
+            gateway_id: "gw-keychain".into(),
+            account: gateway_account(&origin),
+            identity_origin: origin,
+            pat,
+            prior_pat: None,
+            enrolling: Some(enrolling),
+            enrollment: Some(parameters),
+            recorded: None,
+            attempt: Arc::clone(attempt),
+        }
+    }
+
+    #[tokio::test]
+    async fn enrollment_marker_survives_restart_and_only_a_fresh_key_can_retry() {
+        let (_dir, state, _attempt, discovery, old, _) = enrollment_fixture().await;
+        let old_bytes = std::fs::read(&old.key_file).unwrap();
+        let restarted = crate::AppState::with_store(Arc::clone(&state.store));
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Ok(()));
+        assert!(restarted.gateway_manager.fabric.set(fabric).is_ok());
+        let attempt = Arc::new(GatewayAttempt::default());
+        assert!(
+            enrolling_key(&restarted, "gw-keychain", &discovery, &attempt, "attempt-b")
+                .err()
+                .unwrap()
+                .contains("fresh key")
+        );
+        let next = {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            let next =
+                crate::wireguard_keys::generate(&store.wireguard_dir(), "gw-keychain").unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(next.public_key.clone());
+            cfg.gateways[0].wireguard_key_file = Some(next.path.clone());
+            store.save(&cfg).unwrap();
+            next
+        };
+        let new = enrolling_key(&restarted, "gw-keychain", &discovery, &attempt, "attempt-b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(new.marker.public_key, next.public_key);
+        assert_ne!(new.marker.public_key, old.marker.public_key);
+        assert_eq!(std::fs::read(&old.key_file).unwrap(), old_bytes);
+        let row = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateways
+            .remove(0);
+        assert_eq!(row.wireguard_pending_enrollment, Some(new.marker));
+        let url = authorize_url(
+            &discovery,
+            crate::mobile_auth::MOBILE_REDIRECT_URI,
+            "state",
+            "label".into(),
+            "challenge".into(),
+            Some(&next.public_key),
+        )
+        .unwrap();
+        assert!(url
+            .query_pairs()
+            .any(|(name, value)| name == "wireguard_public_key" && value == next.public_key));
+    }
+
+    #[tokio::test]
+    async fn enrollment_commit_keeps_parameters_pat_and_clears_only_its_marker() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let (_dir, state, attempt, _, enrolling, parameters) = enrollment_fixture().await;
+        let mut writes = enrollment_writes(&state, &attempt, enrolling.clone(), parameters.clone());
+        assert!(matches!(
+            attempt.commit_credentials(&mut writes).unwrap(),
+            CredentialOutcome::Kept { activation: Ok(()) }
+        ));
+        let row = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateways
+            .remove(0);
+        assert_eq!(
+            row.wireguard_enrolled_key,
+            Some(enrolling.marker.public_key)
+        );
+        assert_eq!(row.wireguard_enrollment, Some(parameters));
+        assert!(row.wireguard_pending_enrollment.is_none());
+        assert_eq!(read_stored_pat(&row.url).unwrap().unwrap().id, "new-pat");
+        clear_gateway_pat(&row.url).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enrollment_commit_failure_at_each_config_boundary_restores_owned_state() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        for after in [false, true] {
+            for skip in [0] {
+                let (_dir, state, attempt, _, enrolling, parameters) = enrollment_fixture().await;
+                let origin = state.store.lock().unwrap().get().unwrap().gateways[0]
+                    .url
+                    .clone();
+                let prior = StoredPat {
+                    id: "prior-pat".into(),
+                    secret: "prior-secret".into(),
+                    label: "prior".into(),
+                    expires_at: String::new(),
+                };
+                test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .insert(origin.clone(), prior);
+                let bytes = std::fs::read(&enrolling.key_file).unwrap();
+                let mut writes = enrollment_writes(&state, &attempt, enrolling.clone(), parameters);
+                state.store.lock().unwrap().fail_save_for_test(after, skip);
+                assert!(attempt
+                    .commit_credentials(&mut writes)
+                    .unwrap_err()
+                    .contains("injected"));
+                let row = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .gateways
+                    .remove(0);
+                assert!(
+                    row.wireguard_enrollment.is_none(),
+                    "after={after}, skip={skip}"
+                );
+                assert!(row.wireguard_enrolled_key.is_none());
+                assert_eq!(row.wireguard_pending_enrollment, Some(enrolling.marker));
+                assert_eq!(std::fs::read(&enrolling.key_file).unwrap(), bytes);
+                assert_eq!(read_stored_pat(&origin).unwrap().unwrap().id, "prior-pat");
+                clear_gateway_pat(&origin).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_store_failure_and_late_old_results_keep_uncertainty() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let (_dir, state, attempt, discovery, old, parameters) = enrollment_fixture().await;
+        let mut writes = enrollment_writes(&state, &attempt, old.clone(), parameters.clone());
+        *attempt.signin_hooks.store.lock().unwrap() =
+            Some(Box::new(|_, _| Err("credential failure".into())));
+        assert_eq!(
+            attempt.commit_credentials(&mut writes).unwrap_err(),
+            "credential failure"
+        );
+        let row = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateways
+            .remove(0);
+        assert_eq!(row.wireguard_pending_enrollment.as_ref(), Some(&old.marker));
+        assert!(row.wireguard_enrollment.is_none());
+        let next = {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            let next =
+                crate::wireguard_keys::generate(&store.wireguard_dir(), "gw-keychain").unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(next.public_key.clone());
+            cfg.gateways[0].wireguard_key_file = Some(next.path.clone());
+            store.save(&cfg).unwrap();
+            next
+        };
+        let successor = Arc::new(GatewayAttempt::default());
+        let current = enrolling_key(&state, "gw-keychain", &discovery, &successor, "attempt-b")
+            .unwrap()
+            .unwrap();
+        let mut stale = enrollment_writes(&state, &attempt, old, parameters);
+        assert!(attempt
+            .commit_credentials(&mut stale)
+            .unwrap_err()
+            .contains("superseded"));
+        let row = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateways
+            .remove(0);
+        assert_eq!(row.wireguard_public_key, Some(next.public_key));
+        assert_eq!(row.wireguard_pending_enrollment, Some(current.marker));
+        assert!(row.wireguard_enrollment.is_none());
+    }
+    #[tokio::test]
+    async fn actual_redeem_validates_fresh_discovery_and_compensates_only_unkept_tokens() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        for case in [
+            "kept",
+            "missing-parameters",
+            "changed-discovery",
+            "failed-revoke",
+            "invalid-client-address",
+            "too-many-client-addresses",
+            "clear-before",
+            "clear-after",
+            "panic-before-pat",
+            "panic-before-keep",
+            "panic-after-keep",
+        ] {
+            let (_dir, state, attempt, discovery, enrolling, parameters) =
+                enrollment_fixture().await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let entry = discovery.wireguard.unwrap();
+            let mut ingress_json = serde_json::to_value(&parameters.ingresses).unwrap();
+            if case == "changed-discovery" {
+                ingress_json[0]["endpoint"] = serde_json::json!("192.0.2.1:51821");
+            }
+            let doc = serde_json::json!({
+                "kind": "chan-gateway", "api_version": 1,
+                "identity_origin": origin, "mobile_authorize_url": format!("{origin}/mobile/authorize"),
+                "mobile_entry_url": format!("{origin}/mobile/v1/devserver/entry"),
+                "mobile_roster_url": format!("{origin}/mobile/v1/devservers"),
+                "devserver_proxy_origin": "https://proxy.example.test", "devserver_proxy_host_depth": 2,
+                "wireguard": { "mobile_enrollment": true, "endpoint": if case == "changed-discovery" { "192.0.2.1:51821" } else { "192.0.2.1:51820" },
+                    "public_key": entry.public_key, "allowed_ips": entry.allowed_ips,
+                    "persistent_keepalive": entry.persistent_keepalive, "ingresses": ingress_json },
+            });
+            let mut answer = serde_json::json!({ "id": "minted-pat", "secret": "minted-secret", "label": "test", "expires_at": null });
+            if case != "missing-parameters" && case != "failed-revoke" {
+                answer["wireguard"] = serde_json::json!({
+                    "server_public_key": entry.public_key, "endpoint": entry.endpoint,
+                    "addresses": parameters.addresses, "allowed_ips": parameters.allowed_ips,
+                    "persistent_keepalive": parameters.persistent_keepalive,
+                    "hosts": parameters.ingresses[0].hosts,
+                    "ingresses": [{"id": "p1", "server_public_key": entry.public_key, "endpoint": entry.endpoint, "hosts": parameters.ingresses[0].hosts}],
+                });
+            }
+            if case == "invalid-client-address" {
+                answer["wireguard"]["addresses"] = serde_json::json!(["224.0.0.1/32"]);
+            }
+            if case == "too-many-client-addresses" {
+                answer["wireguard"]["addresses"] =
+                    serde_json::json!(["10.7.0.2/32", "10.7.0.3/32", "10.7.0.4/32"]);
+            }
+            let revokes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = Arc::clone(&revokes);
+            let router = axum::Router::new()
+                .route(
+                    "/.well-known/chan-gateway",
+                    axum::routing::get(move || {
+                        let doc = doc.clone();
+                        async move { axum::Json(doc) }
+                    }),
+                )
+                .route(
+                    "/mobile/authorize/redeem",
+                    axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let answer = answer.clone();
+                        async move {
+                            assert_eq!(
+                                body,
+                                serde_json::json!({"code": "code", "code_verifier": "verifier"})
+                            );
+                            axum::Json(answer)
+                        }
+                    }),
+                )
+                .route(
+                    "/mobile/v1/token",
+                    axum::routing::delete(move |headers: axum::http::HeaderMap| {
+                        let observed = Arc::clone(&observed);
+                        async move {
+                            assert_eq!(
+                                headers[axum::http::header::AUTHORIZATION],
+                                "Bearer minted-secret"
+                            );
+                            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if case == "failed-revoke" {
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE
+                            } else {
+                                axum::http::StatusCode::NO_CONTENT
+                            }
+                        }
+                    }),
+                );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            {
+                let mut store = state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0].url = origin.clone();
+                store.save(&cfg).unwrap();
+            }
+            let store_origin = origin.clone();
+            *attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+                test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .insert(store_origin, pat.clone());
+                Ok(())
+            }));
+            if case == "clear-before" || case == "clear-after" {
+                state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .fail_saves_for_test(case == "clear-after", 1);
+            }
+            if case == "panic-before-pat" {
+                *attempt.signin_hooks.store.lock().unwrap() =
+                    Some(Box::new(|_, _| panic!("injected before-PAT failure")));
+            }
+            if case == "panic-before-keep" {
+                *attempt.signin_hooks.before_decision.lock().unwrap() =
+                    Some(Box::new(|| panic!("injected before-kept failure")));
+            }
+            if case == "panic-after-keep" {
+                *attempt.signin_hooks.activation_started.lock().unwrap() =
+                    Some(Box::new(|| panic!("injected after-kept failure")));
+            }
+            let app = tauri::test::mock_app();
+            app.manage(Arc::clone(&state));
+            let (shutdown, _) = watch::channel(false);
+            let action = CallbackAction::Redeem {
+                code: "code".into(),
+                code_verifier: "verifier".into(),
+                identity_origin: origin.clone(),
+                account: gateway_account(&origin),
+                enrolling: Some(Box::new(enrolling.clone())),
+                redemption: attempt.begin_redemption().unwrap(),
+                gateway: GatewaySignin {
+                    id: "gw-keychain".into(),
+                    attempt,
+                },
+                shutdown,
+            };
+            settle(app.handle().clone(), action).await;
+            let row = state
+                .store
+                .lock()
+                .unwrap()
+                .get()
+                .unwrap()
+                .gateways
+                .remove(0);
+            let kept = matches!(
+                case,
+                "kept" | "clear-before" | "clear-after" | "panic-after-keep"
+            );
+            assert_eq!(
+                revokes.load(std::sync::atomic::Ordering::SeqCst),
+                usize::from(!kept),
+                "{case}"
+            );
+            if kept {
+                assert_eq!(
+                    row.wireguard_pending_enrollment.is_none(),
+                    matches!(case, "kept" | "clear-after"),
+                    "{case}"
+                );
+                assert!(row.wireguard_enrollment.is_some(), "{case}");
+                assert_eq!(read_stored_pat(&origin).unwrap().unwrap().id, "minted-pat");
+                if case != "kept" {
+                    assert!(
+                        state
+                            .gateway_manager
+                            .fabric
+                            .get()
+                            .unwrap()
+                            .require_destination(
+                                "gw-keychain",
+                                "https://tenant.p1.proxy.example.test"
+                            )
+                            .is_err(),
+                        "failed activation must not publish: {case}"
+                    );
+                }
+            } else {
+                assert_eq!(row.wireguard_pending_enrollment, Some(enrolling.marker));
+                if !matches!(case, "panic-before-keep" | "panic-before-pat") {
+                    assert!(row.wireguard_enrollment.is_none());
+                }
+                // A pre-decision panic cannot guarantee local rollback, but
+                // its marker still refuses adoption and its PAT is revoked.
+                if case != "panic-before-keep" {
+                    assert!(read_stored_pat(&origin).unwrap().is_none());
+                }
+            }
+            let fresh_store = crate::config::ConfigStore::at_path(_dir.path().join("config.json"));
+            let fresh = fresh_store.get().unwrap().gateways.remove(0);
+            assert_eq!(
+                fresh, row,
+                "restart reads the actual persisted state: {case}"
+            );
+            clear_gateway_pat(&origin).unwrap();
+            server.abort();
+        }
+    }
+    #[tokio::test]
+    async fn the_keep_decision_refuses_changed_ownership_and_store_read_errors() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        for change in [
+            "key",
+            "path",
+            "manual",
+            "marker",
+            "enrollment",
+            "pat",
+            "pat-secret",
+            "config-read",
+            "pat-read",
+            "removed",
+        ] {
+            let (dir, state, attempt, _, enrolling, parameters) = enrollment_fixture().await;
+            let origin = state.store.lock().unwrap().get().unwrap().gateways[0]
+                .url
+                .clone();
+            let mut writes = enrollment_writes(&state, &attempt, enrolling.clone(), parameters);
+            let changing = Arc::clone(&state);
+            let config_path = dir.path().join("config.json");
+            let changing_origin = origin.clone();
+            *attempt.signin_hooks.before_decision.lock().unwrap() =
+                Some(Box::new(move || match change {
+                    "pat" => {
+                        test_gateway_pats()
+                            .lock()
+                            .unwrap()
+                            .get_mut(&changing_origin)
+                            .unwrap()
+                            .id = "successor-pat".into();
+                    }
+                    "pat-secret" => {
+                        test_gateway_pats()
+                            .lock()
+                            .unwrap()
+                            .get_mut(&changing_origin)
+                            .unwrap()
+                            .secret = "successor-secret".into();
+                    }
+                    "pat-read" => {
+                        test_gateway_pat_load_errors()
+                            .lock()
+                            .unwrap()
+                            .insert(changing_origin, "injected credential read failure".into());
+                    }
+                    "config-read" => {
+                        std::fs::write(config_path, b"invalid config").unwrap();
+                    }
+                    _ => {
+                        let mut store = changing.store.lock().unwrap();
+                        let mut cfg = store.get().unwrap();
+                        match change {
+                            "key" => {
+                                cfg.gateways[0].wireguard_public_key = Some("successor-key".into())
+                            }
+                            "path" => {
+                                cfg.gateways[0].wireguard_key_file = Some(
+                                    store
+                                        .wireguard_dir()
+                                        .join("gw-keychain.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.key"),
+                                )
+                            }
+                            "manual" => {
+                                cfg.gateways[0].wireguard =
+                                    Some(store.wireguard_dir().join("manual.conf"))
+                            }
+                            "marker" => {
+                                cfg.gateways[0]
+                                    .wireguard_pending_enrollment
+                                    .as_mut()
+                                    .unwrap()
+                                    .attempt_id = "successor".into()
+                            }
+                            "enrollment" => {
+                                cfg.gateways[0]
+                                    .wireguard_enrollment
+                                    .as_mut()
+                                    .unwrap()
+                                    .addresses = vec!["10.7.0.3/32".into()]
+                            }
+                            "removed" => cfg.gateways.clear(),
+                            _ => unreachable!(),
+                        }
+                        store.save(&cfg).unwrap();
+                    }
+                }));
+            let result = attempt.commit_credentials(&mut writes);
+            assert!(
+                matches!(result, Err(_) | Ok(CredentialOutcome::Unkept)),
+                "{change}: {result:?}"
+            );
+            assert!(!attempt.credentials_kept(), "{change}");
+            test_gateway_pat_load_errors()
+                .lock()
+                .unwrap()
+                .remove(&origin);
+            if change == "pat" {
+                assert_eq!(
+                    read_stored_pat(&origin).unwrap().unwrap().id,
+                    "successor-pat"
+                );
+            }
+            if change == "pat-secret" {
+                assert_eq!(
+                    read_stored_pat(&origin).unwrap().unwrap().secret,
+                    "successor-secret"
+                );
+            }
+            if change == "marker" {
+                assert_eq!(
+                    state.store.lock().unwrap().get().unwrap().gateways[0]
+                        .wireguard_pending_enrollment
+                        .as_ref()
+                        .unwrap()
+                        .attempt_id,
+                    "successor"
+                );
+            }
+            assert!(enrolling.key_file.exists());
+            clear_gateway_pat(&origin).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn default_route_enrollment_refuses_before_exposure_and_a_repaired_offer_reuses_the_key()
+    {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        for networks in [
+            vec!["0.0.0.0/0"],
+            vec!["1.2.3.4/0"],
+            vec!["::/0"],
+            vec!["2001:db8::1/0"],
+            vec!["0.0.0.0/0", "::/0"],
+        ] {
+            let (dir, state, _, mut discovery, initial, parameters) = enrollment_fixture().await;
+            {
+                let mut store = state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0].wireguard_pending_enrollment = None;
+                cfg.gateways[0].wireguard_enrollment = Some(parameters);
+                cfg.gateways[0].wireguard_enrolled_key = Some(initial.marker.public_key.clone());
+                let mut unrelated = cfg.gateways[0].clone();
+                unrelated.id = "gw-unrelated".into();
+                unrelated.url = "https://unrelated.example.test".into();
+                cfg.gateways.push(unrelated);
+                store.save(&cfg).unwrap();
+            }
+            let config_path = dir.path().join("config.json");
+            let before = std::fs::read(&config_path).unwrap();
+            let key_bytes = std::fs::read(&initial.key_file).unwrap();
+            let entry = discovery.wireguard.as_mut().unwrap();
+            entry.allowed_ips = Some(networks.iter().map(|value| value.to_string()).collect());
+            if networks.iter().all(|value| value.contains(':')) {
+                entry.ingresses.as_mut().unwrap()[0].hosts[0].addresses =
+                    vec!["fd00:7::1".parse().unwrap()];
+            }
+            entry.validate().unwrap();
+            let attempt = Arc::new(GatewayAttempt::default());
+            let error = enrolling_key(&state, "gw-keychain", &discovery, &attempt, "refused")
+                .err()
+                .unwrap();
+            assert!(
+                error.contains("does not support default routes"),
+                "{networks:?}: {error}"
+            );
+            assert_eq!(std::fs::read(&config_path).unwrap(), before);
+            assert_eq!(std::fs::read(&initial.key_file).unwrap(), key_bytes);
+            let entry = discovery.wireguard.as_mut().unwrap();
+            entry.allowed_ips = Some(vec!["10.7.0.1/32".into()]);
+            entry.ingresses.as_mut().unwrap()[0].hosts[0].addresses =
+                vec!["10.7.0.1".parse().unwrap()];
+            let accepted = enrolling_key(&state, "gw-keychain", &discovery, &attempt, "repaired")
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted.marker.public_key, initial.marker.public_key);
+            assert_eq!(accepted.key_file, initial.key_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn default_route_guard_preserves_manual_precedence_and_existing_uncertainty() {
+        let (_dir, state, attempt, mut discovery, initial, _) = enrollment_fixture().await;
+        discovery.wireguard.as_mut().unwrap().allowed_ips = Some(vec!["0.0.0.0/0".into()]);
+        assert!(
+            enrolling_key(&state, "gw-keychain", &discovery, &attempt, "retry")
+                .err()
+                .unwrap()
+                .contains("fresh key")
+        );
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].wireguard = Some(store.wireguard_dir().join("manual.conf"));
+            store.save(&cfg).unwrap();
+        }
+        assert!(
+            enrolling_key(&state, "gw-keychain", &discovery, &attempt, "manual")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.store.lock().unwrap().get().unwrap().gateways[0]
+                .wireguard_pending_enrollment
+                .as_ref(),
+            Some(&initial.marker)
+        );
+    }
+    #[tokio::test]
+    async fn incomplete_mobile_offer_never_exposes_the_selected_key() {
+        for case in ["legacy", "missing-ingresses", "empty-host-map"] {
+            let (dir, state, attempt, mut discovery, enrolling, _) = enrollment_fixture().await;
+            {
+                let mut store = state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0].wireguard_pending_enrollment = None;
+                store.save(&cfg).unwrap();
+            }
+            let before = std::fs::read(dir.path().join("config.json")).unwrap();
+            let private = std::fs::read(&enrolling.key_file).unwrap();
+            let entry = discovery.wireguard.as_mut().unwrap();
+            match case {
+                "legacy" => {
+                    entry.ingresses = None;
+                    entry.allowed_ips = None;
+                }
+                "missing-ingresses" => entry.ingresses = None,
+                "empty-host-map" => entry.ingresses.as_mut().unwrap()[0].hosts.clear(),
+                _ => unreachable!(),
+            }
+            entry.validate().unwrap();
+            assert!(enrolling_key(&state, "gw-keychain", &discovery, &attempt, "legacy").is_err());
+            assert_eq!(
+                std::fs::read(dir.path().join("config.json")).unwrap(),
+                before
+            );
+            assert_eq!(std::fs::read(&enrolling.key_file).unwrap(), private);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_enrollment_undo_preserves_a_manual_transport_replacement() {
+        use chan_server::GatewayRegistry;
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let (dir, state, attempt, _, enrolling, parameters) = enrollment_fixture().await;
+        let mut writes = enrollment_writes(&state, &attempt, enrolling.clone(), parameters);
+        let manual = dir.path().join("manual.conf");
+        let private = std::fs::read_to_string(&enrolling.key_file).unwrap();
+        let peer = base64::engine::general_purpose::STANDARD.encode([9; 32]);
+        std::fs::write(&manual, format!("[Interface]\nPrivateKey={}\nAddress=10.7.0.2/32\n[Peer]\nPublicKey={peer}\nEndpoint=127.0.0.1:9\nAllowedIPs=0.0.0.0/0\n", private.trim())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&manual, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let replacement = manual.clone();
+        let changing = Arc::clone(&state);
+        *attempt.signin_hooks.before_decision.lock().unwrap() = Some(Box::new(move || {
+            let registry = crate::config::GatewayConfigRegistry::new(
+                Arc::clone(&changing.store),
+                Arc::new(OnceLock::new()),
+                Arc::clone(&changing.gateway_manager),
+            );
+            registry
+                .update(
+                    "gw-keychain",
+                    chan_server::GatewayInput {
+                        url: String::new(),
+                        label: None,
+                        wireguard: Some(replacement.display().to_string()),
+                    },
+                )
+                .unwrap()
+                .unwrap();
+        }));
+        assert!(attempt
+            .commit_credentials(&mut writes)
+            .unwrap_err()
+            .contains("superseded"));
+        let row = state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateways
+            .remove(0);
+        assert_eq!(row.wireguard.as_ref(), Some(&manual));
+        assert!(row.wireguard_enrollment.is_none());
+        let fabric = state.gateway_manager.fabric.get().unwrap();
+        fabric.settled_gateway("gw-keychain").await.unwrap();
+        assert!(
+            fabric
+                .require_destination("gw-keychain", "https://10.7.0.1")
+                .is_ok(),
+            "stale undo must preserve the replacement's full route"
+        );
+        assert!(manual.exists());
+        clear_gateway_pat(&row.url).unwrap();
     }
 }

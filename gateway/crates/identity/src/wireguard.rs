@@ -17,7 +17,7 @@ use crate::http::{bearer_token, AppState};
 use crate::{Error, Result};
 
 /// The WireGuard ingresses and the routing policy offered to enrolling
-/// desktops. Every ingress answers on the same tunnel addresses and lists
+/// clients. Every ingress answers on the same tunnel addresses and lists
 /// every enrolled peer, so one enrollment is valid on all of them.
 #[derive(Clone, Debug)]
 pub struct WireguardEnrollment {
@@ -46,9 +46,11 @@ pub struct HostRoute {
 }
 
 /// The `wireguard` object of the discovery document: everything a desktop
-/// needs to start a tunnel to any ingress except its own key and address.
+/// or mobile app needs to start a tunnel to any ingress except its own key
+/// and address.
 #[derive(Debug, Serialize)]
 pub(crate) struct Discovery {
+    mobile_enrollment: bool,
     /// The first ingress's endpoint and key. A desktop that reads no list
     /// reads these two and sees one ingress.
     endpoint: String,
@@ -59,7 +61,7 @@ pub(crate) struct Discovery {
     ingresses: Vec<IngressRoutes>,
 }
 
-/// Parameters returned with a PAT after profile accepts the desktop's key.
+/// Parameters returned with a PAT after profile accepts the client's key.
 /// `addresses` is the peer's one address set, valid on every ingress.
 /// `server_public_key`, `endpoint` and `hosts` describe the first ingress,
 /// for a desktop that reads no list; `ingresses` is discovery's list.
@@ -149,6 +151,7 @@ impl WireguardEnrollment {
     pub(crate) fn discovery(&self) -> Discovery {
         let first = &self.first().ingress;
         Discovery {
+            mobile_enrollment: true,
             endpoint: first.endpoint.clone(),
             public_key: first.public_key.clone(),
             allowed_ips: self.allowed_ips.clone(),

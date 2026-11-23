@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 /// The TLS client builder every gateway HTTP call shares: chan-tls's
-/// trust decision with HTTP/1.1 ALPN and no proxy (this leg has no
-/// fabric proxy to decide through, where the desktop reads its
-/// process-wide decision).
+/// trust decision with HTTP/1.1 ALPN and the process-wide routing decision.
 pub(crate) fn tls_client_builder() -> Result<reqwest::ClientBuilder, String> {
     let tls = chan_tls::client_config().map_err(|e| e.to_string())?;
-    Ok(reqwest::Client::builder().use_preconfigured_tls(http1_tls(tls)))
+    crate::wireguard::client_builder(
+        reqwest::Client::builder().use_preconfigured_tls(http1_tls(tls)),
+    )
 }
 
 /// `config` with HTTP/1.1 ALPN alone, as the desktop's HTTP clients
@@ -82,6 +82,7 @@ impl std::fmt::Debug for DevserverConn {
 
 #[derive(Clone)]
 pub struct GatewayConn {
+    pub(crate) access: Option<crate::wireguard::AccessGuard>,
     pub identity_origin: String,
     pub mobile_entry_url: String,
     /// Discovery-advertised proxy namespace apex. Entry responses must name one
@@ -122,6 +123,29 @@ impl std::fmt::Debug for GatewayConn {
 }
 
 impl GatewayConn {
+    pub(crate) fn begin_operation(&self) -> Result<Option<u64>, String> {
+        self.require_access()?;
+        self.access
+            .as_ref()
+            .map(crate::wireguard::AccessGuard::epoch)
+            .transpose()
+    }
+
+    pub(crate) fn require_operation(&self, epoch: Option<u64>) -> Result<(), String> {
+        match (&self.access, epoch) {
+            (Some(access), Some(epoch)) => access.check_epoch(&self.proxy_origin, epoch),
+            (Some(_), None) => Err("WireGuard: request has no operation epoch".into()),
+            (None, _) => Ok(()),
+        }
+    }
+
+    pub(crate) fn require_access(&self) -> Result<(), String> {
+        match &self.access {
+            Some(access) => access.check(&self.proxy_origin),
+            None => Ok(()),
+        }
+    }
+
     #[cfg(test)]
     pub fn new(
         identity_origin: String,
@@ -130,6 +154,7 @@ impl GatewayConn {
         pat: String,
     ) -> Self {
         Self {
+            access: None,
             identity_origin,
             mobile_entry_url,
             proxy_apex_origin: proxy_origin.clone(),
@@ -504,11 +529,8 @@ pub struct DevserverWorkspaceRow {
 
 /// Reuse one process-wide HTTP client so devserver polls and requests share keep-alive connection pools. Cloning the client shares its pool rather than opening an independent one. Memoize the build result, including TLS initialization failures, so every caller sees the same initialization outcome without repeated build attempts.
 ///
-/// The first call pins the process's WireGuard proxy into the client, so it
-/// runs after the start decided the proxy (`main` records it before the
-/// Tauri app is built, and the first devserver request comes later); the
-/// decision refuses to be made after a client was built, so a wrong order
-/// fails loudly rather than leaving a client on the wrong path.
+/// iOS setup installs the stable proxy before any request. The builder refuses
+/// an earlier call, so initialization cannot silently cache a direct client.
 fn http_client() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
@@ -627,6 +649,9 @@ pub struct GatewayDiscovery {
 /// interface, as the discovery document names them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WireguardDiscovery {
+    /// Explicit support for enrollment through the mobile authorization flow.
+    #[serde(default)]
+    pub mobile_enrollment: bool,
     /// `host:port`, an IPv6 literal in brackets, as a wg-quick
     /// `Endpoint` reads.
     pub endpoint: String,
@@ -1138,6 +1163,7 @@ async fn gateway_entry(
     gw: &GatewayConn,
     path: &str,
 ) -> Result<ValidatedGatewayEntry, GatewayEntryError> {
+    let epoch = gw.begin_operation().map_err(GatewayEntryError::Other)?;
     let response = request_gateway_entry(
         &gw.mobile_entry_url,
         &gw.pat,
@@ -1145,6 +1171,8 @@ async fn gateway_entry(
         path,
     )
     .await?;
+    gw.require_operation(epoch)
+        .map_err(GatewayEntryError::Other)?;
     validate_gateway_entry(
         &gw.proxy_apex_origin,
         gw.entry_target.as_ref(),
@@ -1155,11 +1183,26 @@ async fn gateway_entry(
     .map_err(GatewayEntryError::Other)
 }
 
+#[cfg(test)]
 pub async fn gateway_conn(
     discovery: &GatewayDiscovery,
     pat: String,
     entry_target: Option<GatewayEntryTarget>,
 ) -> Result<GatewayConn, GatewayEntryError> {
+    gateway_conn_guarded(discovery, pat, entry_target, None).await
+}
+
+pub(crate) async fn gateway_conn_guarded(
+    discovery: &GatewayDiscovery,
+    pat: String,
+    entry_target: Option<GatewayEntryTarget>,
+    access: Option<crate::wireguard::AccessGuard>,
+) -> Result<GatewayConn, GatewayEntryError> {
+    let epoch = access
+        .as_ref()
+        .map(crate::wireguard::AccessGuard::epoch)
+        .transpose()
+        .map_err(GatewayEntryError::Other)?;
     let response = request_gateway_entry(
         &discovery.mobile_entry_url,
         &pat,
@@ -1176,6 +1219,7 @@ pub async fn gateway_conn(
     )
     .map_err(GatewayEntryError::Other)?;
     let gw = GatewayConn {
+        access,
         identity_origin: discovery.identity_origin.clone(),
         mobile_entry_url: discovery.mobile_entry_url.clone(),
         proxy_apex_origin: origin_of(&discovery.devserver_proxy_origin)
@@ -1187,6 +1231,8 @@ pub async fn gateway_conn(
         session_refresh: Arc::new(tokio::sync::Mutex::new(())),
         session_installer: Arc::new(Mutex::new(None)),
     };
+    gw.require_operation(epoch)
+        .map_err(GatewayEntryError::Other)?;
     establish_gateway_session_from_entry(&gw, &entry)
         .await
         .map_err(GatewayEntryError::Other)?;
@@ -1251,6 +1297,7 @@ async fn establish_gateway_session_from_entry(
     gw: &GatewayConn,
     entry: &ValidatedGatewayEntry,
 ) -> Result<(GatewaySession, String), String> {
+    let epoch = gw.begin_operation()?;
     let resp = http_client_no_redirect()?
         .post(&entry.entry_exchange_url)
         .header(reqwest::header::ORIGIN, &gw.identity_origin)
@@ -1258,6 +1305,7 @@ async fn establish_gateway_session_from_entry(
         .send()
         .await
         .map_err(|e| format!("exchanging gateway entry credential: {e}"))?;
+    gw.require_operation(epoch)?;
     if resp.status() != reqwest::StatusCode::SEE_OTHER {
         return Err(format!(
             "gateway entry exchange returned HTTP {}",
@@ -1289,6 +1337,7 @@ async fn establish_gateway_session_from_entry(
 }
 
 fn publish_gateway_session(gw: &GatewayConn, session: &GatewaySession) -> Result<(), String> {
+    gw.require_access()?;
     *gw.session.lock().unwrap() = Some(session.clone());
     let installer = gw.session_installer.lock().unwrap().clone();
     if let Some(installer) = installer {
@@ -1323,17 +1372,21 @@ fn validate_gateway_navigation_location(
 }
 
 async fn mint_gateway_session(gw: &GatewayConn) -> Result<GatewaySession, String> {
+    let epoch = gw.begin_operation()?;
     let entry = gateway_entry(gw, "/").await?;
+    gw.require_operation(epoch)?;
     establish_gateway_session_from_entry(gw, &entry)
         .await
         .map(|(session, _)| session)
 }
 
 async fn gateway_session(gw: &GatewayConn) -> Result<GatewaySession, String> {
+    let epoch = gw.begin_operation()?;
     if let Some(session) = gw.session.lock().unwrap().clone().filter(|s| s.is_fresh()) {
         return Ok(session);
     }
     let _refresh = gw.session_refresh.lock().await;
+    gw.require_operation(epoch)?;
     if let Some(session) = gw.session.lock().unwrap().clone().filter(|s| s.is_fresh()) {
         return Ok(session);
     }
@@ -1344,7 +1397,9 @@ async fn refresh_gateway_session_after(
     gw: &GatewayConn,
     observed_cookie_header: &str,
 ) -> Result<GatewaySession, String> {
+    let epoch = gw.begin_operation()?;
     let _refresh = gw.session_refresh.lock().await;
+    gw.require_operation(epoch)?;
     if let Some(session) = gw
         .session
         .lock()
@@ -1452,12 +1507,14 @@ pub(crate) fn install_gateway_webview_session<R: tauri::Runtime>(
     };
     let app = app.clone();
     let preferred_window_label = preferred_window_label.map(str::to_string);
+    let access = gw.access.clone();
     let installer: Arc<GatewaySessionInstaller> = Arc::new(move |origin, session| {
         install_gateway_webview_session_values(
             &app,
             origin,
             session,
             preferred_window_label.as_deref(),
+            access.as_ref(),
         )
     });
     *gw.session_installer.lock().unwrap() = Some(Arc::clone(&installer));
@@ -1492,13 +1549,18 @@ fn install_current_gateway_session(
     Ok(())
 }
 
+#[cfg(not(target_os = "ios"))]
 fn install_gateway_webview_session_values<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     proxy_origin: &str,
     session: &GatewaySession,
     preferred_window_label: Option<&str>,
+    access: Option<&crate::wireguard::AccessGuard>,
 ) -> Result<(), String> {
     use tauri::Manager;
+    if access.is_some() {
+        return Err("WireGuard cookie installation is unavailable on this platform".into());
+    }
     let origin =
         url::Url::parse(proxy_origin).map_err(|e| format!("invalid pinned gateway origin: {e}"))?;
     let domain = origin
@@ -1528,14 +1590,27 @@ fn install_gateway_webview_session_values<R: tauri::Runtime>(
         .and_then(|label| app.get_webview_window(label))
         .or_else(|| app.webview_windows().into_values().next());
     let Some(webview) = webview else {
-        return Ok(());
+        return if access.is_some() {
+            Err("WireGuard: no WebView is available for the session".into())
+        } else {
+            Ok(())
+        };
     };
+    if let Some(access) = access {
+        access.check(proxy_origin)?;
+    }
     webview
         .set_cookie(gate)
         .map_err(|e| format!("installing gateway session cookie: {e}"))?;
+    if let Some(access) = access {
+        access.check(proxy_origin)?;
+    }
     webview
         .set_cookie(csrf)
         .map_err(|e| format!("installing gateway CSRF cookie: {e}"))?;
+    if let Some(access) = access {
+        access.check(proxy_origin)?;
+    }
     Ok(())
 }
 
@@ -1580,6 +1655,7 @@ fn gateway_request_builder<T: Serialize + ?Sized>(
     timeout: Duration,
     session: &GatewaySession,
 ) -> Result<reqwest::RequestBuilder, String> {
+    gw.require_access()?;
     let builder = http_client()?
         .request(method.clone(), gateway_url(gw, path))
         .timeout(timeout);
@@ -1597,20 +1673,26 @@ async fn gateway_request<T: Serialize + ?Sized>(
     body: Option<&T>,
     timeout: Option<Duration>,
 ) -> Result<reqwest::Response, String> {
+    let epoch = gw.begin_operation()?;
     let timeout = timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS));
     let session = gateway_session(gw).await?;
+    gw.require_operation(epoch)?;
     let resp = gateway_request_builder(gw, &method, path, body, timeout, &session)?
         .send()
         .await
         .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))?;
+    gw.require_operation(epoch)?;
     if !gateway_auth_shaped(resp.status()) {
         return Ok(resp);
     }
     let session = refresh_gateway_session_after(gw, &session.cookie_header).await?;
-    gateway_request_builder(gw, &method, path, body, timeout, &session)?
+    gw.require_operation(epoch)?;
+    let response = gateway_request_builder(gw, &method, path, body, timeout, &session)?
         .send()
         .await
-        .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))
+        .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))?;
+    gw.require_operation(epoch)?;
+    Ok(response)
 }
 
 async fn raw_devserver_request<T: Serialize + ?Sized>(
@@ -1687,6 +1769,7 @@ pub async fn gateway_entry_url(conn: &DevserverConn, path: &str) -> Result<Strin
         .gateway
         .as_ref()
         .ok_or_else(|| "not a gateway connection".to_string())?;
+    let epoch = gw.begin_operation()?;
     validate_gateway_navigation_location(path, path)?;
     // GatewayConn is pinned to one exact proxy origin. Reuse its fresh opaque
     // session for every same-origin WebView navigation; minting a new entry
@@ -1701,6 +1784,7 @@ pub async fn gateway_entry_url(conn: &DevserverConn, path: &str) -> Result<Strin
         return Ok(gateway_url(gw, path));
     }
     let _refresh = gw.session_refresh.lock().await;
+    gw.require_operation(epoch)?;
     if gw
         .session
         .lock()
@@ -1711,6 +1795,7 @@ pub async fn gateway_entry_url(conn: &DevserverConn, path: &str) -> Result<Strin
         return Ok(gateway_url(gw, path));
     }
     let entry = gateway_entry(gw, path).await.map_err(String::from)?;
+    gw.require_operation(epoch)?;
     establish_gateway_session_from_entry(gw, &entry)
         .await
         .map(|(_, navigation_url)| navigation_url)
@@ -2963,6 +3048,7 @@ mod tests {
         assert_eq!(
             d.wireguard,
             Some(WireguardDiscovery {
+                mobile_enrollment: false,
                 allowed_ips: None,
                 persistent_keepalive: None,
                 ingresses: None,
@@ -2973,6 +3059,7 @@ mod tests {
         // A bracketed IPv6 endpoint is the file's grammar too.
         let mut d = valid_gateway_discovery();
         d.wireguard = Some(WireguardDiscovery {
+            mobile_enrollment: false,
             allowed_ips: None,
             persistent_keepalive: None,
             ingresses: None,
@@ -3062,6 +3149,7 @@ mod tests {
         ] {
             let mut d = valid_gateway_discovery();
             d.wireguard = Some(WireguardDiscovery {
+                mobile_enrollment: false,
                 allowed_ips: None,
                 persistent_keepalive: None,
                 ingresses: None,
@@ -4128,4 +4216,32 @@ mod tests {
             )
         );
     }
+}
+
+#[cfg(target_os = "ios")]
+fn install_gateway_webview_session_values<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    origin: &str,
+    session: &GatewaySession,
+    label: Option<&str>,
+    access: Option<&crate::wireguard::AccessGuard>,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let webview = label
+        .and_then(|label| app.get_webview_window(label))
+        .or_else(|| app.webview_windows().into_values().next());
+    if webview.is_none() {
+        return if access.is_some() {
+            Err("WireGuard: no WebView is available for the session".into())
+        } else {
+            Ok(())
+        };
+    }
+    crate::webview_proxy::install_cookies(
+        app,
+        origin,
+        &session.gate,
+        &session.csrf,
+        access.cloned(),
+    )
 }
