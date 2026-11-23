@@ -11,7 +11,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 // Build-time contract: the app entry imports fonts.css, so the bundled face starts loading at boot.
@@ -20,13 +22,13 @@ import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import {
   installTerminalDom,
-  mountTerminal,
   resetTerminals,
   seatTerminals,
   terminalTab,
   TERMINAL_PANE,
-  xterm,
 } from "../__tests__/terminalTab";
+
+import { ghosttyFixture, ghosttyFontFamily, mountGhosttyTerminal, openedGhostty } from "../__tests__/ghosttyTab";
 
 installTerminalDom();
 
@@ -43,7 +45,7 @@ afterEach(() => {
 // OS/preference chain matrix; this file covers the component integration.
 
 describe("the mounted terminal", () => {
-  test("waits for the bundled face before it constructs or opens xterm", async () => {
+  test("waits for the bundled face before it constructs or opens the widget", async () => {
     let loaded!: (faces: FontFace[]) => void;
     vi.mocked(document.fonts.load).mockImplementationOnce(() => new Promise<FontFace[]>((r) => (loaded = r)));
     const [tab] = seatTerminals([terminalTab()]);
@@ -54,30 +56,30 @@ describe("the mounted terminal", () => {
       props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
     });
     for (let i = 0; i < 4; i += 1) await tick();
-    expect(xterm.terminals, "nothing built while the face loads").toHaveLength(0);
+    expect(ghosttyFixture.terminals, "nothing built while the face loads").toHaveLength(0);
 
     loaded([{} as FontFace]);
-    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
-    expect(xterm.terminals[0]!.element).not.toBeNull();
-    expect(String(xterm.terminals[0]!.options.fontFamily)).toContain("Source Code Pro");
-    unmount(component);
+    const term = await openedGhostty(target);
+    expect(ghosttyFixture.terminals).toHaveLength(1);
+    expect(ghosttyFontFamily(term)).toContain("Source Code Pro");
+    await unmount(component);
   });
 
   test("takes the font size from the settings, 14px without one", async () => {
     const [first] = seatTerminals([terminalTab()]);
-    const { term: plain } = await mountTerminal(TerminalTab, first!);
+    const { term: plain } = await mountGhosttyTerminal(TerminalTab, first!);
     expect(plain.options.fontSize).toBe(14);
     resetTerminals();
 
     __testSetStandalonePreferences(terminalPreferences({ font_size: 18 }));
     const [second] = seatTerminals([terminalTab()]);
-    const { term: sized } = await mountTerminal(TerminalTab, second!);
+    const { term: sized } = await mountGhosttyTerminal(TerminalTab, second!);
     expect(sized.options.fontSize).toBe(18);
   });
 
   test("uses a non-blinking block cursor", async () => {
     const [tab] = seatTerminals([terminalTab()]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect(term.options).toMatchObject({ cursorBlink: false, cursorStyle: "block" });
   });
 });
@@ -92,9 +94,9 @@ describe("TerminalTab font + cursor parity", () => {
 
     vi.mocked(document.fonts.load).mockClear();
     const [tab] = seatTerminals([terminalTab()]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
-    const first = String(term.options.fontFamily).split(",")[0]!.trim().replace(/^["']|["']$/g, "");
-    expect(first, "the first family xterm is given").toBe(declared);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const first = String(ghosttyFontFamily(term)).split(",")[0]!.trim().replace(/^["']|["']$/g, "");
+    expect(first, "the first family the widget is given").toBe(declared);
     const awaited = vi.mocked(document.fonts.load).mock.calls.map(([font]) => /"([^"]+)"/.exec(String(font))?.[1]);
     expect(awaited, "the face the terminal waits for before it builds a renderer").toContain(declared);
   });

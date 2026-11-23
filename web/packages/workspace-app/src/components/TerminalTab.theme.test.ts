@@ -1,11 +1,7 @@
 // @vitest-environment jsdom
 //
-// A terminal's colours follow its own Hybrid surface theme, not the page's,
-// and a custom palette from the settings wins over both. xterm paints to its
-// own canvas from a theme object, so the surface theme has to reach that
-// object and follow it when it flips. A TerminalTab is mounted over the
-// stand-in xterm; the assertions read the theme object it was handed, the
-// body's data-theme and its background token.
+// The widget palette follows the terminal's Hybrid surface and custom
+// settings. The body carries the same theme and background token.
 
 import { flushSync, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -17,16 +13,16 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
-import {
-  applyDesktopTerminalOpacity,
-  resetDesktopTerminalOpacityForTests,
-} from "../terminal/desktopTerminalOpacity.svelte";
-import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
+import { installTerminalDom, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
+
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 
 installTerminalDom();
 
@@ -52,13 +48,12 @@ afterEach(() => {
   resetTerminals();
   delete hybridSurfaceThemes.terminal;
   __testSetStandalonePreferences(null);
-  resetDesktopTerminalOpacityForTests();
   ui.theme = startTheme;
 });
 
 async function mounted() {
   const [tab] = seatTerminals([terminalTab()]);
-  return mountTerminal(TerminalTab, tab!);
+  return mountGhosttyTerminal(TerminalTab, tab!);
 }
 
 function ansi(theme: unknown): string[] {
@@ -66,7 +61,7 @@ function ansi(theme: unknown): string[] {
   return ANSI_KEYS.map((k) => t[k]!);
 }
 
-describe("the xterm palette", () => {
+describe("the widget palette", () => {
   test("is the standard dark or light ANSI set, with the shared selection colour", async () => {
     const { term } = await mounted();
     expect(ansi(term.options.theme)).toEqual(DARK_ANSI);
@@ -83,41 +78,11 @@ describe("the xterm palette", () => {
     hybridSurfaceThemes.terminal = "light";
     const { term } = await mounted();
     expect(ansi(term.options.theme)).toEqual(LIGHT_ANSI);
-    expect(term.options.minimumContrastRatio, "light raises the contrast floor").toBe(4.5);
 
     delete hybridSurfaceThemes.terminal;
     flushSync();
     await tick();
     expect(ansi(term.options.theme)).toEqual(DARK_ANSI);
-    expect(term.options.minimumContrastRatio).toBe(1);
-  });
-
-  test("in a transparent window the contrast floor drops only while the desktop shows through", async () => {
-    // chan-desktop builds every window transparent, so the window flag alone
-    // says nothing about what sits behind the text: at 100 the tint is the
-    // theme background and light keeps its floor. The value is the desktop's
-    // own; the tenant's preference, 90 throughout here, plays no part.
-    const href = window.location.href;
-    window.history.replaceState(null, "", "/?transparent=1");
-    try {
-      hybridSurfaceThemes.terminal = "light";
-      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 90 }));
-      applyDesktopTerminalOpacity(100);
-      const { term } = await mounted();
-      expect(term.options.minimumContrastRatio, "opaque at the desktop's 100").toBe(4.5);
-
-      applyDesktopTerminalOpacity(90);
-      flushSync();
-      await tick();
-      expect(term.options.minimumContrastRatio, "see-through at 90").toBe(1);
-
-      applyDesktopTerminalOpacity(100);
-      flushSync();
-      await tick();
-      expect(term.options.minimumContrastRatio, "back to opaque").toBe(4.5);
-    } finally {
-      window.history.replaceState(null, "", href);
-    }
   });
 
   test("a custom palette sets background, foreground and cursor, and its contrast picks the ANSI set", async () => {

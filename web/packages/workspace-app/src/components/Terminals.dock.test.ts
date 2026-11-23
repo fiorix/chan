@@ -15,7 +15,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import Pane from "./Pane.svelte";
 import Terminals from "./Terminals.svelte";
@@ -26,9 +28,10 @@ import {
   TERMINAL_PANE,
   terminalTab,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 import { layout, type LeafNode } from "../state/tabs.svelte";
+
+import { ghosttyFixture, openedGhostty } from "../__tests__/ghosttyTab";
 
 installTerminalDom();
 
@@ -52,7 +55,7 @@ describe("a terminal", () => {
     await tick();
     await tick();
     await new Promise((r) => setTimeout(r, 20));
-    expect({ renderers: xterm.terminals.length, dials: TerminalSocket.all.length }).toEqual({
+    expect({ renderers: ghosttyFixture.terminals.length, dials: TerminalSocket.all.length }).toEqual({
       renderers: 0,
       dials: 0,
     });
@@ -60,7 +63,8 @@ describe("a terminal", () => {
     mounted.push(mount(Pane, { target: target(), props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
 
-    expect(xterm.terminals[0]!.element!.closest("[data-pane-id]")?.getAttribute("data-pane-id")).toBe(
+    const term = await openedGhostty();
+    expect(term.element!.closest("[data-pane-id]")?.getAttribute("data-pane-id")).toBe(
       TERMINAL_PANE,
     );
   });
