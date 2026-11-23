@@ -162,6 +162,15 @@ export async function observePointer(term) {
 export const pointerEvents = (trace) => trace.evaluate((value) => value.events.slice());
 export const pointerWrites = (page) => page.evaluate(() => window.__pointerSmoke.writes.slice());
 
+export function pointerCheckError(details) {
+  const error = Object.assign(new Error(details.failures.join("\n")), { smokeDetails: details });
+  const unavailable = Object.values(details.legs).filter((leg) => leg.status === "unavailable").length;
+  // An unavailable input source must not turn another arm's product failure
+  // or a cleanup failure into a runner skip.
+  if (unavailable > 0 && unavailable === details.failures.length) error.smokeSkip = true;
+  return error;
+}
+
 // Own the raw PTYs and page instruments together so a failed arm cannot
 // strand a tab, hide later arms, or lose its partial event evidence.
 export async function runPointerCheck(ctx, number, body) {
@@ -292,7 +301,7 @@ export async function runPointerCheck(ctx, number, body) {
     if (details.pageErrors.length) details.failures.push(`page errors: ${details.pageErrors.join("; ")}`);
     writeFileSync(join(ctx.outDir, `${number}-pointer.json`), JSON.stringify(details, null, 2) + "\n");
   }
-  if (details.failures.length) throw new Error(details.failures.join("\n"));
+  if (details.failures.length) throw pointerCheckError(details);
   return details;
 }
 

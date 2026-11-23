@@ -90,3 +90,17 @@ test("painted thumb location comes from pixels and rejects a hidden, flat or amb
   short.fill(42, 30, 32);
   assert.throws(() => paintedThumbBand(short), /usable height/);
 });
+
+test("unavailable input stays a runner skip without masking a product or cleanup failure", async () => {
+  const { pointerCheckError } = await import("./terminal-pointer.mjs");
+  const details = { legs: { pen: { status: "unavailable" }, touch: { status: "passed" } }, failures: ["pen unavailable"] };
+  const skipped = pointerCheckError(details);
+  assert.equal(skipped.smokeSkip, true);
+  assert.equal(skipped.smokeDetails, details);
+  for (const extra of ["touch reports", "cleanup failed"]) {
+    const failed = pointerCheckError({ ...details, failures: [...details.failures, extra] });
+    assert.notEqual(failed.smokeSkip, true);
+    assert.ok(failed.message.includes(extra));
+  }
+  assert.notEqual(pointerCheckError({ legs: { pen: { status: "failed" } }, failures: ["pen failed"] }).smokeSkip, true);
+});
