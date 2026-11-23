@@ -30,6 +30,8 @@ import {
   bumpTabFocusPulse,
   type FileTab,
 } from "../state/tabs.svelte";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyHasFocus, ghosttyLineText, mountGhosttyTerminal, typeInGhostty } from "../__tests__/ghosttyTab";
 import {
   installTerminalDom,
   mountTerminal,
@@ -37,7 +39,6 @@ import {
   resetTerminals,
   TerminalSocket,
   terminalTab,
-  xterm,
 } from "../__tests__/terminalTab";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -47,16 +48,16 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 installTerminalDom();
 
 beforeEach(() => {
   vi.useFakeTimers();
-  // Dials stay CONNECTING until a test opens or fails them, and each
-  // terminal's focus lands on a real textarea, as xterm's does.
+  // Dials stay CONNECTING until a test opens or fails them.
   TerminalSocket.connecting = true;
-  xterm.textareaFocus = true;
 });
 
 afterEach(() => {
@@ -64,15 +65,19 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/// Lines the component wrote INTO the terminal: the surface the version-skew
-/// guard must keep ping-error spam out of.
-function writtenLines(): string[] {
-  return xterm.terminals.flatMap((term) => term.written);
+/// The terminal's screen: the surface the version-skew guard must keep
+/// ping-error spam out of.
+function screenLines(term: Terminal): string[] {
+  return Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "");
 }
 
-/// Focus calls on every terminal the tests made.
-function xtermFocusCalls(): number {
-  return xterm.terminals.reduce((n, term) => n + term.focusCount, 0);
+/// Count the times the terminal's element takes focus from outside it.
+function focusChanges(term: Terminal): () => number {
+  let count = 0;
+  term.element!.addEventListener("focusin", (event) => {
+    if (!(event.relatedTarget instanceof Node && term.element!.contains(event.relatedTarget))) count += 1;
+  });
+  return () => count;
 }
 
 function pings(socket: TerminalSocket): number {
@@ -219,7 +224,7 @@ describe("terminal heartbeat", () => {
   });
 
   test("an old server's unknown-variant ping error is liveness, not terminal spam", async () => {
-    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = lastSocket();
     await attach(socket);
 
@@ -229,13 +234,13 @@ describe("terminal heartbeat", () => {
         message: "invalid terminal frame: unknown variant `ping`, expected one of `input`",
       }),
     });
-    expect(writtenLines().some((l) => l.includes("invalid terminal frame"))).toBe(false);
+    expect(screenLines(term).some((l) => l.includes("invalid terminal frame"))).toBe(false);
 
     // A real error still writes into the terminal.
     await socket.onmessage?.({
       data: JSON.stringify({ type: "error", message: "pty write failed" }),
     });
-    expect(writtenLines().some((l) => l.includes("terminal error: pty write failed"))).toBe(true);
+    expect(screenLines(term).some((l) => l.includes("terminal error: pty write failed"))).toBe(true);
   });
 });
 
@@ -503,40 +508,35 @@ describe("wake input recovery", () => {
 
   test("a wake restores DOM focus to the still-focused terminal", async () => {
     const tab = terminalTab();
-    const { target } = await mountTerminal(TerminalTab, tab);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab);
     await attach(lastSocket(), "sess-focus");
 
-    const textarea = target.querySelector<HTMLTextAreaElement>(
-      ".terminal-host textarea",
-    );
-    expect(textarea).not.toBeNull();
-    expect(document.activeElement).toBe(textarea);
+    expect(ghosttyHasFocus(term)).toBe(true);
 
-    // WKWebView keeps the page-level `focused` prop true across sleep, but its
-    // xterm textarea can lose DOM focus. The wake callback must restore the
-    // keyboard owner even though no Svelte focus-state edge fires.
-    textarea?.blur();
-    expect(document.activeElement).not.toBe(textarea);
+    // WKWebView keeps the page-level `focused` prop true across sleep, but the
+    // terminal's element can lose DOM focus. The wake callback must restore
+    // the keyboard owner even though no Svelte focus-state edge fires.
+    (document.activeElement as HTMLElement).blur();
+    expect(ghosttyHasFocus(term)).toBe(false);
 
     await wake();
 
-    expect(document.activeElement).toBe(textarea);
+    expect(ghosttyHasFocus(term)).toBe(true);
   });
 
-  test("a wake reissues focus when xterm still appears focused", async () => {
-    const { target } = await mountTerminal(TerminalTab, terminalTab());
+  test("a wake reissues focus when the terminal still appears focused", async () => {
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab());
     await attach(lastSocket(), "sess-stale-focus");
 
-    const textarea = target.querySelector<HTMLTextAreaElement>(
-      ".terminal-host textarea",
-    );
-    expect(document.activeElement).toBe(textarea);
-    const callsBeforeWake = xtermFocusCalls();
+    expect(ghosttyHasFocus(term)).toBe(true);
+    // WKWebView can keep the element active while it detaches keyboard
+    // input, so the wake gives the keyboard back through a real focus change.
+    const changes = focusChanges(term);
 
     await wake();
 
-    expect(xtermFocusCalls()).toBe(callsBeforeWake + 1);
-    expect(document.activeElement).toBe(textarea);
+    expect(changes()).toBe(1);
+    expect(ghosttyHasFocus(term)).toBe(true);
   });
 
   test("a wake does not steal focus from another DOM owner", async () => {
@@ -552,44 +552,38 @@ describe("wake input recovery", () => {
   });
 
   test("a wake does not focus a background terminal", async () => {
-    const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     await attach(lastSocket(), "sess-background");
-    const textarea = target.querySelector<HTMLTextAreaElement>(
-      ".terminal-host textarea",
-    );
-    expect(xtermFocusCalls()).toBe(0);
+    const changes = focusChanges(term);
+    expect(ghosttyHasFocus(term)).toBe(false);
 
     await wake();
 
-    expect(xtermFocusCalls()).toBe(0);
-    expect(document.activeElement).not.toBe(textarea);
+    expect(changes()).toBe(0);
+    expect(ghosttyHasFocus(term)).toBe(false);
   });
 
   test("the tab focus pulse restores the same lost terminal focus", async () => {
-    const { target } = await mountTerminal(TerminalTab, terminalTab());
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab());
     await attach(lastSocket(), "sess-tab-focus");
 
-    const textarea = target.querySelector<HTMLTextAreaElement>(
-      ".terminal-host textarea",
-    );
-    expect(document.activeElement).toBe(textarea);
+    expect(ghosttyHasFocus(term)).toBe(true);
 
-    textarea?.blur();
+    (document.activeElement as HTMLElement).blur();
+    expect(ghosttyHasFocus(term)).toBe(false);
     bumpTabFocusPulse();
     await tick();
 
-    expect(document.activeElement).toBe(textarea);
+    expect(ghosttyHasFocus(term)).toBe(true);
   });
 
   test("input typed during reconnect backoff is dropped rather than replayed", async () => {
-    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = lastSocket();
     await attach(first, "sess-backoff");
 
     first.close();
-    const onData = xterm.terminals.at(-1)?.dataHandlers.at(-1);
-    expect(onData).toBeDefined();
-    onData?.("x");
+    typeInGhostty(term, "x");
     expect(first.sent).not.toContain(
       JSON.stringify({ type: "input", data: "x" }),
     );
