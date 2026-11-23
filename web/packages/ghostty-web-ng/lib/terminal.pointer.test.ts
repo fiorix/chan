@@ -292,6 +292,18 @@ describe('captured selection lifecycle', () => {
 });
 
 describe('report and bypass completion', () => {
+  test('DECSET 1000 without motion reporting never selects during a drag', async () => {
+    const { term, canvas, write, reports } = await open();
+    term.write('\x1b[?1000h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 34, 1);
+    expect(term.hasSelection()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+    pointer(canvas, 'pointerup', 34, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<0;5;1m']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   test.each([0, 1, 2])('default-prevented button %i under DECSET 1000 belongs to the embedder', async (button) => {
     const { term, host, canvas, capture, reports, write } = await open('https://example.com');
     const activated: string[] = [];
