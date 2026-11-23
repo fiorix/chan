@@ -10,32 +10,17 @@
 /// back out of the readiness report and converts them through the grid origin
 /// the terminal actually landed on.
 ///
-/// The ghostty adapters are the product's own modules, compiled straight out
-/// of src/terminal/ into /product/. Only the wiring is written here, and it
-/// tracks TerminalTab.start() and backend.ts: the same core under the same
-/// binding, same options, same post-open() alignment, same custom-glyph and
-/// overlay-scrollbar installs.
+/// The widget owns grid measurement, box glyphs and overlay scrollbars.
+/// Construction options and public metrics keep the page on its API.
 
-import { Terminal as XtermTerminal } from "/vendor/xterm/lib/xterm.mjs";
-import { WebglAddon } from "/vendor/addon-webgl/lib/addon-webgl.mjs";
 import { Terminal as GhosttyTerminal } from "/vendor/ghostty-web-ng/ghostty-web.js";
 import { GhosttyVt } from "/vendor/ghostty-web-ng/vt.js";
-import {
-  alignGhosttyRendererToXterm,
-  installGhosttyCustomGlyphs,
-  installGhosttyOverlayScrollbar,
-  measureXtermCellDimensions,
-} from "/product/ghosttyCompat.js";
 
 /// The grid every scenario renders on. Fixed rather than fitted: a fitted
 /// grid changes with the cell size, and then two scenarios would not be
 /// painting the same pattern in the same cells.
 const COLS = 60;
 const ROWS = 20;
-
-/// TerminalTab's line height. Also what measureXtermCellDimensions is handed
-/// when the ghostty renderer is aligned to xterm's grid.
-const LINE_HEIGHT = 1.2;
 
 /// The pattern's geometry, in cells. Every region the driver samples is
 /// derived from these, so moving the pattern moves the measurements with it.
@@ -186,26 +171,62 @@ const PARTIAL_LINES = 30;
 const PARTIAL_SHOWN = 6;
 const PARTIAL_LAST_COL = 47;
 
-/// Scroll a terminal's view to `rows` rows back from the bottom, a fraction
-/// of a row as chan's macOS pixel scroll moves it, and wait for the overlay
-/// scrollbar the scroll shows to hide again.
+/// Snapshot scrolling with the construction hook holding the scrollbar hidden.
 async function scrollBack(term, rows) {
   term.scrollLines(term.getViewportY() - rows);
   if (term.getViewportY() !== rows) {
     throw new Error(`scrolled back ${term.getViewportY()} rows, not ${rows}`);
   }
-  // A scroll shows the widget's overlay scrollbar, which fades in and then
-  // hides itself on a timer. A frame taken mid-fade would not reproduce, so
-  // the snapshot waits for it to be gone.
-  const deadline = performance.now() + 10000;
-  while (term.scrollbarVisible !== false) {
-    if (typeof term.scrollbarVisible !== "boolean") {
-      throw new Error("the widget's scrollbar state is unreadable");
-    }
-    if (performance.now() > deadline) {
-      throw new Error("the overlay scrollbar never hid");
-    }
-    await nextFrame();
+  term.refresh();
+  await nextFrame();
+}
+
+/// The driver moves the native pointer; an untrusted DOM event cannot settle it.
+async function movePointer(term, col, row) {
+  const canvas = term.element.querySelector(":scope > canvas");
+  const metrics = term.getMetrics();
+  if (!canvas || !metrics) throw new Error("pointer target has no canvas or metrics");
+  const rect = canvas.getBoundingClientRect();
+  const target = { x: rect.left + (col + 0.5) * metrics.width,
+    y: rect.top + (row + 0.5) * metrics.height };
+  let timer, listener;
+  try {
+    await new Promise((resolve, reject) => {
+      listener = (event) => {
+        const cell = term.cellAt(event.clientX, event.clientY);
+        if (event.isTrusted && event.pointerType === "mouse" && event.buttons === 0
+            && cell?.col === col && cell.row === row) resolve();
+      };
+      canvas.addEventListener("pointermove", listener);
+      timer = setTimeout(() => reject(new Error(`no trusted pointer move to ${col},${row}`)), 5000);
+      document.title = "chan-pixels-pointer " + JSON.stringify(target);
+    });
+  } finally {
+    clearTimeout(timer);
+    canvas.removeEventListener("pointermove", listener);
+  }
+  await nextFrame();
+}
+
+async function hoverLink(term) {
+  // Park off the link before sampling, even if the pointer started over it.
+  await movePointer(term, 30, 18);
+  const canvas = term.element.querySelector(":scope > canvas");
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("OSC 8 hover needs readable canvas pixels");
+  const row = 11, length = "a link here".length;
+  const text = term.core.plainText({ startRow: row, startCol: 0, endRow: row, endCol: length - 1 });
+  if (text !== "a link here") throw new Error(`OSC 8 hover fixture is missing: ${JSON.stringify(text)}`);
+  const pixels = () => {
+    const y = Math.floor(row * canvas.height / term.rows);
+    return context.getImageData(0, y, Math.ceil(length * canvas.width / term.cols),
+      Math.ceil((row + 1) * canvas.height / term.rows) - y).data;
+  };
+  const before = pixels();
+  await movePointer(term, 2, row);
+  const after = pixels();
+  if (!after.some((value, index) => value !== before[index])) {
+    throw new Error("trusted motion over the OSC 8 link changed no link pixels");
   }
 }
 
@@ -475,8 +496,7 @@ const PATTERNS = {
       ]) {
         await step(term, bytes);
       }
-      term.renderer.setHoveredHyperlinkId(1);
-      await nextFrame();
+      await hoverLink(term);
     },
     regions: () => ({
       painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: REDRAW_PROMPT + 2 },
@@ -536,10 +556,8 @@ const PATTERNS = {
     }),
   },
 
-  // A theme switched on a live terminal the way ghosttyTheme.ts switches it
-  // (the core's colours from the widget's own config builder, then the
-  // renderer's), over default, palette, 256-colour and RGB cells, then a
-  // palette entry and the foreground set by the program.
+  // Replace the live theme over default, palette, 256-colour and RGB cells,
+  // then let the program set a palette entry and foreground.
   theme: {
     bytes() {
       return [
@@ -551,9 +569,7 @@ const PATTERNS = {
       ].join("");
     },
     async settle(term) {
-      Object.assign(term.options.theme, SWITCHED_THEME);
-      term.wasmTerm.setColors(term.buildWasmConfig());
-      term.renderer.setTheme(term.options.theme);
+      term.setTheme(SWITCHED_THEME);
       await nextFrame();
       await step(term, "\x1b]4;1;rgb:00/c0/c0\x07");
       await step(term, "\x1b]10;rgb:f0/e0/80\x07" + cup(0, 6) + "after the program's colours");
@@ -603,9 +619,10 @@ const PATTERNS = {
       for (let i = 0; i < 50; i += 1) lines.push(sgr(String(31 + (i % 7)), `history ${i}`) + " " + "─│█ ".repeat(1 + (i % 9)));
       return "\x1b[?25l" + lines.join("\r\n");
     },
-    async settle(term) {
+    async settle(term, testHooks) {
       await scrollBack(term, 8);
-      term.scrollbarOpacity = 0.6;
+      testHooks.scrollbarOpacity = 0.6;
+      term.refresh();
       await nextFrame();
     },
     regions: () => ({
@@ -696,54 +713,6 @@ function nextFrame() {
   );
 }
 
-async function startXterm(host, scenario, warnings, bytes) {
-  const term = new XtermTerminal({
-    allowProposedApi: true,
-    allowTransparency: false,
-    cols: COLS,
-    cursorBlink: false,
-    cursorStyle: "block",
-    fontFamily: scenario.fontFamily,
-    fontSize: scenario.fontSize,
-    lineHeight: LINE_HEIGHT,
-    macOptionIsMeta: true,
-    rows: ROWS,
-    scrollback: 1000,
-    tabStopWidth: 8,
-    theme: terminalTheme(host),
-  });
-  term.open(host);
-  // The desktop app stays on the DOM renderer on Linux (see
-  // shouldUseWebglRenderer). The webgl arm exists so a run can measure what
-  // the renderer chan turns off there would have painted: it is the only
-  // xterm renderer that fires the customGlyphs path, since @xterm/addon-canvas
-  // has no release for xterm 6 and installing it pulls the core back to 5.5.
-  const addons = { webgl: WebglAddon };
-  const Addon = addons[scenario.renderer];
-  if (Addon) {
-    try {
-      term.loadAddon(new Addon());
-    } catch (err) {
-      warnings.push(`${scenario.renderer} addon unavailable: ${err}`);
-    }
-  }
-  await new Promise((resolve) => term.write(bytes, resolve));
-  await nextFrame();
-
-  const screen = host.querySelector(".xterm-screen");
-  if (!screen) throw new Error("xterm painted no .xterm-screen");
-  const rect = screen.getBoundingClientRect();
-  return {
-    cols: term.cols,
-    rows: term.rows,
-    cellWidth: rect.width / term.cols,
-    cellHeight: rect.height / term.rows,
-    originX: rect.x,
-    originY: rect.y,
-    renderer: scenario.renderer,
-  };
-}
-
 /// The vendored libghostty-vt core, compiled once per page like the module
 /// behind loadGhosttyKit's cached promise. Every chan terminal instantiates
 /// it into a memory of its own, through chan's binding (backend.ts's
@@ -765,18 +734,23 @@ function compileGhostty() {
   return ghosttyModule;
 }
 
-async function startGhostty(host, scenario, warnings, bytes, settle) {
+async function startGhostty(host, scenario, bytes, settle) {
   // TerminalTab's instance host: replies the core generates outside a write
   // (a resize report) go to the PTY, which this page does not have.
   let term = null;
   const ghostty = new GhosttyVt(
     await WebAssembly.instantiate(await compileGhostty(), {}),
     {
-      cellSize: () => term?.renderer?.getMetrics(),
+      cellSize: () => term?.getMetrics(),
       onResizeReply: () => {},
     },
   );
+  const testHooks = { scrollbarOpacity: 0 };
   term = new GhosttyTerminal({
+    lineHeight: 1.2,
+    boxGlyphs: true,
+    scrollbar: "overlay",
+    testHooks,
     cols: COLS,
     cursorBlink: false,
     cursorStyle: scenario.cursorStyle ?? "block",
@@ -790,44 +764,29 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
   });
   term.open(host);
 
-  // TerminalTab's post-open() alignment, in the order it runs there.
-  const renderer = term.renderer;
-  const targetCell = measureXtermCellDimensions(
-    host,
-    scenario.fontFamily,
-    scenario.fontSize,
-    LINE_HEIGHT,
-  );
-  if (
-    !renderer ||
-    !targetCell ||
-    !alignGhosttyRendererToXterm(renderer, targetCell, term.cols, term.rows)
-  ) {
-    warnings.push("ghostty renderer metrics unavailable; native spacing");
-  }
-  if (renderer && !installGhosttyCustomGlyphs(renderer)) {
-    warnings.push("ghostty text hook unavailable; font-rendered box glyphs");
-  }
-  if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
-    warnings.push("ghostty scrollbar hooks unavailable");
-  }
-
   await new Promise((resolve) => term.write(bytes, resolve));
   await nextFrame();
   if (settle) {
-    await settle(term);
+    await settle(term, testHooks);
     await nextFrame();
   }
 
-  const canvas = host.querySelector("canvas");
+  const canvas = host.querySelector(":scope > canvas");
   if (!canvas) throw new Error("ghostty painted no canvas");
   const rect = canvas.getBoundingClientRect();
-  const metrics = renderer?.getMetrics();
+  const metrics = term.getMetrics();
+  if (
+    !metrics ||
+    !Number.isFinite(metrics.width) || metrics.width <= 0 ||
+    !Number.isFinite(metrics.height) || metrics.height <= 0
+  ) {
+    throw new Error("ghostty cell metrics unavailable");
+  }
   return {
     cols: term.cols,
     rows: term.rows,
-    cellWidth: metrics?.width ?? rect.width / term.cols,
-    cellHeight: metrics?.height ?? rect.height / term.rows,
+    cellWidth: metrics.width,
+    cellHeight: metrics.height,
     originX: rect.x,
     originY: rect.y,
     renderer: "ghostty-canvas",
@@ -855,16 +814,17 @@ async function main() {
     `${scenario.fontSize}px "Source Code Pro"`,
   );
 
-  const start =
-    scenario.backend === "ghostty" ? startGhostty : startXterm;
+  if (scenario.backend !== "ghostty") {
+    throw new Error(`unsupported terminal backend ${scenario.backend}`);
+  }
 
   // A reference pattern settles through the ghostty widget's own API and
-  // its scrollbar's timing, so it is painted on ghostty alone.
+  // deterministic scrollbar hook, so it is painted on ghostty alone.
   const pattern = scenario.pattern ? PATTERNS[scenario.pattern] : null;
   if (scenario.pattern && !pattern) {
     throw new Error(`no pattern named ${scenario.pattern}`);
   }
-  if (pattern && (scenario.backend !== "ghostty" || scenario.newTab)) {
+  if (pattern && scenario.newTab) {
     throw new Error(`the ${scenario.pattern} pattern paints one ghostty tab`);
   }
 
@@ -881,7 +841,7 @@ async function main() {
     prior.style.cssText = `position:absolute;left:-${size.width + 100}px;top:0;
       width:${size.width}px;height:${size.height}px;overflow:hidden;`;
     document.body.appendChild(prior);
-    await start(prior, scenario, warnings, patternBytes());
+    await startGhostty(prior, scenario, patternBytes());
   }
 
   const bytes = pattern
@@ -889,7 +849,7 @@ async function main() {
     : scenario.newTab
       ? promptBytes()
       : patternBytes();
-  const grid = await start(host, scenario, warnings, bytes, pattern?.settle);
+  const grid = await startGhostty(host, scenario, bytes, pattern?.settle);
 
   // The title is the whole channel back to the driver: it is readable
   // without a JavaScriptCore binding and it arrives on an event the driver

@@ -65,16 +65,17 @@ function hostile(how) {
 /// The ghostty-web Terminal whose element is the host of the tab `row` names.
 async function terminalOf(page, row) {
   const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
-  const term = await page.evaluateHandle((query) => {
-    const host = document.querySelector(query);
-    return window.__ghostty223.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
-  }, hostQuery);
-  if (!(await term.evaluate((t) => t !== null))) throw new Error(`no ghostty-web Terminal holds the host ${hostQuery}`);
+  const term = await page.evaluateHandle((query) => window.__ghostty223.term(query), hostQuery);
   return { term, hostQuery };
 }
 
 /// The core's text of the whole buffer, as a copy reads it.
-const bufferText = (term) => term.evaluate((t) => t.wasmTerm.plainText() ?? "");
+const bufferText = (term) => term.evaluate((t) => {
+  if (!t.core) throw new Error("Ghostty core unavailable for buffer read");
+  const text = t.core.plainText();
+  if (text === null) throw new Error("Ghostty plainText returned null for buffer read");
+  return text;
+});
 
 async function waitFor(label, probe, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
@@ -89,8 +90,8 @@ async function waitFor(label, probe, timeoutMs = 15_000) {
 /// The centre of cell (col, row) of the screen, in page pixels.
 async function cellCentre(term, col, row) {
   return term.evaluate((t, at) => {
-    const box = t.renderer.getCanvas().getBoundingClientRect();
-    const { width, height } = t.renderer.getMetrics();
+    const box = t.element.querySelector(":scope > canvas").getBoundingClientRect();
+    const { width, height } = t.getMetrics();
     return { x: box.left + (at.col + 0.5) * width, y: box.top + (at.row + 0.5) * height };
   }, { col, row });
 }
@@ -215,7 +216,7 @@ export default {
       await page.keyboard.type(command);
       await waitFor("A's typed command", async () => (await bufferText(a.term)) === line);
       const grid = await a.term.evaluate((t) => ({
-        wrapped: t.wasmTerm.isRowWrapped(1),
+        wrapped: t.core.isRowWrapped(1),
         history: t.getScrollbackLength(),
         viewportY: t.getViewportY(),
       }));
@@ -299,7 +300,7 @@ export default {
     } finally {
       await cs(["close", "--tab-name", TARGET]).catch(() => {});
       await cs(["close", "--tab-name", SOURCE]).catch(() => {});
-      await page.evaluate(() => window.__ghostty223?.restore());
+      await page.evaluate(() => window.__ghostty223?.restore()).catch(() => {});
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }

@@ -12,6 +12,8 @@ export function pointerInputSince(fixture, index) {
 
 // The cursor reply follows the gesture through the real PTY. Silence from
 // a stalled or disconnected recorder cannot satisfy a no-report assertion.
+// Output strings use UTF-8 (callers send ASCII controls/text); recorded input
+// is decoded as Latin-1 to preserve arbitrary X10 coordinate bytes exactly.
 export async function drainPointerInput(fixture, bytes = "", index = fixture.records.length) {
   await fixture.send("bytes", { base64: Buffer.from(bytes + "\x1b[6n").toString("base64") });
   await fixture.waitFor(() => CPR.test(pointerInputSince(fixture, index)));
@@ -36,12 +38,7 @@ export async function capturePointerTerminals(page) {
 }
 
 export async function pointerTerminal(page, hostQuery) {
-  return page.evaluateHandle((query) => {
-    const host = document.querySelector(query);
-    const term = host && window.__pointerSmoke?.terminals.find((candidate) => candidate.element === host);
-    if (!term) throw new Error("the attached Ghostty terminal was not captured");
-    return term;
-  }, hostQuery);
+  return page.evaluateHandle((query) => window.__pointerSmoke.term(query), hostQuery);
 }
 
 export async function pointerGrid(term) {
@@ -73,6 +70,10 @@ export async function copyPointerSelection(page, term) {
     input.focus();
     if (document.activeElement !== input) throw new Error("terminal input did not take focus");
   });
+  return copyPointerChord(page);
+}
+
+export async function copyPointerChord(page) {
   await page.keyboard.down("Control");
   await page.keyboard.down("Shift");
   try { await page.keyboard.press("KeyC"); }
@@ -87,6 +88,16 @@ export async function copyPointerSelection(page, term) {
 export async function settlePointer(page) {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await sleep(200);
+}
+
+export async function beginPointerSelection(page, terminal, grid, text) {
+  await page.mouse.move(grid.x + grid.w * 0.2, grid.y + grid.h * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(grid.x + grid.w * (text.length - 0.2), grid.y + grid.h * 0.5, { steps: 6 });
+  assert.equal(await terminal.term.evaluate((t) => t.getSelection()), text, "the held drag selected the fixture word");
+  const down = (await pointerEvents(terminal.trace)).findLast((event) => event.type === "pointerdown" && event.onCanvas);
+  assert.ok(down?.isPrimary && down.isTrusted && down.pointerType === "mouse", "the canvas received a trusted primary mouse press");
+  return down;
 }
 
 export const POINTER_RESET_MODES = "\x1b[?1000;1002;1003;1006l";
@@ -206,9 +217,9 @@ export async function runPointerCheck(ctx, number, body) {
     assert.ok(resource.ready.tty && resource.ready.raw, "the fixture owns a raw PTY");
     resource.term = await pointerTerminal(page, `${resource.query} .terminal-host`);
     resource.trace = await observePointer(resource.term);
-    resource.prepare = async (text) => {
-      const setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[?25l\x1b[2J\x1b[H${text}\r\n`);
-      assert.equal(setup.reply, "\x1b[2;1R", "fixture text reached the parser without wrapping");
+    resource.prepare = async (text, { reply = "\x1b[2;1R" } = {}) => {
+      const setup = resource.setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[?25l\x1b[2J\x1b[H${text}\r\n`);
+      assert.equal(setup.reply, reply, "fixture text reached the parser without wrapping");
       assert.equal(await resource.term.evaluate((t) => t.getScrollbackLength()), 0,
         "each exact-selection gesture starts with empty scrollback");
       assert.deepEqual(await resource.term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
@@ -242,20 +253,38 @@ export async function runPointerCheck(ctx, number, body) {
     await page.evaluate(() => {
       const state = window.__pointerSmoke;
       const clipboard = navigator.clipboard;
-      const descriptor = Object.getOwnPropertyDescriptor(clipboard, "writeText");
-      const original = clipboard.writeText;
+      const descriptors = new Map();
       const restore = state.restore;
       state.writes = [];
-      clipboard.writeText = function (text) {
-        const write = { text, status: "pending" };
-        state.writes.push(write);
-        return original.call(this, text).then(() => { write.status = "fulfilled"; }, (error) => {
-          write.status = "rejected"; write.error = error.message; throw error;
-        });
-      };
+      for (const method of ["writeText", "write"]) {
+        const original = clipboard[method];
+        if (typeof original !== "function") continue;
+        descriptors.set(method, Object.getOwnPropertyDescriptor(clipboard, method));
+        clipboard[method] = async function (...args) {
+          const write = { text: method === "writeText" ? args[0] : "", status: "pending" };
+          state.writes.push(write);
+          // Read the items independently without changing what the browser
+          // receives or replacing its rejection with an observation error.
+          const observed = method === "writeText" ? Promise.resolve() : Promise.all(
+            Array.from(args[0], async (item) => item.types.includes("text/plain")
+              ? (await item.getType("text/plain")).text() : ""),
+          ).then((texts) => { write.text = texts.join("\n"); }, (error) => { write.observationError = error.message; });
+          try {
+            const result = await original.apply(this, args);
+            write.status = "fulfilled";
+            return result;
+          } catch (error) {
+            write.status = "rejected"; write.error = error.message; throw error;
+          } finally {
+            await observed;
+          }
+        };
+      }
       state.restore = () => {
-        if (descriptor) Object.defineProperty(clipboard, "writeText", descriptor);
-        else delete clipboard.writeText;
+        for (const [method, descriptor] of descriptors) {
+          if (descriptor) Object.defineProperty(clipboard, method, descriptor);
+          else delete clipboard[method];
+        }
         restore();
       };
     });

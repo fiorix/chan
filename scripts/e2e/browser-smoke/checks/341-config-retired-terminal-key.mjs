@@ -10,6 +10,14 @@ import { launchServer, seedWorkspace, teardownServer } from "../lib/server.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitForLog(read, label) {
+  const deadline = Date.now() + 5_000;
+  while (read().length === 0) {
+    assert.ok(Date.now() < deadline, `${label}: stderr deadline expired after 5s`);
+    await sleep(25);
+  }
+  return read().map(maskTokens);
+}
 const seed = (programStatus) => `[terminal]\nghostty = false\nprogram_status = ${programStatus}\n`;
 const sha256 = (bytes) => bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
 function readOptional(path) {
@@ -50,7 +58,6 @@ export default {
   name: "config-retired-terminal-key",
   async run(ctx) {
     assert.ok(ctx.chanHome, "CLI checks require the runner's private CHAN_HOME");
-    assert.ok(Array.isArray(ctx.stderrLines), "runner exposes the live server stderr lines");
     const details = { chanBin: ctx.chanBin, chanHome: ctx.chanHome, arms: {} };
     const errors = [];
     const artifact = join(ctx.outDir, "341-config-retired-terminal-key.json");
@@ -124,24 +131,48 @@ export default {
     }
 
     await arm("e-patch-invalid", async (row) => {
-      const config = await readConfig(ctx.serverUrl);
-      row.before = configHashes(ctx.chanHome);
-      const response = await api(ctx.serverUrl, "/api/config", {
-        method: "PATCH",
-        body: JSON.stringify({ expected_revision: config.revision,
-          preferences: { terminal: { ...config.preferences.terminal, ghostty: "yes" } } }),
+      const workspaceDir = seedWorkspace();
+      const server = launchServer(ctx.chanBin, workspaceDir, undefined, {
+        env: { RUST_LOG: "warn,chan_server::extract=debug" },
       });
-      row.httpStatus = response.status;
-      row.body = await response.text();
-      row.after = configHashes(ctx.chanHome);
-      assert.ok(response.status >= 400 && response.status < 500, `invalid PATCH must be 4xx, got ${response.status}`);
-      assert.match(row.body, /terminal\.ghostty/, "refusal names the invalid key");
-      assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
+      row.chanHome = server.chanHome;
+      row.serverPid = server.child.pid;
+      const rejections = () => server.stderrLines.filter((line) => line.includes("request rejected")
+        && line.includes("chan_server::extract") && line.includes("terminal.ghostty"));
+      try {
+        const serverUrl = await server.url;
+        const config = await readConfig(serverUrl);
+        const patch = (ghostty) => api(serverUrl, "/api/config", {
+          method: "PATCH",
+          body: JSON.stringify({ expected_revision: config.revision,
+            preferences: { terminal: { ...config.preferences.terminal, ghostty } } }),
+        });
+        row.before = configHashes(server.chanHome);
+        const response = await patch("yes");
+        row.httpStatus = response.status;
+        row.body = await response.text();
+        row.after = configHashes(server.chanHome);
+        assert.equal(row.httpStatus, 422, "a non-boolean terminal.ghostty PATCH is rejected as an invalid body");
+        assert.deepEqual(JSON.parse(row.body), { error: "the request body does not match what this route accepts" });
+        assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
+        row.rejections = await waitForLog(rejections, "extractor rejection");
+        assert.equal(row.rejections.length, 1, "exactly one logged rejection names terminal.ghostty");
+        const control = await patch(true);
+        row.controlStatus = control.status;
+        assert.equal(row.controlStatus, 200, "the same PATCH accepts a boolean terminal.ghostty");
+        row.controlReadback = (await readConfig(serverUrl)).preferences.terminal;
+        assert.equal(Object.hasOwn(row.controlReadback, "ghostty"), false, "the accepted retired key is absent on readback");
+        assert.equal(rejections().length, 1, "the boolean control adds no rejection");
+      } finally {
+        row.stderrLines = server.stderrLines.map(maskTokens);
+        await teardownServer(ctx.chanBin, server.child, workspaceDir, server.chanHome);
+      }
     });
 
     await arm("f-stored-false-warning", async (row) => {
       const workspaceDir = seedWorkspace();
       const server = launchServer(ctx.chanBin, workspaceDir, undefined, {
+        env: { RUST_LOG: "warn,chan_server::extract=debug" },
         prepareChanHome(home) { writeFileSync(join(home, "server.toml"), seed(true), { mode: 0o600 }); },
       });
       const path = join(server.chanHome, "server.toml");
@@ -153,8 +184,7 @@ export default {
         const initial = await readConfig(serverUrl, "/api/workspace");
         assert.equal(initial.preferences.terminal.program_status, true, "startup consumed the seeded file");
         assert.equal(readFileSync(path, "utf8"), seed(true), "startup leaves the seeded file untouched");
-        await sleep(250); // Let stderr delivery catch up with the HTTP read.
-        row.startupWarnings = warnings().map(maskTokens);
+        row.startupWarnings = await waitForLog(warnings, "startup warning");
 
         // A changed live field proves this process loaded the second false
         // file, independently of the warning counter under test.
@@ -168,7 +198,18 @@ export default {
         }
         row.reloadConsumed = true;
         assert.equal(readFileSync(path, "utf8"), seed(false), "reload leaves the seeded file untouched");
-        await sleep(250);
+        // A later extractor log fences stderr delivery after the observed
+        // config reload; elapsed time alone cannot prove the pipe caught up.
+        const logIndex = server.stderrLines.length;
+        const current = await readConfig(serverUrl);
+        const fence = await api(serverUrl, "/api/config", {
+          method: "PATCH",
+          body: JSON.stringify({ expected_revision: current.revision,
+            preferences: { terminal: { ghostty: "log-fence" } } }),
+        });
+        assert.equal(fence.status, 422, "the stderr fence rejects its invalid body");
+        row.stderrFence = await waitForLog(() => server.stderrLines.slice(logIndex)
+          .filter((line) => line.includes("request rejected") && line.includes("terminal.ghostty")), "reload stderr fence");
         row.warningsAfterReload = warnings().map(maskTokens);
         assert.equal(row.startupWarnings.length, 1, "startup logs exactly one terminal.ghostty warning");
         assert.equal(row.warningsAfterReload.length, 1, "reloading false does not repeat the warning");

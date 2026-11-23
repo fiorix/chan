@@ -13,7 +13,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
-import { capturePointerTerminals, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { capturePointerTerminals, copyPointerChord, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
@@ -419,23 +419,19 @@ export default {
         }
         ta.focus();
       });
-      await page.keyboard.down("Control");
-      await page.keyboard.down("Shift");
-      await page.keyboard.press("KeyC");
-      await page.keyboard.up("Shift");
-      await page.keyboard.up("Control");
-      await sleep(300);
-      const text = await page.evaluate(() => navigator.clipboard.readText());
+      const text = await copyPointerChord(page);
       return text === CLIPBOARD_SENTINEL ? "" : text;
     }
 
     async function probePressOnlyTracking() {
-      const result = { gestures: {}, failures: [] };
+      const kinds = ["drag", "double-click", "shift-double-click", "triple-click", "shift-triple-click", "shift-released-drag"];
+      const result = { status: "running", gestures: Object.fromEntries(kinds.map((kind) => [kind, { status: "not-run" }])), failures: [] };
       const word = "POINTERWORD";
       const selected = "SHIFT_SELECT_94";
-      const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, "94-pointer-output.bin"), deadlineMs: 20_000 });
+      let fixture;
       let term;
       try {
+        fixture = await startTerminalFixture({ logPath: join(ctx.outDir, "94-pointer-output.bin"), deadlineMs: 20_000 });
         await capturePointerTerminals(page);
         const args = ["--command", "stty -opost -echo && " + fixture.command,
           ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
@@ -471,9 +467,8 @@ export default {
         await settlePointer(page);
         const from = { x: box.x + box.w * 0.25, y: box.y + box.h * 2.5 };
         const to = { x: box.x + box.w * (selected.length - 0.25), y: from.y };
-        const kinds = ["drag", "double-click", "shift-double-click", "triple-click", "shift-triple-click", "shift-released-drag"];
         for (const kind of kinds) {
-          const gesture = result.gestures[kind] = {};
+          const gesture = result.gestures[kind] = { status: "running" };
           const clicks = kind.includes("double") ? 2 : kind.includes("triple") ? 3 : 0;
           let held = false;
           try {
@@ -527,7 +522,9 @@ export default {
             assert.equal(gesture.selection, expected, `${kind}: selection`);
             assert.equal(gesture.releaseClipboard, expected || sentinel, `${kind}: release clipboard`);
             assert.equal(gesture.copyClipboard, expected || sentinel, `${kind}: copy chord clipboard`);
+            gesture.status = "passed";
           } catch (error) {
+            gesture.status = "failed";
             gesture.error = error.message;
             result.failures.push(`${kind}: ${error.message}`);
             await ctx.shot(`94-${kind}-failure`).catch(() => {});
@@ -538,12 +535,17 @@ export default {
         }
         assert.deepEqual(Object.keys(result.gestures), kinds, "all press-only gesture legs ran");
         return result;
+      } catch (error) {
+        result.setupError = error.message;
+        result.failures.push(`setup: ${error.message}`);
+        throw error;
       } finally {
-        result.records = fixture.records;
+        result.records = fixture?.records ?? [];
         await closeTerminal(TAB_G).catch((error) => result.failures.push(`terminal cleanup: ${error.message}`));
-        await fixture.close();
-        await term?.dispose();
-        await page.evaluate(() => window.__pointerSmoke?.restore());
+        await fixture?.close().catch((error) => result.failures.push(`fixture cleanup: ${error.message}`));
+        await term?.dispose().catch((error) => result.failures.push(`handle cleanup: ${error.message}`));
+        await page.evaluate(() => window.__pointerSmoke?.restore()).catch(() => {});
+        result.status = result.failures.length ? "failed" : "passed";
         writeFileSync(join(ctx.outDir, "94-pointer.json"), JSON.stringify(result, null, 2) + "\n");
       }
     }
@@ -649,6 +651,7 @@ export default {
         await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: true });
         return { canonicalKeyAbsent: true, backend: "ghostty", session: row.session_id };
       }, { keepOpen: true });
+      assert.deepEqual(details.mouse1000Leg.failures, [], "all press-only gesture legs passed");
       if (compatibilityErrors.length) {
         throw new AggregateError(compatibilityErrors,
           `legacy config failed: ${compatibilityErrors.map((error) => error.message).join("; ")}`);
@@ -833,7 +836,6 @@ export default {
       await setMouseCapture(true);
       await assertTomlMouseCapture(true);
 
-      assert.deepEqual(details.mouse1000Leg.failures, [], "all press-only gesture legs passed");
       return details;
     } catch (error) {
       runError = error;

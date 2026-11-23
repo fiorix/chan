@@ -17,18 +17,7 @@ import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerm
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const frame = (page) => page.evaluate(() => new Promise(requestAnimationFrame));
 async function captureGhostty(page) {
-  const chunk = await captureGhosttyTerminals(page, "__mouse97");
-  if (!chunk) return null;
-  await page.evaluate(() => {
-    const state = window.__mouse97;
-    state.term = (query) => {
-      const host = document.querySelector(query);
-      const term = host && state.terminals.find((candidate) => candidate.element === host);
-      if (!term) throw new Error("the attached Ghostty terminal was not captured");
-      return term;
-    };
-  });
-  return chunk;
+  return captureGhosttyTerminals(page, "__mouse97");
 }
 
 async function selection(page, hostQuery) {

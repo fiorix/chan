@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, POINTER_RESET_MODES, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { copyPointerSelection, drainPointerInput, pointerEvents, pointerReports, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "SELECTION337";
 const FIND = "FIND337TARGET";
@@ -65,14 +65,8 @@ export default {
         await settlePointer(page);
 
         async function prepare(result) {
-          result.setup = await drainPointerInput(fixture, `${POINTER_RESET_MODES}\x1b[2J\x1b[H${TEXT}\r\n${FIND}\r\n`);
-          assert.equal(result.setup.reply, "\x1b[3;1R", "fixture text reached the terminal parser");
-          assert.equal(await term.evaluate((t) => t.getScrollbackLength()), 0,
-            "each exact-selection gesture starts with empty scrollback");
-          assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
-            [false, false, false, false], "each gesture starts without mouse tracking");
-          await settlePointer(page);
-          const grid = await pointerGrid(term);
+          const grid = await resource.prepare(`${TEXT}\r\n${FIND}`, { reply: "\x1b[3;1R" });
+          result.setup = resource.setup;
           // A real click makes the source pane active before keyboard chords.
           await page.mouse.click(grid.x + grid.w * 2.5, grid.y + grid.h * 3.5);
           await term.evaluate((t) => t.clearSelection());
@@ -141,18 +135,25 @@ export default {
           await page.keyboard.type(FIND);
           await page.waitForFunction((query) => document.querySelector(query)?.textContent === "1 of 1", { timeout: 10_000 }, countQuery);
           await settlePointer(page);
-          assert.equal(await term.evaluate((t) => t.getSelection()), FIND, "find selected the unique fixture match");
+          const findState = () => term.evaluate((t) => ({
+            ranges: t.highlights.get("search-active")?.ranges ?? [],
+            userSelection: t.getSelectionRange(),
+          }));
+          const expectedFind = { ranges: [{ start: { col: 0, absoluteRow: 1 },
+            end: { col: FIND.length - 1, absoluteRow: 1 } }], userSelection: null };
+          result.find = await findState();
+          assert.deepEqual(result.find, expectedFind, "find highlights the unique fixture match independently of selection");
           result.highlight = await paintedFindRow(term);
-          assert.notEqual(result.highlight, result.before, "find visibly painted its selected match");
+          assert.notEqual(result.highlight, result.before, "find visibly painted its active match");
           await page.click(countQuery);
           await settlePointer(page);
-          result.afterBar = { text: await term.evaluate((t) => t.getSelection()), pixels: await paintedFindRow(term) };
-          assert.deepEqual(result.afterBar, { text: FIND, pixels: result.highlight }, "a click on the find bar keeps its highlight");
+          result.afterBar = { ...(await findState()), pixels: await paintedFindRow(term) };
+          assert.deepEqual(result.afterBar, { ...expectedFind, pixels: result.highlight }, "a click on the find bar keeps its highlight");
           const outside = await otherPoint(grid);
           await page.mouse.click(outside.x, outside.y);
           await settlePointer(page);
-          result.afterPane = { text: await term.evaluate((t) => t.getSelection()), pixels: await paintedFindRow(term) };
-          assert.deepEqual(result.afterPane, { text: FIND, pixels: result.highlight }, "a click on another pane keeps the find highlight");
+          result.afterPane = { ...(await findState()), pixels: await paintedFindRow(term) };
+          assert.deepEqual(result.afterPane, { ...expectedFind, pixels: result.highlight }, "a click on another pane keeps the find highlight");
           assert.equal(await page.$eval(countQuery, (el) => el.textContent), "1 of 1", "the find bar keeps its match count");
         });
 
@@ -183,6 +184,29 @@ export default {
           assert.ok(motion.every((report) => report.button === 32 && report.end === "M"
             && report.col >= 1 && report.col <= grid.cols && report.row >= 1 && report.row <= grid.rows), "all motion reports stay inside the grid");
           assert.equal(await page.evaluate(() => navigator.clipboard.readText()), sentinel, "a reported outside release copies nothing");
+        });
+
+        await leg("buttonless-hover", async (result) => {
+          const grid = await prepare(result);
+          // The first move precedes tracking so the measured move changes cell.
+          await page.mouse.move(grid.x + grid.w * 1.5, grid.y + grid.h * 1.5);
+          result.mode = await drainPointerInput(fixture, "\x1b[?1003h\x1b[?1006h");
+          assert.equal(result.mode.input, "", "hover setup sends no input");
+          assert.deepEqual(await term.evaluate((t) => [t.getMode(1003), t.getMode(1006)]), [true, true],
+            "any-motion tracking and SGR are enabled");
+          const eventIndex = (await pointerEvents(resource.trace)).length;
+          const index = fixture.records.length;
+          await page.mouse.move(grid.x + grid.w * 4.5, grid.y + grid.h * 2.5);
+          await settlePointer(page);
+          result.events = (await pointerEvents(resource.trace)).slice(eventIndex);
+          const moves = result.events.filter((event) => event.type === "pointermove" && event.onCanvas);
+          assert.ok(moves.length > 0 && moves.every((event) => event.isTrusted && event.pointerType === "mouse" && event.buttons === 0),
+            "the engine delivered buttonless mouse motion over the canvas");
+          result.after = await drainPointerInput(fixture, "", index);
+          result.reports = pointerReports(result.after.input);
+          result.buttonCodes = result.reports.map((report) => report.button);
+          assert.deepEqual(result.reports, [{ button: 35, col: 5, row: 3, end: "M" }],
+            "1003 hover reports motion plus no button: 32 + 3 = 35");
         });
 
         await leg("tracking-enabled-mid-drag", async (result) => {
@@ -237,11 +261,9 @@ export default {
           assert.equal(result.selection, "", "the reported press never becomes a local selection");
           assert.equal(result.clipboard, sentinel, "turning tracking off does not copy the reported press");
         });
-        assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
+        assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "buttonless-hover", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
       } finally {
         if (held) await page.mouse.up().catch((error) => details.failures.push(`mouse cleanup: ${error.message}`));
-        await resource.close().catch((error) => details.failures.push(`terminal cleanup: ${error.message}`));
-        details.records = fixture.records;
         if (otherPane) await shell(["pane", "close", otherPane, "--window", windowId, "--force"])
           .catch((error) => details.failures.push(`pane cleanup: ${error.message}`));
       }

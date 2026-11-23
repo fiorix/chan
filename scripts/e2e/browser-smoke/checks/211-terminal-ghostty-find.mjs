@@ -17,10 +17,10 @@
 //             to each width. libghostty-vt forgets its selected match on a
 //             resize and scans again; find keeps the match itself, so each
 //             time the same match is selected again once the scan finds it:
-//             the count reads the same k of N, the selection is that match,
+//             the count reads the same k of N, the active highlight is that match,
 //             its text the needle, and it is on the screen. Enter then goes
 //             on from it to the next older match, k+1 of N.
-//   ESCAPE -- Escape closes the bar and clears the selection.
+//   ESCAPE -- Escape closes the bar and clears the search highlight.
 //   OLDEST -- the chord opens the bar again with the query it kept, and
 //             Shift+Enter, the first step of a fresh search, lands on the
 //             oldest match, the 99 on line 99, once the scan completes:
@@ -34,16 +34,9 @@
 //             keyboard goes back to the terminal, and a command typed next
 //             runs in the shell.
 //
-// The selection and the viewport are read from ghostty-web's own Terminal
-// in the page: its SelectionManager's anchors (absolute rows, 0 the oldest
-// history row), its viewport offset (lines scrolled back from the bottom)
-// and the binding's text of the selected row. Before the terminal opens,
-// the check imports the lazily loaded ghostty-web chunk itself, by the name
-// the app's entry module gives it, and wraps its Terminal's open() to keep
-// each terminal opened; the module map hands the app the same module, so
-// the check then holds the Terminal whose element is this tab's terminal
-// host. A heap walk for the instance (Runtime.queryObjects) outruns the
-// protocol timeout on this page.
+// Named search highlights, independent user selection and viewport state are
+// read through the widget's public API. The shared capture module wraps open
+// before the app creates the terminal and restores it after the check.
 
 import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -108,28 +101,28 @@ export default {
       await cs(["write", "--tab-name", TAB,
         `PS1='$ '; printf '\\033[H\\033[2J\\033[3J'; seq 1 ${LAST}; printf '${MARK}%s\\n' DONE\n`]);
 
-      const term = await page.evaluateHandle((query) => {
-        const host = document.querySelector(query);
-        return window.__ghostty211.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
-      }, hostQuery);
-      if (!(await term.evaluate((t) => t !== null))) {
-        throw new Error(`no ghostty-web Terminal from ${chunk} holds this tab's terminal host`);
-      }
+      const term = await page.evaluateHandle((query) => window.__ghostty211.term(query), hostQuery);
 
-      /// The terminal as find leaves it: the selection's anchors, its text
-      /// and the text of its start row, the viewport offset, the history
-      /// length and the grid.
+
+      /// Observe find's active range separately from the user's selection.
       const state = () => term.evaluate((t) => {
-        const m = t.selectionManager;
-        const start = m?.selectionStart ?? null;
-        const end = m?.selectionEnd ?? null;
-        const rowText = (r) => t.wasmTerm.plainText({ startRow: r, startCol: 0, endRow: r, endCol: t.cols - 1 });
+        if (!t.core) throw new Error("Ghostty core unavailable for find read");
+        const ranges = t.highlights.get("search-active")?.ranges ?? [];
+        const { start = null, end = null } = ranges[0] ?? {};
+        const read = (range) => {
+          const text = t.core.plainText(range);
+          if (text === null) throw new Error("Ghostty plainText returned null for find read");
+          return text;
+        };
         return {
           start,
           end,
-          startRowText: start ? rowText(start.absoluteRow) : null,
-          hasSelection: t.hasSelection(),
-          selectedText: t.hasSelection() ? t.getSelection() : "",
+          activeCount: ranges.length,
+          startRowText: start ? read({ startRow: start.absoluteRow, startCol: 0,
+            endRow: start.absoluteRow, endCol: t.cols - 1 }) : null,
+          matchText: start && end ? read({ startRow: start.absoluteRow, startCol: start.col,
+            endRow: end.absoluteRow, endCol: end.col }) : null,
+          userSelection: t.getSelectionRange(),
           viewportY: t.getViewportY(),
           scrollback: t.getScrollbackLength(),
           rows: t.rows,
@@ -139,7 +132,7 @@ export default {
       const onScreen = (s, absoluteRow) => absoluteRow - s.scrollback + Math.floor(s.viewportY);
 
       const deadline = Date.now() + 30_000;
-      while (!(await term.evaluate((t, mark) => (t.wasmTerm.plainText() ?? "").includes(`${mark}DONE`), MARK))) {
+      while (!(await term.evaluate((t, mark) => (t.core.plainText() ?? "").includes(`${mark}DONE`), MARK))) {
         if (Date.now() > deadline) {
           await ctx.shot("ghostty-find-no-output");
           throw new Error(`the terminal never showed ${MARK}DONE`);
@@ -148,7 +141,7 @@ export default {
       }
       await ctx.shot("ghostty-find-output");
 
-      /// Waits until the count reads `want` and the selection's row reads
+      /// Waits until the count reads `want` and the active highlight's row reads
       /// `line`; throws with what the page showed.
       async function waitFor(stage, want, line) {
         const until = Date.now() + 15_000;
@@ -165,8 +158,8 @@ export default {
         }
       }
       function expectMatch(stage, s, match) {
-        if (s.start?.col !== match.col || s.end?.col !== match.end || s.start?.absoluteRow !== s.end?.absoluteRow) {
-          throw new Error(`${stage}: the selection is not the match at columns ${match.col}-${match.end}: ${JSON.stringify(s)}`);
+        if (s.activeCount !== 1 || s.userSelection !== null || s.start?.col !== match.col || s.end?.col !== match.end || s.start?.absoluteRow !== s.end?.absoluteRow) {
+          throw new Error(`${stage}: the search highlight is not the sole match, with no user selection, at columns ${match.col}-${match.end}: ${JSON.stringify(s)}`);
         }
       }
 
@@ -267,7 +260,7 @@ export default {
           throw new Error(`resize ${stage}: the grid did not narrow: ${JSON.stringify({ before, after })}`);
         }
         expectMatch(`resize-${stage}`, after, kept);
-        if (after.selectedText !== "99") throw new Error(`resize ${stage}: the selected text is not the match: ${JSON.stringify(after)}`);
+        if (after.matchText !== "99") throw new Error(`resize ${stage}: the active highlight text is not the match: ${JSON.stringify(after)}`);
         const keptAt = onScreen(after, after.start.absoluteRow);
         if (keptAt < 0 || keptAt >= after.rows) throw new Error(`resize ${stage}: the kept match is off the screen: ${JSON.stringify(after)}`);
         await ctx.shot(`ghostty-find-resize-${stage}`);
@@ -286,9 +279,9 @@ export default {
       await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery);
       const closed = await state();
       readings.closed = closed;
-      if (closed.hasSelection || closed.start || closed.end) {
+      if (closed.activeCount !== 0 || closed.userSelection !== null || closed.start || closed.end) {
         await ctx.shot("ghostty-find-escape-failure");
-        throw new Error(`Escape left the selection: ${JSON.stringify(closed)}`);
+        throw new Error(`Escape left a search highlight or changed the empty user selection: ${JSON.stringify(closed)}`);
       }
       await ctx.shot("ghostty-find-closed");
 
@@ -349,7 +342,7 @@ export default {
       if (!keyboard) throw new Error("reopen: Escape did not hand the keyboard back to the terminal");
       await page.keyboard.type(`echo ${MARK}$((6*7))\n`);
       const typed = Date.now() + 15_000;
-      while (!(await term.evaluate((t, mark) => (t.wasmTerm.plainText() ?? "").includes(`${mark}42`), MARK))) {
+      while (!(await term.evaluate((t, mark) => (t.core.plainText() ?? "").includes(`${mark}42`), MARK))) {
         if (Date.now() > typed) {
           await ctx.shot("ghostty-find-reopen-typing-failure");
           throw new Error("reopen: a command typed after Escape never ran in the shell");
@@ -361,7 +354,7 @@ export default {
     } finally {
       if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
-      await page.evaluate(() => window.__ghostty211?.restore());
+      await page.evaluate(() => window.__ghostty211?.restore()).catch(() => {});
     }
   },
 };

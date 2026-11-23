@@ -52,6 +52,7 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
   const child = spawn(chanBin, ["serve", "--here", "--port", "0", workspaceDir], {
     env: {
       ...process.env,
+      ...options.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",
       CHAN_HOME: chanHome,
       XDG_RUNTIME_DIR: runtimeDir,

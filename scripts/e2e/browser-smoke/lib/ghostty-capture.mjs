@@ -8,31 +8,59 @@ export async function captureGhosttyTerminals(page, key, { notices = false } = {
       if (!name) continue;
       const url = new URL(name, script.src).href;
       const { Terminal } = await import(url);
-      const open = Terminal.prototype.open;
-      const write = Terminal.prototype.write;
+      // Link wrappers so either restoration order keeps other captures alive.
+      const chain = Symbol.for("chan.smoke.capture");
+      const wrap = (target, name, wrapper) => {
+        wrapper[chain] = { original: target[name], descriptor: Object.getOwnPropertyDescriptor(target, name) };
+        target[name] = wrapper;
+        return wrapper;
+      };
+      const unwrap = (target, name, wrapper) => {
+        const previous = wrapper[chain];
+        if (target[name] === wrapper) {
+          if (previous.descriptor) Object.defineProperty(target, name, previous.descriptor);
+          else delete target[name];
+          return;
+        }
+        for (let current = target[name]; current?.[chain]; current = current[chain].original) {
+          if (current[chain].original !== wrapper) continue;
+          current[chain] = { ...previous };
+          return;
+        }
+      };
+      const writes = new Map();
+      const decoder = new TextDecoder();
       const state = window[key] = {
         terminals: [], notices: [],
+        term(query) {
+          const host = document.querySelector(query);
+          const term = host && state.terminals.find((candidate) => candidate.element === host);
+          if (!term) throw new Error("the attached Ghostty terminal was not captured");
+          return term;
+        },
         restore() {
-          Terminal.prototype.open = open;
-          if (notices) Terminal.prototype.write = write;
+          unwrap(Terminal.prototype, "open", open);
+          for (const [term, wrapper] of writes) unwrap(term, "write", wrapper);
+          writes.clear();
           delete window[key];
         },
       };
-      Terminal.prototype.open = function (...args) {
+      const open = wrap(Terminal.prototype, "open", function (...args) {
         state.terminals.push(this);
-        return open.apply(this, args);
-      };
-      if (notices) {
-        // A flood evicts local notices before a buffer read can see them.
-        const decoder = new TextDecoder();
-        Terminal.prototype.write = function (data, ...rest) {
-          const text = typeof data === "string" ? data : data.length < 256 ? decoder.decode(data) : "";
-          for (const match of text.matchAll(/terminal (?:replay missed \d+ bytes|error: [^\r\n]*)/g)) {
-            state.notices.push(match[0]);
-          }
-          return write.call(this, data, ...rest);
-        };
-      }
+        if (notices && !writes.has(this)) {
+
+          // A flood evicts local notices before a buffer read can see them.
+          const write = wrap(this, "write", function (data, ...rest) {
+            const text = typeof data === "string" ? data : data.length < 256 ? decoder.decode(data) : "";
+            for (const match of text.matchAll(/terminal (?:replay missed \d+ bytes|error: [^\r\n]*)/g)) {
+              state.notices.push(match[0]);
+            }
+            return write[chain].original.call(this, data, ...rest);
+          });
+          writes.set(this, write);
+        }
+        return open[chain].original.apply(this, args);
+      });
       return url;
     }
     return null;

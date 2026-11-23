@@ -2,19 +2,10 @@
 // Native capture events pin completion; disposal is exercised through tab close.
 
 import assert from "node:assert/strict";
-import { drainPointerInput, pointerEvents, pointerGrid, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { beginPointerSelection, drainPointerInput, pointerEvents, pointerGrid, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "CAPTURE338";
 
-async function begin(page, terminal, grid) {
-  await page.mouse.move(grid.x + grid.w * 0.2, grid.y + grid.h * 0.5);
-  await page.mouse.down();
-  await page.mouse.move(grid.x + grid.w * (TEXT.length - 0.2), grid.y + grid.h * 0.5, { steps: 6 });
-  assert.equal(await terminal.term.evaluate((t) => t.getSelection()), TEXT, "the held drag selected the fixture word");
-  const down = (await pointerEvents(terminal.trace)).findLast((event) => event.type === "pointerdown" && event.onCanvas);
-  assert.ok(down?.isPrimary && down.isTrusted && down.pointerType === "mouse", "the canvas received a trusted primary mouse press");
-  return down;
-}
 
 export default {
   name: "terminal-pointer-capture-loss",
@@ -26,7 +17,7 @@ export default {
         await seedPointerClipboard(page, "SMOKE338_LOSS_SENTINEL");
         const writes = (await pointerWrites(page)).length;
         const index = terminal.fixture.records.length;
-        const down = result.press = await begin(page, terminal, grid);
+        const down = result.press = await beginPointerSelection(page, terminal, grid, TEXT);
         result.hadCapture = await terminal.trace.evaluate((trace, id) => trace.canvas.hasPointerCapture(id), down.pointerId);
         assert.equal(result.hadCapture, true, "the held selection owns pointer capture before loss");
         await terminal.trace.evaluate((trace, id) => trace.canvas.releasePointerCapture(id), down.pointerId);
@@ -84,7 +75,7 @@ export default {
         assert.deepEqual(details.pageErrors, [], "disposing while auto-scroll is running raises no page error");
         const next = await open("after-dispose");
         const nextGrid = await next.prepare(TEXT);
-        await begin(page, next, nextGrid);
+        await beginPointerSelection(page, next, nextGrid, TEXT);
         await page.mouse.up();
         await settlePointer(page);
         result.nextClipboard = await page.evaluate(() => navigator.clipboard.readText());

@@ -6,12 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { launchServer } from "./server.mjs";
 
-function fakeServer(t, source) {
+function fakeServer(t, source, options) {
   const root = mkdtempSync(join(tmpdir(), "chan-server-lines-test-"));
   const bin = join(root, "fake-chan");
   writeFileSync(bin, `#!${process.execPath}\n${source}`, { mode: 0o700 });
   const logged = [];
-  const server = launchServer(bin, root, (line) => logged.push(line));
+  const server = launchServer(bin, root, (line) => logged.push(line), options);
   const closed = once(server.child, "close");
   t.after(async () => {
     if (server.child.exitCode === null && server.child.signalCode === null) server.child.kill();
@@ -60,4 +60,21 @@ test("an early exit includes an unterminated stderr diagnostic", async (t) => {
   await assert.rejects(server.url, /chan serve exited early \(7\)\nfailed before URL/);
   await server.closed;
   assert.deepEqual(server.stderrLines, ["failed before URL"]);
+});
+
+
+test("launch environment overrides reach the child without replacing its private home", async (t) => {
+  const server = fakeServer(t, `
+process.stderr.write(JSON.stringify({ filter: process.env.RUST_LOG,
+  home: process.env.CHAN_HOME, runtime: process.env.XDG_RUNTIME_DIR,
+  handoff: process.env.CHAN_NO_DEVSERVER_HANDOFF }) + "\\n");
+process.stdout.write("http://127.0.0.1:1234/\\n");
+`, { env: { RUST_LOG: "warn,chan_server::extract=debug", CHAN_HOME: "/refused-home",
+    XDG_RUNTIME_DIR: "/refused-runtime", CHAN_NO_DEVSERVER_HANDOFF: "0" } });
+  await server.url;
+  await server.closed;
+  assert.deepEqual(JSON.parse(server.stderrLines[0]), {
+    filter: "warn,chan_server::extract=debug", home: server.chanHome,
+    runtime: join(server.chanHome, "runtime"), handoff: "1",
+  });
 });
