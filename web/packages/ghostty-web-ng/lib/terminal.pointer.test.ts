@@ -408,15 +408,37 @@ describe('report and bypass completion', () => {
     expect(write).toHaveBeenCalledExactlyOnceWith('hello');
   });
 
-  test('a reported press stays reported if tracking stops during its drag', async () => {
-    const { term, canvas, reports, write } = await open();
+  test.each(['pointerup', 'pointercancel', 'lostpointercapture', 'uncaptured'])('a reported press ends silently on %s after tracking stops', async (end) => {
+    const { term, canvas, captured, reports, write } = await open();
     term.write('\x1b[?1000h\x1b[?1006h');
     pointer(canvas, 'pointerdown');
     term.write('\x1b[?1000l');
     pointer(canvas, 'pointermove', 33, 1);
-    pointer(canvas, 'pointerup', 33, 1);
-    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<0;5;1m']);
+    if (end === 'uncaptured') {
+      captured.clear();
+      pointer(canvas, 'pointermove', 49, 1);
+    } else {
+      pointer(canvas, end, 33, 1);
+    }
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 65, 1);
+    expect(reports).toEqual(['\x1b[<0;1;1M']);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  test('a chorded release after tracking stops clears held state silently', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 3 });
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 1 });
+    pointer(canvas, 'pointerup', 33, 1);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointermove', 49, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<2;1;1M']);
   });
 
   test('a Shift selection copies once on connected capture loss', async () => {
@@ -575,7 +597,7 @@ describe('scoped context menu and click selection', () => {
     pointer(canvas, 'pointerdown', 17, 1); pointer(canvas, 'pointerup', 17, 1);
     canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 17, clientY: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(reports).toEqual(['\x1b[<0;3;1M', '\x1b[<0;3;1m']);
+    expect(reports).toEqual(['\x1b[<0;3;1M']);
     expect(activated).toEqual([]);
   });
 

@@ -834,13 +834,13 @@ export class InputHandler {
   }
 
   /**
-   * Report the release of a button whose press was reported.
+   * Release a reported button only while the program still tracks the mouse.
    */
   handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
 
-    // Pair a reported press with its release even when Shift has changed.
-    // Disposal and detachment only clear held state in endMouseGesture.
+    // Shift changes do not break the pair, but a program that stopped
+    // tracking must not leave release bytes for the next PTY reader.
     if (this.mouseButtonsBypassed & (1 << event.button)) {
       this.mouseButtonsBypassed &= ~(1 << event.button);
       return;
@@ -849,18 +849,19 @@ export class InputHandler {
     const button = event.button;
     if (!(this.mouseButtonsPressed & (1 << button))) return;
     this.mouseButtonsPressed &= ~(1 << button);
+    if (!this.mouseConfig?.hasMouseTracking()) return;
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
 
-  /** Release held buttons at the supplied position; no event clears state silently. */
+  /** Clear held state; report releases only with a position and active tracking. */
   endMouseGesture(event?: MouseEvent): void {
     const pressed = this.mouseButtonsPressed;
     this.mouseButtonsPressed = 0;
     this.mouseButtonsBypassed = 0;
-    if (!event || this.isDisposed) return;
+    if (!event || this.isDisposed || !this.mouseConfig?.hasMouseTracking()) return;
     const cell = this.pixelToCell(event);
     if (!cell) return;
     for (let button = 0; button < 3; button++) {
