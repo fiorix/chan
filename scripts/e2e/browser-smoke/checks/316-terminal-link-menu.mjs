@@ -229,9 +229,8 @@ export default {
     }
 
     async function runGhostty() {
-      const backend = "ghostty";
       const name = "SmokeLink316G";
-      const at = (leg) => `${backend}.${leg}`;
+      const at = (leg) => `ghostty.${leg}`;
       await writeTerminalPrefs(page, authToken, { mouse_capture: true });
       await assertTerminalPrefs(ctx, { mouse_capture: true });
       await capturePointerTerminals(page);
@@ -239,15 +238,15 @@ export default {
       tabs.push(name);
       terminal = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
       const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
-      const sizeFile = join(dir, `size316-${backend}`);
+      const sizeFile = join(dir, `size316-ghostty`);
       rmSync(sizeFile, { force: true });
 
       const format = String.raw`\033[H\033[2Jhttp%s\n\033]8;;%s\033\\NOTES-REL\033]8;;\033\\\n\033]8;;%s\033\\NOTES-ABS\033]8;;\033\\\n\033]8;;%s\033\\MISSING\033]8;;\033\\\n\033]8;;%s\033\\FOREIGN\033]8;;\033\\\n\033]8;;%s\033\\HOME\033]8;;\033\\\nL316_%s\n`;
-      const homeRecord = join(dir, `home316-${backend}`);
-      const print = `cd ${DIR} && stty size > size316-${backend} && printf '%s' "$HOME" > home316-${backend} && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
+      const homeRecord = join(dir, `home316-ghostty`);
+      const print = `cd ${DIR} && stty size > size316-ghostty && printf '%s' "$HOME" > home316-ghostty && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
       await cs(["write", "--tab-name", name, print]);
       await waitScrollback(name, "L316_READY");
-      if (!existsSync(sizeFile)) throw new Error(`${backend}: the shell wrote no ${sizeFile}`);
+      if (!existsSync(sizeFile)) throw new Error(`ghostty: the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
       assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
         "the PTY grid fits the link fixtures without wrapping");
@@ -484,7 +483,7 @@ export default {
 
       // The shell prints a URL, turns on mouse tracking and becomes a raw
       // recorder of what the PTY receives.
-      const record = join(ctx.outDir, `pty316-${backend}`);
+      const record = join(ctx.outDir, `pty316-ghostty`);
       rmSync(record, { force: true });
       const trackFormat = String.raw`\033[H\033[2Jhttp%s\n\033[?1000h\033[?1006hT316_%s\n`;
       await cs(["write", "--tab-name", name,
@@ -492,7 +491,7 @@ export default {
       await waitScrollback(name, "T316_READY");
       const deadline = Date.now() + 15_000;
       while (!existsSync(record) && Date.now() < deadline) await sleep(100);
-      if (!existsSync(record)) throw new Error(`${backend}: the recorder never started`);
+      if (!existsSync(record)) throw new Error(`ghostty: the recorder never started`);
       await sleep(500);
       const recorded = () => readFileSync(record).toString("latin1");
 

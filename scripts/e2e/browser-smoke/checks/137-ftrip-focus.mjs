@@ -109,80 +109,78 @@ export default {
     const capture = { engine: await page.browser().version(), readings: [] };
     let opened = [];
     try {
-      for (const backend of ["ghostty"]) {
-        const source = `Ftrip${backend}Source`;
-        const control = `Ftrip${backend}Control`;
-        const path = join(ctx.outDir, `${backend}-input.jsonl`);
-        await openAttachedTerminal(ctx, page, cs, windowId, source, backend);
-        opened.push(source);
-        await cs(["write", "--tab-name", source, `node ${reader} ${path}\n`]);
-        await waitFor(() => Promise.resolve(inputHex(path)), () => true, "reader file");
-        await waitFor(async () => (await cs(["scrollback", "--tab-name", source])).stdout,
-          (text) => text.includes("FTRIP_READY"), "focus mode parsed");
-        await openAttachedTerminal(ctx, page, cs, windowId, control, backend);
-        opened.push(control);
-        const subjectFrames = () => frames.filter((frame) => frame.tabName === source);
-        const snapshot = () => ({ input: inputHex(path), messages: subjectFrames() });
-        let lastReading = { ...snapshot(), action: "setup" };
-        const requireNoLateReport = (before) => {
-          const current = snapshot();
-          if (current.input !== lastReading.input || current.messages.length !== lastReading.messages.length) {
-            throw new Error(`${backend} ${lastReading.action}: late report before ${before}: ` +
-              `${current.input.slice(lastReading.input.length)} / ${JSON.stringify(current.messages.slice(lastReading.messages.length))}`);
-          }
-          return current;
-        };
-        const runAction = async (name, action, expected, expectedMessages) => {
-          const before = requireNoLateReport(name);
-          await focusEvents(page);
-          await action();
-          const after = await waitFor(snapshot,
-            (value) => value.input.length >= before.input.length + expected.length &&
-              value.messages.length >= before.messages.length + expectedMessages.length,
-            `${backend} ${name} report`);
-          const focus = await focusEvents(page);
-          const reading = {
-            backend, action: name, expected, input: after.input.slice(before.input.length),
-            messages: after.messages.slice(before.messages.length), ...focus,
-          };
-          capture.readings.push(reading);
-          if (reading.input !== expected) {
-            throw new Error(`${backend} ${name}: ${reading.input} != ${expected}`);
-          }
-          if (JSON.stringify(reading.messages.map((message) => message.focused)) !== JSON.stringify(expectedMessages)) {
-            throw new Error(`${backend} ${name}: focus messages ${JSON.stringify(reading.messages)} != ${JSON.stringify(expectedMessages)}`);
-          }
-          lastReading = { ...after, action: name };
-        };
-        await runAction("click-subject", () => clickTab(page, source), "1b5b49", [true]);
-        await runAction("click-active", () => clickTab(page, source), "1b5b4f1b5b49", [true]);
-        await runAction("click-away", () => clickTab(page, control), "1b5b4f", [false]);
-        await runAction("keyboard-jump", async () => {
-          await page.keyboard.down("Control");
-          await page.keyboard.down("Alt");
-          try {
-            await page.keyboard.press("1");
-          } finally {
-            await page.keyboard.up("Alt");
-            await page.keyboard.up("Control");
-          }
-        }, "1b5b49", [true]);
-        await runAction("click-away-again", () => clickTab(page, control), "1b5b4f", [false]);
-        await runAction("command-jump", () => page.evaluate(() =>
-          window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.tab.jump", index: 0 } }))), "1b5b49", [true]);
-        await runAction("click-away-before-drag", () => clickTab(page, control), "1b5b4f", [false]);
-        await runAction("drag-subject", () => dragTab(page, source, control), "1b5b49", [true]);
-        const dragEvents = capture.readings.at(-1).events.map((event) => event.type);
-        if (!dragEvents.includes("dragstart") || !dragEvents.includes("dragend")) {
-          throw new Error(`${backend} drag-subject: native drag did not start and end: ${JSON.stringify(dragEvents)}`);
+      const source = `FtripghosttySource`;
+      const control = `FtripghosttyControl`;
+      const path = join(ctx.outDir, `ghostty-input.jsonl`);
+      await openAttachedTerminal(ctx, page, cs, windowId, source, "ghostty");
+      opened.push(source);
+      await cs(["write", "--tab-name", source, `node ${reader} ${path}\n`]);
+      await waitFor(() => Promise.resolve(inputHex(path)), () => true, "reader file");
+      await waitFor(async () => (await cs(["scrollback", "--tab-name", source])).stdout,
+        (text) => text.includes("FTRIP_READY"), "focus mode parsed");
+      await openAttachedTerminal(ctx, page, cs, windowId, control, "ghostty");
+      opened.push(control);
+      const subjectFrames = () => frames.filter((frame) => frame.tabName === source);
+      const snapshot = () => ({ input: inputHex(path), messages: subjectFrames() });
+      let lastReading = { ...snapshot(), action: "setup" };
+      const requireNoLateReport = (before) => {
+        const current = snapshot();
+        if (current.input !== lastReading.input || current.messages.length !== lastReading.messages.length) {
+          throw new Error(`ghostty ${lastReading.action}: late report before ${before}: ` +
+            `${current.input.slice(lastReading.input.length)} / ${JSON.stringify(current.messages.slice(lastReading.messages.length))}`);
         }
-        const selected = await page.evaluate(() => document.querySelector('.tab.active .path')?.textContent?.trim());
-        if (selected !== source) throw new Error(`${backend} drag-subject: selected ${selected} instead of ${source}`);
-        await pause(500);
-        requireNoLateReport("tab close");
-        for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
-        opened = [];
+        return current;
+      };
+      const runAction = async (name, action, expected, expectedMessages) => {
+        const before = requireNoLateReport(name);
+        await focusEvents(page);
+        await action();
+        const after = await waitFor(snapshot,
+          (value) => value.input.length >= before.input.length + expected.length &&
+            value.messages.length >= before.messages.length + expectedMessages.length,
+          `ghostty ${name} report`);
+        const focus = await focusEvents(page);
+        const reading = {
+          backend: "ghostty", action: name, expected, input: after.input.slice(before.input.length),
+          messages: after.messages.slice(before.messages.length), ...focus,
+        };
+        capture.readings.push(reading);
+        if (reading.input !== expected) {
+          throw new Error(`ghostty ${name}: ${reading.input} != ${expected}`);
+        }
+        if (JSON.stringify(reading.messages.map((message) => message.focused)) !== JSON.stringify(expectedMessages)) {
+          throw new Error(`ghostty ${name}: focus messages ${JSON.stringify(reading.messages)} != ${JSON.stringify(expectedMessages)}`);
+        }
+        lastReading = { ...after, action: name };
+      };
+      await runAction("click-subject", () => clickTab(page, source), "1b5b49", [true]);
+      await runAction("click-active", () => clickTab(page, source), "1b5b4f1b5b49", [true]);
+      await runAction("click-away", () => clickTab(page, control), "1b5b4f", [false]);
+      await runAction("keyboard-jump", async () => {
+        await page.keyboard.down("Control");
+        await page.keyboard.down("Alt");
+        try {
+          await page.keyboard.press("1");
+        } finally {
+          await page.keyboard.up("Alt");
+          await page.keyboard.up("Control");
+        }
+      }, "1b5b49", [true]);
+      await runAction("click-away-again", () => clickTab(page, control), "1b5b4f", [false]);
+      await runAction("command-jump", () => page.evaluate(() =>
+        window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.tab.jump", index: 0 } }))), "1b5b49", [true]);
+      await runAction("click-away-before-drag", () => clickTab(page, control), "1b5b4f", [false]);
+      await runAction("drag-subject", () => dragTab(page, source, control), "1b5b49", [true]);
+      const dragEvents = capture.readings.at(-1).events.map((event) => event.type);
+      if (!dragEvents.includes("dragstart") || !dragEvents.includes("dragend")) {
+        throw new Error(`ghostty drag-subject: native drag did not start and end: ${JSON.stringify(dragEvents)}`);
       }
+      const selected = await page.evaluate(() => document.querySelector('.tab.active .path')?.textContent?.trim());
+      if (selected !== source) throw new Error(`ghostty drag-subject: selected ${selected} instead of ${source}`);
+      await pause(500);
+      requireNoLateReport("tab close");
+      for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
+      opened = [];
       const required = ["click-subject", "click-active", "click-away", "keyboard-jump", "click-away-again", "command-jump", "click-away-before-drag", "drag-subject"];
       if (JSON.stringify(capture.readings.map(({ backend, action }) => `${backend}/${action}`)) !==
           JSON.stringify(required.map((action) => `ghostty/${action}`))) throw new Error("Ghostty focus arms incomplete");

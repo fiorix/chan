@@ -185,7 +185,6 @@ export default {
     const cs = (args) => shell(["terminal", ...args]);
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
-    const backend = "ghostty";
     const directory = mkdtempSync(join(ctx.workspaceDir, ".screenlock-336-"));
     const archive = join(directory, "archive.tar.zst");
     writeFileSync(archive, "not a real archive");
@@ -623,7 +622,7 @@ export default {
         await openFileTab(NOTE);
         await dispatchCommand(page, "app.tab.close");
         await settle(page);
-        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Chord336", backend);
+        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Chord336", "ghostty");
         const host = `.pane[data-pane-id="${terminal.pane}"] .terminal-tab.active .terminal-host`;
         await page.click(host);
         await settle(page);
@@ -705,7 +704,7 @@ export default {
       });
 
       await leg("findAfterMove", async (r) => {
-        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Move336", backend);
+        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Move336", "ghostty");
         await page.click(`.pane[data-pane-id="${terminal.pane}"] .terminal-tab.active .terminal-host`);
         await dispatchCommand(page, "app.find.open");
         await page.waitForSelector(FIND, { visible: true, timeout: 10_000 });
