@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 //
-// The key handler TerminalTab registers with xterm, which sees every key
-// before xterm does. A TerminalTab is mounted over the stand-in xterm and
-// keys are handed to that handler the way xterm hands them; the assertions
-// read its answer (false tells xterm to skip the key) and the frames the
-// component sent the PTY.
+// The keys TerminalTab decides before the terminal encodes them. A
+// TerminalTab is mounted on the shared fixture's widget and each key is a
+// keydown at the element the widget focuses; the assertions read what the
+// product shows for it: the frames sent the PTY and whether the key's
+// default was prevented.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -15,14 +15,15 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
-  pressInTerminal,
   resetTerminals,
   seatTerminals,
   sentFrames,
@@ -38,7 +39,7 @@ afterEach(() => {
 
 async function attachedTerminal() {
   const [tab] = seatTerminals([terminalTab()]);
-  const { term } = await mountTerminal(TerminalTab, tab!);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   socket.sent.splice(0);
@@ -52,28 +53,28 @@ function inputs(socket: TerminalSocket): unknown[] {
 }
 
 describe("the terminal key handler", () => {
-  test("leaves Alt+Space to xterm and sends the PTY nothing of its own", async () => {
+  test("claims Alt+Space for no chord: the terminal sends it as Meta+Space", async () => {
     const { term, socket } = await attachedTerminal();
-    const { event, handled } = pressInTerminal(term, { key: " ", code: "Space", altKey: true });
+    pressInGhostty(term, { key: " ", code: "Space", keyCode: 32, altKey: true });
 
-    expect(handled, "xterm processes the key").toBe(true);
-    expect(event.defaultPrevented).toBe(false);
-    expect(inputs(socket)).toEqual([]);
+    expect(inputs(socket)).toEqual(["\x1b "]);
   });
 
   test("hands Alt+Left and Alt+Backspace to the shell as word motions", async () => {
     const { term, socket } = await attachedTerminal();
-    const left = pressInTerminal(term, { key: "ArrowLeft", altKey: true });
-    const back = pressInTerminal(term, { key: "Backspace", altKey: true });
+    const left = pressInGhostty(term, { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true });
+    const back = pressInGhostty(term, { key: "Backspace", code: "Backspace", keyCode: 8, altKey: true });
 
-    expect([left.handled, back.handled], "xterm skips both").toEqual([false, false]);
-    expect(left.event.defaultPrevented).toBe(true);
+    expect(left.defaultPrevented).toBe(true);
+    expect(back.defaultPrevented).toBe(true);
+    // Exactly these bytes, once each: the terminal's own encoding of the
+    // two keys never follows them.
     expect(inputs(socket)).toEqual(["\x1bb", "\x1b\x7f"]);
   });
 
-  test("leaves a plain key to xterm", async () => {
+  test("leaves a plain key to the terminal, which types it once", async () => {
     const { term, socket } = await attachedTerminal();
-    expect(pressInTerminal(term, { key: "a" }).handled).toBe(true);
-    expect(inputs(socket)).toEqual([]);
+    pressInGhostty(term, { key: "a", code: "KeyA", keyCode: 65 });
+    expect(inputs(socket)).toEqual(["a"]);
   });
 });
