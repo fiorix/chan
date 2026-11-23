@@ -248,3 +248,15 @@ Still owed for part 6's net, condition (a) of the modernisation: the real-engine
 ## Boundary amended: xterm.js leaves, 2026-11-23
 
 The owner decided with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, as amended by its review `dev/team-ghostty-web-ng-plan-review.md`) that xterm.js leaves chan: the boundary above that keeps it as a second backend no longer holds. The removal and the retirement of the `terminal.ghostty` key are their own row, [chan carries xterm.js as a second terminal backend](chan-carries-xterm-js-as-a-second-terminal-backend.md), built first, so the parts here no longer need both-backend arms; the later rejection of the key is [another row](the-retired-terminal-ghostty-key-is-accepted-with-a-warning.md). This row keeps parts 4 to 6: the public hooks from the unmerged `v0132/ghosttyng-*` stages recovered onto the current base, all-match find, and the input modernization behind its native net, with `@xterm/xterm` kept as a development dependency for the two keyboard parity tests until that modernization is accepted. Acceptance 1's checks are read on Ghostty only once the removal lands.
+
+## Pointer, focus and widget APIs, 2026-11-23
+
+Merged on `v0134/ghostty-ng-int` at `518ac933d`, not into `v0134/int`:
+
+- Pointer handling recovered onto the widget: pointer-id ownership, capture acquire and release, cancel and capture loss, outside releases, pen and touch, the scrollbar thumb, and the release rules when tracking turns on or off mid-press. Buttonless motion reports code 35, not 32 (read red and green in a browser). A public synchronous `Terminal.getCursor()`.
+- Synchronous widget focus with `preventScroll` and no retry, and an app whose late focus calls ask who holds the keyboard when they run. End to end: a seeded terminal in an unfocused pane and a delayed menu paste after a pane switch send a focus report without the change and keep the keyboard with it. The reload case did not reach its legs.
+
+Built and reviewed on branches not merged here: selection and copy through the widget, named highlights, ordered paint layers, grid and render options, a read-only core facade, `setTheme` with a contrast floor, scrollback as a byte budget and all-match find with its incremental placement (`v0134/ghostty-ng-app-m3` at `f487fd27f`, with find on named highlights, a selection-clear rule and per-cell motion reports); the browser and pixel instruments moved off private widget fields (`v0134/ghostty-ng-input-m3`). The app's `TerminalTab.svelte` half of that migration exists as unapplied patches.
+
+Open: the key encoder ignores the kitty keyboard flags (Ctrl+C sends 0x03 after `CSI > 1 u`; the widget answers no kitty query on purpose); the widget prevents the default of every chord chan lets out of the terminal, where xterm.js did not; WebKitGTK and Mac readings of the pointer and focus changes; the private-field seal; ConPTY.
+

@@ -1,6 +1,6 @@
 # chan carries xterm.js as a second terminal backend
 
-Status: accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, as amended by its review `dev/team-ghostty-web-ng-plan-review.md`); not started. Split out of [the migration row](chan-drives-ghostty-web-from-outside-through-its-private-internals.md), whose boundary kept xterm.js as a second backend "a separate decision", so that this part can close while the migration's input modernization carries.
+Status: in progress, on `v0134/ghostty-ng-int` at `518ac933d`, not merged into `v0134/int`. Contract items 2 to 6 are built and acceptance 1 is met (below). Items 1 and 7 are open: a failed load still falls back to an unlabelled xterm.js terminal, and `@xterm/*` is still a runtime dependency. Accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, as amended by its review `dev/team-ghostty-web-ng-plan-review.md`). Split out of [the migration row](chan-drives-ghostty-web-from-outside-through-its-private-internals.md), whose boundary kept xterm.js as a second backend "a separate decision", so that this part can close while the migration's input modernization carries.
 
 ## What is there now
 
@@ -32,3 +32,14 @@ Read at `f5657caab`, by reading; not run.
 2. Loader fault injections (fetch, compile, instantiate failures; close and restart while loading; retry after a transient error) leave the app usable, the PTY unduplicated and no leaked instance.
 3. A production build emits one wasm and no xterm asset; no runtime import, alias or CSS of `@xterm/*` remains.
 4. The terminal browser suite runs Ghostty only in a guest, with every check that asked for xterm converted or failing loudly; the scoped gate, the Nix hash check and CI on the tip are green.
+
+## Built, 2026-11-23: the key retired, Ghostty unconditional
+
+On `v0134/ghostty-ng-int` at `518ac933d`; by test, and by the browser suite in a guest.
+
+- Every terminal opens on Ghostty; nothing reads the preference. Settings, help and listings no longer show the key.
+- `server.toml`: a stored `false` warns once per process, `true` and absent are silent, loading never rewrites the file, a save omits the key. The preferences API accepts and ignores a boolean `ghostty`, a non-boolean refused with 422. `chan config set` is a no-op with a warning on stderr, `get` prints `true` with the warning, listings omit the key. Pinned by unit tests at each boundary with their mutants, and end to end by browser check 341 (set, get, listing and the warning count; red at `f5657caab`). Its refusal arm asserts the key in the response body, which the server keeps generic by design; the corrected arm (its own server with the extractor's debug log) is on `v0134/ghostty-ng-input-m3`, not merged here.
+- `chan config` now returns a failed stdout write as an error, exit 1, where it panicked with 101: a line for the release notes.
+- `CHAN_TERMINAL=ghostty` on every spawn path.
+- Open: the load-failure error UI and its fault tests (acceptance 2); the runtime removal of `@xterm/*`, its addons, aliases, CSS and the fallback (acceptance 3); 40 app test files still on a test-only xterm stand-in route, which must reach 0 before the removal; the desktop drivers, read not run since their port.
+
