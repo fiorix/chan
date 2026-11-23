@@ -121,7 +121,7 @@ export class SelectionManager {
     private mouseInput?: {
       claimScrollbarPress: (event: PointerEvent) => boolean;
       press: (event: PointerEvent, reported: boolean) => void;
-      move: (event: MouseEvent) => void;
+      move: (event: MouseEvent, reportMotion: boolean) => void;
       release: (event: MouseEvent) => void;
       end: (event?: MouseEvent) => void;
     }
@@ -420,7 +420,7 @@ export class SelectionManager {
   private handlePointerMove = (event: PointerEvent): void => {
     if (this.disposed || !event.isPrimary || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
     if (!this.activePointer) {
-      if (event.buttons === 0) this.mouseInput?.move(event);
+      if (event.buttons === 0) this.mouseInput?.move(event, true);
       return;
     }
     if (!this.matchesPointer(event)) return;
@@ -441,7 +441,7 @@ export class SelectionManager {
       }
     }
     pointer.buttons = event.buttons;
-    if (!buttonChanged) this.mouseInput?.move(event);
+    this.mouseInput?.move(event, !buttonChanged);
     if (!this.isSelecting) return;
     if (!this.dragThresholdMet) {
       const dx = event.clientX - this.mouseDownX;

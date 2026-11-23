@@ -834,33 +834,36 @@ export class InputHandler {
   }
 
   /**
-   * Report the release of a button whose press was reported.
+   * Release a reported button only while the program still tracks the mouse.
    */
   handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
+    this.releaseMouseButton(event, event.button);
+  }
 
-    // Pair a reported press with its release even when Shift has changed.
-    // Disposal and detachment only clear held state in endMouseGesture.
-    if (this.mouseButtonsBypassed & (1 << event.button)) {
-      this.mouseButtonsBypassed &= ~(1 << event.button);
+  private releaseMouseButton(event: MouseEvent, button: number): void {
+    // Shift changes do not break the pair, but a program that stopped
+    // tracking must not leave release bytes for the next PTY reader.
+    if (this.mouseButtonsBypassed & (1 << button)) {
+      this.mouseButtonsBypassed &= ~(1 << button);
       return;
     }
 
-    const button = event.button;
     if (!(this.mouseButtonsPressed & (1 << button))) return;
     this.mouseButtonsPressed &= ~(1 << button);
+    if (!this.mouseConfig?.hasMouseTracking()) return;
     const cell = this.pixelToCell(event);
     if (!cell) return;
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
 
-  /** Release held buttons at the supplied position; no event clears state silently. */
+  /** Clear held state; report releases only with a position and active tracking. */
   endMouseGesture(event?: MouseEvent): void {
     const pressed = this.mouseButtonsPressed;
     this.mouseButtonsPressed = 0;
     this.mouseButtonsBypassed = 0;
-    if (!event || this.isDisposed) return;
+    if (!event || this.isDisposed || !this.mouseConfig?.hasMouseTracking()) return;
     const cell = this.pixelToCell(event);
     if (!cell) return;
     for (let button = 0; button < 3; button++) {
@@ -871,8 +874,16 @@ export class InputHandler {
   /**
    * Report pointer motion with the disposition of its held buttons.
    */
-  handleMouseMove(event: MouseEvent): void {
+  handleMouseMove(event: MouseEvent, reportMotion = true): void {
     if (this.isDisposed) return;
+    // Capture can outlive a release with no pointerup. Reconcile only
+    // reported buttons; a local selection keeps its buttonless moves.
+    for (let button = 0; button < 3; button++) {
+      if ((this.mouseButtonsPressed & (1 << button)) && !(event.buttons & [1, 4, 2][button])) {
+        this.releaseMouseButton(event, button);
+      }
+    }
+    if (!reportMotion) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
     // Check if button motion mode or any-event tracking is enabled

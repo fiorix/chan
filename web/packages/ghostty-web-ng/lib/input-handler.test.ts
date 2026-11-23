@@ -1135,6 +1135,7 @@ describe('InputHandler', () => {
         clientX: 5,
         clientY: 5,
         button,
+        buttons: type === 'mouseup' ? 0 : [1, 4, 2][button],
         deltaY: -100,
         shiftKey,
         metaKey: false,
@@ -1258,7 +1259,7 @@ describe('InputHandler', () => {
       dispatchMouse(mouseEvent('mousedown', 0, true));
       dispatchMouse(mouseEvent('mouseup', 0));
       // Motion with no button held is reported again under any-motion tracking.
-      dispatchMouse(mouseEvent('mousemove', 0));
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
       handler.dispose();
       expect(dataReceived).toEqual(['\x1b[<32;1;1M']);
     });
