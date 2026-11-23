@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { drainPointerInput, pointerInputSince, pointerReports } from "./terminal-pointer.mjs";
+import { drainPointerInput, pointerInputSince, pointerReports, runPointerCheck } from "./terminal-pointer.mjs";
 
 const keys = (text) => ({ type: "keys", base64: Buffer.from(text, "latin1").toString("base64") });
 
@@ -103,4 +108,210 @@ test("unavailable input stays a runner skip without masking a product or cleanup
     assert.ok(failed.message.includes(extra));
   }
   assert.notEqual(pointerCheckError({ legs: { pen: { status: "failed" } }, failures: ["pen failed"] }).smokeSkip, true);
+});
+
+// Replace only the PTY process boundary and served browser chunk. The check
+// orchestration, attachment, preferences and page callbacks run unchanged.
+let activeFixture;
+export const startPointerTestFixture = () => activeFixture;
+export class PointerTestTerminal {
+  open(element) { this.element = element; }
+}
+
+function checkFixture(t, { reply = "\x1b[2;1R", history = 0, missingInstance = false, chunk = true } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "chan-pointer-check-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixtureModule = `data:text/javascript,${encodeURIComponent(`export { startPointerTestFixture as startTerminalFixture } from ${JSON.stringify(import.meta.url)};`)}`;
+  const terminalModule = `data:text/javascript,${encodeURIComponent(`export { PointerTestTerminal as Terminal } from ${JSON.stringify(import.meta.url)};`)}`;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL === new URL("./terminal-pointer.mjs", import.meta.url).href && specifier === "./terminal-fixture.mjs") {
+        return { url: fixtureModule, shortCircuit: true };
+      }
+      if (specifier === "file:///pointer-smoke/ghostty-web-stub.js") return { url: terminalModule, shortCircuit: true };
+      return nextResolve(specifier, context);
+    },
+  });
+  t.after(() => hooks.deregister());
+  const globals = (values) => {
+    for (const [key, value] of Object.entries(values)) {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+      Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
+      t.after(() => descriptor ? Object.defineProperty(globalThis, key, descriptor) : delete globalThis[key]);
+    }
+  };
+  const canvas = Object.assign(new EventTarget(), {
+    getBoundingClientRect: () => ({ left: 10, top: 10, width: 800, height: 480 }),
+  });
+  const host = { querySelector: () => canvas };
+  const document = Object.assign(new EventTarget(), {
+    querySelector: (query) => query.endsWith(" .terminal-host") ? host : canvas,
+    querySelectorAll: () => chunk ? [{ src: "file:///pointer-smoke/entry.js" }] : [],
+  });
+  globals({ document, window: {}, location: { href: "http://test.invalid/?w=window" },
+    navigator: { clipboard: { writeText: async () => {} } }, requestAnimationFrame: (callback) => callback() });
+  const handle = (value) => ({
+    evaluate: async (fn, ...args) => fn(value, ...args),
+    evaluateHandle: async (fn, ...args) => handle(await fn(value, ...args)),
+    dispose: async () => {},
+  });
+  const page = Object.assign(new EventEmitter(), {
+    bringToFront: async () => {},
+    evaluate: async (fn, ...args) => fn(...args),
+    evaluateHandle: async (fn, ...args) => handle(await fn(...args)),
+    waitForSelector: async () => {},
+    mouse: { reset: async () => {} },
+    createCDPSession: async () => ({ send: async () => {}, detach: async () => {} }),
+  });
+  let acceptResponse, finishRefresh;
+  page.waitForResponse = (predicate) => {
+    acceptResponse = predicate;
+    return new Promise((resolve) => { finishRefresh = resolve; });
+  };
+  let preferences = { mouse_capture: false, secret_masking: false };
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url, options = {}) => {
+    if (url === "file:///pointer-smoke/entry.js") return new Response('import("ghostty-web-stub.js")');
+    assert.equal(url, "/api/config");
+    if (options.method === "PATCH") {
+      preferences = JSON.parse(options.body).preferences.terminal;
+      requests.push(preferences);
+      writeFileSync(join(root, "server.toml"), `[terminal]\nmouse_capture = ${preferences.mouse_capture}\nsecret_masking = ${preferences.secret_masking}\n`);
+      const patch = { url: () => "http://test.invalid/api/config", method: () => "PATCH" };
+      const refresh = { url: () => "http://test.invalid/api/workspace", method: () => "GET" };
+      page.emit("request", patch);
+      page.emit("request", refresh);
+      const response = { request: () => refresh, ok: () => true, json: async () => ({ preferences: { terminal: preferences } }) };
+      assert.equal(await acceptResponse(response), true);
+      finishRefresh(response);
+      return new Response(null, { status: 200 });
+    }
+    return Response.json({ revision: 1, preferences: { terminal: preferences } });
+  });
+  const fixture = activeFixture = {
+    records: [], command: "stub-pty", env: { TERMINAL_FIXTURE_TOKEN: "stub-token" },
+    ready: async () => ({ tty: true, raw: true }),
+    send: async (op, args) => {
+      assert.equal(op, "bytes");
+      assert.ok(Buffer.from(args.base64, "base64").toString().endsWith("\x1b[6n"));
+      fixture.records.push(keys(reply));
+    },
+    waitFor: async (predicate) => assert.ok(predicate(), "the stub supplied a complete DSR reply"),
+    close: async () => { fixture.closed = true; },
+  };
+  const commands = [], shots = [];
+  const terminal = Object.assign(new PointerTestTerminal(), {
+    cols: 80, rows: 24, getMode: () => false, getScrollbackLength: () => history,
+  });
+  const ctx = {
+    page, browser: { id: "context" }, controlSocket: "/stub/socket", chanBin: "/stub/chan",
+    serverUrl: "http://test.invalid/?t=token", outDir: root, workspaceDir: root, chanHome: root,
+    waitWindowLive: async (id) => assert.equal(id, "window"), shot: async (name) => shots.push(name),
+    exec: async (bin, args) => {
+      assert.equal(bin, "/stub/chan");
+      assert.deepEqual(args.slice(0, 2), ["shell", "terminal"]);
+      commands.push(args.slice(2));
+      if (args[2] === "new") {
+        if (missingInstance) terminal.element = host;
+        else terminal.open(host);
+        const newest = Object.assign(new PointerTestTerminal(), {
+          cols: 80, rows: 24, getMode: () => false, getScrollbackLength: () => 0,
+        });
+        newest.open({ querySelector: () => canvas });
+      }
+      return { stdout: JSON.stringify({ groups: { Default: [{
+        name: "Pointer901-probe", pane: "pane", tab: "tab", window: "window", window_status: "alive",
+      }] } }) };
+    },
+  };
+  return { ctx, terminal, fixture, commands, shots, requests,
+    saved: () => JSON.parse(readFileSync(join(root, "901-pointer.json"), "utf8")) };
+}
+
+test("runPointerCheck saves successful legs and restores its instruments and preferences", async (t) => {
+  const f = checkFixture(t);
+  const details = await runPointerCheck(f.ctx, 901, async ({ open, leg }) => {
+    await leg("selection", async () => {
+      const resource = await open("probe");
+      assert.equal(await resource.term.evaluate((terminal) => terminal), f.terminal, "lookup uses the host, not the newest instance");
+      assert.equal((await resource.prepare("TEXT")).cols, 80);
+    });
+  });
+  assert.equal(details.legs.selection.status, "passed");
+  assert.deepEqual(details.failures, []);
+  assert.deepEqual(f.saved(), details);
+  assert.equal(f.fixture.closed, true);
+  assert.equal(window.__pointerSmoke, undefined);
+  assert.deepEqual(f.requests.at(-1), { mouse_capture: false, secret_masking: false });
+  assert.ok(f.commands.some((args) => args[0] === "close"));
+});
+
+test("runPointerCheck propagates a product failure even beside an unavailable leg", async (t) => {
+  const f = checkFixture(t);
+  await assert.rejects(runPointerCheck(f.ctx, 901, async ({ leg }) => {
+    await leg("native", async () => { throw Object.assign(new Error("no pen"), { code: "POINTER_UNAVAILABLE" }); });
+    await leg("selection", async () => { throw new Error("wrong selected text"); });
+    await leg("later", async () => {});
+  }), (error) => {
+    assert.notEqual(error.smokeSkip, true);
+    assert.equal(error.smokeDetails.legs.native.status, "unavailable");
+    assert.equal(error.smokeDetails.legs.selection.status, "failed");
+    assert.equal(error.smokeDetails.legs.later.status, "passed");
+    assert.deepEqual(error.smokeDetails.unexercised, { native: "no pen" });
+    assert.match(error.message, /selection \(failed\): wrong selected text/);
+    assert.deepEqual(f.saved(), error.smokeDetails);
+    return true;
+  });
+  assert.deepEqual(f.shots, ["901-native-unavailable", "901-selection-failed"]);
+});
+
+test("runPointerCheck skips an unavailable-only failure without losing passed legs", async (t) => {
+  const f = checkFixture(t);
+  await assert.rejects(runPointerCheck(f.ctx, 901, async ({ leg }) => {
+    await leg("connected", async () => {});
+    await leg("native", async () => { throw Object.assign(new Error("no pen"), { code: "POINTER_UNAVAILABLE" }); });
+  }), (error) => {
+    assert.equal(error.smokeSkip, true);
+    assert.equal(error.smokeDetails.legs.connected.status, "passed");
+    assert.equal(error.smokeDetails.legs.native.status, "unavailable");
+    assert.deepEqual(f.saved(), error.smokeDetails);
+    return true;
+  });
+});
+
+for (const [label, options, expected] of [
+  ["an uncaptured attached instance", { missingInstance: true }, /attached Ghostty terminal was not captured/],
+  ["a wrapped fixture cursor reply", { reply: "\x1b[3;1R" }, /fixture text reached the parser without wrapping/],
+  ["retained history", { history: 5 }, /each exact-selection gesture starts with empty scrollback/],
+]) {
+  test(`runPointerCheck rejects ${label} before the gesture`, async (t) => {
+    const f = checkFixture(t, options);
+    let gesture = false;
+    await assert.rejects(runPointerCheck(f.ctx, 901, async ({ open, leg }) => {
+      await leg("selection", async () => {
+        const resource = await open("probe");
+        await resource.prepare("TEXT");
+        gesture = true;
+      });
+    }), (error) => {
+      assert.match(error.message, expected);
+      assert.equal(error.smokeDetails.legs.selection.status, "failed");
+      assert.notEqual(error.smokeSkip, true);
+      return true;
+    });
+    assert.equal(gesture, false);
+    assert.equal(f.fixture.closed, true);
+  });
+}
+
+test("runPointerCheck rejects a missing chunk before installing clipboard capture or running its body", async (t) => {
+  const f = checkFixture(t, { chunk: false });
+  let body = false;
+  await assert.rejects(runPointerCheck(f.ctx, 901, async () => { body = true; }), (error) => {
+    assert.match(error.message, /the entry module names a Ghostty chunk/);
+    assert.notEqual(error.smokeSkip, true);
+    assert.deepEqual(error.smokeDetails.legs, {});
+    return true;
+  });
+  assert.equal(body, false);
 });
