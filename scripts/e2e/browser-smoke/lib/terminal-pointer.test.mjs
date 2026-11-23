@@ -326,3 +326,35 @@ test("runPointerCheck rejects a missing chunk before installing clipboard captur
   });
   assert.equal(body, false);
 });
+
+
+test("clipboard capture observes text and item writes, preserves rejection, and restores both methods", async (t) => {
+  const f = checkFixture(t);
+  const rejected = new Error("clipboard denied");
+  const calls = [];
+  const clipboard = navigator.clipboard;
+  const writeText = clipboard.writeText;
+  const write = clipboard.write = async function (items) {
+    assert.equal(this, clipboard);
+    calls.push(items);
+    if (calls.length === 2) throw rejected;
+  };
+  const items = [{ types: ["text/plain"], getType: async () => new Blob(["ITEM_COPY"]) }];
+  const details = await runPointerCheck(f.ctx, 901, async ({ leg }) => {
+    await leg("copy", async () => {
+      await clipboard.writeText("TEXT_COPY");
+      await clipboard.write(items);
+      await assert.rejects(clipboard.write(items), (error) => error === rejected);
+    });
+  });
+  assert.deepEqual(details.writes, [
+    { text: "TEXT_COPY", status: "fulfilled" },
+    { text: "ITEM_COPY", status: "fulfilled" },
+    { text: "ITEM_COPY", status: "rejected", error: "clipboard denied" },
+  ]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], items);
+  assert.equal(calls[1], items);
+  assert.equal(clipboard.writeText, writeText);
+  assert.equal(clipboard.write, write);
+});

@@ -242,20 +242,38 @@ export async function runPointerCheck(ctx, number, body) {
     await page.evaluate(() => {
       const state = window.__pointerSmoke;
       const clipboard = navigator.clipboard;
-      const descriptor = Object.getOwnPropertyDescriptor(clipboard, "writeText");
-      const original = clipboard.writeText;
+      const descriptors = new Map();
       const restore = state.restore;
       state.writes = [];
-      clipboard.writeText = function (text) {
-        const write = { text, status: "pending" };
-        state.writes.push(write);
-        return original.call(this, text).then(() => { write.status = "fulfilled"; }, (error) => {
-          write.status = "rejected"; write.error = error.message; throw error;
-        });
-      };
+      for (const method of ["writeText", "write"]) {
+        const original = clipboard[method];
+        if (typeof original !== "function") continue;
+        descriptors.set(method, Object.getOwnPropertyDescriptor(clipboard, method));
+        clipboard[method] = async function (...args) {
+          const write = { text: method === "writeText" ? args[0] : "", status: "pending" };
+          state.writes.push(write);
+          // Read the items independently without changing what the browser
+          // receives or replacing its rejection with an observation error.
+          const observed = method === "writeText" ? Promise.resolve() : Promise.all(
+            Array.from(args[0], async (item) => item.types.includes("text/plain")
+              ? (await item.getType("text/plain")).text() : ""),
+          ).then((texts) => { write.text = texts.join("\n"); }, (error) => { write.observationError = error.message; });
+          try {
+            const result = await original.apply(this, args);
+            write.status = "fulfilled";
+            return result;
+          } catch (error) {
+            write.status = "rejected"; write.error = error.message; throw error;
+          } finally {
+            await observed;
+          }
+        };
+      }
       state.restore = () => {
-        if (descriptor) Object.defineProperty(clipboard, "writeText", descriptor);
-        else delete clipboard.writeText;
+        for (const [method, descriptor] of descriptors) {
+          if (descriptor) Object.defineProperty(clipboard, method, descriptor);
+          else delete clipboard[method];
+        }
         restore();
       };
     });
