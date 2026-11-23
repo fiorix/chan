@@ -4,7 +4,7 @@
 // real two-line output and a full-width rule over a line keep theirs.
 //
 // Engine: headless Chrome through puppeteer-core; the result names the
-// browser's version. It says nothing about WebKit or the xterm.js engine.
+// browser's version. It says nothing about WebKit.
 //
 // The fixture is Muse Code's own output, recorded from a real session at 80
 // by 24 (fixtures/muse-code-block.json): a code block's line drawn to the

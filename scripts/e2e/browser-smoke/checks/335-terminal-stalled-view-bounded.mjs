@@ -9,10 +9,10 @@
 //   30 s: the program goes on, and the view resumes from the ring, on its
 //   socket or on a redial, with a count of what it missed and no lag line.
 //
-// The page takes a long gap between its 2 s wake probes for a machine sleep
-// and replaces the socket, so the two short stalls start on a probe's tick,
-// which keeps that gap to the stall alone. A stall that starts later between
-// two ticks can trip it from about 4 s; this check does not cover that case.
+// A gap over 6 s between 2 s wake ticks probes the socket and redials only if
+// no frame answers in time. The two short stalls start on a tick to keep that
+// gap to the stall alone. A stall that starts later between two ticks can
+// trigger a probe from about 4 s; this check does not cover that case.
 //
 // A second view of the session runs here in Node on the terminal socket's own
 // protocol, so a stall of the page cannot stop it. It acknowledges what it
@@ -21,8 +21,7 @@
 // scheduling margin. At the end Ctrl+C reaches the program through the
 // stalled view's socket, and both views must agree on the stream's position.
 //
-// It says nothing about WebKit, whose stall the desktop driver reads, or
-// about the xterm.js engine.
+// It says nothing about WebKit, whose stall the desktop driver reads.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";

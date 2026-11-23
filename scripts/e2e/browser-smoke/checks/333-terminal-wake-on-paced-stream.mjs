@@ -9,8 +9,7 @@
 //   throttle: the page's CPU slowed 20 times, so the probes land that far
 //             apart with no single long stall.
 //
-// It says nothing about WebKit, whose stall the desktop driver reads, or about
-// the xterm.js engine.
+// It says nothing about WebKit, whose stall the desktop driver reads.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";

@@ -10,10 +10,10 @@
 //
 // Each leg reads every byte the page's socket handed to the app, in order,
 // then what the terminal itself retains: consecutive numbers ending at the
-// last one, no lag line and no missed-bytes line. A 3 s stall cannot trip the
-// page's wake detector, which replaces the socket when its 2 s probes land
-// more than 6 s apart. A page slowed until they do is not covered here. It
-// says nothing about WebKit or the xterm.js engine.
+// last one, no lag line and no missed-bytes line. A gap over 6 s between 2 s
+// wake ticks probes the socket and redials only if no frame answers in time.
+// This check does not deliberately trigger that probe. It says nothing about
+// WebKit.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
