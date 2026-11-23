@@ -2,7 +2,7 @@
  * Terminal options and buffer interfaces
  */
 
-import type { GhosttyVt } from '../vt/ghosttyVt';
+import type { GhosttyVt, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
 import type { HighlightRange, HighlightStyle } from './highlights';
 
 export interface ITerminalOptions {
@@ -78,6 +78,25 @@ export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 
 /** A parsed write or a completed grid resize, delivered before painting. */
 export type TerminalChange = { kind: 'write' | 'resize' };
+
+/** Read-only terminal access; every member throws TerminalCoreDisposedError after disposal. */
+export type TerminalCore = Readonly<Pick<VtTerminal,
+  'cols' | 'getScrollbackLength' | 'getDimensions' | 'plainText' | 'readRow' | 'readHistoryRow' |
+  'isRowWrapped' | 'isScrollbackRowWrapped' | 'encodePaste'
+>> & {
+  readonly beforeResize: (listener: (from: Readonly<{ cols: number; rows: number }>) => void) => () => void;
+  readonly createSearch: () => TerminalCoreSearch;
+  readonly trackCell: (row: number, col: number) => TerminalCoreTrackedCell | null;
+};
+
+/** Owns only its search state. Free is idempotent; terminal disposal also releases it. */
+export type TerminalCoreSearch = Readonly<Pick<VtSearch,
+  'setNeedle' | 'restart' | 'step' | 'feed' | 'selectNext' | 'selectPrev' | 'caughtUp' |
+  'state' | 'matchesBetween' | 'indexOfMatchAt' | 'completingUnitMs' | 'free'
+>>;
+
+/** Owns only its tracked point. Free is idempotent; terminal disposal also releases it. */
+export type TerminalCoreTrackedCell = Readonly<Pick<VtTrackedCell, 'point' | 'moveTo' | 'free'>>;
 
 /** Which provider found a link: an OSC 8 hyperlink or a URL in the text. */
 export type TerminalLinkKind = 'osc8' | 'url';

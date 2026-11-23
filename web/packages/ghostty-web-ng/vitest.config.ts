@@ -7,6 +7,7 @@ export default defineConfig({
       "vt/**/*.test.ts",
       "lib/input-handler.test.ts",
       "lib/terminal.focus.test.ts",
+      "lib/terminal.core.test.ts",
       "lib/terminal.selection.test.ts",
       "lib/highlights.test.ts",
       "lib/paint-layers.test.ts",

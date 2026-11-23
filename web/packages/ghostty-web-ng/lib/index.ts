@@ -8,10 +8,14 @@
 
 // Main Terminal class
 export { Terminal } from './terminal';
+export { TerminalCoreDisposedError } from './terminal-core';
 
 export type {
   ITheme,
   TerminalChange,
+  TerminalCore,
+  TerminalCoreSearch,
+  TerminalCoreTrackedCell,
   TerminalHighlights,
   TerminalTestHooks,
   TerminalLinkActivation,

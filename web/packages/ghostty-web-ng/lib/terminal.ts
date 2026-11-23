@@ -26,6 +26,7 @@ import type {
   IEvent,
   ITerminalOptions,
   TerminalChange,
+  TerminalCore,
   TerminalHighlights,
   TerminalLinkActivation,
   TerminalViewport,
@@ -35,6 +36,7 @@ import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer, type FontMetrics, type PaintLayer } from './renderer';
 import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
+import { createTerminalCore } from './terminal-core';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -58,6 +60,9 @@ export class Terminal {
   // Components (created on open())
   private ghostty?: GhosttyVt;
   public wasmTerm?: VtTerminal; // Made public for link providers
+  #coreAccess?: ReturnType<typeof createTerminalCore>;
+  /** Available from open to dispose; the widget retains ownership of the raw core. */
+  get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
   public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
@@ -372,6 +377,7 @@ export class Terminal {
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
       this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+      this.#coreAccess = createTerminalCore(this.wasmTerm);
 
       // Create canvas element
       this.canvas = document.createElement('canvas');
@@ -745,23 +751,6 @@ export class Terminal {
     // Flush any writes that were queued during resize, then restart render loop
     this.flushWriteQueue();
     this.startRenderLoop();
-  }
-
-  /**
-   * Reset terminal state
-   */
-  reset(): void {
-    this.assertOpen();
-
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
-    const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
-
-    // Clear renderer
-    this.renderer!.clear();
   }
 
   /**
@@ -1195,6 +1184,8 @@ export class Terminal {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.#coreAccess?.dispose();
+    this.#coreAccess = undefined;
     this.endScrollbarDrag();
     this.cancelRenderLoop();
     if (this.scrollbarAnimationFrame !== undefined) cancelAnimationFrame(this.scrollbarAnimationFrame);
