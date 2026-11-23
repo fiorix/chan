@@ -8,10 +8,18 @@
 
 // Main Terminal class
 export { Terminal } from './terminal';
+export { TerminalCoreDisposedError } from './terminal-core';
 
 export type {
   ITheme,
   TerminalChange,
+  TerminalCore,
+  TerminalCoreSearch,
+  TerminalCoreTrackedCell,
+  TerminalHighlights,
+  TerminalSearch,
+  TerminalSearchState,
+  TerminalTestHooks,
   TerminalLinkActivation,
   TerminalLinkKind,
   TerminalViewport,
@@ -22,6 +30,9 @@ export { Key, KeyEncoderOption } from './types';
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';
-export type { FontMetrics } from './renderer';
+export type { FontMetrics, PaintFrame, PaintLayer } from './renderer';
 export { InputHandler } from './input-handler';
 export { SelectionManager } from './selection-manager';
+
+export type { SelectionAnchor, SelectionRange } from './selection-manager';
+export type { HighlightRange, HighlightStyle } from './highlights';

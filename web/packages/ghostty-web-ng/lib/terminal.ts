@@ -18,21 +18,29 @@
 
 import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig, type VtTrackedCell } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
+import { parseColor } from './color';
 import { EventEmitter } from './event-emitter';
+import { HighlightsManager } from './highlights';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
   IBufferNamespace,
   IEvent,
+  ITheme,
   ITerminalOptions,
   TerminalChange,
+  TerminalCore,
+  TerminalHighlights,
+  TerminalSearch,
   TerminalLinkActivation,
   TerminalViewport,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
-import { DRAG_THRESHOLD_CELLS, SelectionManager } from './selection-manager';
+import { CanvasRenderer, type FontMetrics, type PaintLayer } from './renderer';
+import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
+import { createTerminalCore } from './terminal-core';
+import { SearchOwner } from './search';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -56,9 +64,21 @@ export class Terminal {
   // Components (created on open())
   private ghostty?: GhosttyVt;
   public wasmTerm?: VtTerminal; // Made public for link providers
+  #coreAccess?: ReturnType<typeof createTerminalCore>;
+  /** Available from open to dispose; the widget retains ownership of the raw core. */
+  get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
   public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
+  private highlightsManager?: HighlightsManager;
+  #searchOwner?: SearchOwner;
+  public readonly search: TerminalSearch;
+  /** Stable facade; requests before open or after disposal do not retain state. */
+  public readonly highlights: TerminalHighlights = {
+    set: (name, ranges, style) => { this.highlightsManager?.set(name, ranges, style); },
+    get: (name) => this.highlightsManager?.get(name),
+    clear: (name) => this.highlightsManager?.clear(name) ?? false,
+  };
   private canvas?: HTMLCanvasElement;
 
   // Link detection system
@@ -93,7 +113,6 @@ export class Terminal {
   private isOpen = false;
   private isDisposed = false;
   private animationFrameId?: number;
-  private focusRetry?: ReturnType<typeof setTimeout>;
   private writeQueue: Uint8Array[] = [];
   private awaitingEcho = false;
 
@@ -133,11 +152,18 @@ export class Terminal {
       rows: options.rows ?? 24,
       cursorBlink: options.cursorBlink ?? false,
       cursorStyle: options.cursorStyle ?? 'block',
-      theme: options.theme ?? {},
+      theme: { ...options.theme },
       scrollback: options.scrollback ?? 10000,
+      scrollbackBytes: options.scrollbackBytes,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
+      lineHeight: options.lineHeight ?? 1,
+      boxGlyphs: options.boxGlyphs ?? false,
+      scrollbar: options.scrollbar,
       disableStdin: options.disableStdin ?? false,
+      copy: options.copy,
+      joinDrawnWraps: options.joinDrawnWraps,
+      testHooks: options.testHooks,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -162,6 +188,14 @@ export class Terminal {
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
     const terminal = this;
+    const emptySearch = Object.freeze({ index: 0, total: 0, partial: false });
+    this.search = Object.freeze({
+      find: (query: string) => this.#searchOwner?.find(query),
+      step: (query: string, direction: 'older' | 'newer') => this.#searchOwner?.step(query, direction),
+      close: () => this.#searchOwner?.close(),
+      get state() { return terminal.#searchOwner?.state ?? emptySearch; },
+      onChange: (listener: Parameters<TerminalSearch['onChange']>[0]) => this.#searchOwner?.onChange(listener) ?? { dispose() {} },
+    });
     this.viewport = {
       get offset() { return terminal.viewportY; },
       followOutput: 'at-bottom',
@@ -198,9 +232,9 @@ export class Terminal {
         break;
 
       case 'theme':
-        if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
-        }
+        this.wasmTerm!.setColors(this.buildWasmConfig());
+        this.renderer!.setTheme(this.options.theme);
+        this.refresh();
         break;
 
       case 'fontSize':
@@ -240,44 +274,14 @@ export class Terminal {
     // Resize canvas to match new font metrics
     this.renderer.resize(this.cols, this.rows);
 
-    // Update canvas element dimensions to match renderer
-    const metrics = this.renderer.getMetrics();
-    this.canvas.width = metrics.width * this.cols;
-    this.canvas.height = metrics.height * this.rows;
-    this.canvas.style.width = `${metrics.width * this.cols}px`;
-    this.canvas.style.height = `${metrics.height * this.rows}px`;
-
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY);
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
   }
 
-  /**
-   * Parse a CSS color string to 0xRRGGBB format.
-   * Returns 0 if the color is undefined or invalid.
-   */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
-
-    // Handle hex colors (#RGB, #RRGGBB)
-    if (color.startsWith('#')) {
-      let hex = color.slice(1);
-      if (hex.length === 3) {
-        hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-      }
-      const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
-    }
-
-    // Handle rgb(r, g, b) format
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (match) {
-      const r = Number.parseInt(match[1], 10);
-      const g = Number.parseInt(match[2], 10);
-      const b = Number.parseInt(match[3], 10);
-      return (r << 16) | (g << 8) | b;
-    }
-
-    return 0;
+  private parseColorToHex(color?: string): number | undefined {
+    const parsed = parseColor(color);
+    if (!parsed) return undefined;
+    return (Math.round(parsed[0]) << 16) | (Math.round(parsed[1]) << 8) | Math.round(parsed[2]);
   }
 
   /**
@@ -286,16 +290,19 @@ export class Terminal {
   private buildWasmConfig(): VtTerminalConfig | undefined {
     const theme = this.options.theme;
     const scrollback = this.options.scrollback;
+    // wasm32 SIZE_MAX means unlimited, so keep finite budgets below it.
+    const scrollbackMaxBytes = Number.isInteger(this.options.scrollbackBytes) && this.options.scrollbackBytes > 0
+      ? Math.min(this.options.scrollbackBytes, 0xffff_fffe) : undefined;
 
     // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
+    if (!theme && scrollback === 10000 && scrollbackMaxBytes === undefined) {
       return undefined;
     }
 
     // Build palette array from theme colors
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
     //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
+    const palette = [
       this.parseColorToHex(theme?.black),
       this.parseColorToHex(theme?.red),
       this.parseColorToHex(theme?.green),
@@ -316,6 +323,7 @@ export class Terminal {
 
     return {
       scrollbackLimit: scrollback,
+      scrollbackMaxBytes,
       fgColor: this.parseColorToHex(theme?.foreground),
       bgColor: this.parseColorToHex(theme?.background),
       cursorColor: this.parseColorToHex(theme?.cursor),
@@ -365,6 +373,7 @@ export class Terminal {
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
       this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+      this.#coreAccess = createTerminalCore(this.wasmTerm);
 
       // Create canvas element
       this.canvas = document.createElement('canvas');
@@ -407,6 +416,9 @@ export class Terminal {
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
+        lineHeight: this.options.lineHeight,
+        boxGlyphs: this.options.boxGlyphs,
+        scrollbar: this.options.scrollbar,
       });
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
@@ -491,6 +503,10 @@ export class Terminal {
 
       // Connect selection manager to renderer
       this.renderer.setSelectionManager(this.selectionManager);
+      this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
+      this.renderer.setHighlights(this.highlightsManager);
+      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlightsManager, this.viewport,
+        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch());
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
@@ -516,7 +532,7 @@ export class Terminal {
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this.scrollbarOpacity);
+      this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
 
       // Start render loop
       this.startRenderLoop();
@@ -550,10 +566,6 @@ export class Terminal {
       if (callback) requestAnimationFrame(callback);
       return;
     }
-    // Note: We intentionally do NOT clear selection on write - most modern terminals
-    // preserve selection when new data arrives. Selection is cleared by user actions
-    // like clicking or typing, not by incoming data.
-
     const core = this.wasmTerm!;
     const viewportBefore = this.viewportY;
     const targetBefore = this.targetViewportY;
@@ -591,6 +603,9 @@ export class Terminal {
       targetAnchor?.free();
     }
 
+    this.selectionManager?.syncSelection();
+    this.highlightsManager?.observeScreen(core.isAlternateScreen());
+
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
@@ -600,6 +615,7 @@ export class Terminal {
 
     // Observers see the current links and view, with replies already sent,
     // before an echo or scrollbar animation can paint synchronously.
+    this.#searchOwner?.changed('write', core.isAlternateScreen());
     this.changeEmitter.fire({ kind: 'write' });
 
     if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
@@ -613,7 +629,7 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
     }
 
@@ -714,24 +730,20 @@ export class Terminal {
       this.wasmTerm!.resize(cols, rows);
       this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
       this.targetViewportY = Math.min(this.targetViewportY, this.getScrollbackLength());
+      this.selectionManager?.syncSelection();
+      this.highlightsManager?.observeScreen(this.wasmTerm!.isAlternateScreen());
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
 
-      // Update canvas dimensions
-      const metrics = this.renderer!.getMetrics();
-      this.canvas!.width = metrics.width * cols;
-      this.canvas!.height = metrics.height * rows;
-      this.canvas!.style.width = `${metrics.width * cols}px`;
-      this.canvas!.style.height = `${metrics.height * rows}px`;
-
+      this.#searchOwner?.changed('resize', this.wasmTerm!.isAlternateScreen());
       this.changeEmitter.fire({ kind: 'resize' });
 
       // The dimension event also serves PTY size publication.
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY);
+      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
@@ -742,37 +754,12 @@ export class Terminal {
   }
 
   /**
-   * Reset terminal state
-   */
-  reset(): void {
-    this.assertOpen();
-
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
-    const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
-
-    // Clear renderer
-    this.renderer!.clear();
-  }
-
-  /**
-   * Focus terminal input
+   * Focus terminal input synchronously without scrolling. Calls before open,
+   * while detached or after disposal are ignored; no later retry takes focus.
    */
   focus(): void {
-    if (this.isOpen && this.element) {
-      // Focus immediately for immediate keyboard/wheel event handling
-      this.element.focus();
-
-      // Also schedule a delayed focus as backup to ensure it sticks
-      // (some browsers may need this if DOM isn't fully settled)
-      clearTimeout(this.focusRetry);
-      this.focusRetry = setTimeout(() => {
-        this.focusRetry = undefined;
-        this.element?.focus();
-      }, 0);
+    if (this.isOpen && this.element?.isConnected) {
+      this.element.focus({ preventScroll: true });
     }
   }
 
@@ -781,10 +768,6 @@ export class Terminal {
    */
   blur(): void {
     if (this.isOpen && this.element) {
-      // A focus() still owes its delayed retry, which would take the
-      // keyboard back after this blur.
-      clearTimeout(this.focusRetry);
-      this.focusRetry = undefined;
       // A press on the canvas can leave the hidden textarea holding focus
       // rather than the element, and blur() acts only on the focused element,
       // so blur whichever of the two holds it. Focus outside stays put.
@@ -819,6 +802,26 @@ export class Terminal {
    */
   public clearSelection(): void {
     this.selectionManager?.clearSelection();
+  }
+
+  /** Inclusive absolute-row selection, in either direction; null clears. */
+  public setSelection(range: SelectionRange | null): void {
+    this.selectionManager?.setSelection(range);
+  }
+
+  /** A snapshot of the current selection, or null when unavailable. */
+  public getSelectionRange(): SelectionRange | null {
+    return this.selectionManager?.getSelectionRange() ?? null;
+  }
+
+  /** Client CSS pixels to viewport and absolute cells; null without geometry. */
+  public cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
+    return this.selectionManager?.cellAt(clientX, clientY) ?? null;
+  }
+
+  /** Copy-formatted retained history and screen; leaves selection untouched. */
+  public getScrollbackText(): string {
+    return this.selectionManager?.getScrollbackText() ?? '';
   }
 
   /**
@@ -858,6 +861,41 @@ export class Terminal {
    */
   public getViewportY(): number {
     return this.viewportY;
+  }
+
+  /** Add a layer above the widget; an unopened terminal retains no registration. */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (!this.isOpen) return () => {};
+    return this.renderer!.addPaintLayer(layer);
+  }
+
+  /**
+   * Repaint synchronously at the current scrollbar opacity. During a paint
+   * callback, request a full next frame instead of recursively rendering.
+   */
+  public refresh(): void {
+    if (!this.isOpen) return;
+    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+  }
+
+  /**
+   * Replace the theme with a copy and repaint the complete widget synchronously.
+   * Before open, only the held theme changes; after disposal, nothing changes.
+   * A paint callback requesting a theme change gets a full next frame.
+   */
+  public setTheme(theme: ITheme): void {
+    if (this.isDisposed) return;
+    this.options.theme = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
+  }
+
+  /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */
+  public getMetrics(): Readonly<FontMetrics> | undefined {
+    return this.isOpen ? this.renderer!.getMetrics() : undefined;
+  }
+
+  private paintScrollbarOpacity(): number {
+    const fixed = this.options.testHooks?.scrollbarOpacity;
+    return fixed !== undefined ? Math.max(0, Math.min(1, fixed)) : this.scrollbarOpacity;
   }
 
   // ==========================================================================
@@ -1069,8 +1107,6 @@ export class Terminal {
 
     this.isDisposed = true;
     this.isOpen = false;
-    clearTimeout(this.focusRetry);
-    this.focusRetry = undefined;
 
     // Stop render loop and clear write queue
     this.cancelRenderLoop();
@@ -1136,9 +1172,11 @@ export class Terminal {
         //    render state up to date and lists the rows that changed
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.scrollbarOpacity);
-
-        this.animationFrameId = requestAnimationFrame(loop);
+        try {
+          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
+        } finally {
+          if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);
+        }
       }
     };
     loop();
@@ -1156,6 +1194,10 @@ export class Terminal {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.#searchOwner?.dispose();
+    this.#searchOwner = undefined;
+    this.#coreAccess?.dispose();
+    this.#coreAccess = undefined;
     this.endScrollbarDrag();
     this.cancelRenderLoop();
     if (this.scrollbarAnimationFrame !== undefined) cancelAnimationFrame(this.scrollbarAnimationFrame);
@@ -1163,6 +1205,9 @@ export class Terminal {
     this.linkPress = undefined;
     this.currentHoveredLink = undefined;
     this.hoverCells = new VtCells();
+
+    this.highlightsManager?.dispose();
+    this.highlightsManager = undefined;
 
     // Dispose selection manager
     if (this.selectionManager) {
@@ -1633,7 +1678,7 @@ export class Terminal {
     }
     if (event.button !== 0 || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
-        this.scrollbarOpacity <= 0 || !this.canvas?.isConnected) return false;
+        this.paintScrollbarOpacity() <= 0 || !this.canvas?.isConnected) return false;
     const geometry = this.scrollbarGeometry();
     if (!geometry) return false;
     const { rect, track, thumb, history, top } = geometry;
@@ -1707,6 +1752,7 @@ export class Terminal {
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    if (this.options.testHooks?.scrollbarOpacity !== undefined) return;
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
@@ -1764,7 +1810,7 @@ export class Terminal {
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1789,7 +1835,7 @@ export class Terminal {
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1799,7 +1845,7 @@ export class Terminal {
         this.scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
         if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, 0);
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
         }
       }
     };
