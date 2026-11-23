@@ -26,7 +26,7 @@ The full run builds `web/` and `cargo build -p chan` first; set `SMOKE_SKIP_BUIL
 
 ## Exit status
 
-A smoke run exits `0` only after finalizing a nonempty selection whose every check passed. An empty fatal detail still reports an error. A direct `process.exit(0)` before finalization exits `2` and leaves only partial evidence. Assertion failures exit `1`; incomplete runs, environment errors and invalid selections exit `2`. The printed verdict and `results.json.status` distinguish the non-passing cases that share exit `2`.
+A smoke run exits `0` only after finalizing a nonempty selection whose every check passed. An empty fatal detail still reports an error. A direct `process.exit(0)` or `process.exit(1)` before finalization exits `2` and leaves only partial evidence; higher exit codes are preserved. An unfinished exit synchronously kills the runner's chan server and Chrome children. Assertion failures exit `1`; incomplete runs, environment errors and invalid selections exit `2`. The printed verdict and `results.json.status` distinguish the non-passing cases that share exit `2`.
 
 | Outcome | Check line | Run verdict / JSON status | Exit |
 | --- | --- | --- | --- |
