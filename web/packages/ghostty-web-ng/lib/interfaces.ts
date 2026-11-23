@@ -14,6 +14,12 @@ export interface ITerminalOptions {
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  /** Cell-height multiplier, at least 1; defaults to 1. Construction only. */
+  lineHeight?: number;
+  /** Draw supported box and block characters as cell paths. Defaults to false. Construction only. */
+  boxGlyphs?: boolean;
+  /** Composite the scrollbar over content. Omit for the background strip. Construction only. */
+  scrollbar?: 'overlay';
   disableStdin?: boolean; // Disable keyboard input (default: false)
 
   /** Test-only paint controls. Omit in production. */

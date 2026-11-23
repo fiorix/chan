@@ -11,6 +11,7 @@
  */
 
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { drawBoxGlyph } from './box-glyphs';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { HighlightsManager, HighlightSpan, HighlightStyle } from './highlights';
@@ -26,6 +27,9 @@ export interface RendererOptions {
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
+  lineHeight?: number; // Default: 1
+  boxGlyphs?: boolean; // Default: false
+  scrollbar?: 'overlay'; // Composite the translucent bar over content
 }
 
 /** A snapshot of the rows repainted beneath a layer, in CSS pixels. */
@@ -103,7 +107,12 @@ export class CanvasRenderer {
   private cursorBlink: boolean;
   private theme: RendererTheme;
   private devicePixelRatio: number;
+  private readonly followsDevicePixelRatio: boolean;
+  private readonly lineHeight: number;
+  private readonly boxGlyphs: boolean;
+  private readonly scrollbar?: 'overlay';
   private metrics: FontMetrics;
+  private resizeRequired = false;
 
   private paintLayers: PaintLayer[] = [];
   private repaintAll = false;
@@ -167,6 +176,11 @@ export class CanvasRenderer {
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.followsDevicePixelRatio = options.devicePixelRatio === undefined;
+    const lineHeight = options.lineHeight ?? 1;
+    this.lineHeight = Number.isFinite(lineHeight) && lineHeight >= 1 ? lineHeight : 1;
+    this.boxGlyphs = options.boxGlyphs ?? false;
+    this.scrollbar = options.scrollbar;
 
     // Measure font metrics
     this.metrics = this.measureFont();
@@ -192,19 +206,35 @@ export class CanvasRenderer {
       height: Math.ceil(ascent + descent) + 2,
       baseline: Math.ceil(ascent) + 1,
     };
+    const fallbackHeight = natural.height * this.lineHeight;
+    const fallback = {
+      width: natural.width,
+      height: fallbackHeight,
+      baseline: Math.max(0, Math.min(fallbackHeight, natural.baseline + (fallbackHeight - natural.height) / 2)),
+    };
     const measured = this.measureCell();
     const ratio = this.devicePixelRatio;
     if (!measured || !Number.isFinite(ratio) || ratio <= 0 ||
         !Number.isFinite(measured.width) || measured.width <= 0 ||
-        !Number.isFinite(measured.height) || measured.height <= 0) return natural;
+        !Number.isFinite(measured.height) || measured.height <= 0) return fallback;
     const width = Math.floor(measured.width * ratio) / ratio;
-    const height = Math.ceil(measured.height * ratio) / ratio;
-    if (width <= 0 || height <= 0) return natural;
+    const height = Math.floor(Math.ceil(measured.height * ratio) * this.lineHeight) / ratio;
+    if (width <= 0 || height <= 0) return fallback;
     return {
       width,
       height,
       baseline: Math.max(0, Math.min(height, natural.baseline + (height - natural.height) / 2)),
     };
+  }
+
+  private syncDevicePixelRatio(): void {
+    if (!this.followsDevicePixelRatio) return;
+    const ratio = window.devicePixelRatio;
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio === this.devicePixelRatio) return;
+    this.devicePixelRatio = ratio;
+    this.metrics = this.measureFont();
+    this.resizeRequired = true;
+    this.repaintAll = true;
   }
 
   private measureCell(): { width: number; height: number } | null {
@@ -255,6 +285,7 @@ export class CanvasRenderer {
    * Resize canvas to fit terminal dimensions
    */
   public resize(cols: number, rows: number): void {
+    this.syncDevicePixelRatio();
     const cssWidth = cols * this.metrics.width;
     const cssHeight = rows * this.metrics.height;
 
@@ -262,9 +293,11 @@ export class CanvasRenderer {
     this.canvas.style.width = `${cssWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
-    // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    // The backing store and resize comparison use identical integer sizes.
+    // Fractional device products otherwise reset the canvas on every frame.
+    this.canvas.width = Math.round(cssWidth * this.devicePixelRatio);
+    this.canvas.height = Math.round(cssHeight * this.devicePixelRatio);
+    this.resizeRequired = false;
 
     // Scale context to match DPI: the size assignment above reset the
     // context, so this puts the device scale back for the rest of the frame.
@@ -298,6 +331,7 @@ export class CanvasRenderer {
       this.repaintAll = true;
       return;
     }
+    this.syncDevicePixelRatio();
     this.rendering = true;
     const layers = [...this.paintLayers];
     forceAll ||= this.repaintAll;
@@ -351,8 +385,9 @@ export class CanvasRenderer {
 
     // Resize canvas if dimensions changed
     const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
+      this.resizeRequired ||
+      this.canvas.width !== Math.round(dims.cols * this.metrics.width * this.devicePixelRatio) ||
+      this.canvas.height !== Math.round(dims.rows * this.metrics.height * this.devicePixelRatio);
 
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
@@ -673,10 +708,13 @@ export class CanvasRenderer {
     const textX = cellX;
     const textY = cellY + this.metrics.baseline;
 
-    // The character to render: the cell's whole cluster for complex
-    // scripts, else its codepoint, a space if it has none
+    // Complex clusters stay with the font. Cell paths share the resolved
+    // foreground and decorations, including selection and cursor overrides.
     const char = cell.cluster ?? String.fromCodePoint(cell.codepoint || 32);
-    this.ctx.fillText(char, textX, textY);
+    const boxed = this.boxGlyphs && cell.cluster === null &&
+      drawBoxGlyph(this.ctx, this.metrics, cell.codepoint, x, y,
+        (cell.flags & VtFlag.FAINT) !== 0, this.devicePixelRatio);
+    if (!boxed) this.ctx.fillText(char, textX, textY);
 
     // Reset alpha
     if (cell.flags & VtFlag.FAINT) {
@@ -957,10 +995,12 @@ export class CanvasRenderer {
     const scrollbarPadding = 4;
     const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
 
-    // Always clear the scrollbar area first (fixes ghosting when fading out)
-    ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
-    ctx.fillStyle = this.theme.background;
-    ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+    // The overlay composites onto the fresh rows painted by this frame.
+    if (this.scrollbar !== 'overlay') {
+      ctx.clearRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+      ctx.fillStyle = this.theme.background;
+      ctx.fillRect(scrollbarX - 2, 0, scrollbarWidth + 6, canvasHeight);
+    }
 
     // Don't draw scrollbar if fully transparent or no scrollback
     if (opacity <= 0 || scrollbackLength === 0) return;
@@ -984,6 +1024,7 @@ export class CanvasRenderer {
     ctx.fillRect(scrollbarX, thumbY, scrollbarWidth, thumbHeight);
   }
   public getMetrics(): FontMetrics {
+    this.syncDevicePixelRatio();
     return { ...this.metrics };
   }
 
@@ -1094,14 +1135,14 @@ export class CanvasRenderer {
    * Get character cell width (for coordinate conversion)
    */
   public get charWidth(): number {
-    return this.metrics.width;
+    return this.getMetrics().width;
   }
 
   /**
    * Get character cell height (for coordinate conversion)
    */
   public get charHeight(): number {
-    return this.metrics.height;
+    return this.getMetrics().height;
   }
 
   /**
