@@ -5,8 +5,11 @@
 // opens a Ghostty terminal without that fixture on purpose: in jsdom the real
 // loader cannot fetch the core, TerminalTab reports the failed load and
 // falls back, and the guard has recorded the report by the time the terminal
-// is up. The case takes the failure from the guard itself, so it passes while
-// the guard still fails any other test that does the same.
+// is up. The first case takes the failure from the guard itself, so it passes
+// while the guard still fails any other test that does the same; the second
+// leaves it to the guard and is expected to fail. The runner settles an
+// expected failure after the test's hooks, so that case passes only while the
+// guard's own hook fails it.
 //
 // A load that fails with the stand-in route's own error is the one report the
 // guard lets through, by its class: an error that only reads like it fails.
@@ -57,6 +60,11 @@ test("a terminal opened without the shared widget fixture fails its test, naming
     /failed to initialize: open it on the real widget through the shared fixture in src\/__tests__\/ghosttyTab\.ts .*Reported: \[chan\] ghostty-web failed to load/,
   );
   expect(() => failOnTerminalInitFailures(), "each report fails one test").not.toThrow();
+});
+
+test.fails("a terminal opened without the shared widget fixture, its report left to the guard, fails the test", async () => {
+  const [tab] = seatTerminals([terminalTab()]);
+  await mountTerminal(TerminalTab, tab!);
 });
 
 test("a load that fails with the stand-in route's error is let through", async () => {
