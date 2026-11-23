@@ -1,45 +1,27 @@
 // @vitest-environment jsdom
 //
-// Both backends use their real parser, input listeners and viewport. Only
+// The widget uses its real parser, input listeners and viewport. Only
 // browser sizing, optional addons and the transport are supplied by the test.
 
-import { readFileSync } from "node:fs";
-import { mount, tick, unmount } from "svelte";
-import type { Terminal as XtermTerminal } from "@xterm/xterm";
-import { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
+import { tick } from "svelte";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
-  terminals: [] as unknown[],
-  module: null as WebAssembly.Module | null,
   paths: [] as string[],
   os: "mac",
 }));
 
-vi.mock("@xterm/xterm", async (original) => {
-  const actual = await original<typeof import("@xterm/xterm")>();
-  return { ...actual, Terminal: class extends actual.Terminal {
-    constructor(options: ConstructorParameters<typeof actual.Terminal>[0]) {
-      super(options);
-      runtime.terminals.push(this);
-    }
-  } };
-});
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { activate() {} dispose() {} fit() {} proposeDimensions() { return undefined; } } }));
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (original) => {
-  const actual = await original<typeof import("../terminal/backend")>();
-  const { Terminal } = await import("@chan/ghostty-web-ng");
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({ ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(runtime.module!, {
-    Terminal: class extends Terminal {
-      constructor(options: ConstructorParameters<typeof Terminal>[0]) {
-        super(options);
-        runtime.terminals.push(this);
-      }
-    },
-  }) });
-});
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 vi.mock("../api/desktop", async (original) => ({
   ...(await original<typeof import("../api/desktop")>()),
   readDroppedPaths: async () => runtime.paths,
@@ -50,43 +32,24 @@ vi.mock("../state/shortcuts", async (original) => ({
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
 import {
   attach, installTerminalDom, output, receive, resetTerminals,
-  seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
+  seatTerminals, sentFrames, terminalTab, TerminalSocket,
 } from "../__tests__/terminalTab";
 
-type Terminal = XtermTerminal | GhosttyTerminal;
-let component: ReturnType<typeof mount> | undefined;
-
 installTerminalDom();
-beforeAll(async () => {
-  runtime.module = await WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
-});
 beforeEach(() => {
   runtime.os = "mac";
   runtime.paths = [];
-  runtime.terminals.length = 0;
   vi.stubGlobal("requestAnimationFrame", () => 0);
   vi.stubGlobal("cancelAnimationFrame", () => {});
-  // jsdom has no font layout; xterm derives its viewport pixels from these.
-  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains("xterm-char-measure-element") ? 256 : 0;
-  });
-  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains("xterm-char-measure-element") ? 17 : 0;
-  });
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    return new SoftwareCanvasContext(this, 8) as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
 });
-afterEach(async () => {
-  if (component) await unmount(component);
-  component = undefined;
+afterEach(() => {
   resetTerminals();
   __testSetStandalonePreferences(null);
   document.body.innerHTML = "";
@@ -95,31 +58,23 @@ afterEach(async () => {
 });
 
 function history(term: Terminal): number {
-  return term instanceof GhosttyTerminal
-    ? term.getViewportY()
-    : term.buffer.active.baseY - term.buffer.active.viewportY;
+  return term.getViewportY();
 }
 function inputFrames(socket: TerminalSocket): unknown[] {
   return sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data);
 }
-async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false, broadcast = false) {
-  useXtermStandIn(backend === "xterm");
+async function scrolled(mouseCapture = false, broadcast = false) {
   __testSetStandalonePreferences(terminalPreferences({ secret_masking: false, mouse_capture: mouseCapture }));
   const [tab, sibling] = seatTerminals(broadcast ? [
     terminalTab({ broadcastEnabled: true, group: "input-scroll" }),
     terminalTab({ id: "term-sibling", broadcastEnabled: true, group: "input-scroll" }),
   ] : [terminalTab()]);
-  const target = document.createElement("div");
-  document.body.append(target);
-  component = mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } });
-  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
-  const term = runtime.terminals[0] as Terminal;
-  expect(term instanceof GhosttyTerminal).toBe(backend === "ghostty");
+  const { target, term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all[0]!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(socket, Array.from({ length: 100 }, (_, i) => `history ${i}\r\n`).join("") + "$ ");
-  await vi.waitFor(() => expect(term instanceof GhosttyTerminal ? term.getScrollbackLength() : term.buffer.active.baseY).toBeGreaterThan(50));
+  await vi.waitFor(() => expect(term.getScrollbackLength()).toBeGreaterThan(50));
   term.scrollLines(-7);
   expect(history(term)).toBe(7);
   socket.sent.length = 0;
@@ -133,7 +88,7 @@ async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false, broa
     send(data);
   });
   const host = target.querySelector<HTMLElement>(".terminal-host")!;
-  const input = term instanceof GhosttyTerminal ? host : term.textarea!;
+  const input = host;
   return { tab: tab!, sibling, target, term, socket, host, input, inputHistory, promptHistory };
 }
 function key(input: HTMLElement, init: KeyboardEventInit): void {
@@ -146,9 +101,9 @@ function drop(target: HTMLElement): Event {
   return event;
 }
 
-describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (backend) => {
+describe("terminal input viewport", () => {
   test("a Rich Prompt returns to the live cursor before sending its queued frame", async () => {
-    const { tab, term, socket, promptHistory } = await scrolled(backend);
+    const { tab, term, socket, promptHistory } = await scrolled();
     expect(sendPromptToTerminal(tab.id, "run it", "claude", "prompt-scroll")).toBe(true);
     expect(sentFrames(socket)).toEqual([
       { type: "prompt", data: "run it", agent: "claude", id: "prompt-scroll" },
@@ -158,7 +113,7 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
   });
 
   test.each([0, 2, 3])("a prompt rejected by socket state %s preserves history", async (readyState) => {
-    const { tab, term, socket, promptHistory } = await scrolled(backend);
+    const { tab, term, socket, promptHistory } = await scrolled();
     socket.readyState = readyState;
     expect(sendPromptToTerminal(tab.id, "run it", "claude", "prompt-offline")).toBe(false);
     expect(sentFrames(socket)).toEqual([]);
@@ -171,7 +126,7 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     { name: "Option+Left while closing", readyState: 2, key: { key: "ArrowLeft", code: "ArrowLeft", altKey: true } },
     { name: "a file drop while closed", readyState: 3, key: null },
   ])("$name sends nothing and preserves history", async ({ readyState, key: init }) => {
-    const { target, term, socket, input, inputHistory } = await scrolled(backend);
+    const { target, term, socket, input, inputHistory } = await scrolled();
     socket.readyState = readyState;
     if (init) {
       key(input, init);
@@ -188,17 +143,15 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
   test.each([0, 2, 3].flatMap((readyState) =>
     ["direct key", "dropped path"].map((kind) => ({ readyState, kind })),
   ))("$kind reaches the same-window group while socket state $readyState preserves local history", async ({ readyState, kind }) => {
-    const { sibling, target, term, socket, input, inputHistory } = await scrolled(backend, false, true);
+    const { sibling, target, term, socket, input, inputHistory } = await scrolled(false, true);
     const received: Array<[string, boolean | undefined]> = [];
     const unregister = registerTerminalInputSink(sibling!.id, (data, binary) => received.push([data, binary]));
     try {
       socket.readyState = readyState;
       let bytes: string;
       if (kind === "direct key") {
-        bytes = backend === "ghostty" ? "\r" : "\x1f";
-        key(input, backend === "ghostty"
-          ? { key: "Enter", code: "Enter", keyCode: 13 }
-          : { key: "/", code: "Slash", ctrlKey: true });
+        bytes = "\r";
+        key(input, { key: "Enter", code: "Enter", keyCode: 13 });
       } else {
         bytes = "'/tmp/group path' ";
         runtime.paths = ["/tmp/group path"];
@@ -220,30 +173,25 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     { name: "SGR wheel", sgr: true, wheel: true, bytes: "\x1b[<64;1;1M" },
     { name: "X10 wheel", sgr: false, wheel: true, bytes: "\x1b[M`!!" },
   ])("a native $name report follows the backend's input-scroll rule", async ({ sgr, wheel, bytes }) => {
-    const { term, socket, host, inputHistory } = await scrolled(backend, true);
+    const { term, socket, host, inputHistory } = await scrolled(true);
     await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    await vi.waitFor(() => expect(term instanceof GhosttyTerminal
-      ? term.hasMouseTracking()
-      : term.modes.mouseTrackingMode === "vt200").toBe(true));
-    const surface = host.querySelector<HTMLElement>(backend === "ghostty" ? "canvas" : ".xterm-screen")!;
+    await vi.waitFor(() => expect(term.hasMouseTracking()).toBe(true));
+    const surface = host.querySelector<HTMLElement>("canvas")!;
     vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
     const position = { bubbles: true, cancelable: true, clientX: 1, clientY: 1 };
-    // Ghostty reports the press its canvas captures; xterm.js reports the
-    // compatibility mousedown.
     if (wheel) surface.dispatchEvent(new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 }));
-    else if (backend === "ghostty") {
+    else {
       modelPointerCapture(surface);
       mousePointer(surface, "pointerdown", position);
-    } else surface.dispatchEvent(new MouseEvent("mousedown", { ...position, button: 0 }));
+    }
     expect(inputFrames(socket)).toEqual([bytes]);
-    // xterm marks SGR reports as user data; its X10 reports use onBinary.
-    const expectedHistory = backend === "xterm" && sgr ? 0 : 7;
+    const expectedHistory = 7;
     expect(inputHistory, "the viewport when the report reaches the socket").toEqual([expectedHistory]);
     expect(history(term)).toBe(expectedHistory);
   });
 
   test("a file drop types its escaped path and returns to the live cursor", async () => {
-    const { target, term, socket, inputHistory } = await scrolled(backend);
+    const { target, term, socket, inputHistory } = await scrolled();
     runtime.paths = ["/tmp/file with spaces"];
     expect(drop(target).defaultPrevented).toBe(true);
     await tick();
@@ -252,7 +200,7 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     expect(history(term)).toBe(0);
   });
   test("an empty drop leaves the history view and sends nothing", async () => {
-    const { target, term, socket } = await scrolled(backend);
+    const { target, term, socket } = await scrolled();
     drop(target);
     await tick();
     expect(inputFrames(socket)).toEqual([]);
@@ -262,20 +210,20 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     ["Ctrl+/", { key: "/", code: "Slash", ctrlKey: true }, "\x1f"],
     ["Option+Left", { key: "ArrowLeft", code: "ArrowLeft", altKey: true }, "\x1bb"],
   ] as const)("%s returns to the live cursor before sending its bytes", async (_name, init, bytes) => {
-    const { term, socket, input, inputHistory } = await scrolled(backend);
+    const { term, socket, input, inputHistory } = await scrolled();
     key(input, init);
     expect(inputFrames(socket)).toEqual([bytes]);
     expect(inputHistory).toEqual([0]);
     expect(history(term)).toBe(0);
   });
   test("copy leaves history where it was and sends no bytes", async () => {
-    const { term, socket, input } = await scrolled(backend);
+    const { term, socket, input } = await scrolled();
     key(input, { key: "c", code: "KeyC", metaKey: true });
     expect(inputFrames(socket)).toEqual([]);
     expect(history(term)).toBe(7);
   });
   test("output and a terminal query reply preserve the anchored history", async () => {
-    const { term, socket, inputHistory } = await scrolled(backend);
+    const { term, socket, inputHistory } = await scrolled();
     await output(socket, "background output\x1b[5n");
     await vi.waitFor(() => expect(inputFrames(socket)).toEqual(["\x1b[0n"]));
     expect(inputHistory, "the reply itself leaves the view alone").toEqual([7]);
@@ -289,7 +237,7 @@ describe("ghostty terminal key parity viewport", () => {
     ["host text", "beforeinput", { inputType: "insertText", data: "word" }, "word"],
     ["delete", "beforeinput", { inputType: "deleteContentBackward" }, "\x7f"],
   ] as const)("%s returns to the live cursor", async (_name, type, init, bytes) => {
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
+    const { term, socket, host, inputHistory } = await scrolled();
     const options = { bubbles: true, cancelable: true, ...init };
     host.dispatchEvent(type === "keydown" ? new KeyboardEvent(type, options) : new InputEvent(type, options));
     expect(inputFrames(socket)).toEqual([bytes]);
@@ -298,7 +246,7 @@ describe("ghostty terminal key parity viewport", () => {
   });
   test("a Windows dead key's deferred Enter returns to the live cursor", async () => {
     runtime.os = "windows";
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
+    const { term, socket, host, inputHistory } = await scrolled();
     key(host, { key: "Dead", code: "Quote", keyCode: 222 });
     key(host, { key: "Enter", code: "Enter", keyCode: 13 });
     expect(inputFrames(socket), "the line-break input still owns Enter").toEqual([]);
@@ -312,8 +260,7 @@ describe("ghostty terminal key parity viewport", () => {
 
 describe("ghostty fractional and queued viewport movement", () => {
   test("output advances the live screen and retains a half-row scroll fraction", async () => {
-    const { term, socket } = await scrolled("ghostty");
-    if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
+    const { term, socket } = await scrolled();
     term.viewport.scrollTo(0.5);
     const scrollback = term.getScrollbackLength();
     await output(socket, "background output\r\n");
@@ -328,8 +275,7 @@ describe("ghostty fractional and queued viewport movement", () => {
     ["paste", "pasted"],
     ["file drop", "'/tmp/fraction' "],
   ] as const)("%s clears a half-row scroll fraction before sending", async (kind, bytes) => {
-    const { term, socket, host, target, inputHistory } = await scrolled("ghostty");
-    if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
+    const { term, socket, host, target, inputHistory } = await scrolled();
     term.viewport.scrollTo(0.5);
     expect(term.getViewportY()).toBe(0.5);
     if (kind === "typed text") key(host, { key: "a", code: "KeyA", keyCode: 65 });
@@ -358,7 +304,7 @@ describe("ghostty fractional and queued viewport movement", () => {
       return id;
     });
     vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
+    const { term, socket, host, inputHistory } = await scrolled();
     const canvas = host.querySelector("canvas")!;
     // Line-mode scrolling takes the widget's own wheel path; its pending
     // render frames also run after input returns the view to the cursor.

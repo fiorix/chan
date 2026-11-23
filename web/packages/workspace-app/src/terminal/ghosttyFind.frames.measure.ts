@@ -3,11 +3,13 @@
 // A measurement, not a test of record; `vitest.findframes.config.ts` runs it
 // and the ordinary web tests do not. What each GhosttyFind frame costs while
 // `seq 1 200000` streams into a terminal with the find bar open: chan's
-// binding of the vendored core, chan's viewport controller over a stand-in
-// with ghostty-web's viewport semantics, ghostty-web's own SelectionManager,
-// and frames run by hand. Each frame writes one chunk of the stream through
-// the viewport controller, the terminal's only write path, then runs the
-// frame find asked for, timed; once the stream ends, the frames run until
+// binding of the vendored core, the widget's public highlights and selection
+// reader, chan's viewport controller, and find frames run by hand. Widget
+// animation callbacks are parked; the software canvas models rectangle
+// paint, not glyph rasterization or browser frame cost. Each frame writes
+// one chunk through the viewport controller, the terminal's only write
+// path, then runs the frame find asked for, timed; once the stream ends,
+// the frames run until
 // find asks for none. Configurations: 80x24 and 200x50, the default and the
 // largest scrollback, 16, 64 and 256 KiB a frame and 16 KiB for 30 frames
 // then 256 KiB (a burst after moderate output), needles `9` (on about every
@@ -25,11 +27,12 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { env, hrtime, version } from "node:process";
-import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
-import { beforeAll, expect, test } from "vitest";
+import { Terminal, type TerminalCoreSearch } from "@chan/ghostty-web-ng";
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
+import { SoftwareCanvasContext, softwareGetContext } from "../__tests__/softwareCanvas";
 import { type FindCount, type FrameScheduler, GhosttyFind, FIND_SCAN_BUDGET_MS } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
-import { GhosttyVt, type VtSearch, VtTerminal } from "@chan/ghostty-web-ng/vt";
+import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { SCROLLBACK_MB_DEFAULT, SCROLLBACK_MB_MAX, scrollbackLinesFromMb } from "./scrollback";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
@@ -41,6 +44,26 @@ const HONESTY = env.MEASURE_HONESTY === "1";
 let vendored: WebAssembly.Module;
 beforeAll(async () => {
   vendored = await WebAssembly.compile(readFileSync(VENDORED));
+});
+
+const terminals = new Set<Terminal>();
+const controllers = new Set<GhosttyFind>();
+beforeEach(() => {
+  vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    softwareGetContext(contexts, HTMLCanvasElement.prototype.getContext),
+  );
+});
+afterEach(() => {
+  for (const find of controllers) find.dispose();
+  for (const term of terminals) term.dispose();
+  controllers.clear();
+  terminals.clear();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const ms = (a: bigint, b: bigint) => Number(b - a) / 1e6;
@@ -72,11 +95,12 @@ function timedFrames() {
 
 type Split = { feedMs: number; stepMs: number; feeds: number; steps: number; restarts: number; needles: number };
 
-function instrument(search: VtSearch, split: Split) {
-  const s = search as unknown as Record<string, (...args: unknown[]) => unknown>;
+function instrument(search: TerminalCoreSearch, split: Split): TerminalCoreSearch {
+  const instrumented = { ...search, get completingUnitMs() { return search.completingUnitMs; } };
+  const s = instrumented as unknown as Record<string, (...args: unknown[]) => unknown>;
   const wrap = (name: string, after: (elapsed: number) => void) => {
     const original = s[name];
-    if (typeof original !== "function") return;
+    if (typeof original !== "function") throw new Error(`missing search instrument: ${name}`);
     const bound = original.bind(search);
     s[name] = (...args: unknown[]) => {
       const t0 = now();
@@ -99,74 +123,41 @@ function instrument(search: VtSearch, split: Split) {
   wrap("setNeedle", () => {
     split.needles++;
   });
+  return instrumented;
 }
 
 async function fixture(cols: number, rows: number, scrollbackLimit: number) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const core = vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
-  const clamp = (y: number) => Math.max(0, Math.min(core.getScrollbackLength(), y));
-  const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
-  const view = {
-    cols,
-    rows,
-    viewportY: 0,
-    getViewportY: () => view.viewportY,
-    getScrollbackLength: () => core.getScrollbackLength(),
-    viewport: {
-      get offset() { return view.viewportY; },
-      followOutput: "at-bottom" as const,
-      scrollTo(offset: number) { view.viewportY = clamp(offset); },
-      scrollBy(amount: number) { view.viewportY = clamp(view.viewportY + amount); },
-      scrollToBottom() { view.viewportY = 0; },
-      reveal(row: number, align = "center") {
-        const history = core.getScrollbackLength();
-        const onScreen = row - history + Math.max(0, Math.floor(view.viewportY));
-        if (onScreen >= 0 && onScreen < view.rows) return;
-        const at = align === "start" ? 0 : align === "end" ? view.rows - 1 : Math.floor(view.rows / 2);
-        view.viewportY = clamp(history - row + at);
-      },
-    },
-    write(data: string | Uint8Array) {
-      const before = core.getScrollbackLength();
-      core.write(data);
-      const growth = view.viewportY >= 1 ? Math.max(0, core.getScrollbackLength() - before) : 0;
-      view.viewportY = clamp(view.viewportY + growth);
-      for (const listener of changeListeners) listener({ kind: "write" });
-    },
-    onChange(listener: (change: { kind: "write" | "resize" }) => void) {
-      changeListeners.add(listener);
-      return { dispose: () => changeListeners.delete(listener) };
-    },
-  };
-  const viewport = new GhosttyViewportController(view, {
+  const term = new Terminal({ ghostty: vt, cols, rows, scrollback: scrollbackLimit, cursorBlink: false, smoothScrollDuration: 0 });
+  terminals.add(term);
+  const host = document.createElement("div");
+  document.body.append(host);
+  term.open(host);
+  const core = term.core!;
+  const viewport = new GhosttyViewportController(term, {
     os: () => "linux",
-    hasMouseTracking: () => false,
-    isAlternateScreen: () => core.isAlternateScreen(),
+    hasMouseTracking: () => term.hasMouseTracking(),
+    isAlternateScreen: () => term.buffer.active.type === "alternate",
     cellHeight: () => 16,
   });
-  const canvas = document.createElement("canvas");
-  const renderer = { getCanvas: () => canvas, getMetrics: () => ({ width: 8, height: 16, baseline: 12 }) };
-  const manager = new SelectionManager(
-    view as unknown as Terminal,
-    renderer as unknown as ConstructorParameters<typeof SelectionManager>[1],
-    core as unknown as ConstructorParameters<typeof SelectionManager>[2],
-    document.createElement("textarea"),
-  );
   const frames = timedFrames();
   const counts: FindCount[] = [];
   const split: Split = { feedMs: 0, stepMs: 0, feeds: 0, steps: 0, restarts: 0, needles: 0 };
   const createSearch = core.createSearch.bind(core);
-  (core as { createSearch: () => VtSearch }).createSearch = () => {
-    const search = createSearch();
-    instrument(search, split);
-    return search;
+  // Instrument copies of the public facades; the widget's facades are frozen.
+  const measuredCore = {
+    ...core,
+    get cols() { return core.cols; },
+    createSearch: () => instrument(createSearch(), split),
   };
-  const find = new GhosttyFind(core, {
+  const find = new GhosttyFind(measuredCore as unknown as VtTerminal, {
     viewport,
-    selection: manager as unknown as ConstructorParameters<typeof GhosttyFind>[1]["selection"],
+    highlights: term.highlights,
+    getSelectionRange: () => term.getSelectionRange(),
     onCount: (count) => counts.push(count),
     frames,
   });
+  controllers.add(find);
   /// The whole buffer's match count now, from a search of its own run to
   /// completion; not timed.
   const truth = (needle: string) => {
@@ -177,7 +168,16 @@ async function fixture(cols: number, rows: number, scrollbackLimit: number) {
     search.free();
     return total;
   };
-  return { core, viewport, frames, counts, split, find, truth };
+  return {
+    viewport, frames, counts, split, find, truth,
+    dispose() {
+      find.dispose();
+      controllers.delete(find);
+      term.dispose();
+      terminals.delete(term);
+      host.remove();
+    },
+  };
 }
 
 function seqBytes(n: number): Uint8Array {
@@ -208,7 +208,7 @@ const chunkAt = (chunking: Chunking, frame: number) => (chunking === "mixed" ? (
 
 async function run(opts: { cols: number; rows: number; scrollback: number; chunk: Chunking; needle: string; stream: Uint8Array; honesty: boolean }) {
   const f = await fixture(opts.cols, opts.rows, opts.scrollback);
-  f.core.write("$ seq 1 200000\r\n");
+  f.viewport.write(`$ seq 1 ${LINES}\r\n`);
   f.find.find(opts.needle);
   let guard = 0;
   while (f.frames.pending()) {
@@ -270,8 +270,7 @@ async function run(opts: { cols: number; rows: number; scrollback: number; chunk
     needlesAtOpen,
     honesty,
   };
-  f.find.dispose();
-  f.core.free();
+  f.dispose();
   return result;
 }
 

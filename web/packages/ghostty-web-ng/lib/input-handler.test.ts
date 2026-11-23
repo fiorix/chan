@@ -1263,6 +1263,41 @@ describe('InputHandler', () => {
       handler.dispose();
       expect(dataReceived).toEqual(['\x1b[<35;1;1M']);
     });
+
+    test('X10 no-button motion encodes 35 plus the Ctrl modifier', () => {
+      createMouseHandler(
+        ghostty, container as any, (data) => dataReceived.push(data),
+        vi.fn(), undefined, undefined, (mode) => mode === 1003,
+        undefined, undefined, mouseConfig(false)
+      );
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0, ctrlKey: true });
+      expect(dataReceived).toEqual(['\x1b[M\x43!!', '\x1b[M\x53!!']);
+    });
+
+    test('press and release reset motion suppression even when the motion code stays the same', () => {
+      trackingHandler(1003);
+      dispatchMouse(mouseEvent('mousedown', 0));
+      dispatchMouse(mouseEvent('mousemove', 0));
+      dispatchMouse({ ...mouseEvent('mousedown', 2), buttons: 3 });
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 3 });
+      dispatchMouse({ ...mouseEvent('mouseup', 2), buttons: 1 });
+      dispatchMouse(mouseEvent('mousemove', 0));
+      dispatchMouse(mouseEvent('mousemove', 0));
+      expect(dataReceived).toEqual([
+        '\x1b[<0;1;1M', '\x1b[<32;1;1M', '\x1b[<2;1;1M',
+        '\x1b[<32;1;1M', '\x1b[<2;1;1m', '\x1b[<32;1;1M',
+      ]);
+    });
+
+    test('ending a gesture resets motion suppression for the same hover cell', () => {
+      const handler = trackingHandler(1003);
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
+      handler.endMouseGesture();
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
+      dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
+      expect(dataReceived).toEqual(['\x1b[<35;1;1M', '\x1b[<35;1;1M']);
+    });
   });
 
   describe('Clipboard Operations', () => {

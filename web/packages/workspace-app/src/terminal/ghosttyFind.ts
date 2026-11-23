@@ -1,7 +1,7 @@
 /// Find in a ghostty terminal: the find bar's query searched with
 /// libghostty-vt's own engine (`VtSearch`), the active match shown as the
-/// terminal's selection and scrolled into view, and a "k of n" count with k
-/// counted from the newest match.
+/// terminal's search-active highlight and scrolled into view, and a "k of n"
+/// count with k counted from the newest match.
 ///
 /// The direction is Ghostty's. A new query selects the newest match, the one
 /// closest to the prompt; stepping "older" walks up through the history and
@@ -28,10 +28,10 @@
 /// presses ends where it would on a finished scan, or, past the cap, where
 /// it would among the matches found by then. A new query or closing the bar
 /// drops them; a resize keeps them behind the active match (below), or
-/// drops them when it loses that match. A step that waited writes its
-/// highlight over the selection there was when it was pressed; a selection
-/// the user makes while it waits stays theirs, and the step moves only the
-/// count.
+/// drops them when it loses that match. A step that waited reveals its
+/// match only if the user's selection still matches the snapshot at the
+/// press, or is empty. A changed selection keeps the viewport in place;
+/// the count and the independent highlight still follow the active match.
 ///
 /// Output keeps arriving while the bar is open. The viewport controller
 /// reports every change to the terminal, each write (output and the lines
@@ -82,14 +82,11 @@
 /// that has not landed yet needs no keeping: it starts from no match
 /// selected anyway.
 ///
-/// The highlight is ghostty-web's own selection, written through its
-/// SelectionManager's anchors. ghostty-web's public `select()` counts its
-/// viewport offset as an absolute row, so it is never called. A selection the
-/// user makes while the bar is open is theirs: the controller moves and
-/// clears only the selection it wrote last.
+/// The active match uses the widget's search-active highlight layer.
+/// User selection stays independent, including when the query changes or
+/// the bar closes. Its public snapshot gates a waiting step's reveal.
 
-import type { Terminal } from "@chan/ghostty-web-ng";
-import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
+import type { SelectionRange, Terminal, TerminalHighlights } from "@chan/ghostty-web-ng";
 import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
 import { type MatchRange, type SearchState, type VtSearch, VtTerminal, type VtTrackedCell } from "@chan/ghostty-web-ng/vt";
 
@@ -174,11 +171,13 @@ const animationFrames: FrameScheduler = {
   cancel: (id) => cancelAnimationFrame(id),
 };
 
+const FIND_HIGHLIGHT_LAYER = "search-active";
+
 export type GhosttyFindOptions = {
   viewport: FindViewport;
-  /// ghostty-web's selection manager. Without one the active match is
-  /// counted and scrolled to but not highlighted.
-  selection: SelectionManagerLike | null;
+  highlights: TerminalHighlights;
+  /// The user's selection snapshot, used only to gate a waiting reveal.
+  getSelectionRange(): SelectionRange | null;
   /// Takes the count each time the controller reads the search.
   onCount(count: FindCount): void;
   frames?: FrameScheduler;
@@ -199,12 +198,18 @@ export class GhosttyFind {
   static attach(term: Terminal, viewport: FindViewport, onCount: (count: FindCount) => void): GhosttyFind | null {
     const core = term.wasmTerm;
     if (!(core instanceof VtTerminal)) return null;
-    return new GhosttyFind(core, { viewport, selection: selectionManagerOf(term), onCount });
+    return new GhosttyFind(core, {
+      viewport,
+      highlights: term.highlights,
+      getSelectionRange: () => term.getSelectionRange(),
+      onCount,
+    });
   }
 
   private readonly core: VtTerminal;
   private readonly viewport: FindViewport;
-  private readonly selection: SelectionManagerLike | null;
+  private readonly highlights: TerminalHighlights;
+  private readonly getSelectionRange: () => SelectionRange | null;
   private readonly onCount: (count: FindCount) => void;
   private readonly frames: FrameScheduler;
   private readonly budgetMs: number;
@@ -221,8 +226,6 @@ export class GhosttyFind {
   private askedOver: MatchRange | null = null;
   /// The terminal changed since the search was last fed.
   private dirty = false;
-  /// The range last written to the selection.
-  private written: MatchRange | null = null;
   private framePending = false;
   private frameId = 0;
   /// Tracked cells on the first and last character of the kept match, made
@@ -258,7 +261,8 @@ export class GhosttyFind {
   constructor(core: VtTerminal, options: GhosttyFindOptions) {
     this.core = core;
     this.viewport = options.viewport;
-    this.selection = options.selection;
+    this.highlights = options.highlights;
+    this.getSelectionRange = options.getSelectionRange;
     this.onCount = options.onCount;
     this.frames = options.frames ?? animationFrames;
     this.budgetMs = options.budgetMs ?? FIND_SCAN_BUDGET_MS;
@@ -306,8 +310,7 @@ export class GhosttyFind {
     this.schedule();
   }
 
-  /// The bar closed: stop scanning, free the search, and clear the highlight
-  /// unless the user has selected something else since.
+  /// The bar closed: stop scanning, free the search, and clear search-active.
   close(): void {
     this.cancelFrame();
     this.dropHighlight();
@@ -492,7 +495,7 @@ export class GhosttyFind {
       return;
     }
     this.kept = range;
-    if (this.selectionRange() === null || this.ownsSelection()) this.highlight(range);
+    this.highlight(range);
     if (this.keptOnScreen) this.viewport.reveal(range.startRow);
     // A resize during the walk sends it back to the start: the core forgot
     // the match it had walked to.
@@ -524,12 +527,11 @@ export class GhosttyFind {
     if (this.waiting[0]?.step !== "kept") this.waiting.unshift({ step: "kept", at: this.clock() });
   }
 
-  /// The kept match is at `range` now: the highlight follows it while the
-  /// selection is still the controller's own.
+  /// Republish the kept match when its cells move or a screen change clears
+  /// the layer, even if the restored coordinates equal the previous ones.
   private follow(range: MatchRange): void {
-    if (sameRange(range, this.kept)) return;
     this.kept = range;
-    if (this.ownsSelection()) this.highlight(range);
+    if (!sameRange(range, this.highlightRange())) this.highlight(range);
   }
 
   /// The kept match where its cells are now; null when either is gone.
@@ -691,18 +693,15 @@ export class GhosttyFind {
     return true;
   }
 
-  /// Whether a step that waited may write its highlight: the user has not
-  /// selected anything of their own since the bar asked.
+  /// Whether a step that waited may reveal its match: the user's public
+  /// selection snapshot still matches the one at the press, or is empty.
   private askStands(): boolean {
     const now = this.selectionRange();
-    return now === null || sameRange(now, this.askedOver) || this.ownsSelection();
+    return now === null || sameRange(now, this.askedOver);
   }
 
-  /// Show what the search holds: the count, and the active match as the
-  /// selection. With `reveal`, a match the user asked for, the highlight is
-  /// written over whatever is selected and scrolled to. Otherwise it follows
-  /// its match only when the match moved and the selection is still the
-  /// controller's own, and goes when no match is active any more.
+  /// Show the count and active highlight independently of user selection.
+  /// Only a permitted reveal scrolls the match into view.
   private show(reveal: boolean): void {
     const state = this.search!.state();
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
@@ -717,50 +716,32 @@ export class GhosttyFind {
       return;
     }
     const active = state.active;
-    if (active && reveal) {
-      this.highlight(active);
-      this.viewport.reveal(active.startRow);
-    } else if (!sameRange(active, this.written) && this.ownsSelection()) {
+    if (!sameRange(active, this.highlightRange())) {
       if (active) this.highlight(active);
       else this.dropHighlight();
     }
+    if (active && reveal) this.viewport.reveal(active.startRow);
     this.keep(active);
     this.onCount(count);
   }
 
   private highlight(range: MatchRange): void {
-    this.written = range;
-    const manager = this.selection;
-    if (!manager) return;
-    // Dropping the selection it replaces marks that selection's rows for
-    // repaint. At the bottom of the buffer ghostty-web repaints only rows
-    // marked so, and the old highlight would stay painted.
-    manager.clearSelection();
-    manager.selectionStart = { col: range.startCol, absoluteRow: range.startRow };
-    manager.selectionEnd = { col: range.endCol, absoluteRow: range.endRow };
-    manager.requestRender();
-    manager.selectionChangedEmitter.fire();
+    this.highlights.set(FIND_HIGHLIGHT_LAYER, [{
+      start: { col: range.startCol, absoluteRow: range.startRow },
+      end: { col: range.endCol, absoluteRow: range.endRow },
+    }]);
   }
 
   private dropHighlight(): void {
-    if (this.selection && this.ownsSelection()) {
-      this.selection.clearSelection();
-      this.selection.selectionChangedEmitter.fire();
-    }
-    this.written = null;
+    this.highlights.clear(FIND_HIGHLIGHT_LAYER);
   }
 
-  /// Whether the selection is still the range written last.
-  private ownsSelection(): boolean {
-    return this.written !== null && sameRange(this.selectionRange(), this.written);
+  private highlightRange(): MatchRange | null {
+    return asMatchRange(this.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0] ?? null);
   }
 
-  /// The selection as a match range; null when nothing is selected.
   private selectionRange(): MatchRange | null {
-    const start = this.selection?.selectionStart;
-    const end = this.selection?.selectionEnd;
-    if (!start || !end) return null;
-    return { startRow: start.absoluteRow, startCol: start.col, endRow: end.absoluteRow, endCol: end.col };
+    return asMatchRange(this.getSelectionRange());
   }
 }
 
@@ -791,6 +772,16 @@ function landsAsComplete(step: Waiting["step"], { index, total }: SearchState): 
 /// low.
 function learned(estimate: number, measured: number, floor: number): number {
   return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);
+}
+
+function asMatchRange(range: SelectionRange | null): MatchRange | null {
+  if (!range) return null;
+  return {
+    startRow: range.start.absoluteRow,
+    startCol: range.start.col,
+    endRow: range.end.absoluteRow,
+    endCol: range.end.col,
+  };
 }
 
 function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {

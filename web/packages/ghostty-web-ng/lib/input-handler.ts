@@ -197,6 +197,7 @@ export class InputHandler {
   // Non-reported presses stay with the terminal even if tracking or Shift
   // changes before their release.
   private mouseButtonsBypassed = 0;
+  private lastMouseMotion: { code: number; col: number; row: number } | null = null;
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
   private lastPasteData: string | null = null;
@@ -740,7 +741,7 @@ export class InputHandler {
   private getMouseModifiers(event: MouseEvent): number {
     let mods = 0;
     if (event.shiftKey) mods |= 4;
-    if (event.metaKey) mods |= 8; // Meta (Cmd on Mac)
+    if (event.altKey || event.metaKey) mods |= 8;
     if (event.ctrlKey) mods |= 16;
     return mods;
   }
@@ -785,6 +786,12 @@ export class InputHandler {
     event: MouseEvent
   ): void {
     const modifiers = this.getMouseModifiers(event);
+    if (!isRelease && button >= 32 && button <= 35) {
+      const code = button + modifiers;
+      const last = this.lastMouseMotion;
+      if (last?.code === code && last.col === col && last.row === row) return;
+      this.lastMouseMotion = { code, col, row };
+    }
 
     // Check if SGR extended mode is enabled (mode 1006)
     const useSGR = this.mouseConfig?.hasSgrMouseMode?.() ?? true;
@@ -807,6 +814,7 @@ export class InputHandler {
    */
   handleMouseDown(event: MouseEvent, reported?: boolean): void {
     if (this.isDisposed) return;
+    this.lastMouseMotion = null;
     reported ??= !!this.mouseConfig?.hasMouseTracking() && !event.shiftKey;
     // A press starts a fresh gesture, whatever became of the last one's
     // release.
@@ -842,6 +850,7 @@ export class InputHandler {
   }
 
   private releaseMouseButton(event: MouseEvent, button: number): void {
+    this.lastMouseMotion = null;
     // Shift changes do not break the pair, but a program that stopped
     // tracking must not leave release bytes for the next PTY reader.
     if (this.mouseButtonsBypassed & (1 << button)) {
@@ -860,6 +869,7 @@ export class InputHandler {
 
   /** Clear held state; report releases only with a position and active tracking. */
   endMouseGesture(event?: MouseEvent): void {
+    this.lastMouseMotion = null;
     const pressed = this.mouseButtonsPressed;
     this.mouseButtonsPressed = 0;
     this.mouseButtonsBypassed = 0;

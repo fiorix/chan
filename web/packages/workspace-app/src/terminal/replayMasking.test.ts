@@ -2,9 +2,6 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-/// What the terminal's secret masker was asked to do.
-const masker = vi.hoisted(() => ({ captures: 0, scans: 0, scanAlls: 0 }));
-
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
@@ -12,27 +9,12 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
-vi.mock("./secretMaskingXterm", () => ({
-  TerminalSecretMasker: class {
-    setEnabled() {}
-    setColor() {}
-    captureWrite() {
-      masker.captures += 1;
-      return {};
-    }
-    scanWrite() {
-      masker.scans += 1;
-    }
-    scanAll() {
-      masker.scanAlls += 1;
-    }
-    clear() {}
-    dispose() {}
-  },
-}));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "../components/TerminalTab.svelte";
+import { GhosttySecretMasker } from "./secretMaskingGhostty";
 import { ReplayMaskScanBatch } from "./replayMasking";
 import {
   attach,
@@ -146,7 +128,7 @@ describe("attach replay secret-mask scans", () => {
 describe("a mounted terminal's secret masking", () => {
   afterEach(() => {
     resetTerminals();
-    Object.assign(masker, { captures: 0, scans: 0, scanAlls: 0 });
+    vi.restoreAllMocks();
   });
 
   async function reattached() {
@@ -158,22 +140,26 @@ describe("a mounted terminal's secret masking", () => {
   }
 
   test("scans a replay once, when it ends, not write by write", async () => {
+    const scans = vi.spyOn(GhosttySecretMasker.prototype, "scanWrite");
+    const scanAlls = vi.spyOn(GhosttySecretMasker.prototype, "scanAll");
     const socket = await reattached();
-    const before = masker.scanAlls;
+    const before = scanAlls.mock.calls.length;
     await output(socket, "export TOKEN=abc\r\n");
     await output(socket, "export KEY=def\r\n");
-    expect(masker.scans, "no per-write scan during the replay").toBe(0);
-    expect(masker.scanAlls).toBe(before);
+    expect(scans, "no per-write scan during the replay").not.toHaveBeenCalled();
+    expect(scanAlls).toHaveBeenCalledTimes(before);
 
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    expect(masker.scanAlls).toBe(before + 1);
+    expect(scanAlls).toHaveBeenCalledTimes(before + 1);
   });
 
   test("scans live output write by write", async () => {
+    const captures = vi.spyOn(GhosttySecretMasker.prototype, "captureWrite");
+    const scans = vi.spyOn(GhosttySecretMasker.prototype, "scanWrite");
     const socket = await reattached();
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     await output(socket, "one\r\n");
     await output(socket, "two\r\n");
-    expect([masker.captures, masker.scans]).toEqual([2, 2]);
+    expect([captures.mock.calls.length, scans.mock.calls.length]).toEqual([2, 2]);
   });
 });

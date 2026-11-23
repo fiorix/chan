@@ -388,13 +388,11 @@ const STRIP_X = CANVAS_CSS_WIDTH - 10;
 // Inside the strip upstream clears, outside the bar it then draws: nothing
 // ever paints here, so it reads as content or as nothing at all.
 const ERASED_X = CANVAS_CSS_WIDTH - 2;
-const CONTENT_X = 100;
 // At viewportY 0 the thumb sits at the bottom of the track, so these sample a
 // thumb pixel and a track-only pixel respectively.
 const THUMB_Y = 100;
 const TRACK_Y = 20;
 
-const THEME_BACKGROUND: Rgba = { r: 16, g: 16, b: 16, a: 1 };
 const CONTENT: Rgba = { r: 40, g: 80, b: 160, a: 1 };
 const TRACK_OVER_CONTENT = sourceOver(
   { r: 128, g: 128, b: 128, a: 0.1 },
@@ -406,32 +404,6 @@ const THUMB_OVER_CONTENT = sourceOver(
 );
 
 describe("Ghostty overlay scrollbar", () => {
-  test("upstream erases the columns it covers and leaves them erased", async () => {
-    const { renderer, context, screen } = await ghosttyScreen();
-
-    screen.paint(renderer, 0);
-    expectPixel(context.pixelAt(ERASED_X, THUMB_Y), CONTENT);
-
-    // One frame with the overlay visible, then an idle frame without it. No
-    // row is dirty by then, so upstream renders no row at all and nothing
-    // repaints what the overlay erased.
-    expect(screen.paint(renderer, 1)).toBe(0);
-    expect(screen.paint(renderer, 0)).toBe(0);
-
-    // The owner's report: a blank strip down the right edge that survives the
-    // frame that drew it. What is left is the theme background, not content,
-    // and it is background even where the bar itself never paints.
-    expectPixel(context.pixelAt(ERASED_X, THUMB_Y), THEME_BACKGROUND);
-    expectPixel(
-      context.pixelAt(STRIP_X, THUMB_Y),
-      sourceOver(
-        { r: 128, g: 128, b: 128, a: 0.3 },
-        sourceOver({ r: 128, g: 128, b: 128, a: 0.1 }, THEME_BACKGROUND),
-      ),
-    );
-    expectPixel(context.pixelAt(CONTENT_X, THUMB_Y), CONTENT);
-  });
-
   test("the adapter paints the bar onto the content it covers", async () => {
     const { renderer, context, screen } = await ghosttyScreen();
     expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);

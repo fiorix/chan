@@ -1,11 +1,9 @@
 // @vitest-environment jsdom
 //
-// TerminalTab sizes xterm's scrollback from the persisted MB setting when it
-// spawns, and its copy actions serialize that much. The component is mounted
-// over the stand-in xterm with the setting served as machine preferences.
+// TerminalTab converts the persisted MB setting into the line count it
+// passes the widget when it spawns.
 
-import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -14,7 +12,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -22,27 +22,18 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { clampScrollbackMb, scrollbackLinesFromMb } from "../terminal/scrollback";
 import {
   installTerminalDom,
-  menuRow,
-  mountTerminal,
-  openBodyMenu,
   resetTerminals,
   seatTerminals,
   terminalTab,
-  xterm,
 } from "../__tests__/terminalTab";
 
-installTerminalDom();
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 
-const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
-Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+installTerminalDom();
 
 function serveScrollbackMb(mb: number): void {
   __testSetStandalonePreferences(terminalPreferences({ scrollback_mb: mb }));
 }
-
-beforeEach(() => {
-  clipboard.writeText.mockClear();
-});
 
 afterEach(() => {
   resetTerminals();
@@ -53,41 +44,13 @@ describe("the scrollback cap", () => {
   test("comes from the setting when the terminal spawns", async () => {
     serveScrollbackMb(50);
     const [tab] = seatTerminals([terminalTab()]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect(term.options.scrollback).toBe(scrollbackLinesFromMb(50));
   });
 
   test("falls back to the clamped default without a setting", async () => {
     const [tab] = seatTerminals([terminalTab()]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect(term.options.scrollback).toBe(scrollbackLinesFromMb(clampScrollbackMb(undefined)));
-  });
-});
-
-describe("the copy actions", () => {
-  test("Copy scrollback serializes the configured cap", async () => {
-    serveScrollbackMb(30);
-    xterm.serialized = "line one\nline two";
-    const [tab] = seatTerminals([terminalTab()]);
-    const { target } = await mountTerminal(TerminalTab, tab!);
-    await openBodyMenu(target);
-    menuRow("Copy scrollback").click();
-    await tick();
-
-    expect(xterm.serializeCalls).toEqual([{ scrollback: scrollbackLinesFromMb(30) }]);
-    expect(clipboard.writeText).toHaveBeenCalledWith("line one\nline two");
-  });
-
-  test("Copy with no selection serializes the same cap", async () => {
-    serveScrollbackMb(30);
-    xterm.serialized = "all of it";
-    const [tab] = seatTerminals([terminalTab()]);
-    const { target } = await mountTerminal(TerminalTab, tab!);
-    await openBodyMenu(target);
-    menuRow("Copy").click();
-    await tick();
-
-    expect(xterm.serializeCalls).toEqual([{ scrollback: scrollbackLinesFromMb(30) }]);
-    expect(clipboard.writeText).toHaveBeenCalledWith("all of it");
   });
 });

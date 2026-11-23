@@ -31,6 +31,12 @@ const HOSTILE = "echo one\x1b[201~; echo two\r\nprintf '\x1b[31mred\x1b[0m'\tdon
 /// kept, every line end a carriage return.
 const CLEANED = "echo one [201~; echo two\rprintf ' [31mred [0m'\tdone   \rlast";
 
+/// The byte set shared with the server's submit encoder fixture.
+const PASTE_REPLACED_BYTES = [
+  0x00, 0x03, 0x04, 0x05, 0x08, 0x0f, 0x11, 0x12, 0x13, 0x15, 0x16, 0x17, 0x1a, 0x1b, 0x1c, 0x7f,
+];
+const FIXTURE = "../../../fixtures/paste-encoder/replaced-bytes.json";
+
 let vendored: WebAssembly.Module;
 const opened: Terminal[] = [];
 
@@ -234,4 +240,30 @@ describe("the core's paste encoder, native Ghostty's", () => {
     expect(terminal.encodePaste("a\nb\r\nc")).toBe(`${OPEN}a\nb\r\nc${CLOSE}`);
     expect(terminal.encodePaste("")).toBe(OPEN + CLOSE);
   });
+});
+
+describe.each([true, false])("the paste encoder byte set, bracketed=%s", (bracketed) => {
+  test("the set is the bytes the core's encodePaste turns into a space, over every ASCII byte", async () => {
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const terminal = vt.createTerminal(40, 6);
+    try {
+      if (bracketed) terminal.write("\x1b[?2004h");
+      expect(terminal.hasBracketedPaste()).toBe(bracketed);
+      const replaced: number[] = [];
+      for (let byte = 0; byte < 0x80; byte++) {
+        const ch = String.fromCharCode(byte);
+        const encoded = terminal.encodePaste(`a${ch}z`);
+        const body = bracketed ? encoded.slice(OPEN.length, -CLOSE.length) : encoded;
+        if (ch !== " " && body === "a z") replaced.push(byte);
+      }
+      expect(replaced).toEqual(PASTE_REPLACED_BYTES);
+    } finally {
+      terminal.free();
+    }
+  });
+});
+
+test("the fixture the server's copy is pinned to holds the same set", () => {
+  const fixture = JSON.parse(readFileSync(FIXTURE, "utf8")) as { replaced: string[] };
+  expect(fixture.replaced.map((hex) => Number.parseInt(hex, 16))).toEqual(PASTE_REPLACED_BYTES);
 });

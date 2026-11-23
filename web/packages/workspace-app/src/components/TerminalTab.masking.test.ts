@@ -4,13 +4,11 @@
 // the screen is the terminal's masker. Every way that state changes has to
 // reach the masker: the launcher's row, a chord assigned to the command, the
 // body menu's row, Privacy mode switched while the terminal runs, and a
-// masker built after the state was already on. The stand-in xterm here holds
-// one buffer line with a secret in it and keeps the decorations a masker
-// registers, so each case reads the mask over the secret's cells, never the
-// check a row draws.
+// masker built after the state was already on. A real widget parses the
+// secret, and the software canvas reads the mask painted over its cells.
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -19,7 +17,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
@@ -31,98 +31,57 @@ import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import {
   attach,
-  FakeTerminal,
   installTerminalDom,
   menuRow,
-  mountTerminal,
   openBodyMenu,
+  output,
   receive,
   resetTerminals,
   seatTerminals,
   terminalTab,
   TERMINAL_PANE,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
+
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, openedGhostty } from "../__tests__/ghosttyTab";
+import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
 installTerminalDom();
 
 const MASKING = "app.terminal.secretMasking.toggle";
 
-/// The one line every stand-in terminal holds, and the cells of its value.
 const SECRET_LINE = "API_TOKEN=hunter2";
 const MASKED = [{ x: "API_TOKEN=".length, width: "hunter2".length }];
-
 type Mask = { x: number; width: number };
 
-/// The live decorations of each stand-in terminal.
-const masks = new WeakMap<object, Set<Mask>>();
+let canvas: ReturnType<typeof installSoftwareCanvas>;
+let refuseMaskPaint = false;
 
-/// When set, a stand-in terminal registers no decoration, which a masker
-/// reads as its own failure.
-let refuseDecorations = false;
-
-// What a masker reads and paints on, given to the stand-in xterm: a buffer
-// of the one line, and markers and decorations that live until disposed.
-const standIn = FakeTerminal.prototype as unknown as Record<string, unknown>;
-Object.defineProperty(standIn, "buffer", {
-  configurable: true,
-  get(this: FakeTerminal) {
-    const cols = this.cols;
-    const text = SECRET_LINE.padEnd(cols, " ");
-    const line = {
-      isWrapped: false,
-      translateToString: (_trimRight?: boolean, start = 0, end = cols) => text.slice(start, end),
-      getCell: (x: number) =>
-        x < cols ? { getWidth: () => 1, getChars: () => text[x]!.trim() } : undefined,
-    };
-    return {
-      active: {
-        type: "normal",
-        baseY: 0,
-        cursorY: 0,
-        viewportY: 0,
-        length: 1,
-        getLine: (row: number) => (row === 0 ? line : undefined),
-      },
-    };
-  },
+beforeEach(() => {
+  canvas = installSoftwareCanvas();
+  const fill = SoftwareCanvasContext.prototype.fillRect;
+  vi.spyOn(SoftwareCanvasContext.prototype, "fillRect").mockImplementation(function (this: SoftwareCanvasContext, x, y, width, height) {
+    if (this.fillStyle === "#6c6c70") {
+      if (refuseMaskPaint) throw new Error("mask paint refused");
+    }
+    fill.call(this, x, y, width, height);
+  });
 });
-standIn.registerMarker = function (offset = 0) {
-  return {
-    line: offset,
-    isDisposed: false,
-    dispose() {
-      this.isDisposed = true;
-    },
-  };
-};
-standIn.registerDecoration = function (this: FakeTerminal, options: Mask & { marker: unknown }) {
-  if (refuseDecorations) return undefined;
-  const live = masks.get(this) ?? new Set<Mask>();
-  masks.set(this, live);
-  const mask = { x: options.x, width: options.width };
-  const disposed: Array<() => void> = [];
-  live.add(mask);
-  return {
-    marker: options.marker,
-    isDisposed: false,
-    onDispose(listener: () => void) {
-      disposed.push(listener);
-    },
-    onRender() {},
-    dispose() {
-      if (this.isDisposed) return;
-      this.isDisposed = true;
-      live.delete(mask);
-      for (const listener of disposed) listener();
-    },
-  };
-};
 
-/// The masks painted on the terminal now.
-function painted(term: FakeTerminal): Mask[] {
-  return [...(masks.get(term) ?? [])];
+/// Advance a real renderer frame and read the secret-mask color over the first row's cells.
+function painted(term: Terminal): Mask[] {
+  const context = canvas.context(term.element!);
+  canvas.frame();
+  const spans: Mask[] = [];
+  for (let x = 0; x < term.cols; x++) {
+    const pixel = context.pixelAt(x * 8 + 4, 9);
+    if (pixel.r !== 108 || pixel.g !== 108 || pixel.b !== 112 || pixel.a !== 1) continue;
+    const previous = spans.at(-1);
+    if (previous && previous.x + previous.width === x) previous.width += 1;
+    else spans.push({ x, width: 1 });
+  }
+  return spans;
 }
 
 function masking(): Command {
@@ -139,25 +98,27 @@ afterEach(() => {
   privacy.mask_terminal_secrets = false;
   __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
-  refuseDecorations = false;
+  refuseMaskPaint = false;
   installTerminalDom();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 /// A terminal attached to its session, its masking seeded from `prefs`.
 async function running(prefs: Partial<TerminalPreferences> = { secret_masking: false }, tab?: TerminalTabState) {
   __testSetStandalonePreferences(terminalPreferences(prefs));
   const seated = tab ?? seatTerminals([terminalTab()])[0]!;
-  const mounted = await mountTerminal(TerminalTab, seated);
+  const mounted = await mountGhosttyTerminal(TerminalTab, seated);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  await output(socket, SECRET_LINE);
   return { ...mounted, tab: seated, socket };
 }
 
 /// A width change, at which a masker that is on rescans the rows on screen.
 /// A masker built on paints at its first scan, not at its construction.
-function rescan(term: FakeTerminal): void {
+function rescan(term: Terminal): void {
   term.resize(term.cols + 1, term.rows);
 }
 
@@ -265,14 +226,15 @@ describe("a masker built after its tab's masking was already on", () => {
     try {
       await tick();
       await tick();
-      expect(xterm.terminals, "no terminal while the font loads").toHaveLength(0);
+      expect(ghosttyFixture.terminals, "no terminal while the font loads").toHaveLength(0);
       expect(tab!.secretMasking, "seeded off").toBe(false);
 
       masking().run();
       fontLoaded([{}]);
-      await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
-      const term = xterm.terminals[0]!;
+      await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(1));
+      const term = ghosttyFixture.terminals[0]!;
       await attach(TerminalSocket.all.at(-1)!);
+      await output(TerminalSocket.all.at(-1)!, SECRET_LINE);
       rescan(term);
       expect(painted(term)).toEqual(MASKED);
     } finally {
@@ -288,12 +250,12 @@ describe("a masker's failure", () => {
   async function failed() {
     privacy.enabled = true;
     privacy.mask_terminal_secrets = true;
-    refuseDecorations = true;
+    refuseMaskPaint = true;
     const mounted = await running();
     rescan(mounted.term);
     expect(mounted.tab.secretMaskingFailed, "the masker failed").toBe(true);
     expect(ui.status).toBe("Secret masking stopped working in this terminal");
-    refuseDecorations = false;
+    refuseMaskPaint = false;
     return mounted;
   }
 
@@ -312,9 +274,10 @@ describe("a masker's failure", () => {
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     expect(confirmState.open, "a terminal with a session asks before it restarts").toBe(true);
     resolveConfirm(true);
-    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(2));
-    const restarted = xterm.terminals[1]!;
+    await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(2));
+    const restarted = ghosttyFixture.terminals[1]!;
     await attach(TerminalSocket.all.at(-1)!);
+    await output(TerminalSocket.all.at(-1)!, SECRET_LINE);
 
     rescan(restarted);
     expect(painted(restarted)).toEqual(MASKED);
@@ -325,7 +288,7 @@ describe("a masker's failure", () => {
   test("does not outlive it: the terminal drawn again over the same tab masks under Privacy mode", async () => {
     privacy.enabled = true;
     privacy.mask_terminal_secrets = true;
-    refuseDecorations = true;
+    refuseMaskPaint = true;
     __testSetStandalonePreferences(terminalPreferences({ secret_masking: false }));
     const [tab] = seatTerminals([terminalTab()]);
     const target = document.createElement("div");
@@ -334,17 +297,19 @@ describe("a masker's failure", () => {
       target,
       props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
     });
-    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(1));
     await attach(TerminalSocket.all.at(-1)!);
-    rescan(xterm.terminals[0]!);
+    await output(TerminalSocket.all.at(-1)!, SECRET_LINE);
+    rescan(await openedGhostty(target));
     expect(tab!.secretMaskingFailed, "the first masker failed").toBe(true);
-    refuseDecorations = false;
+    refuseMaskPaint = false;
     unmount(first);
-    xterm.terminals.splice(0);
+    ghosttyFixture.terminals.splice(0);
     TerminalSocket.all.splice(0);
 
-    const again = await mountTerminal(TerminalTab, tab!);
+    const again = await mountGhosttyTerminal(TerminalTab, tab!);
     await attach(TerminalSocket.all.at(-1)!);
+    await output(TerminalSocket.all.at(-1)!, SECRET_LINE);
     rescan(again.term);
     expect(painted(again.term)).toEqual(MASKED);
   });

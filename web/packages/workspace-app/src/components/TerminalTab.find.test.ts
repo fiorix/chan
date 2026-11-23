@@ -1,446 +1,129 @@
 // @vitest-environment jsdom
 
-// Terminal find. The contracts pinned here:
-//
-// 1. The xterm Terminal is constructed with `allowProposedApi: true`.
-//    xterm gates registerDecoration behind that flag, and the search
-//    addon's decorated find throws without it -- the find bar "matches
-//    nothing" because the search dies mid-keystroke.
-// 2. The find command family (app.find.open / next / prev) reaches the
-//    focused terminal over the chan:command bus. On desktop the key
-//    bridge claims the find chords before the webview sees the keydown
-//    and fires these commands; App.svelte serves them for file tabs
-//    only, so the terminal must serve itself or the chord is dead on
-//    a terminal pane. With the keyboard inside the active terminal tab
-//    the bridge releases Mod+F in both forms and Ctrl+G, and the tab
-//    takes those as keys: its root opens the bar on `terminal.find`,
-//    and the find input steps on the Find next chord.
-// 3. Direction. Typing selects the newest match, the bottom-most in the
-//    buffer: the selection is cleared and the addon's reverse search
-//    starts from the bottom. Enter and app.find.next step to older
-//    output (findPrevious); Shift+Enter and app.find.prev step to newer
-//    output (findNext).
-// 4. The count. The bar reads `k of n` with k counting from the newest
-//    match, fed by the addon's onDidChangeResults: `0 of 0` without a
-//    match, `? of 1000+` at the highlight limit, blank once the bar
-//    closes or the query empties, and kept blank when the addon's refresh
-//    after output fires after that. A screen reader hears the count through
-//    a status region that takes it once it settles, not on every frame.
-// 5. Ghostty. A ghostty terminal has the same bar, menu row, commands,
-//    direction and count, found by libghostty-vt's search on chan's
-//    binding: the active match is ghostty-web's selection, the total
-//    carries a `+` while the scan runs, and Escape clears the selection.
-//    Escape hands the keyboard to the terminal with no later refocus, so a
-//    bar reopened at once keeps it. A click in the bar keeps the highlight,
-//    and a selection the user drags stays theirs; a click elsewhere in the
-//    page clears the selection, as ghostty-web does.
-//
-// The xterm component cases run on terminal and addon doubles that record
-// the calls. The block after them runs the real addon over a real xterm in
-// jsdom to pin what the doubles stand in for: where findPrevious lands from
-// a cleared and from a kept selection, the top-down order of resultIndex,
-// and what the addon reports at its highlight limit. The next block mounts
-// the tab with the doubles backed by a real xterm and the real addon, for
-// what the addon reports on its own: its refresh after output. The ghostty
-// cases run the binding over the vendored core inside a ghostty-web terminal
-// stand-in that carries ghostty-web's own SelectionManager, mouse handling
-// included, with animation frames run by the case.
+// The terminal find bar over the shared real widget and vendored core:
+// command routing, keyboard stepping, counts and announcements, selection
+// ownership, and search lifetime. Frames are controlled by each scan case.
 
 import { readFileSync } from "node:fs";
-import { mount, tick, unmount } from "svelte";
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
-
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { type SearchState, VtSearch } from "@chan/ghostty-web-ng/vt";
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
 import { allCommands } from "../state/commands";
 import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
-import { terminalTab } from "../__tests__/tabs";
-import { mousePointer } from "../__tests__/pointer";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { type SearchState, VtSearch, type VtTerminal } from "@chan/ghostty-web-ng/vt";
+import { ghosttyFixture, mountGhosttyTerminal, openedGhostty } from "../__tests__/ghosttyTab";
+import {
+  attach,
+  installTerminalDom,
+  output as socketOutput,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  sentFrames,
+  TerminalSocket,
+  terminalTab,
+} from "../__tests__/terminalTab";
 
-type ResultsEvent = { resultIndex: number; resultCount: number };
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
-const mounted: Array<Record<string, any>> = [];
-const terminalOptions: Array<Record<string, unknown>> = [];
-/// Every selection and search call in order, so a case can read that typing
-/// clears the selection before the reverse search runs.
-const calls: Array<{ name: string; query?: string; opts?: unknown }> = [];
-let resultsListener: ((e: ResultsEvent) => void) | null = null;
-/// While `on`, each xterm double is backed by a real xterm that parses its
-/// writes and holds its selection, and each search addon double hands every
-/// call to a real addon loaded into that xterm.
-const realXterm = vi.hoisted(() => ({ on: false, terminals: [] as Array<{ model: any }> }));
+installTerminalDom();
 
-class TestResizeObserver {
-  observe() {}
-  disconnect() {}
-}
-
-class TestWebSocket {
-  static OPEN = 1;
-  static all: TestWebSocket[] = [];
-
-  readyState = TestWebSocket.OPEN;
-  binaryType = "blob";
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-
-  constructor() {
-    TestWebSocket.all.push(this);
-  }
-
-  send(data: string) {
-    this.sent.push(data);
-  }
-
-  close() {
-    this.readyState = 3;
-    this.onclose?.();
-  }
-}
-
-vi.mock("@xterm/xterm", async () => {
-  const actual = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-  return {
-    Terminal: class {
-      cols = 80;
-      rows = 24;
-      options: Record<string, unknown> = {};
-      model: InstanceType<typeof actual.Terminal> | null = null;
-
-      constructor(options: Record<string, unknown> = {}) {
-        terminalOptions.push(options);
-        if (realXterm.on) {
-          this.model = new actual.Terminal({ allowProposedApi: true, cols: 40, rows: 10, scrollback: 1000 });
-          realXterm.terminals.push(this);
-        }
-      }
-
-      loadAddon(addon: { real?: { activate(terminal: unknown): void } | null }) {
-        if (this.model && addon.real) this.model.loadAddon(addon.real as never);
-      }
-      open(element: HTMLElement) {
-        this.model?.open(element);
-      }
-      attachCustomKeyEventHandler() {}
-      onData() {}
-      onBinary() {}
-      onResize() {}
-      write(data: string | Uint8Array, done?: () => void) {
-        this.model?.write(data, done);
-      }
-      writeln() {}
-      resize() {}
-      focus() {}
-      clearSelection() {
-        calls.push({ name: "clearSelection" });
-        this.model?.clearSelection();
-      }
-      dispose() {
-        this.model?.dispose();
-      }
-    },
-  };
-});
-
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit() {}
-  },
-}));
-
-vi.mock("@xterm/addon-search", async () => {
-  const actual = await vi.importActual<typeof import("@xterm/addon-search")>("@xterm/addon-search");
-  return {
-    SearchAddon: class {
-      real: InstanceType<typeof actual.SearchAddon> | null;
-      constructor(options?: { highlightLimit?: number }) {
-        this.real = realXterm.on ? new actual.SearchAddon(options) : null;
-      }
-      findNext(query: string, opts: any) {
-        calls.push({ name: "findNext", query, opts });
-        return this.real?.findNext(query, opts) ?? false;
-      }
-      findPrevious(query: string, opts: any) {
-        calls.push({ name: "findPrevious", query, opts });
-        return this.real?.findPrevious(query, opts) ?? false;
-      }
-      clearDecorations() {
-        calls.push({ name: "clearDecorations" });
-        this.real?.clearDecorations();
-      }
-      onDidChangeResults(listener: (e: ResultsEvent) => void) {
-        if (this.real) return this.real.onDidChangeResults(listener);
-        resultsListener = listener;
-        return { dispose() {} };
-      }
-    },
-  };
-});
-
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize() {
-      return "";
-    }
-  },
-}));
-
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {},
-}));
-
-type Anchor = { col: number; absoluteRow: number };
-
-/// What a case reads of a ghostty terminal stand-in.
-type GhosttyStandIn = {
-  wasmTerm: VtTerminal;
-  cols: number;
-  rows: number;
-  viewportY: number;
-  focused: number;
-  /// ghostty-web's canvas, in the element the terminal opened in.
-  canvas: HTMLCanvasElement;
-  /// The element the terminal opened in, and the keys that reached it.
-  element: HTMLElement | null;
-  keys: string[];
-  selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null };
-  resize(cols: number, rows: number): void;
-};
-
-const ghostty = vi.hoisted(() => ({
-  module: null as WebAssembly.Module | null,
-  terminals: [] as GhosttyStandIn[],
-}));
-
-// The ghostty kit over the vendored core, with a stand-in for ghostty-web's
-// Terminal that holds what TerminalTab and find reach: the binding's
-// terminal as its core, ghostty-web's own SelectionManager over it, its
-// viewport offset (lines scrolled back from the bottom, clamped to the
-// history, back to the bottom after a write), writeln as a write with CRLF,
-// a resize that hands the core the new grid and fires the resize event, and
-// focus as ghostty-web's: open() makes the element it opens in focusable,
-// reads keys there and puts its canvas in it, and focus() focuses that
-// element once, synchronously.
-vi.mock("../terminal/backend", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const { SelectionManager } = await import("@chan/ghostty-web-ng");
-  const { modelPointerCapture } = await import("../__tests__/pointer");
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    viewportY = 0;
-    focused = 0;
-    options: Record<string, any>;
-    wasmTerm: any = undefined;
-    selectionManager: any = undefined;
-    canvas = document.createElement("canvas");
-    renderer = {
-      getMetrics: () => ({ width: 8, height: 16, baseline: 12 }),
-      getCanvas: () => this.canvas,
-      ctx: {},
-      render() {},
-    };
-    buffer = { active: { type: "normal", length: 24, getLine: () => undefined }, alternate: {} };
-    constructor(options: Record<string, any>) {
-      this.options = options;
-      ghostty.terminals.push(this as unknown as GhosttyStandIn);
-    }
-    element: HTMLElement | null = null;
-    keys: string[] = [];
-    open(element: HTMLElement) {
-      this.element = element;
-      if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
-      element.addEventListener("keydown", (e) => this.keys.push(e.key));
-      element.append(this.canvas);
-      this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
-        scrollbackLimit: this.options.scrollback,
-      });
-      modelPointerCapture(this.canvas);
-      this.selectionManager = new SelectionManager(
-        this as never,
-        this.renderer as never,
-        this.wasmTerm,
-        document.createElement("textarea"),
-      );
-    }
-    attachCustomKeyEventHandler() {}
-    attachCustomWheelEventHandler() {}
-    onData() {
-      return { dispose() {} };
-    }
-    changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
-    onChange(listener: (change: { kind: "write" | "resize" }) => void) {
-      this.changeListeners.add(listener);
-      return { dispose: () => this.changeListeners.delete(listener) };
-    }
-    resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
-    onResize(listener: (size: { cols: number; rows: number }) => void) {
-      this.resizeListeners.add(listener);
-      return { dispose: () => this.resizeListeners.delete(listener) };
-    }
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() {
-      return false;
-    }
-    hasFocusEvents() {
-      return false;
-    }
-    getMode() {
-      return false;
-    }
-    hasBracketedPaste() {
-      return false;
-    }
-    write(data: string | Uint8Array) {
-      const before = this.getScrollbackLength();
-      this.wasmTerm.write(data);
-      const growth = this.viewportY >= 1 ? Math.max(0, this.getScrollbackLength() - before) : 0;
-      this.viewportY = Math.max(0, Math.min(this.getScrollbackLength(), this.viewportY + growth));
-      for (const listener of this.changeListeners) listener({ kind: "write" });
-    }
-    writeln(data: string) {
-      this.write(`${data}\r\n`);
-    }
-    paste() {}
-    resize(cols: number, rows: number) {
-      if (cols === this.cols && rows === this.rows) return;
-      this.cols = cols;
-      this.rows = rows;
-      this.wasmTerm.resize(cols, rows);
-      for (const listener of this.changeListeners) listener({ kind: "resize" });
-      for (const listener of this.resizeListeners) listener({ cols, rows });
-    }
-    focus() {
-      this.focused += 1;
-      this.element?.focus({ preventScroll: true });
-    }
-    blur() {}
-    getSelection() {
-      return this.selectionManager.getSelection();
-    }
-    hasSelection() {
-      return this.selectionManager.hasSelection();
-    }
-    getViewportY() {
-      return this.viewportY;
-    }
-    getScrollbackLength() {
-      return this.wasmTerm.getScrollbackLength();
-    }
-    scrollLines(amount: number) {
-      this.viewport.scrollBy(-amount);
-    }
-    get viewport() {
-      const term = this;
-      return {
-        get offset() { return term.viewportY; },
-        followOutput: "at-bottom" as const,
-        scrollTo(offset: number) { term.viewportY = Math.max(0, Math.min(term.getScrollbackLength(), offset)); },
-        scrollBy(rows: number) { this.scrollTo(term.viewportY + rows); },
-        scrollToBottom() { this.scrollTo(0); },
-        reveal(row: number, align = "center") {
-          const history = term.getScrollbackLength();
-          const onScreen = row - history + Math.max(0, Math.floor(term.viewportY));
-          if (onScreen >= 0 && onScreen < term.rows) return;
-          const at = align === "start" ? 0 : align === "end" ? term.rows - 1 : Math.floor(term.rows / 2);
-          this.scrollTo(history - row + at);
-        },
-      };
-    }
-    selectAll() {}
-    clearSelection() {
-      this.selectionManager.clearSelection();
-    }
-    dispose() {
-      this.element = null;
-      this.selectionManager?.dispose();
-      this.wasmTerm?.free();
-    }
-  }
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({
-    ...actual,
-    loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: Terminal as never }),
-  });
-});
-// Renderer hooks the stand-in has no renderer for.
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-}));
-
-globalThis.ResizeObserver = TestResizeObserver as any;
-globalThis.WebSocket = TestWebSocket as any;
-const syncFrame = ((cb: FrameRequestCallback) => {
-  cb(0);
-  return 0;
-}) as typeof requestAnimationFrame;
-const ownCancelFrame = globalThis.cancelAnimationFrame;
-globalThis.requestAnimationFrame = syncFrame;
-// The real xterm the last block opens parses colours through a scratch
-// canvas and reads matchMedia from its renderer; jsdom has neither.
-HTMLCanvasElement.prototype.getContext = (() => ({
-  createLinearGradient: () => ({ addColorStop() {} }),
-  measureText: () => ({ width: 8 }),
-  fillRect() {},
-  clearRect() {},
-  fillText() {},
-})) as any;
-(window as { matchMedia?: unknown }).matchMedia ??= (query: string) => ({
-  matches: false,
-  media: query,
-  onchange: null,
-  addEventListener() {},
-  removeEventListener() {},
-  addListener() {},
-  removeListener() {},
-  dispatchEvent: () => false,
-});
-
-// Every case runs on the xterm stand-in unless it names ghostty.
-beforeEach(() => useXtermStandIn());
-
+beforeEach(() => __testSetStandalonePreferences(terminalPreferences()));
 afterEach(() => {
-  for (const component of mounted.splice(0)) unmount(component);
-  terminalOptions.splice(0);
-  calls.splice(0);
-  resultsListener = null;
-  realXterm.on = false;
-  realXterm.terminals.splice(0);
-  TestWebSocket.all.splice(0);
-  ghostty.terminals.splice(0);
-  globalThis.requestAnimationFrame = syncFrame;
-  globalThis.cancelAnimationFrame = ownCancelFrame;
+  resetTerminals();
+  __testSetStandalonePreferences(null);
+  vi.useRealTimers();
   vi.restoreAllMocks();
-  document.body.innerHTML = "";
 });
 
 async function renderTerminal(tab: TerminalTabState, focused: boolean) {
-  const target = document.createElement("div");
-  document.body.append(target);
-  const component = mount(TerminalTab, {
-    target,
-    props: { tab, paneId: "pane-1", active: true, focused },
-  });
-  mounted.push(component);
-  // The terminal is built once its engine's load settles, on either engine.
-  await vi.waitFor(() => expect(terminalOptions.length + ghostty.terminals.length).toBeGreaterThan(0));
+  const [seated] = seatTerminals([tab]);
+  return mountGhosttyTerminal(TerminalTab, seated!, { focused });
+}
+
+// Six rows from the top of a cleared screen, needles on rows 1, 3 and 5.
+const NEEDLES = "\x1b[2J\x1b[3J\x1b[H" + ["a", "needle b", "c", "needle d", "e", "needle f"].join("\r\n");
+const match = (row: number) => ({ start: { col: 0, absoluteRow: row }, end: { col: 5, absoluteRow: row } });
+
+async function renderGhostty(text = NEEDLES): Promise<Terminal> {
+  const { term } = await renderTerminal(terminalTab(), true);
+  const socket = TerminalSocket.all[0]!;
+  await attach(socket);
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  await output(text);
+  expect(term.wasmTerm!.plainText()).toContain(text.split("\r\n").at(-1)!);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return term;
+}
+
+async function output(text: string): Promise<void> {
+  await socketOutput(TerminalSocket.all[0]!, text);
+}
+
+function activeHighlight(term: Terminal) {
+  return term.highlights.get("search-active")?.ranges[0] ?? null;
+}
+
+// Finite work (search and fitting) drains; a callback that reschedules
+// itself, such as the widget's render loop, stays live for the next frame.
+function holdFrames() {
+  const queue = new Map<number, FrameRequestCallback>();
+  const recurring = new Set<FrameRequestCallback>();
+  let next = 1;
+  globalThis.requestAnimationFrame = (cb) => {
+    const id = next++;
+    queue.set(id, cb);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = (id) => { queue.delete(id); };
+  const pending = () => [...queue.values()].filter((cb) => !recurring.has(cb)).length;
+  const frame = () => {
+    const runs = [...queue.entries()];
+    for (const [id, run] of runs) {
+      if (!queue.delete(id)) continue;
+      run(0);
+      if ([...queue.values()].includes(run)) recurring.add(run);
+    }
+  };
+  return {
+    pending,
+    frame,
+    settle() {
+      for (let i = 0; pending(); i++) {
+        if (i > 1000) throw new Error("finite animation-frame work never stopped");
+        frame();
+      }
+    },
+  };
+}
+
+async function findNeedle(term: Terminal) {
+  const frames = holdFrames();
+  const input = await openFindWithQuery("needle");
+  frames.settle();
   await tick();
-  await tick();
-  return { component, target };
+  expect(activeHighlight(term)).toEqual(match(5));
+  expect(term.getSelectionRange()).toBeNull();
+  expect(countElement()?.textContent).toBe("1 of 3");
+  return { input, frames };
 }
 
 function fireCommand(name: string): void {
@@ -458,10 +141,6 @@ function countElement(): HTMLElement | null {
 /// The bar's live region, what a screen reader hears of the count.
 function statusRegion(): HTMLElement | null {
   return document.querySelector('.terminal-find [role="status"]');
-}
-
-function callNames(): string[] {
-  return calls.map((c) => c.name);
 }
 
 function typeQuery(input: HTMLInputElement, query: string): void {
@@ -482,32 +161,50 @@ async function openFindWithQuery(query: string): Promise<HTMLInputElement> {
 
 /// Restart the focused terminal and answer its confirm; resolves once the
 /// new terminal has dialled its own socket.
-async function restartTerminal(): Promise<TestWebSocket> {
-  const sockets = TestWebSocket.all.length;
+async function restartTerminal(): Promise<TerminalSocket> {
+  const sockets = TerminalSocket.all.length;
   fireCommand("app.terminal.restart");
   expect(confirmState.open, "a terminal with a session asks before it restarts").toBe(true);
   resolveConfirm(true);
-  await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(sockets + 1));
+  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(sockets + 1));
   await tick();
-  return TestWebSocket.all.at(-1)!;
+  return TerminalSocket.all.at(-1)!;
 }
 
 function pressEnter(input: HTMLInputElement, shiftKey = false): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey, bubbles: true }));
 }
 
-async function reportResults(e: ResultsEvent): Promise<void> {
-  expect(resultsListener, "the component subscribed to the addon's results").not.toBeNull();
-  resultsListener!(e);
-  await tick();
-}
-
-describe("terminal find construction", () => {
-  test("constructs xterm with allowProposedApi so decorated search works", async () => {
-    await renderTerminal(terminalTab(), true);
-
-    expect(terminalOptions.length).toBeGreaterThan(0);
-    expect(terminalOptions.at(-1)?.allowProposedApi).toBe(true);
+describe("find and user selection coexistence", () => {
+  test.each(["Escape", "empty query"] as const)("query and steps preserve selection, and %s clears only search-active", async (close) => {
+    const term = await renderGhostty();
+    const users = { start: { col: 0, absoluteRow: 1 }, end: { col: 7, absoluteRow: 1 } };
+    term.setSelection(users);
+    const text = term.getSelection();
+    term.highlights.set("annotation", [match(3)]);
+    const frames = holdFrames();
+    const input = await openFindWithQuery("needle");
+    frames.settle();
+    await tick();
+    expect(term.getSelectionRange(), "query preserves the user's range").toEqual(users);
+    expect(term.getSelection()).toBe(text);
+    expect(activeHighlight(term)).toEqual(match(5));
+    pressEnter(input);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(3));
+    expect(term.getSelectionRange(), "stepping preserves the user's range").toEqual(users);
+    typeQuery(input, "needle b");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toEqual(users);
+    expect(term.getSelectionRange()).toEqual(users);
+    if (close === "Escape") input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    else typeQuery(input, "");
+    await tick();
+    expect(activeHighlight(term)).toBeNull();
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(term.getSelection()).toBe(text);
+    expect(term.highlights.get("annotation")?.ranges).toEqual([match(3)]);
   });
 });
 
@@ -546,57 +243,61 @@ describe("terminal find command routing", () => {
     expect(findInput()).toBeNull();
   });
 
-  test("typing clears the selection and runs a decorated findPrevious", async () => {
-    // The reverse search starts at the bottom of the buffer only from no
-    // selection; the real-addon block below shows what a kept selection
-    // does to it.
-    await renderTerminal(terminalTab(), true);
-    calls.splice(0);
-    await openFindWithQuery("needle");
+  test("typing a changed query highlights its newest match without creating a selection", async () => {
+    const term = await renderGhostty("\x1b[2J\x1b[3J\x1b[Hne a\r\nnee b\r\nxx\r\nne c");
+    const frames = holdFrames();
+    const input = await openFindWithQuery("nee");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toEqual({ start: { col: 0, absoluteRow: 1 }, end: { col: 2, absoluteRow: 1 } });
+    expect(term.getSelection()).toBe("");
 
-    expect(callNames()).toEqual(["clearSelection", "findPrevious"]);
-    const search = calls[1]!;
-    expect(search.query).toBe("needle");
-    expect((search.opts as { decorations?: unknown }).decorations).toBeTruthy();
+    typeQuery(input, "ne");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toEqual({ start: { col: 0, absoluteRow: 3 }, end: { col: 1, absoluteRow: 3 } });
+    expect(term.getSelection()).toBe("");
+    expect(countElement()?.textContent).toBe("1 of 3");
   });
 
   test("Enter steps to older output and Shift+Enter to newer", async () => {
-    await renderTerminal(terminalTab(), true);
-    const input = await openFindWithQuery("needle");
-
-    calls.splice(0);
+    const term = await renderGhostty();
+    const { input } = await findNeedle(term);
     pressEnter(input);
-    expect(callNames()).toEqual(["findPrevious"]);
-    expect(calls[0]!.query).toBe("needle");
-    expect((calls[0]!.opts as { decorations?: unknown }).decorations).toBeTruthy();
-
-    calls.splice(0);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(3));
+    expect(countElement()?.textContent).toBe("2 of 3");
     pressEnter(input, true);
-    expect(callNames()).toEqual(["findNext"]);
-    expect(calls[0]!.query).toBe("needle");
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
   });
 
   test("app.find.next steps to older output and app.find.prev to newer", async () => {
-    await renderTerminal(terminalTab(), true);
-    await openFindWithQuery("needle");
-
-    calls.splice(0);
+    const term = await renderGhostty();
+    await findNeedle(term);
     fireCommand("app.find.next");
-    expect(callNames()).toEqual(["findPrevious"]);
-    expect(calls[0]!.query).toBe("needle");
-
-    calls.splice(0);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(3));
+    expect(countElement()?.textContent).toBe("2 of 3");
     fireCommand("app.find.prev");
-    expect(callNames()).toEqual(["findNext"]);
-    expect(calls[0]!.query).toBe("needle");
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
   });
 
   test("app.find.next without an open find bar is inert", async () => {
-    await renderTerminal(terminalTab(), true);
-
+    const term = await renderGhostty();
+    const { input } = await findNeedle(term);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+    expect(findInput()).toBeNull();
+    term.select(0, 0, 1);
+    expect(term.getSelection()).toBe("a");
     fireCommand("app.find.next");
-
-    expect(calls).toHaveLength(0);
+    await tick();
+    expect(findInput()).toBeNull();
+    expect(term.getSelection()).toBe("a");
   });
 });
 
@@ -651,22 +352,22 @@ describe("the terminal menu's Find row", () => {
 
 describe("terminal find count", () => {
   test("reads k of n with k counting from the newest match", async () => {
-    await renderTerminal(terminalTab(), true);
-    await openFindWithQuery("needle");
-
-    // The addon indexes top-down: the newest match is the last index.
-    await reportResults({ resultIndex: 2, resultCount: 3 });
+    const term = await renderGhostty();
+    const { input } = await findNeedle(term);
     expect(countElement()?.textContent).toBe("1 of 3");
-
-    await reportResults({ resultIndex: 0, resultCount: 3 });
+    pressEnter(input);
+    pressEnter(input);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
   });
 
   test("is heard through a named status region, the shown count hidden from screen readers", async () => {
-    await renderTerminal(terminalTab(), true);
+    await renderGhostty("needle");
+    const frames = holdFrames();
     await openFindWithQuery("needle");
-    await reportResults({ resultIndex: 0, resultCount: 1 });
-
+    frames.settle();
+    await tick();
     const region = statusRegion();
     expect(region?.getAttribute("aria-label")).toBe("find matches");
     expect(region?.textContent, "a final count is heard at once").toBe("1 of 1");
@@ -676,54 +377,37 @@ describe("terminal find count", () => {
   });
 
   test("reads 0 of 0 when nothing matches", async () => {
-    await renderTerminal(terminalTab(), true);
-    await openFindWithQuery("needle");
-
-    await reportResults({ resultIndex: -1, resultCount: 0 });
-
+    const term = await renderGhostty();
+    const frames = holdFrames();
+    await openFindWithQuery("absent");
+    frames.settle();
+    await tick();
+    expect(term.getSelection()).toBe("");
     expect(countElement()?.textContent).toBe("0 of 0");
   });
 
-  test("reads ? of 1000+ at the highlight limit whichever match is selected", async () => {
-    // The addon stops listing at the limit, so its total is a floor and an
-    // index among the listed thousand says nothing about the distance from
-    // the newest match.
-    await renderTerminal(terminalTab(), true);
-    await openFindWithQuery("needle");
 
-    await reportResults({ resultIndex: -1, resultCount: 1000 });
-    expect(countElement()?.textContent).toBe("? of 1000+");
-
-    await reportResults({ resultIndex: 999, resultCount: 1000 });
-    expect(countElement()?.textContent).toBe("? of 1000+");
-  });
-
-  test("goes blank when the query empties and clears the decorations", async () => {
-    await renderTerminal(terminalTab(), true);
-    const input = await openFindWithQuery("needle");
-    await reportResults({ resultIndex: 2, resultCount: 3 });
-    expect(countElement()?.textContent).toBe("1 of 3");
-
-    calls.splice(0);
+  test("goes blank when the query empties and clears the highlight", async () => {
+    const term = await renderGhostty();
+    const { input, frames } = await findNeedle(term);
     typeQuery(input, "");
+    frames.settle();
     await tick();
-
-    expect(callNames()).toEqual(["clearDecorations"]);
+    expect(activeHighlight(term)).toBeNull();
+    expect(term.hasSelection()).toBe(false);
+    expect(term.getSelection()).toBe("");
     expect(countElement()?.textContent).toBe("");
   });
 
-  test("Escape closes the bar, clears the decorations and drops the count", async () => {
-    await renderTerminal(terminalTab(), true);
-    const input = await openFindWithQuery("needle");
-    await reportResults({ resultIndex: 2, resultCount: 3 });
-
-    calls.splice(0);
+  test("Escape closes the bar, clears the highlight and drops the count", async () => {
+    const term = await renderGhostty();
+    const { input } = await findNeedle(term);
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
-    expect(callNames()).toEqual(["clearDecorations"]);
-
-    // Reopening shows the kept query with no stale count beside it.
+    expect(activeHighlight(term)).toBeNull();
+    expect(term.hasSelection()).toBe(false);
+    expect(term.getSelection()).toBe("");
     fireCommand("app.find.open");
     await tick();
     await tick();
@@ -789,23 +473,24 @@ describe("the find stepping chords in the find input", () => {
     };
   }
 
-  /// A bar open on "needle" in a mounted xterm terminal, the input focused,
-  /// as the bridge reads focus to tell a terminal tab from the page.
+  let term: Terminal;
+
   async function openBar(): Promise<HTMLInputElement> {
-    await renderTerminal(terminalTab(), true);
-    const input = await openFindWithQuery("needle");
+    term = await renderGhostty();
+    const { input } = await findNeedle(term);
     expect(document.activeElement, "the find input holds the keyboard").toBe(input);
     expect(input.closest(".terminal-tab.active"), "inside the active terminal tab").not.toBeNull();
-    calls.splice(0);
     return input;
   }
 
-  /// Press a key in the input and return the steps it made, in order.
-  function press(input: HTMLInputElement, init: KeyboardEventInit): { steps: string[]; event: KeyboardEvent } {
-    calls.splice(0);
+  async function press(input: HTMLInputElement, init: KeyboardEventInit, row: number, count: string): Promise<KeyboardEvent> {
     const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
     input.dispatchEvent(event);
-    return { steps: callNames(), event };
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(row));
+    expect(term.getSelectionRange()).toBeNull();
+    expect(countElement()?.textContent).toBe(count);
+    return event;
   }
 
   const G = { key: "g", code: "KeyG" };
@@ -814,41 +499,28 @@ describe("the find stepping chords in the find input", () => {
   test.each(["linux", "windows"] as const)("on the %s desktop Ctrl+G steps to older output once", async (os) => {
     const input = await openBar();
     onDesktop(os);
-
-    const next = press(input, { ...G, ctrlKey: true });
-    expect(next.steps).toEqual(["findPrevious"]);
-    expect(calls[0]!.query).toBe("needle");
-    expect(next.event.defaultPrevented).toBe(true);
-
-    // Ctrl+Shift+G is the bridge's: its command steps to newer output, and
-    // the key never reaches the input to step again.
-    expect(press(input, { ...SHIFT_G, ctrlKey: true }).steps).toEqual(["findNext"]);
+    const next = await press(input, { ...G, ctrlKey: true }, 3, "2 of 3");
+    expect(next.defaultPrevented).toBe(true);
+    await press(input, { ...SHIFT_G, ctrlKey: true }, 5, "1 of 3");
   });
 
   test("on the macOS desktop Cmd+G steps once, through the bridge's command, and Ctrl+G is no find chord", async () => {
     const input = await openBar();
     onDesktop("mac");
-
-    expect(press(input, { ...G, metaKey: true }).steps).toEqual(["findPrevious"]);
-    expect(press(input, { ...SHIFT_G, metaKey: true }).steps).toEqual(["findNext"]);
-    // The bridge leaves Ctrl+G to the tab on macOS too, where it is not the
-    // Find next chord.
-    const control = press(input, { ...G, ctrlKey: true });
-    expect(control.steps).toEqual([]);
-    expect(control.event.defaultPrevented).toBe(false);
+    await press(input, { ...G, metaKey: true }, 3, "2 of 3");
+    await press(input, { ...SHIFT_G, metaKey: true }, 5, "1 of 3");
+    const control = await press(input, { ...G, ctrlKey: true }, 5, "1 of 3");
+    expect(control.defaultPrevented).toBe(false);
   });
 
-  // The pair to the case above: the input does answer Cmd+G on the macOS
-  // desktop, so the single step there is the bridge taking the key first.
   test.each([
     ["mac", { metaKey: true }],
     ["linux", { ctrlKey: true }],
   ] as const)("on the %s desktop without its bridge both chords step from the input", async (os, mod) => {
     const input = await openBar();
     onDesktop(os, false);
-
-    expect(press(input, { ...G, ...mod }).steps).toEqual(["findPrevious"]);
-    expect(press(input, { ...SHIFT_G, ...mod }).steps).toEqual(["findNext"]);
+    await press(input, { ...G, ...mod }, 3, "2 of 3");
+    await press(input, { ...SHIFT_G, ...mod }, 5, "1 of 3");
   });
 
   test.each([
@@ -857,11 +529,9 @@ describe("the find stepping chords in the find input", () => {
   ] as const)("in a browser on %s the keys are left alone", async (os, mod) => {
     const input = await openBar();
     inBrowser(os);
-
     for (const key of [G, SHIFT_G]) {
-      const pressed = press(input, { ...key, ...mod });
-      expect(pressed.steps).toEqual([]);
-      expect(pressed.event.defaultPrevented, "the browser keeps its own find keys").toBe(false);
+      const pressed = await press(input, { ...key, ...mod }, 5, "1 of 3");
+      expect(pressed.defaultPrevented, "the browser keeps its own find keys").toBe(false);
     }
   });
 
@@ -869,359 +539,12 @@ describe("the find stepping chords in the find input", () => {
     const input = await openBar();
     onDesktop("linux");
     hydrateOverrides({ "app.find.next": { linux: "Mod+Alt+N" } });
-
-    expect(press(input, { key: "n", code: "KeyN", ctrlKey: true, altKey: true }).steps).toEqual(["findPrevious"]);
-    expect(press(input, { ...G, ctrlKey: true }).steps, "the chord it replaced").toEqual([]);
-  });
-});
-
-describe("the real search addon over a real xterm", () => {
-  const decorations = {
-    decorations: {
-      matchBackground: "#7c5cff",
-      matchOverviewRuler: "#7c5cff",
-      activeMatchBackground: "#58a6ff",
-      activeMatchColorOverviewRuler: "#58a6ff",
-    },
-  };
-
-  /// A 20x5 terminal with the lines written one per row and the cursor on an
-  /// empty row after the last; the search addon loaded with the highlight
-  /// limit the component uses, and its result events recorded.
-  async function openTerminal(lines: string[]) {
-    const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-    const { SearchAddon } =
-      await vi.importActual<typeof import("@xterm/addon-search")>("@xterm/addon-search");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const term = new Terminal({ allowProposedApi: true, cols: 20, rows: 5, scrollback: 5000 });
-    term.open(host);
-    const search = new SearchAddon({ highlightLimit: 1000 });
-    term.loadAddon(search);
-    const events: ResultsEvent[] = [];
-    search.onDidChangeResults((e) => events.push({ ...e }));
-    await new Promise<void>((resolve) => term.write([...lines, ""].join("\r\n"), resolve));
-    return { term, search, events };
-  }
-
-  function selectedRow(term: import("@xterm/xterm").Terminal): number | undefined {
-    return term.getSelectionPosition()?.start.y;
-  }
-
-  test("findPrevious lands on the newest match from a cleared selection only", async () => {
-    const { term, search } = await openTerminal(["ne a", "nee b", "xx", "ne c", "zz"]);
-
-    // The first keystroke: nothing selected, so the reverse search starts
-    // at the bottom of the buffer.
-    term.clearSelection();
-    expect(search.findPrevious("ne", decorations)).toBe(true);
-    expect(selectedRow(term)).toBe(3);
-
-    // A longer query, the way typing goes on; its only match is above.
-    term.clearSelection();
-    search.findPrevious("nee", decorations);
-    expect(selectedRow(term)).toBe(1);
-
-    // Shortened back with the selection kept, as the addon's own refresh
-    // does: the selection expands in place and the newer match on row 3
-    // is never reached. `incremental` changes nothing in this addon.
-    search.findPrevious("ne", { ...decorations, incremental: true });
-    expect(selectedRow(term)).toBe(1);
-
-    // Cleared first, the same call lands on the newest match again.
-    term.clearSelection();
-    search.findPrevious("ne", decorations);
-    expect(selectedRow(term)).toBe(3);
-
-    term.dispose();
-  });
-
-  test("resultIndex counts from the top, so the newest match is resultCount - 1", async () => {
-    const { term, search, events } = await openTerminal(["ne a", "nee b", "xx", "ne c", "zz"]);
-
-    term.clearSelection();
-    search.findPrevious("ne", decorations);
-    expect(selectedRow(term)).toBe(3);
-    expect(events.at(-1)).toEqual({ resultIndex: 2, resultCount: 3 });
-
-    // Older steps walk up the buffer and the index down; the top wraps to
-    // the bottom.
-    search.findPrevious("ne", decorations);
-    expect(selectedRow(term)).toBe(1);
-    expect(events.at(-1)).toEqual({ resultIndex: 1, resultCount: 3 });
-    search.findPrevious("ne", decorations);
-    expect(selectedRow(term)).toBe(0);
-    expect(events.at(-1)).toEqual({ resultIndex: 0, resultCount: 3 });
-    search.findPrevious("ne", decorations);
-    expect(selectedRow(term)).toBe(3);
-    expect(events.at(-1)).toEqual({ resultIndex: 2, resultCount: 3 });
-
-    // A newer step walks down the buffer; the bottom wraps to the top.
-    search.findNext("ne", decorations);
-    expect(selectedRow(term)).toBe(0);
-    expect(events.at(-1)).toEqual({ resultIndex: 0, resultCount: 3 });
-    search.findNext("ne", decorations);
-    expect(selectedRow(term)).toBe(1);
-    expect(events.at(-1)).toEqual({ resultIndex: 1, resultCount: 3 });
-
-    // No match: no index, zero results.
-    term.clearSelection();
-    expect(search.findPrevious("qq", decorations)).toBe(false);
-    expect(events.at(-1)).toEqual({ resultIndex: -1, resultCount: 0 });
-
-    term.dispose();
-  });
-
-  test("at the highlight limit the list is the oldest thousand", async () => {
-    const lines: string[] = [];
-    for (let i = 0; i < 1001; i += 1) lines.push(`m${i}`);
-    const { term, search, events } = await openTerminal(lines);
-
-    // The newest match is outside the list: no index, the total capped.
-    term.clearSelection();
-    search.findPrevious("m", decorations);
-    expect(selectedRow(term)).toBe(1000);
-    expect(events.at(-1)).toEqual({ resultIndex: -1, resultCount: 1000 });
-
-    // One step older is the last listed match, reported as if it were the
-    // newest of exactly a thousand: the reason the component shows no
-    // index at the limit.
-    search.findPrevious("m", decorations);
-    expect(selectedRow(term)).toBe(999);
-    expect(events.at(-1)).toEqual({ resultIndex: 999, resultCount: 1000 });
-
-    term.dispose();
-  });
-});
-
-describe("the real search addon in the mounted tab", () => {
-  // The addon refreshes its search 200 ms after each write it parses, from
-  // the term it cached and with the options of the last search, and reports
-  // the outcome through onDidChangeResults. clearFind drops that term, but a
-  // refresh already pending still fires: it takes the empty-term path, which
-  // reports no results.
-  const NEEDLES = ["needle a", "b", "needle c", "d", "needle e"].join("\r\n") + "\r\n";
-
-  /// Mount an xterm terminal, attach its session and print `text` down it,
-  /// parsed by the real xterm behind the double.
-  async function renderXterm(text: string) {
-    realXterm.on = true;
-    await renderTerminal(terminalTab(), true);
-    await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(1));
-    return attachXterm(TestWebSocket.all[0]!, "sess-1", text);
-  }
-
-  /// Attach the session behind the newest terminal's `socket` and print
-  /// `text` down it.
-  async function attachXterm(socket: TestWebSocket, id: string, text: string) {
-    const model = realXterm.terminals.at(-1)!.model;
-    socket.onopen?.();
-    await socket.onmessage?.({
-      data: JSON.stringify({ type: "session", id, seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
-    });
-    await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
-    const print = async (out: string) => {
-      const bytes = new TextEncoder().encode(out);
-      const buffer = new ArrayBuffer(bytes.length);
-      new Uint8Array(buffer).set(bytes);
-      await socket.onmessage?.({ data: buffer });
-    };
-    await print(text);
-    await vi.waitFor(() => expect(model.buffer.active.getLine(4)?.translateToString(true)).toBe("needle e"));
-    return { model, print };
-  }
-
-  function pressEscape(input: HTMLInputElement): void {
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  }
-
-  async function reopen(): Promise<void> {
-    fireCommand("app.find.open");
-    await tick();
-    await tick();
-  }
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  test("output in an open bar refreshes the count", async () => {
-    const { print } = await renderXterm(NEEDLES);
-    const input = await openFindWithQuery("needle");
-    expect(countElement()?.textContent).toBe("1 of 3");
-
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await print("needle f\r\n");
-    vi.advanceTimersByTime(1);
-    expect(countElement()?.textContent, "the refresh waits 200 ms").toBe("1 of 3");
-    vi.advanceTimersByTime(200);
-    await tick();
-    // The refresh keeps the selection, so the selected match is now the
-    // second newest of four.
-    expect(countElement()?.textContent).toBe("2 of 4");
-    expect(input.value).toBe("needle");
-  });
-
-  test.each(["before", "after"])("a refresh pending at Escape that fires %s the bar reopens leaves its count blank", async (fires) => {
-    const { print } = await renderXterm(NEEDLES);
-    const input = await openFindWithQuery("needle");
-    expect(countElement()?.textContent).toBe("1 of 3");
-
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await print("more\r\n");
-    vi.advanceTimersByTime(1);
-    pressEscape(input);
-    await tick();
-    expect(findInput()).toBeNull();
-
-    if (fires === "before") {
-      vi.advanceTimersByTime(250);
-      await tick();
-      await reopen();
-    } else {
-      await reopen();
-      vi.advanceTimersByTime(250);
-      await tick();
-    }
-    expect(findInput()?.value).toBe("needle");
-    expect(countElement()?.textContent).toBe("");
-
-    // The bar's own search counts again.
-    pressEnter(findInput()!);
-    await tick();
-    expect(countElement()?.textContent).toMatch(/^[123] of 3$/);
-  });
-
-  // A restart builds a new terminal in the same tab. The bar searched the
-  // one torn down, so it closes with it; left open it would show its query
-  // over a terminal it has not searched, with no count and no highlight.
-  test("a restart closes the bar, and the kept query searches the new terminal", async () => {
-    const first = await renderXterm(NEEDLES);
-    await openFindWithQuery("needle");
-    expect(countElement()?.textContent).toBe("1 of 3");
-
-    const socket = await restartTerminal();
-    expect(realXterm.terminals, "restart built a second terminal").toHaveLength(2);
-    expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
-
-    const { model } = await attachXterm(socket, "sess-2", NEEDLES);
-    expect(model).not.toBe(first.model);
-    await reopen();
-    expect(findInput()?.value).toBe("needle");
-    expect(countElement()?.textContent).toBe("");
-    pressEnter(findInput()!);
-    await tick();
-    expect(countElement()?.textContent).toBe("1 of 3");
-    expect(model.getSelection()).toBe("needle");
-  });
-
-  test("a refresh pending when the query empties leaves the count blank", async () => {
-    const { print } = await renderXterm(NEEDLES);
-    const input = await openFindWithQuery("needle");
-    expect(countElement()?.textContent).toBe("1 of 3");
-
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await print("more\r\n");
-    vi.advanceTimersByTime(1);
-    typeQuery(input, "");
-    await tick();
-    expect(countElement()?.textContent).toBe("");
-    vi.advanceTimersByTime(250);
-    await tick();
-    expect(countElement()?.textContent).toBe("");
+    await press(input, { key: "n", code: "KeyN", ctrlKey: true, altKey: true }, 3, "2 of 3");
+    await press(input, { ...G, ctrlKey: true }, 3, "2 of 3");
   });
 });
 
 describe("terminal find on the ghostty backend", () => {
-  /// Six rows from the top of a cleared screen, needles on rows 1, 3 and 5.
-  const NEEDLES = "\x1b[2J\x1b[3J\x1b[H" + ["a", "needle b", "c", "needle d", "e", "needle f"].join("\r\n");
-  const match = (row: number) => ({ start: { col: 0, absoluteRow: row }, end: { col: 5, absoluteRow: row } });
-
-  beforeAll(() => {
-    ghostty.module = new WebAssembly.Module(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
-  });
-
-  beforeEach(() => {
-    useXtermStandIn(false);
-    __testSetStandalonePreferences(terminalPreferences());
-  });
-
-  afterEach(() => {
-    __testSetStandalonePreferences(null);
-  });
-
-  /// Mount a terminal that spawns on ghostty, attach its session and print
-  /// `text` down it.
-  async function renderGhostty(text: string): Promise<GhosttyStandIn> {
-    await renderTerminal(terminalTab(), true);
-    await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(1));
-    const term = ghostty.terminals.at(-1)!;
-    expect(term.wasmTerm, "the terminal runs on the binding").toBeTruthy();
-    const socket = TestWebSocket.all[0]!;
-    socket.onopen?.();
-    await socket.onmessage?.({
-      data: JSON.stringify({ type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
-    });
-    await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
-    await output(text);
-    await vi.waitFor(() => expect(term.wasmTerm.plainText()).toContain("needle f"));
-    return term;
-  }
-
-  /// `text` as PTY output down the attached session.
-  async function output(text: string): Promise<void> {
-    const bytes = new TextEncoder().encode(text);
-    const buffer = new ArrayBuffer(bytes.length);
-    new Uint8Array(buffer).set(bytes);
-    await TestWebSocket.all[0]!.onmessage?.({ data: buffer });
-  }
-
-  /// Animation frames held until the case runs them, from here to the end
-  /// of the case.
-  function holdFrames() {
-    const queue = new Map<number, FrameRequestCallback>();
-    let next = 1;
-    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
-      const id = next++;
-      queue.set(id, cb);
-      return id;
-    }) as typeof requestAnimationFrame;
-    globalThis.cancelAnimationFrame = ((id: number) => {
-      queue.delete(id);
-    }) as typeof cancelAnimationFrame;
-    const frame = () => {
-      const runs = [...queue.values()];
-      queue.clear();
-      for (const run of runs) run(0);
-    };
-    return {
-      pending: () => queue.size,
-      frame,
-      settle() {
-        for (let i = 0; queue.size; i++) {
-          if (i > 1000) throw new Error("animation frames never stopped");
-          frame();
-        }
-      },
-    };
-  }
-
-  function selection(term: GhosttyStandIn) {
-    const { selectionStart: start, selectionEnd: end } = term.selectionManager;
-    return start && end ? { start, end } : null;
-  }
-
-  /// Open the bar, type "needle" and let its scan finish; frames stay held.
-  async function findNeedle(term: GhosttyStandIn) {
-    const frames = holdFrames();
-    const input = await openFindWithQuery("needle");
-    frames.settle();
-    await tick();
-    expect(selection(term)).toEqual(match(5));
-    expect(countElement()?.textContent).toBe("1 of 3");
-    return { input, frames };
-  }
-
   test("the menu's Find row opens the bar, as app.find.open does", async () => {
     await renderGhostty(NEEDLES);
     document
@@ -1253,12 +576,12 @@ describe("terminal find on the ghostty backend", () => {
     expect(frames.pending(), "the scan waits for a frame").toBe(1);
     frames.frame();
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3+");
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
   });
 
   // A screen reader speaks each change to a live region; the shown count
@@ -1293,13 +616,13 @@ describe("terminal find on the ghostty backend", () => {
         shown.push(countElement()!.textContent!);
         heard.push(statusRegion()!.textContent!);
       }
-      const total = term.wasmTerm.plainText()!.split("needle").length - 1;
+      const total = term.wasmTerm!.plainText()!.split("needle").length - 1;
       expect(shown, "the shown count is every frame's own").toEqual(read);
       expect(new Set(shown).size, "and it grew over the scan").toBeGreaterThan(3);
       expect(shown.at(-1)).toBe(`1 of ${total}`);
       expect(heard.slice(0, -1).every((text) => text === ""), "nothing heard while partial").toBe(true);
       expect(heard.at(-1), "the settled count heard once the scan completes").toBe(`1 of ${total}`);
-      expect(selection(term)).toEqual(match(3005));
+      expect(activeHighlight(term)).toEqual(match(3005));
 
       // Enter steps at once on the screen; the region holds the step until
       // an interval has passed since it last spoke.
@@ -1356,20 +679,21 @@ describe("terminal find on the ghostty backend", () => {
 
     pressEnter(findInput()!, true);
     await tick();
-    expect(selection(term), "nothing selected while the scan runs").toBeNull();
+    expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
     expect(countElement()?.textContent).toBe("");
     const shown: string[] = [];
-    while (frames.pending()) {
+    do {
+      expect(shown.length, "the scan completes within 1000 frames").toBeLessThan(1000);
       frames.frame();
       await tick();
       shown.push(countElement()!.textContent!);
-      if (frames.pending()) expect(selection(term), "nothing selected while the scan runs").toBeNull();
-    }
-    const total = term.wasmTerm.plainText()!.split("needle").length - 1;
+      if (shown.at(-1)!.endsWith("+")) expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
+    } while (shown.at(-1)!.endsWith("+"));
+    const total = term.wasmTerm!.plainText()!.split("needle").length - 1;
     expect(shown.length).toBeGreaterThan(2);
     for (const text of shown.slice(0, -1)) expect(text).toMatch(/^\? of \d+\+$/);
     expect(shown.at(-1)).toBe(`${total} of ${total}`);
-    expect(selection(term)).toEqual({ start: { col: 6, absoluteRow: 5 }, end: { col: 11, absoluteRow: 5 } });
+    expect(activeHighlight(term)).toEqual({ start: { col: 6, absoluteRow: 5 }, end: { col: 11, absoluteRow: 5 } });
   });
 
   test("Enter steps to older output and Shift+Enter to newer", async () => {
@@ -1378,17 +702,17 @@ describe("terminal find on the ghostty backend", () => {
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(1));
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
 
     pressEnter(input, true);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
   });
 
@@ -1398,12 +722,12 @@ describe("terminal find on the ghostty backend", () => {
 
     fireCommand("app.find.prev");
     await tick();
-    expect(selection(term), "newer than the newest wraps to the oldest").toEqual(match(1));
+    expect(activeHighlight(term), "newer than the newest wraps to the oldest").toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
 
     fireCommand("app.find.next");
     await tick();
-    expect(selection(term), "older than the oldest wraps to the newest").toEqual(match(5));
+    expect(activeHighlight(term), "older than the oldest wraps to the newest").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -1414,10 +738,10 @@ describe("terminal find on the ghostty backend", () => {
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("0 of 0");
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
   });
 
-  test("Escape closes the bar, clears the selection and the count, and focuses the terminal", async () => {
+  test("Escape closes the bar, clears the highlight and the count, and focuses the terminal", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const free = vi.spyOn(VtSearch.prototype, "free");
@@ -1425,7 +749,7 @@ describe("terminal find on the ghostty backend", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
     expect(free).toHaveBeenCalledTimes(1);
     expect(document.activeElement, "the element the terminal reads keys from").toBe(term.element);
 
@@ -1438,15 +762,14 @@ describe("terminal find on the ghostty backend", () => {
     expect(countElement()?.textContent).toBe("");
     pressEnter(findInput()!);
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3+");
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
-  // Escape hands the terminal the keyboard, and nothing focuses it again
-  // later: a bar that reopens at once, as a quick Escape and find chord can,
+  // A bar that reopens during the same task or just after Escape closes it
   // keeps the keyboard, and the next Escape is the bar's.
   test.each(["in Escape's own task", "once Escape has closed it"])(
     "a bar reopened %s keeps the keyboard",
@@ -1480,19 +803,19 @@ describe("terminal find on the ghostty backend", () => {
         await tick();
         expect(findInput()).toBeNull();
         press("a");
-        expect(term.keys).toEqual(["a"]);
+        expect(sentFrames(TerminalSocket.all[0]!).filter((f) => f.type === "input").map((f) => f.data)).toEqual(["a"]);
       } finally {
         vi.useRealTimers();
       }
     },
   );
 
-  test("an emptied query clears the selection and the count", async () => {
+  test("an emptied query clears the highlight and the count", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input } = await findNeedle(term);
     typeQuery(input, "");
     await tick();
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
     expect(countElement()?.textContent).toBe("");
   });
 
@@ -1506,17 +829,19 @@ describe("terminal find on the ghostty backend", () => {
 
   /// The user's drag over the terminal from one screen cell to another,
   /// handled by ghostty-web's own pointer code; returns the clipboard writes
-  /// its release made. The canvas has the grid's size, 8 by 16 pixels a cell.
-  function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }) {
+  /// its release made. The canvas has the grid's size, 8 by 19 pixels a cell.
+  function drag(term: Terminal, from: { col: number; row: number }, to: { col: number; row: number }) {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
-    const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
+    const canvas = term.element!.querySelector("canvas")!;
+    modelPointerCapture(canvas);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+    const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 19 + 1 });
     try {
-      mousePointer(term.canvas, "pointerdown", at(from));
-      mousePointer(term.canvas, "pointermove", at(to));
-      mousePointer(term.canvas, "pointerup", at(to));
-      term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
+      mousePointer(canvas, "pointerdown", at(from));
+      mousePointer(canvas, "pointermove", at(to));
+      mousePointer(canvas, "pointerup", at(to));
+      canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard;
     }
@@ -1529,15 +854,15 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     const target = { input, count: countElement()!, box: document.querySelector(".terminal-find")! }[part];
     click(target);
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(activeHighlight(term), "a later frame keeps it too").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
   });
 
   test("a click elsewhere in the page keeps the selection and find highlight", async () => {
@@ -1546,32 +871,36 @@ describe("terminal find on the ghostty backend", () => {
     const elsewhere = document.createElement("button");
     document.body.append(elsewhere);
     click(elsewhere);
-    expect(selection(term), "an outside click keeps the selection").toEqual(match(5));
+    expect(activeHighlight(term), "an outside click keeps the highlight").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(activeHighlight(term), "a later frame keeps it too").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term), "a step highlights again").toEqual(match(3));
+    expect(activeHighlight(term), "a step highlights again").toEqual(match(3));
   });
 
-  test("a tap in the terminal clears find's highlight, and find leaves it cleared", async () => {
+  test("a tap in the terminal leaves find's highlight in place", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
-    const at = { clientX: 2 * 8 + 1, clientY: 2 * 16 + 1 };
-    mousePointer(term.canvas, "pointerdown", at);
-    mousePointer(term.canvas, "pointerup", at);
-    expect(selection(term), "ghostty-web's press clears it").toBeNull();
+    const canvas = term.element!.querySelector("canvas")!;
+    modelPointerCapture(canvas);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+    const at = { clientX: 2 * 8 + 1, clientY: 2 * 19 + 1 };
+    mousePointer(canvas, "pointerdown", at);
+    mousePointer(canvas, "pointerup", at);
+    expect(term.getSelectionRange()).toBeNull();
+    expect(activeHighlight(term), "a press clears only the user selection").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "find leaves it cleared").toBeNull();
+    expect(activeHighlight(term), "find keeps its active match").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term), "a step highlights again").toEqual(match(3));
+    expect(activeHighlight(term), "a step highlights again").toEqual(match(3));
   });
 
   test("a selection the user drags after find's highlight stays theirs through a click in the bar", async () => {
@@ -1579,14 +908,17 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     const copied = drag(term, { col: 0, row: 0 }, { col: 2, row: 1 });
     const users = { start: { col: 0, absoluteRow: 0 }, end: { col: 2, absoluteRow: 1 } };
-    expect(selection(term), "ghostty-web made the user's selection").toEqual(users);
+    expect(term.getSelectionRange(), "the widget made the user's selection").toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(copied, "and copied it on release").toHaveBeenCalledTimes(1);
     click(input);
-    expect(selection(term)).toEqual(users);
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     await output("\r\nmore needle");
     frames.settle();
     await tick();
-    expect(selection(term), "find does not take it over").toEqual(users);
+    expect(term.getSelectionRange(), "find does not take it over").toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("2 of 4");
   });
 
@@ -1595,22 +927,22 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     // ghostty-web's own resize, where the fit and a broadcast grid end. The
     // rows are short and keep their places; the core still forgets its
     // selected match and scans again.
     term.resize(60, 24);
-    expect(selection(term), "kept before ghostty-web repaints").toEqual(match(3));
+    expect(activeHighlight(term), "kept before ghostty-web repaints").toEqual(match(3));
     frames.settle();
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(1));
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
   });
 
@@ -1621,17 +953,17 @@ describe("terminal find on the ghostty backend", () => {
     frames.settle();
     await tick();
     const earlier = { start: { col: 6, absoluteRow: 6 }, end: { col: 10, absoluteRow: 6 } };
-    expect(selection(term)).toEqual(earlier);
+    expect(activeHighlight(term)).toEqual(earlier);
     expect(countElement()?.textContent).toBe("1 of 1");
 
-    await TestWebSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
-    expect(term.wasmTerm.plainText()).toContain("session ended (idle)");
+    await TerminalSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
+    expect(term.wasmTerm!.plainText()).toContain("session ended (idle)");
     expect(frames.pending(), "find heard the line").toBe(1);
     frames.settle();
     await tick();
     // The core keeps the selection on its text; the line's match is newer.
     expect(countElement()?.textContent).toBe("2 of 2");
-    expect(selection(term)).toEqual(earlier);
+    expect(activeHighlight(term)).toEqual(earlier);
   });
 
   /// Each call of a write method in `source`, as the name written to and the
@@ -1680,12 +1012,12 @@ describe("terminal find on the ghostty backend", () => {
 
     await restartTerminal();
     frames.settle();
-    await vi.waitFor(() => expect(ghostty.terminals).toHaveLength(2));
+    await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(2));
     expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
     expect(free).toHaveBeenCalledTimes(1);
 
-    const next = ghostty.terminals.at(-1)!;
-    const socket = TestWebSocket.all.at(-1)!;
+    const next = await openedGhostty();
+    const socket = TerminalSocket.all.at(-1)!;
     socket.onopen?.();
     await socket.onmessage?.({
       data: JSON.stringify({ type: "session", id: "sess-2", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
@@ -1695,7 +1027,7 @@ describe("terminal find on the ghostty backend", () => {
     const buffer = new ArrayBuffer(bytes.length);
     new Uint8Array(buffer).set(bytes);
     await socket.onmessage?.({ data: buffer });
-    await vi.waitFor(() => expect(next.wasmTerm.plainText()).toContain("needle f"));
+    await vi.waitFor(() => expect(next.wasmTerm!.plainText()).toContain("needle f"));
     expect(document.activeElement, "the new terminal reads the keyboard").toBe(next.element);
 
     fireCommand("app.find.open");
@@ -1706,7 +1038,7 @@ describe("terminal find on the ghostty backend", () => {
     pressEnter(findInput()!);
     frames.settle();
     await tick();
-    expect(selection(next)).toEqual(match(5));
+    expect(activeHighlight(next)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -1714,7 +1046,7 @@ describe("terminal find on the ghostty backend", () => {
     const term = await renderGhostty(NEEDLES);
     await findNeedle(term);
     const free = vi.spyOn(VtSearch.prototype, "free");
-    for (const component of mounted.splice(0)) unmount(component);
+    resetTerminals();
     expect(free).toHaveBeenCalledTimes(1);
   });
 });

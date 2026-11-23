@@ -11,17 +11,12 @@
 // chan-desktop, where it is the native `write_clipboard_text` and any write to
 // the web clipboard went around it. ClipboardItem exists, as in Chrome and
 // WebKit, so a copy that writes the clipboard itself, the way ghostty-web's
-// does, shows as a `write`. The terminal is a stand-in for ghostty-web's
-// Terminal over the binding on the vendored core, carrying ghostty-web's own
-// SelectionManager and its mouse handling, as the find tests' stand-in does,
-// and ghostty-web's paste: its listeners on the element frame a native paste
-// and an `insertFromPaste` input as the clipboard holds them, as does its
-// `paste`, and `input` hands the program what it is given.
+// does, shows as a `write`. The shared fixture opens the real widget on the
+// vendored core, with its own selection and input handlers.
 
-import { readFileSync } from "node:fs";
+
 import { mount, tick, unmount } from "svelte";
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -31,9 +26,11 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { openedGhostty } from "../__tests__/ghosttyTab";
+import * as ghosttyPaste from "../terminal/ghosttyPaste";
 import { terminalPreferences } from "../__tests__/standalone";
-import { engineClick, mousePointer } from "../__tests__/pointer";
+import { engineClick, modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import {
@@ -42,176 +39,18 @@ import {
   menuRow,
   openBodyMenu,
   output,
+  resetTerminals,
   seatTerminals,
   sentFrames,
   TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
-  xterm,
-  pressInTerminal,
-  type FakeTerminal,
 } from "../__tests__/terminalTab";
 
-/// What a case reads of the ghostty terminal stand-in.
-type GhosttyStandIn = {
-  wasmTerm: VtTerminal;
-  cols: number;
-  rows: number;
-  canvas: HTMLCanvasElement;
-  element: HTMLElement | null;
-};
-
-const ghostty = vi.hoisted(() => ({
-  module: null as WebAssembly.Module | null,
-  terminals: [] as GhosttyStandIn[],
-}));
-
-// The ghostty kit over the vendored core, with a stand-in for ghostty-web's
-// Terminal: the binding's terminal as its core, ghostty-web's own
-// SelectionManager over it, a canvas of 8 by 16 pixels a cell in the
-// element it opens in, and a viewport that stays at the bottom.
-vi.mock("../terminal/backend", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const { SelectionManager } = await import("@chan/ghostty-web-ng");
-  const { modelPointerCapture } = await import("../__tests__/pointer");
-  class Terminal {
-    cols = 80;
-    rows = 24;
-    options: Record<string, any>;
-    wasmTerm: any = undefined;
-    selectionManager: any = undefined;
-    canvas = document.createElement("canvas");
-    renderer = {
-      getMetrics: () => ({ width: 8, height: 16, baseline: 12 }),
-      getCanvas: () => this.canvas,
-      ctx: {},
-      render() {},
-    };
-    buffer = { active: { type: "normal", length: 24, getLine: () => undefined }, alternate: {} };
-    element: HTMLElement | null = null;
-    constructor(options: Record<string, any>) {
-      this.options = options;
-      ghostty.terminals.push(this as unknown as GhosttyStandIn);
-    }
-    dataHandlers: Array<(data: string) => void> = [];
-    open(element: HTMLElement) {
-      this.element = element;
-      if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
-      element.append(this.canvas);
-      element.addEventListener("paste", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const text = (event as ClipboardEvent).clipboardData?.getData("text/plain");
-        if (text) this.paste(text);
-      });
-      element.addEventListener("beforeinput", (event) => {
-        const input = event as InputEvent;
-        if (input.inputType !== "insertFromPaste" || !input.data) return;
-        event.preventDefault();
-        event.stopPropagation();
-        this.paste(input.data);
-      });
-      this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
-        scrollbackLimit: this.options.scrollback,
-      });
-      modelPointerCapture(this.canvas);
-      this.selectionManager = new SelectionManager(
-        this as never,
-        this.renderer as never,
-        this.wasmTerm,
-        document.createElement("textarea"),
-      );
-    }
-    attachCustomKeyEventHandler() {}
-    attachCustomWheelEventHandler() {}
-    onData(handler: (data: string) => void) {
-      this.dataHandlers.push(handler);
-      return { dispose: () => void this.dataHandlers.splice(this.dataHandlers.indexOf(handler), 1) };
-    }
-    fire(data: string) {
-      for (const handler of [...this.dataHandlers]) handler(data);
-    }
-    onResize() {
-      return { dispose() {} };
-    }
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() {
-      return false;
-    }
-    hasFocusEvents() {
-      return false;
-    }
-    getMode() {
-      return false;
-    }
-    hasBracketedPaste() {
-      return this.wasmTerm.hasBracketedPaste();
-    }
-    write(data: string | Uint8Array) {
-      this.wasmTerm.write(data);
-    }
-    writeln(data: string) {
-      this.write(`${data}\r\n`);
-    }
-    paste(text: string) {
-      this.fire(this.hasBracketedPaste() ? `\x1b[200~${text}\x1b[201~` : text);
-    }
-    input(data: string, wasUserInput = false) {
-      if (wasUserInput) this.fire(data);
-      else this.write(data);
-    }
-    resize(cols: number, rows: number) {
-      this.cols = cols;
-      this.rows = rows;
-      this.wasmTerm.resize(cols, rows);
-    }
-    focus() {
-      this.element?.focus();
-    }
-    blur() {}
-    getSelection() {
-      return this.selectionManager.getSelection();
-    }
-    hasSelection() {
-      return this.selectionManager.hasSelection();
-    }
-    getViewportY() {
-      return 0;
-    }
-    getScrollbackLength() {
-      return this.wasmTerm.getScrollbackLength();
-    }
-    scrollLines() {}
-    viewport = {
-      offset: 0, followOutput: "at-bottom" as const,
-      scrollTo() {}, scrollBy() {}, scrollToBottom() {}, reveal() {},
-    };
-    onChange() { return { dispose() {} }; }
-    selectAll() {
-      this.selectionManager.selectAll();
-    }
-    clearSelection() {
-      this.selectionManager.clearSelection();
-    }
-    dispose() {
-      this.element = null;
-      this.selectionManager?.dispose();
-      this.wasmTerm?.free();
-    }
-  }
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({
-    ...actual,
-    loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: Terminal as never }),
-  });
-});
-// Renderer hooks the stand-in has no renderer for.
-vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-}));
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 installTerminalDom();
 
@@ -228,10 +67,6 @@ let clipboard: {
   readText: ReturnType<typeof vi.fn>;
 };
 const tauri = window as unknown as { __TAURI_INTERNALS__?: { invoke: ReturnType<typeof vi.fn> } };
-
-beforeAll(() => {
-  ghostty.module = new WebAssembly.Module(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
-});
 
 beforeEach(() => {
   __testSetStandalonePreferences(terminalPreferences());
@@ -251,10 +86,7 @@ afterEach(() => {
   delete tauri.__TAURI_INTERNALS__;
   closeTabMenu();
   for (const component of mounted.splice(0)) unmount(component);
-  TerminalSocket.all.splice(0);
-  ghostty.terminals.splice(0);
-  xterm.terminals.splice(0);
-  useXtermStandIn(false);
+  resetTerminals();
   __testSetStandalonePreferences(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -277,23 +109,28 @@ async function renderGhostty(command = COMMAND) {
   await tick();
   await tick();
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
-  await vi.waitFor(() => expect(ghostty.terminals.at(-1)?.wasmTerm).toBeTruthy());
-  const term = ghostty.terminals.at(-1)!;
+  const term = await openedGhostty(target);
   const socket = TerminalSocket.all[0]!;
   await attach(socket);
   await output(socket, `\x1b[2J\x1b[3J\x1b[H${command}\r\n$ `);
-  await vi.waitFor(() => expect(term.wasmTerm.isRowWrapped(1), "the command wrapped on screen").toBe(true));
+  await vi.waitFor(() => expect(term.buffer.active.getLine(1)?.isWrapped, "the command wrapped on screen").toBe(true));
   return { target, term };
+}
+
+function canvas(term: Terminal): HTMLCanvasElement {
+  return term.element!.querySelector("canvas")!;
 }
 
 /// The user's drag from one screen cell to another, handled by
 /// ghostty-web's own pointer code; its release copies.
-function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }): void {
-  vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
-  const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
-  mousePointer(term.canvas, "pointerdown", at(from));
-  mousePointer(term.canvas, "pointermove", at(to));
-  mousePointer(term.canvas, "pointerup", at(to));
+function drag(term: Terminal, from: { col: number; row: number }, to: { col: number; row: number }): void {
+  const surface = canvas(term);
+  modelPointerCapture(surface);
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+  const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 19 + 1 });
+  mousePointer(surface, "pointerdown", at(from));
+  mousePointer(surface, "pointermove", at(to));
+  mousePointer(surface, "pointerup", at(to));
 }
 
 /// Where chan's writer puts a copy on each platform, and what reads it back.
@@ -368,7 +205,7 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
   test("a double click copies the word under it through chan's writer", async () => {
     const { term } = await renderGhostty();
     platform.enter();
-    term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, clientX: 3 * 8 + 1, clientY: 1 }));
+    canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, clientX: 3 * 8 + 1, clientY: 1 }));
     await tick();
     expect(platform.takeWrites()).toEqual(["curl"]);
     platform.expectNoBypass();
@@ -378,8 +215,8 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
     const { term } = await renderGhostty(PATH_COMMAND);
     platform.enter();
     const click = (detail: number, col: number, row: number) =>
-      term.canvas.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, detail, clientX: col * 8 + 1, clientY: row * 16 + 1 }),
+      canvas(term).dispatchEvent(
+        new MouseEvent("click", { bubbles: true, detail, clientX: col * 8 + 1, clientY: row * 19 + 1 }),
       );
     click(2, 10, 0);
     await tick();
@@ -410,7 +247,7 @@ describe("pasting into a ghostty terminal", () => {
   test("the paste chord and the menu's Paste row send the same cleaned bytes, once each", async () => {
     const { target, term } = await renderGhostty();
     await output(TerminalSocket.all[0]!, "\x1b[?2004h");
-    expect(term.wasmTerm.hasBracketedPaste()).toBe(true);
+    expect(term.hasBracketedPaste()).toBe(true);
     const before = inputs().length;
 
     const paste = new Event("paste", { bubbles: true, cancelable: true });
@@ -466,7 +303,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     ]);
     invoke.mockClear();
     for (const [detail, text] of [[2, PATH], [3, PATH_COMMAND]] as const) {
-      term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, detail, clientX: 25, clientY: 17 }));
+      canvas(term).dispatchEvent(new MouseEvent("click", { bubbles: true, detail, clientX: 25, clientY: 20 }));
       await tick();
       expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text }], ["write_primary_selection", { text }]]);
       invoke.mockClear();
@@ -493,7 +330,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     const before = inputs().length;
     const widget = vi.fn();
     term.element!.addEventListener("auxclick", widget);
-    const event = middle(term.canvas);
+    const event = middle(canvas(term));
     await vi.waitFor(() => expect(inputs().slice(before)).toEqual([
       "\x1b[200~echo one [201~; echo two\rprintf ' [31mred' \rlast\x1b[201~",
     ]));
@@ -503,90 +340,9 @@ describe("the Linux desktop PRIMARY selection", () => {
     expect(clipboard.readText).not.toHaveBeenCalled();
   });
 
-  async function renderXterm() {
-    useXtermStandIn();
-    __testSetStandalonePreferences(terminalPreferences());
-    const [tab] = seatTerminals([terminalTab()]);
-    const target = document.createElement("div");
-    document.body.append(target);
-    mounted.push(mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } }));
-    await tick();
-    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
-    await attach(TerminalSocket.all[0]!);
-    return xterm.terminals[0]!;
-  }
-
-  test("xterm mouse selection writes its copy text only on release, never for a keyboard selection", async () => {
-    const invoke = desktop();
-    const term = await renderXterm();
-    invoke.mockClear();
-    term.changeSelection("a find result");
-    expect(invoke).not.toHaveBeenCalled();
-    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
-    term.changeSelection("partial");
-    expect(invoke).not.toHaveBeenCalled();
-    term.changeSelection(COMMAND);
-    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await nextTask();
-    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: COMMAND }]]);
-    invoke.mockClear();
-    pressInTerminal(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
-    await tick();
-    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: COMMAND }]]);
-    invoke.mockClear();
-    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
-    term.changeSelection("");
-    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await nextTask();
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  /// A release in the order WebKitGTK runs a trusted mouseup. xterm adds its
-  /// document mouseup listener when a drag starts, after chan's, and
-  /// announces the final selection from it; the engine runs a microtask
-  /// checkpoint after each listener of an event it dispatches, so microtasks
-  /// chan's listener queued run before xterm's listener does. A script's
-  /// dispatchEvent runs every listener first. Here chan's listener runs, then
-  /// its microtasks, then xterm's announcement.
-  async function releaseAsTheEngineDoes(term: FakeTerminal, selection: string): Promise<void> {
-    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await Promise.resolve();
-    term.changeSelection(selection);
-  }
-
-  function pressLeft(term: FakeTerminal): void {
-    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
-  }
-
-  test("xterm writes PRIMARY once with the selection it announces on a trusted release, line break kept", async () => {
-    const invoke = desktop();
-    const term = await renderXterm();
-    invoke.mockClear();
-    const text = `primary-${"x".repeat(160)}-end\nwide:\u754c end`;
-    pressLeft(term);
-    await releaseAsTheEngineDoes(term, text);
-    await nextTask();
-    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text }]]);
-  });
-
-  test("a press before the deferred read leaves the write to its own release", async () => {
-    const invoke = desktop();
-    const term = await renderXterm();
-    invoke.mockClear();
-    // The first click of a double click clears the selection; the second
-    // press arrives before that release's read runs, and its release
-    // announces the word.
-    pressLeft(term);
-    await releaseAsTheEngineDoes(term, "");
-    pressLeft(term);
-    await nextTask();
-    await releaseAsTheEngineDoes(term, PATH);
-    await nextTask();
-    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: PATH }]]);
-  });
   /// A right click as the engine dispatches it, at a cell of the terminal.
   function rightClick(on: Element): MouseEvent {
-    const event = new MouseEvent("contextmenu", { button: 2, bubbles: true, cancelable: true, clientX: 25, clientY: 17 });
+    const event = new MouseEvent("contextmenu", { button: 2, bubbles: true, cancelable: true, clientX: 25, clientY: 20 });
     on.dispatchEvent(event);
     return event;
   }
@@ -599,7 +355,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     invoke.mockClear();
     const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
     const range = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
-    const event = rightClick(term.canvas);
+    const event = rightClick(canvas(term));
     await tick();
     await tick();
     expect(select, "a selected textarea is what WebKitGTK copies into PRIMARY").not.toHaveBeenCalled();
@@ -610,38 +366,12 @@ describe("the Linux desktop PRIMARY selection", () => {
     expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: PATH_COMMAND }]]);
   });
 
-  test("a right click on xterm opens chan's menu before xterm.js selects its textarea", async () => {
-    const invoke = desktop();
-    const term = await renderXterm();
-    // xterm.js's own right-click handler on its element, which the stand-in
-    // has none of: the selection goes into its textarea, selected, for a
-    // browser menu's Copy.
-    const widget = document.createElement("div");
-    const textarea = document.createElement("textarea");
-    term.element!.append(widget, textarea);
-    widget.addEventListener("contextmenu", () => {
-      textarea.value = term.getSelection();
-      textarea.select();
-    });
-    term.changeSelection(COMMAND);
-    invoke.mockClear();
-    const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
-    const event = rightClick(widget);
-    await tick();
-    await tick();
-    expect(select, "a selected textarea is what WebKitGTK copies into PRIMARY").not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(true);
-    menuRow("Copy").click();
-    await tick();
-    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: COMMAND }]]);
-  });
-
   test("in a browser ghostty-web's right click still selects its textarea under chan's menu", async () => {
     const { term } = await renderGhostty(PATH_COMMAND);
     drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });
     await tick();
     const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
-    const event = rightClick(term.canvas);
+    const event = rightClick(canvas(term));
     await tick();
     await tick();
     expect(select).toHaveBeenCalledOnce();
@@ -649,58 +379,8 @@ describe("the Linux desktop PRIMARY selection", () => {
     expect(menuRow("Copy")).toBeTruthy();
   });
 
-  test("an xterm drag that ends on its previous selection writes PRIMARY again", async () => {
-    const invoke = desktop();
-    const term = await renderXterm();
-    pressLeft(term);
-    await releaseAsTheEngineDoes(term, COMMAND);
-    await nextTask();
-    invoke.mockClear();
-    // The same cells dragged again: on the way xterm puts the selection in
-    // its textarea, which WebKitGTK copies into PRIMARY, and its release
-    // announces nothing, since the selection did not change.
-    pressLeft(term);
-    term.element!.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, bubbles: true }));
-    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await nextTask();
-    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: COMMAND }]]);
-    invoke.mockClear();
-    // A press and release with no move and no announcement writes nothing,
-    // whatever selection is left.
-    pressLeft(term);
-    term.element!.dispatchEvent(new MouseEvent("mousemove", { buttons: 0, bubbles: true }));
-    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await nextTask();
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  test("xterm middle click sends PRIMARY cleaned, through xterm.js's own paste", async () => {
-    const text = "one\r\ntwo\nthree\x1b[201~";
-    const invoke = desktop(text);
-    const term = await renderXterm();
-    invoke.mockClear();
-    const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-    const real = new Terminal();
-    // Its encoder needs only the hidden textarea; no renderer or display.
-    (real as unknown as { _core: { textarea: HTMLTextAreaElement } })._core.textarea = document.createElement("textarea");
-    const subscription = real.onData((data) => term.type(data));
-    await new Promise<void>((resolve) => real.write("\x1b[?2004h", resolve));
-    const paste = vi.spyOn(term, "paste").mockImplementation((value) => real.paste(value));
-    const before = inputs().length;
-    const event = middle(term.element!);
-    // The pasted ESC[201~ reaches the program as " [201~" inside one bracket,
-    // as a ghostty terminal sends it.
-    await vi.waitFor(() => expect(inputs().slice(before)).toEqual(["\x1b[200~one\rtwo\rthree [201~\x1b[201~"]));
-    expect(paste).toHaveBeenCalledExactlyOnceWith("one\r\ntwo\nthree [201~");
-    subscription.dispose();
-    real.dispose();
-    expect(event.defaultPrevented).toBe(true);
-    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
-    expect(clipboard.readText).not.toHaveBeenCalled();
-  });
-
-  test.each(["ghostty", "xterm"])("%s installs no PRIMARY handler in a browser", async (backend) => {
-    const term = backend === "ghostty" ? (await renderGhostty()).term : await renderXterm();
+  test("ghostty installs no PRIMARY handler in a browser", async () => {
+    const { term } = await renderGhostty();
     const event = middle(term.element!);
     await tick();
     expect(event.defaultPrevented).toBe(false);
@@ -713,7 +393,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
     const { term } = await renderGhostty();
     invoke.mockClear();
-    expect(middle(term.canvas).defaultPrevented).toBe(false);
+    expect(middle(canvas(term)).defaultPrevented).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -721,7 +401,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     const invoke = desktop();
     const { term } = await renderGhostty();
     const host = term.element!;
-    const encode = vi.spyOn(term.wasmTerm, "encodePaste");
+    const paste = vi.spyOn(ghosttyPaste, "pasteIntoGhostty");
     let finish!: (text: string) => void;
     invoke.mockImplementation((cmd) => cmd === "read_primary_selection"
       ? new Promise<string>((resolve) => { finish = resolve; }) : Promise.resolve(undefined));
@@ -732,7 +412,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     // Drain the nested invoke/read continuations before the negative assertion.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(inputs().length).toBe(before);
-    expect(encode, "no paste reaches the freed core").not.toHaveBeenCalled();
+    expect(paste, "no paste reaches the disposed widget").not.toHaveBeenCalled();
     invoke.mockClear();
     expect(middle(host).defaultPrevented).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
@@ -747,7 +427,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     const { term } = await renderGhostty();
     const before = inputs().length;
     invoke.mockClear();
-    middle(term.canvas);
+    middle(canvas(term));
     await tick();
     expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
     expect(inputs().length).toBe(before);
