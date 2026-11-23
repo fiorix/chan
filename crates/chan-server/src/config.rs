@@ -10,6 +10,7 @@
 //! Anything filesystem-shaped on the workspace itself stays in chan-workspace.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chan_workspace::SearchAggression;
 use serde::{Deserialize, Serialize};
@@ -116,14 +117,56 @@ impl Default for SearchConfig {
     }
 }
 
+/// Keys a `server.toml` may still hold after their setting was retired, read
+/// for their type and their warning and never written: `ServerConfig` has no
+/// field for them, so the next save drops them.
+#[derive(Debug, Default, Deserialize)]
+struct RetiredKeys {
+    #[serde(default)]
+    terminal: RetiredTerminalKeys,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RetiredTerminalKeys {
+    /// The terminal engine choice. Every terminal is Ghostty. `true` is the
+    /// value chan itself wrote on every save and passes silently; `false`
+    /// asked for xterm.js, so it is reported.
+    #[serde(default)]
+    ghostty: Option<bool>,
+}
+
+/// Whether this process has reported a stored `terminal.ghostty = false`. The
+/// file is loaded far more often than a user edits it (at every config-watch
+/// event, at each PTY spawn of a terminal-only tenant, by the desktop), so
+/// the warning is given once per process rather than once per load.
+static RETIRED_TERMINAL_GHOSTTY_WARNED: AtomicBool = AtomicBool::new(false);
+
 impl ServerConfig {
     pub fn load() -> Result<Self, Error> {
         Self::load_from(&default_path())
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
+        Self::load_warning_once(path, &RETIRED_TERMINAL_GHOSTTY_WARNED)
+    }
+
+    /// [`Self::load_from`] with the once-per-process flag of the
+    /// `terminal.ghostty` warning passed in, so a test owns its flag.
+    fn load_warning_once(path: &Path, ghostty_warned: &AtomicBool) -> Result<Self, Error> {
         // The typed read preserves source locations in retained-key errors.
         let mut config: Self = crate::store::load_toml(path)?;
+        // So does the typed read of the retired keys, so a non-boolean
+        // `terminal.ghostty` stays an error with its location.
+        let retired: RetiredKeys = crate::store::load_toml(path)?;
+        if retired.terminal.ghostty == Some(false) && !ghostty_warned.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                key = "terminal.ghostty",
+                path = %path.display(),
+                "server.toml key is deprecated and has no effect: every terminal uses Ghostty; \
+                 remove it, a future release will reject it"
+            );
+        }
         let warn_retired_attachments_dir = std::fs::read_to_string(path)
             .ok()
             .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
@@ -292,6 +335,134 @@ mod tests {
         ));
     }
 
+    /// The WARN lines a load of `path` gives under its own once-per-process
+    /// flag, so the test does not depend on what other tests loaded.
+    fn load_warnings(path: &Path, warned: &AtomicBool) -> (Vec<String>, ServerConfig) {
+        let (lines, config) =
+            capture_warnings(|| ServerConfig::load_warning_once(path, warned).unwrap());
+        let warnings = lines
+            .into_iter()
+            .filter(|line| line.starts_with("WARN"))
+            .collect();
+        (warnings, config)
+    }
+
+    #[test]
+    fn a_stored_false_terminal_ghostty_warns_and_is_dropped_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(
+            &path,
+            "[search]\naggression = \"aggressive\"\n[terminal]\nghostty = false\nscrollback_mb = 30\n",
+        )
+        .unwrap();
+        let (warnings, config) = load_warnings(&path, &AtomicBool::new(false));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        for word in [
+            "terminal.ghostty",
+            "deprecated",
+            "no effect",
+            "remove it",
+            "will reject",
+        ] {
+            assert!(warnings[0].contains(word), "{word}: {warnings:?}");
+        }
+        assert_eq!(config.search.aggression, SearchAggression::Aggressive);
+        assert_eq!(config.terminal.scrollback_mb, 30);
+
+        config.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("ghostty"), "{saved}");
+        assert!(saved.contains("aggression = \"aggressive\""), "{saved}");
+        assert!(saved.contains("scrollback_mb = 30"), "{saved}");
+        let (warnings, reloaded) = load_warnings(&path, &AtomicBool::new(false));
+        assert!(
+            warnings.is_empty(),
+            "the saved file still warns: {warnings:?}"
+        );
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn a_stored_true_terminal_ghostty_is_silent_and_dropped_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nghostty = true\nfont_size = 12\n").unwrap();
+        let (warnings, config) = load_warnings(&path, &AtomicBool::new(false));
+        assert!(warnings.is_empty(), "chan's own value warned: {warnings:?}");
+        assert_eq!(config.terminal.font_size, 12);
+
+        config.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("ghostty"), "{saved}");
+        assert!(saved.contains("font_size = 12"), "{saved}");
+    }
+
+    #[test]
+    fn an_absent_terminal_ghostty_is_silent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nfont_size = 12\n").unwrap();
+        let (warnings, _) = load_warnings(&path, &AtomicBool::new(false));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (warnings, _) =
+            load_warnings(&tmp.path().join("missing.toml"), &AtomicBool::new(false));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_non_boolean_terminal_ghostty_keeps_its_type_error_and_location() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(
+            &path,
+            "[search]\naggression = \"aggressive\"\n[terminal]\nghostty = \"yes\"\n",
+        )
+        .unwrap();
+        let Err(Error::Config(message)) =
+            ServerConfig::load_warning_once(&path, &AtomicBool::new(false))
+        else {
+            panic!("expected a config decode error");
+        };
+        assert!(message.contains("line 4, column"), "{message}");
+        assert!(message.contains("expected a boolean"), "{message}");
+    }
+
+    #[test]
+    fn the_terminal_ghostty_warning_is_given_once_per_process() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("server.toml");
+        let second = tmp.path().join("other.toml");
+        std::fs::write(&first, "[terminal]\nghostty = false\n").unwrap();
+        std::fs::write(&second, "[terminal]\nghostty = false\nfont_size = 12\n").unwrap();
+        let warned = AtomicBool::new(false);
+        let (mut warnings, _) = load_warnings(&first, &warned);
+        warnings.extend(load_warnings(&first, &warned).0);
+        warnings.extend(load_warnings(&second, &warned).0);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+        // `load_from` answers to the process's own flag.
+        let _ = ServerConfig::load_from(&first).unwrap();
+        assert!(RETIRED_TERMINAL_GHOSTTY_WARNED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn loading_a_retired_terminal_ghostty_leaves_the_file_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        for value in ["false", "true"] {
+            let body = format!("# kept\n[terminal]\nghostty = {value}\nfont_size = 12\n");
+            std::fs::write(&path, &body).unwrap();
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let _ = load_warnings(&path, &AtomicBool::new(false));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                before
+            );
+        }
+    }
+
     #[test]
     fn populated_round_trips() {
         let tmp = TempDir::new().unwrap();
@@ -320,7 +491,6 @@ mod tests {
                     enabled: true,
                     trust: vec!["ssh".into()],
                 },
-                ghostty: true,
                 secret_masking: Some(false),
                 secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
                 // Populated rather than defaulted so the round trip actually

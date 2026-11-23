@@ -8,32 +8,58 @@ fn default_config_retains_two_mebibytes_of_terminal_replay() {
     assert_eq!(omitted.ring_bytes, 2 * 1024 * 1024);
 }
 
-#[test]
-fn a_poisoned_backend_resolver_keeps_resolving_at_spawn_time() {
-    let registry = Registry::new(test_config(4096, 4, 60));
-    registry.install_terminal_backend_resolver(TerminalBackendResolver::new(|| Some(false)));
-    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = registry.terminal_backend_resolver.lock().unwrap();
-        panic!("poison the resolver cell");
-    }));
-    assert!(poisoned.is_err());
-    assert!(registry.terminal_backend_resolver.is_poisoned());
-    // The fallback is ghostty, so false proves the resolver is still consulted.
-    assert!(!registry.spawn_config().config.terminal.ghostty);
+/// A profiles resolver that answers `default_profile` as `id`.
+fn resolving_default_profile(id: &'static str) -> TerminalProfilesResolver {
+    TerminalProfilesResolver::new(move || {
+        Some(TerminalProfilePrefs {
+            profiles: Vec::new(),
+            default_profile: Some(id.into()),
+        })
+    })
 }
 
 #[test]
-fn a_poisoned_backend_resolver_can_be_replaced() {
+fn a_poisoned_profiles_resolver_keeps_resolving_at_spawn_time() {
     let registry = Registry::new(test_config(4096, 4, 60));
-    registry.install_terminal_backend_resolver(TerminalBackendResolver::new(|| Some(false)));
-    assert!(!registry.spawn_config().config.terminal.ghostty);
+    registry.install_terminal_profiles_resolver(resolving_default_profile("pulled"));
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = registry.terminal_backend_resolver.lock().unwrap();
+        let _guard = registry.terminal_profiles_resolver.lock().unwrap();
         panic!("poison the resolver cell");
     }));
     assert!(poisoned.is_err());
-    registry.install_terminal_backend_resolver(TerminalBackendResolver::new(|| Some(true)));
-    assert!(registry.spawn_config().config.terminal.ghostty);
+    assert!(registry.terminal_profiles_resolver.is_poisoned());
+    // The boot snapshot names no default, so "pulled" proves the resolver is
+    // still consulted.
+    assert_eq!(
+        registry
+            .spawn_config()
+            .config
+            .terminal
+            .default_profile
+            .as_deref(),
+        Some("pulled")
+    );
+}
+
+#[test]
+fn a_poisoned_profiles_resolver_can_be_replaced() {
+    let registry = Registry::new(test_config(4096, 4, 60));
+    registry.install_terminal_profiles_resolver(resolving_default_profile("first"));
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = registry.terminal_profiles_resolver.lock().unwrap();
+        panic!("poison the resolver cell");
+    }));
+    assert!(poisoned.is_err());
+    registry.install_terminal_profiles_resolver(resolving_default_profile("second"));
+    assert_eq!(
+        registry
+            .spawn_config()
+            .config
+            .terminal
+            .default_profile
+            .as_deref(),
+        Some("second")
+    );
 }
 
 #[test]
