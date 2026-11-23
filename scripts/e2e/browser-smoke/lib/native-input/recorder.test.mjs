@@ -220,7 +220,7 @@ test("native input recorder controls without a browser or server", async (t) => 
     snap = runSrc(ctx, page.READ_SRC);
     if (snap.events.length !== 0 || snap.bytes.length !== 0) fail("RESET left rows behind");
     let tapped = null;
-    const termStub = { element: sp.host, isDisposed: false, onData: (cb) => { tapped = cb; return { dispose() {} }; } };
+    const termStub = { element: sp.host, onData: (cb) => { tapped = cb; return { dispose() {} }; } };
     sp.windowObj.__nativeInputTermsK = { terminals: [termStub] };
     const hooked = runSrc(ctx, `(${page.FIND_TERM_SRC})("__nativeInputTermsK", ".terminal-host .x")`);
     if (hooked !== "hooked") fail(`FIND call form answered ${JSON.stringify(hooked)}, want hooked`);
@@ -231,7 +231,7 @@ test("native input recorder controls without a browser or server", async (t) => 
     if (runSrc(ctx, `(${page.FIND_TERM_SRC})("__nativeInputTermsK", ".no-such-pane")`) !== null) {
       fail("FIND with no matching terminal did not answer null");
     }
-    const badTerm = { element: sp.host, isDisposed: false, onData: () => { throw new Error("tap blew"); } };
+    const badTerm = { element: sp.host, onData: () => { throw new Error("tap blew"); } };
     sp.windowObj.__nativeInputTermsK = { terminals: [badTerm] };
     let threw = "";
     try {

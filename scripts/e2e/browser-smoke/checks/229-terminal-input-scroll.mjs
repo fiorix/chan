@@ -32,13 +32,17 @@ async function readViewport(page, hostQuery) {
     if (!host) throw new Error("Ghostty terminal host missing");
     const term = window.__ghostty229.terminals.find((candidate) => candidate.element === host);
     if (!term) throw new Error("the opened ghostty Terminal was not captured");
+    if (!term.core) throw new Error("Ghostty core unavailable");
     const history = term.getScrollbackLength();
     const offset = term.getViewportY();
     const first = Math.max(0, history - Math.floor(offset));
-    const rowText = (row) => term.wasmTerm.plainText({
-      startRow: row, startCol: 0, endRow: row, endCol: term.cols - 1,
-    }) ?? "";
-    const cursor = term.wasmTerm.getCursor();
+    const rowText = (row) => {
+      const text = term.core.plainText({ startRow: row, startCol: 0, endRow: row, endCol: term.cols - 1 });
+      if (text === null) throw new Error(`Ghostty plainText returned null for row ${row}`);
+      return text;
+    };
+    const cursor = term.getCursor();
+    if (!cursor) throw new Error("Ghostty cursor unavailable");
     return {
       bottom: offset === 0,
       offset,

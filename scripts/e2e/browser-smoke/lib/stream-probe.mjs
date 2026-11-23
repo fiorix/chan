@@ -188,8 +188,9 @@ export async function trackGhosttyTerminals(page) {
 export function readGhosttyText(page) {
   return page.evaluate(() => {
     const term = globalThis.__ghosttyTerminals.at(-1);
+    if (!term?.core) throw new Error("Ghostty core unavailable for retained buffer read");
     const history = term.getScrollbackLength();
-    const text = term.wasmTerm.plainText({
+    const text = term.core.plainText({
       startRow: 0, startCol: 0, endRow: history + term.rows - 1, endCol: term.cols - 1,
     });
     if (text === null) throw new Error("Ghostty plainText returned null for the retained buffer");

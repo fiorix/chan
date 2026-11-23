@@ -141,18 +141,25 @@ export default {
           await page.keyboard.type(FIND);
           await page.waitForFunction((query) => document.querySelector(query)?.textContent === "1 of 1", { timeout: 10_000 }, countQuery);
           await settlePointer(page);
-          assert.equal(await term.evaluate((t) => t.getSelection()), FIND, "find selected the unique fixture match");
+          const findState = () => term.evaluate((t) => ({
+            ranges: t.highlights.get("search-active")?.ranges ?? [],
+            userSelection: t.getSelectionRange(),
+          }));
+          const expectedFind = { ranges: [{ start: { col: 0, absoluteRow: 1 },
+            end: { col: FIND.length - 1, absoluteRow: 1 } }], userSelection: null };
+          result.find = await findState();
+          assert.deepEqual(result.find, expectedFind, "find highlights the unique fixture match independently of selection");
           result.highlight = await paintedFindRow(term);
-          assert.notEqual(result.highlight, result.before, "find visibly painted its selected match");
+          assert.notEqual(result.highlight, result.before, "find visibly painted its active match");
           await page.click(countQuery);
           await settlePointer(page);
-          result.afterBar = { text: await term.evaluate((t) => t.getSelection()), pixels: await paintedFindRow(term) };
-          assert.deepEqual(result.afterBar, { text: FIND, pixels: result.highlight }, "a click on the find bar keeps its highlight");
+          result.afterBar = { ...(await findState()), pixels: await paintedFindRow(term) };
+          assert.deepEqual(result.afterBar, { ...expectedFind, pixels: result.highlight }, "a click on the find bar keeps its highlight");
           const outside = await otherPoint(grid);
           await page.mouse.click(outside.x, outside.y);
           await settlePointer(page);
-          result.afterPane = { text: await term.evaluate((t) => t.getSelection()), pixels: await paintedFindRow(term) };
-          assert.deepEqual(result.afterPane, { text: FIND, pixels: result.highlight }, "a click on another pane keeps the find highlight");
+          result.afterPane = { ...(await findState()), pixels: await paintedFindRow(term) };
+          assert.deepEqual(result.afterPane, { ...expectedFind, pixels: result.highlight }, "a click on another pane keeps the find highlight");
           assert.equal(await page.$eval(countQuery, (el) => el.textContent), "1 of 1", "the find bar keeps its match count");
         });
 

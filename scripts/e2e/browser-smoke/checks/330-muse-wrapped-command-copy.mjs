@@ -94,13 +94,18 @@ async function terminalOf(page, row) {
   const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
   const term = await page.evaluateHandle((query) => {
     const host = document.querySelector(query);
-    return window.__ghostty330.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
+    return window.__ghostty330.terminals.find((t) => t.core !== undefined && host && t.element === host) ?? null;
   }, hostQuery);
   if (!(await term.evaluate((t) => t !== null))) throw new Error(`no ghostty-web Terminal holds the host ${hostQuery}`);
   return term;
 }
 
-const bufferText = (term) => term.evaluate((t) => t.wasmTerm.plainText() ?? "");
+const bufferText = (term) => term.evaluate((t) => {
+  if (!t.core) throw new Error("Ghostty core unavailable for buffer read");
+  const text = t.core.plainText();
+  if (text === null) throw new Error("Ghostty plainText returned null for buffer read");
+  return text;
+});
 
 async function waitFor(label, probe, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
@@ -118,7 +123,7 @@ async function waitFor(label, probe, timeoutMs = 15_000) {
 async function sizeTo80(page, term, label) {
   const readings = [];
   for (let step = 0; step < 8; step++) {
-    const grid = await term.evaluate((t) => ({ cols: t.cols, rows: t.rows, cell: t.renderer.getMetrics().width }));
+    const grid = await term.evaluate((t) => ({ cols: t.cols, rows: t.rows, cell: t.getMetrics().width }));
     const viewport = page.viewport() ?? { width: 1280, height: 900 };
     readings.push({ ...grid, width: viewport.width });
     if (grid.cols === COLS && grid.rows >= ROWS) return readings;
@@ -134,8 +139,8 @@ async function sizeTo80(page, term, label) {
 /// The centre of cell (col, row) of the screen, in page pixels.
 async function cellCentre(term, col, row) {
   return term.evaluate((t, at) => {
-    const box = t.renderer.getCanvas().getBoundingClientRect();
-    const { width, height } = t.renderer.getMetrics();
+    const box = t.element.querySelector(":scope > canvas").getBoundingClientRect();
+    const { width, height } = t.getMetrics();
     return { x: box.left + (at.col + 0.5) * width, y: box.top + (at.row + 0.5) * height };
   }, { col, row });
 }
@@ -271,8 +276,8 @@ export default {
           rows: t.rows,
           history: t.getScrollbackLength(),
           viewportY: t.getViewportY(),
-          wrapped: Object.fromEntries(rows.map((r) => [r, t.wasmTerm.isRowWrapped(r)])),
-          text: Object.fromEntries(rows.map((r) => [r, t.wasmTerm.plainText({ startCol: 0, startRow: t.getScrollbackLength() + r, endCol: t.cols - 1, endRow: t.getScrollbackLength() + r })])),
+          wrapped: Object.fromEntries(rows.map((r) => [r, t.core.isRowWrapped(r)])),
+          text: Object.fromEntries(rows.map((r) => [r, t.core.plainText({ startCol: 0, startRow: t.getScrollbackLength() + r, endCol: t.cols - 1, endRow: t.getScrollbackLength() + r })])),
         }), [LINE_ROW, LINE_ROW + 1, OUTPUT_ROW, OUTPUT_ROW + 1, RULE_ROW, RULE_ROW + 1]);
         record.grid = grid;
         if (grid.cols !== COLS) throw new Error(`${label}: the terminal holds ${grid.cols} columns after the replay, not ${COLS}`);
