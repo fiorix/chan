@@ -460,6 +460,11 @@ export default {
         return { edge, release, historyUrls };
       });
 
+      // A row-zero drag enters the auto-scroll edge. Clear history after
+      // the padding verdict so later gestures cannot select its link rows.
+      await cs(["write", "--tab-name", name, "printf '\\033[H\\033[2J\\033[3JP316_%s\\n' RESET\n"]);
+      await waitScrollback(name, "P316_RESET");
+
       // ghostty looks a link up at the click, so one printed into the row
       // under a resting pointer is clickable with no move off the row.
       await leg(at("resting-click"), async () => {
