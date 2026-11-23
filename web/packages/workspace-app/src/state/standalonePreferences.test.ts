@@ -137,6 +137,9 @@ describe("each reader of a setting", () => {
     const timers = trackTimers();
     const app: Array<Record<string, unknown>> = [];
     try {
+      // Over an empty layout, so the app opens no terminal tab an earlier
+      // case left in it.
+      resetLayout();
       installDemoWorkspace({
         metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 0, textCount: 0 },
         files: [],
