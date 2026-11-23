@@ -292,6 +292,25 @@ describe('captured selection lifecycle', () => {
 });
 
 describe('report and bypass completion', () => {
+  test('buttonless motion reports once per cell and modifier code', async () => {
+    const { term, canvas, reports, height } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    for (const x of [1, 2, 3, 9]) pointer(canvas, 'pointermove', x, 1, { buttons: 0 });
+    expect(reports).toEqual(['\x1b[<35;1;1M', '\x1b[<35;2;1M']);
+    pointer(canvas, 'pointermove', 9, 1, { buttons: 0, ctrlKey: true });
+    pointer(canvas, 'pointermove', 10, 1, { buttons: 0, ctrlKey: true });
+    pointer(canvas, 'pointermove', 10, height + 1, { buttons: 0, ctrlKey: true });
+    expect(reports.slice(2)).toEqual(['\x1b[<51;2;1M', '\x1b[<51;2;2M']);
+  });
+
+  test('Alt hover encodes the meta bit once, including with Meta held', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointermove', 1, 1, { buttons: 0, altKey: true });
+    pointer(canvas, 'pointermove', 9, 1, { buttons: 0, altKey: true, metaKey: true });
+    expect(reports).toEqual(['\x1b[<43;1;1M', '\x1b[<43;2;1M']);
+  });
+
   test('DECSET 1000 without motion reporting never selects during a drag', async () => {
     const { term, canvas, write, reports } = await open();
     term.write('\x1b[?1000h\x1b[?1006h');
