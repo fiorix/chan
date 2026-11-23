@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Hybrid Nav never unmounts a terminal: that would dispose its xterm and drop
+// Hybrid Nav never unmounts a terminal: that would dispose its widget and drop
 // the scrollback. While Hybrid Nav is on, the terminal stays mounted and is
 // hidden from assistive tech, and when it ends the same terminal is active
 // again. A terminal on a pane's hidden side is hidden the same way.
@@ -10,7 +10,7 @@
 // bytes written at the old width into the new one, so the terminal keeps its
 // renderer and its socket, is fitted to its new host, and sends that size.
 
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fitAddonModule());
@@ -18,10 +18,13 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
-import { FakeTerminal, xterm } from "../__tests__/xterm";
+import { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyFixture, openedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { sessionWindowId } from "../api/client";
 import { setSocketFactory } from "../api/transport";
@@ -48,7 +51,10 @@ import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 
 stubAppEnvironment();
 
+let dispose: MockInstance<Terminal["dispose"]>;
+
 beforeEach(async () => {
+  dispose = vi.spyOn(Terminal.prototype, "dispose");
   await mountApp();
 });
 
@@ -56,9 +62,7 @@ afterEach(async () => {
   cancelPaneMode();
   vi.restoreAllMocks();
   await unmountApp();
-  xterm.terminals.splice(0);
-  xterm.fit.size = null;
-  xterm.textareaFocus = false;
+  ghosttyFixture.terminals.splice(0);
   richPrompt.byTab = {};
   resetSurveysForTest();
 });
@@ -73,7 +77,7 @@ describe("a terminal tab", () => {
     await settle();
     await vi.waitFor(() => expect(terminal()).not.toBeNull());
     const mounted = terminal();
-    const dispose = vi.spyOn(FakeTerminal.prototype, "dispose");
+    await openedGhostty(mounted);
     expect(mounted.getAttribute("aria-hidden")).toBe("false");
 
     press({ key: ".", code: "Period", ctrlKey: true });
@@ -133,9 +137,18 @@ function hostTerminal(): HTMLElement | null {
 /// The live renderer drawing into the host terminal's element. A rebuilt
 /// terminal dials as soon as its renderer exists, so waiting for this one
 /// also waits out a dial a rebuild would make.
-function liveHostRenderer(): FakeTerminal | undefined {
+function liveHostRenderer(): Terminal | undefined {
   const root = hostTerminal();
-  return xterm.terminals.find((t) => !t.disposed && t.element !== null && root?.contains(t.element));
+  return ghosttyFixture.terminals.find((t) => t.element?.isConnected && root?.contains(t.element));
+}
+
+// The shared software canvas measures an 8 by 19 CSS-pixel cell.
+function hostSize(root: HTMLElement, cols: number, rows: number): void {
+  const host = root.querySelector<HTMLElement>(".terminal-host")!;
+  Object.defineProperties(host, {
+    clientWidth: { configurable: true, value: cols * 8 },
+    clientHeight: { configurable: true, value: rows * 19 },
+  });
 }
 
 function paneHolding(el: HTMLElement): string | null {
@@ -146,11 +159,12 @@ function paneHolding(el: HTMLElement): string | null {
 /// with an unpositioned team spawned over it and the host selected again.
 /// Returns what survives or not: the host's element, its renderer and its
 /// dials.
-async function hostUnderTeam(): Promise<{ root: HTMLElement; term: FakeTerminal; dials: Dial[] }> {
+async function hostUnderTeam(): Promise<{ root: HTMLElement; term: Terminal; dials: Dial[] }> {
   const dials = recordDials();
   resetLayout([terminalTab({ id: HOST, title: "host", terminalSessionId: HOST_SESSION })]);
   await settle();
   await vi.waitFor(() => expect(hostTerminal()).not.toBeNull());
+  await openedGhostty(hostTerminal()!);
   onWatchEvent({
     type: "window_command",
     window_id: sessionWindowId(),
@@ -188,7 +202,7 @@ describe("a live terminal under a pane restructure", () => {
     expect({
       sameElement: hostTerminal() === root,
       sameRenderer: liveHostRenderer() === term,
-      disposed: term.disposed,
+      disposed: dispose.mock.instances.includes(term),
       hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
       pane: paneHolding(root),
     }).toEqual({ sameElement: true, sameRenderer: true, disposed: false, hostDialsSince: ["0"], pane: SEED_PANE });
@@ -199,7 +213,7 @@ describe("a live terminal under a pane restructure", () => {
     const target = splitPane(SEED_PANE, "row")!;
     await settle();
 
-    xterm.fit.size = { cols: 57, rows: 19 };
+    hostSize(root, 57, 19);
     moveTab(SEED_PANE, HOST, target);
     await settle();
     await vi.waitFor(() => expect(liveHostRenderer()).toBeDefined());
@@ -207,7 +221,7 @@ describe("a live terminal under a pane restructure", () => {
     expect({
       sameElement: hostTerminal() === root,
       sameRenderer: liveHostRenderer() === term,
-      disposed: term.disposed,
+      disposed: dispose.mock.instances.includes(term),
       hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
       pane: paneHolding(root),
     }).toEqual({ sameElement: true, sameRenderer: true, disposed: false, hostDialsSince: ["0"], pane: target });
@@ -264,7 +278,7 @@ describe("a live terminal under a positioned team spawn", () => {
     expect({
       sameElement: hostTerminal() === root,
       sameRenderer: liveHostRenderer() === term,
-      disposed: term.disposed,
+      disposed: dispose.mock.instances.includes(term),
       hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
       drawnWhereListed: paneHolding(root) === paneListing("host"),
       inAMemberCell: memberPanes.includes(paneHolding(root)),
@@ -282,8 +296,8 @@ describe("a live terminal under a positioned team spawn", () => {
 describe("a terminal the pane tree rebuilds", () => {
   test("opens its renderer inside the pane that holds it", async () => {
     const openedIn: Array<string | null> = [];
-    const open = FakeTerminal.prototype.open;
-    vi.spyOn(FakeTerminal.prototype, "open").mockImplementation(function (this: FakeTerminal, element: HTMLElement) {
+    const open = Terminal.prototype.open;
+    vi.spyOn(Terminal.prototype, "open").mockImplementation(function (this: Terminal, element: HTMLElement) {
       openedIn.push(element.closest<HTMLElement>("[data-pane-id]")?.dataset.paneId ?? null);
       open.call(this, element);
     });
@@ -303,8 +317,8 @@ describe("a terminal the pane tree rebuilds", () => {
     setActivePane(SEED_PANE);
     await settle();
     await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
-    xterm.fit.size = { cols: 90, rows: 30 };
-    const focusesBefore = term.focusCount;
+    hostSize(root, 90, 30);
+    const focus = vi.spyOn(term, "focus");
 
     await closePane(beside);
     await settle();
@@ -318,7 +332,7 @@ describe("a terminal the pane tree rebuilds", () => {
       sameRenderer: liveHostRenderer() === term,
       hostDialsSince: hostDials(dials).map((d) => d.url.searchParams.get("since")),
       pane: paneHolding(root),
-      refocused: term.focusCount > focusesBefore,
+      refocused: focus.mock.calls.length > 0,
     }).toEqual({ sameElement: true, sameRenderer: true, hostDialsSince: ["0"], pane: SEED_PANE, refocused: true });
   });
 
@@ -331,7 +345,7 @@ describe("a terminal the pane tree rebuilds", () => {
     await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
     const [dial] = hostDials(dials);
     const sentBefore = dial!.sent.length;
-    const focusesBefore = term.focusCount;
+    const focus = vi.spyOn(term, "focus");
 
     (layout.nodes[other] as LeafNode).tabs.push(fileTab({ id: "elsewhere", path: "README.md" }));
     await settle();
@@ -339,7 +353,7 @@ describe("a terminal the pane tree rebuilds", () => {
 
     expect({
       sent: dial!.sent.slice(sentBefore).map((frame) => frame.type),
-      refocused: term.focusCount > focusesBefore,
+      refocused: focus.mock.calls.length > 0,
     }).toEqual({ sent: [], refocused: false });
   });
 
@@ -349,7 +363,7 @@ describe("a terminal the pane tree rebuilds", () => {
     await closeTab(SEED_PANE, HOST, { force: true });
     await settle();
 
-    expect({ disposed: term.disposed, element: hostTerminal() }).toEqual({ disposed: true, element: null });
+    expect({ disposed: dispose.mock.instances.includes(term), element: hostTerminal() }).toEqual({ disposed: true, element: null });
   });
 });
 
@@ -359,7 +373,6 @@ describe("the keyboard after a relocation", () => {
   // asked to take it back once the pane beside it closes and its own pane is
   // rebuilt, with its focus and its tab unchanged.
   async function focusedHostBesideEmptyPane() {
-    xterm.textareaFocus = true;
     const host = await hostUnderTeam();
     const beside = splitPane(SEED_PANE, "row")!;
     await settle();
@@ -411,13 +424,13 @@ describe("the keyboard after a relocation", () => {
     const { root, term, beside } = await focusedHostBesideEmptyPane();
     await openFind(root);
     term.focus();
-    expect(document.activeElement).toBe(term.textarea);
+    await vi.waitFor(() => expect(document.activeElement).toBe(term.element));
     const asked = recordFocusRequests();
 
     await closePane(beside);
     await settle();
 
-    await vi.waitFor(() => expect(lastAskedInside(asked, root)).toBe(term.textarea));
+    await vi.waitFor(() => expect(lastAskedInside(asked, root)).toBe(term.element));
   });
 
   test("goes back to the Rich Prompt composer that held it", async () => {
