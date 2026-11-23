@@ -37,7 +37,7 @@ import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
-import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
+import { engineClick, modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { FRESH_SHELL_ALT_EXIT, FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
 import {
   attach,
@@ -260,6 +260,38 @@ describe("mouse events encoded by the Ghostty input handler", () => {
       ]),
     );
     expect(received).toEqual(reports.map((data) => [data, !sgr]));
+  });
+
+  test("on the Linux desktop a middle click pastes PRIMARY once and reports nothing; the other buttons still report", async () => {
+    const invoke = vi.fn(async (cmd: string, _args?: unknown) => (cmd === "read_primary_selection" ? "from PRIMARY" : undefined));
+    const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invoke } };
+    desktop.__TAURI_INTERNALS__ = { invoke };
+    cleanups.push(() => delete desktop.__TAURI_INTERNALS__);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[?1000h\x1b[?1006h");
+    expect(ghosttyMouseTracking(term)).toBe(true);
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    const { width, height } = ghosttyCellMetrics(term);
+    const at = { clientX: 2.5 * width, clientY: 1.5 * height };
+    socket.sent.splice(0);
+    invoke.mockClear();
+
+    const middle = engineClick(canvas, 1, at);
+    await vi.waitFor(() => expect(inputFrames(socket)).toEqual([{ type: "input", data: "from PRIMARY" }]));
+    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
+    expect(middle.down.defaultPrevented, "the widget leaves a cancelled press to the embedder").toBe(true);
+    expect(middle.click.defaultPrevented, "the webview does not paste it too").toBe(true);
+
+    socket.sent.splice(0);
+    for (const button of [0, 2] as const) {
+      expect(engineClick(canvas, button, at).down.defaultPrevented, `button ${button} stays the widget's`).toBe(false);
+    }
+    expect(inputFrames(socket).map((frame) => frame.data)).toEqual([
+      "\x1b[<0;3;2M", "\x1b[<0;3;2m", "\x1b[<2;3;2M", "\x1b[<2;3;2m",
+    ]);
   });
 });
 

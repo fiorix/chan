@@ -11,8 +11,9 @@ export function isPrimarySelectionDesktop(): boolean {
 
 /// Mouse-only PRIMARY integration. Ghostty's selection writer handles its
 /// automatic copies; xterm announces selection changes on document mouseup.
-/// Capture owns the middle button before the renderer or WebKit can paste
-/// it, and the right click before either widget can select its textarea;
+/// Capture owns the middle button before the widget can report it or WebKit
+/// can paste it, and the right click before either widget can select its
+/// textarea;
 /// `openMenu` opens chan's terminal menu for that click.
 export function installTerminalPrimarySelection(
   host: HTMLElement,
@@ -29,6 +30,14 @@ export function installTerminalPrimarySelection(
   const selection = backend === "xterm" ? (term as XtermTerminal).onSelectionChange(() => {
     if (selecting) changed = true;
   }) : null;
+  // Ghostty captures and reports a press from its pointerdown and leaves a
+  // cancelled one to the embedder, so the middle press is cancelled here,
+  // before the canvas sees it; auxclick owns the PRIMARY paste. xterm.js
+  // reads the compatibility mouse events, which the listeners below keep
+  // from it.
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.button === 1) event.preventDefault();
+  };
   const onDown = (event: MouseEvent): void => {
     if (event.button === 0) {
       gesture += 1;
@@ -93,6 +102,7 @@ export function installTerminalPrimarySelection(
     event.stopImmediatePropagation();
     openMenu(event);
   };
+  if (backend === "ghostty") host.addEventListener("pointerdown", onPointerDown, true);
   host.addEventListener("mousedown", onDown, true);
   host.addEventListener("mouseup", onUp, true);
   host.addEventListener("auxclick", onMiddle, true);
@@ -102,6 +112,7 @@ export function installTerminalPrimarySelection(
   return () => {
     alive = false;
     selection?.dispose();
+    host.removeEventListener("pointerdown", onPointerDown, true);
     host.removeEventListener("mousedown", onDown, true);
     host.removeEventListener("mouseup", onUp, true);
     host.removeEventListener("auxclick", onMiddle, true);
