@@ -118,13 +118,16 @@ function measure(phase: string, work: () => void) {
   results.at(-1)!.samples.push(sample);
   sample = undefined;
 }
-function settle(phase: string, stream: boolean) {
+async function settle(phase: string, stream: boolean) {
   for (let i = 0; i < 2000; i++) {
     measure(phase, () => {
       if (stream && i < 8 && i % 2 === 0) terminal!.write('xyz output\r\n'.repeat(8));
       animationFrame();
     });
     if (!terminal!.search.state.partial && (!stream || i >= 8)) return;
+    // Real animation frames return to the event loop between work slices.
+    // Keep the clock real and permit runtime housekeeping without forcing GC.
+    await new Promise(resolve => setTimeout(resolve, 0));
   }
   throw new Error('Maximum-history search did not settle within 2000 measured frames');
 }
@@ -148,7 +151,7 @@ function save() {
       cpu: readFileSync('/proc/cpuinfo', 'utf8').split('\n').find(line => line.startsWith('model name')),
       kernel: readFileSync('/proc/sys/kernel/osrelease', 'utf8').trim(),
       medium: 'jsdom; software rectangle canvas shim, fixed glyph metrics, no glyph rasterization; not a browser',
-      budgetBytes: BYTES, cols: 80, rows: 24, line: LINE, timing: 'performance.now; manual animation frames; instrumented wall time' },
+      budgetBytes: BYTES, cols: 80, rows: 24, line: LINE, timing: 'performance.now; manual animation frames with macrotask yields; instrumented wall time' },
     results, coreLimits,
   }, null, 2) + '\n');
 }
@@ -216,7 +219,7 @@ describe.skipIf(!output)('maximum-history search work', () => {
     results.push({ query, rows: previous, samples: [], summary: {} });
     instrument();
     measure('newest-start', () => terminal!.search.find(query));
-    settle('newest-stream', true);
+    await settle('newest-stream', true);
     expect(terminal.search.state.total).toBeGreaterThan(50_000);
     const exactCount = () => expect(terminal!.search.state.total).toBe(
       terminal!.core!.plainText()!.split(query).length - 1);
@@ -227,10 +230,10 @@ describe.skipIf(!output)('maximum-history search work', () => {
     measure('oldest-step', () => terminal!.search.step(query, 'newer'));
     expect(terminal.search.state.index).toBe(terminal.search.state.total);
     for (let i = 0; i < 10; i++) measure('oldest-paint', () => animationFrame());
-    settle('oldest-stream', true);
+    await settle('oldest-stream', true);
     exactCount();
     measure('reflow', () => terminal!.resize(40, 24));
-    settle('reflow-scan', false);
+    await settle('reflow-scan', false);
     expect(terminal.search.state.total).toBeGreaterThan(50_000);
     exactCount();
     save();

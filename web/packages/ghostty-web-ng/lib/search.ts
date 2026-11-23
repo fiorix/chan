@@ -242,7 +242,11 @@ export class SearchOwner {
       const checked = this.checked();
       if (checked >= LEARN_CHECK) this.completeMs = learned(this.completeMs, search.completingUnitMs / checked, COST_PRIORS.complete);
     }
-    this.readResults(Math.min(started + SCAN_BUDGET_MS + PLACEMENT_BUDGET_MS, performance.now() + PLACEMENT_BUDGET_MS));
+    // A new core snapshot can require a whole-buffer copy. Do not stack it
+    // on a spent scan slice; pending placement gets a fresh slice next frame.
+    this.readResults(pending
+      ? Math.min(started + SCAN_BUDGET_MS + PLACEMENT_BUDGET_MS, performance.now() + PLACEMENT_BUDGET_MS)
+      : started + SCAN_BUDGET_MS);
     const reveal = this.applyWaiting();
     // Schedule before notifying: a subscriber can close or replace the query.
     if (!this.complete || this.waiting.length > 0 || this.restoreAt !== null) this.schedule();
@@ -296,6 +300,7 @@ export class SearchOwner {
 
   private indexOf(range: MatchRange): number | undefined {
     const found = this.indexFor(range).get(startKey(range));
+    if (found === undefined) return undefined;
     const sameEnd = (index: number) => {
       const end = this.matches[Math.floor(index / 256)][index % 256].end;
       return end.absoluteRow === range.endRow && end.col === range.endCol;
