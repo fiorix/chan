@@ -116,6 +116,8 @@ enum Row {
         started: Instant,
         #[cfg(test)]
         test_status: Option<chan_wireguard::Status>,
+        #[cfg(test)]
+        test_closed: bool,
     },
     /// The source at `path` was refused, for `reason`; nothing runs.
     Refused { path: PathBuf, reason: String },
@@ -177,10 +179,9 @@ impl WireguardFabric {
                 .is_some_and(|(parameters, enrolled_key)| {
                     parameters == enrollment && enrolled_key == &key
                 })
-                && row
-                    .ingresses
-                    .iter()
-                    .all(|(_, ingress)| matches!(ingress, Row::Running { .. }))
+                && row.ingresses.iter().all(|(_, ingress)| {
+                    matches!(ingress, Row::Running { .. }) && !ingress.is_closed()
+                })
             {
                 return row.answer();
             }
@@ -213,7 +214,9 @@ impl WireguardFabric {
                             return None;
                         }
                         row.ingresses.iter().find(|(held, state)| {
-                            held == &id && matches!(state, Row::Running { .. })
+                            held == &id
+                                && matches!(state, Row::Running { .. })
+                                && !state.is_closed()
                         })
                     });
                     let state = if let Some((_, state)) = retained {
@@ -326,7 +329,11 @@ impl WireguardFabric {
         let mut rows = self.rows.lock().unwrap();
         if let Some(row) = rows.get(gateway_id) {
             if row.enrollment.is_none()
-                && matches!(row.ingresses.first(), Some((_, Row::Running { path, .. })) if path == conf)
+                && matches!(
+                    row.ingresses.first(),
+                    Some((_, running @ Row::Running { path, .. }))
+                        if path == conf && !running.is_closed()
+                )
             {
                 return row.answer();
             }
@@ -610,6 +617,22 @@ impl WireguardFabric {
         };
         *test_status = Some(status);
     }
+
+    #[cfg(test)]
+    pub(crate) fn mark_closed_for_test(&self, gateway_id: &str, ingress: &str) {
+        let mut rows = self.rows.lock().unwrap();
+        let (_, state) = rows
+            .get_mut(gateway_id)
+            .expect("test gateway row")
+            .ingresses
+            .iter_mut()
+            .find(|(id, _)| id == ingress)
+            .expect("test ingress");
+        let Row::Running { test_closed, .. } = state else {
+            panic!("test ingress is not running");
+        };
+        *test_closed = true;
+    }
 }
 
 impl GatewayRow {
@@ -636,6 +659,7 @@ impl GatewayRow {
                 }
                 let id = id.strip_prefix(gateway_id)?.strip_prefix('/')?;
                 let status = match row {
+                    Row::Running { .. } if row.is_closed() => STOPPED.to_string(),
                     Row::Running { .. } => describe(
                         row.tunnel_status()
                             .expect("a running ingress has a tunnel status"),
@@ -668,6 +692,9 @@ impl GatewayRow {
         for (_, row) in &self.ingresses {
             if Some(row.path()) != configured {
                 continue;
+            }
+            if row.is_closed() {
+                return Some(STOPPED.to_string());
             }
             let Some(status) = row.tunnel_status() else {
                 continue;
@@ -710,6 +737,8 @@ impl Row {
                 started: Instant::now(),
                 #[cfg(test)]
                 test_status: None,
+                #[cfg(test)]
+                test_closed: false,
             },
             Err(reason) => Self::Refused {
                 path: path.to_owned(),
@@ -722,6 +751,20 @@ impl Row {
         match self {
             Self::Running { path, .. } | Self::Refused { path, .. } => path,
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        #[cfg(test)]
+        if matches!(
+            self,
+            Row::Running {
+                test_closed: true,
+                ..
+            }
+        ) {
+            return true;
+        }
+        matches!(self, Row::Running { tunnel, .. } if tunnel.is_closed())
     }
 
     fn tunnel_status(&self) -> Option<chan_wireguard::Status> {
@@ -786,6 +829,10 @@ fn start_config(
         }
     }
 }
+
+/// The launcher's words for a tunnel whose driver has stopped. It carries
+/// nothing until the gateway's next connect starts a new one.
+const STOPPED: &str = "stopped; connect the gateway again";
 
 /// The launcher's words for a tunnel's state. A tunnel keeps handshaking
 /// with the endpoint it knows while lookups of the name fail, so a live
@@ -2490,6 +2537,61 @@ pub(crate) mod tests {
             .count();
         assert_eq!(started, 1, "{:?}", lines.infos());
         assert_eq!(fabric.tunnels(), 1);
+    }
+
+    #[tokio::test]
+    async fn adopt_replaces_a_tunnel_whose_driver_stopped() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let fabric = start(&[]).await;
+        fabric.adopt("gw", &far.conf, Vec::new()).unwrap();
+        carried(&fabric, &mut listener, "10.7.0.1", "10.7.0.2").await;
+
+        fabric.mark_closed_for_test("gw", "gw");
+        assert_eq!(
+            fabric.status("gw", Some(&far.conf)).as_deref(),
+            Some(STOPPED),
+            "a stopped tunnel must not read as up"
+        );
+
+        assert_eq!(
+            fabric.adopt("gw", &far.conf, Vec::new()).as_deref(),
+            Ok("connecting")
+        );
+        carried(&fabric, &mut listener, "10.7.0.1", "10.7.0.2").await;
+        assert_eq!(fabric.status("gw", Some(&far.conf)).as_deref(), Some("up"));
+        let started = lines
+            .infos()
+            .iter()
+            .filter(|line| line.contains("gateway WireGuard tunnel started"))
+            .count();
+        assert_eq!(started, 2, "{:?}", lines.infos());
+        assert_eq!(fabric.tunnels(), 1);
+    }
+
+    #[tokio::test]
+    async fn enrolled_adopt_restarts_only_the_ingress_whose_driver_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (row, _peers) = enrolled_peers(dir.path(), "gw-multi").await;
+        let fabric = start(std::slice::from_ref(&row)).await;
+        let started = |id: &str| {
+            fabric
+                .ingress_starts(&row.id)
+                .into_iter()
+                .find(|(held, _)| held == id)
+                .map(|(_, at)| at)
+                .unwrap()
+        };
+        let original = [started("gw-multi/p1"), started("gw-multi/p2")];
+
+        fabric.mark_closed_for_test("gw-multi", "gw-multi/p1");
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+
+        assert_ne!(started("gw-multi/p1"), original[0], "the stopped ingress");
+        assert_eq!(started("gw-multi/p2"), original[1], "the running ingress");
     }
 
     #[tokio::test]
