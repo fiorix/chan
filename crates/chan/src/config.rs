@@ -1133,6 +1133,64 @@ mod tests {
         assert_eq!(listing["server"]["terminal"]["font_size"], 13, "{out}");
     }
 
+    /// A stdout that refuses every write, as a pipe whose reader has gone.
+    struct RefusingWriter;
+
+    impl std::io::Write for RefusingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn config_returns_a_refused_stdout_write_as_its_error() {
+        let _env = test_env::ChanTestEnv::new();
+        let font_size = |json| ConfigAction::Get {
+            key: Some("terminal.font_size".into()),
+            json,
+        };
+        for action in [
+            ConfigAction::Set {
+                key: "terminal.font_size".into(),
+                value: Some("13".into()),
+            },
+            ConfigAction::Get {
+                key: Some("terminal.ghostty".into()),
+                json: false,
+            },
+            ConfigAction::Get {
+                key: None,
+                json: false,
+            },
+            ConfigAction::Get {
+                key: None,
+                json: true,
+            },
+            font_size(false),
+            font_size(true),
+        ] {
+            let label = format!("{action:?}");
+            let error = config_command(action, &mut RefusingWriter, &mut std::io::sink())
+                .expect_err(&label);
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                Some(std::io::ErrorKind::BrokenPipe),
+                "{label}: {error:#}"
+            );
+        }
+
+        // The retired key's set answers on stderr alone.
+        let set = ConfigAction::Set {
+            key: "terminal.ghostty".into(),
+            value: Some("false".into()),
+        };
+        config_command(set, &mut RefusingWriter, &mut std::io::sink()).unwrap();
+    }
+
     #[test]
     fn retired_engine_key_is_left_out_of_listings() {
         let tmp = tempfile::TempDir::new().unwrap();
