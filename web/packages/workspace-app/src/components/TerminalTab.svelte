@@ -1848,6 +1848,19 @@
       wakeProbe.frameReceived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
+        // Count the frame before the terminal takes it. The core parses a
+        // write before anything it then runs (replies, change listeners, a
+        // render), so code inside the write sees the position the core
+        // reached, and a throw from any of it cannot leave the position
+        // short: a short ack stops the server once its window fills, and a
+        // short cursor makes a redial replay what the screen already shows.
+        // It precedes the reset and notice below, whose writes run the same
+        // listeners.
+        streamAck.parsed(bytes.length, attachReplayActive);
+        // Advance the server byte cursor only for LIVE output: replay chunks
+        // (between the `session` and `ready` frames) reconstruct history up to
+        // the prelude `seq` we already adopted, so counting them would double.
+        if (!attachReplayActive) receivedSeq += bytes.length;
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
           const terminal = term;
@@ -1866,11 +1879,6 @@
           }
         }
         writePtyOutput(bytes, attachPtyWriteOrigin());
-        streamAck.parsed(bytes.length, attachReplayActive);
-        // Advance the server byte cursor only for LIVE output: replay chunks
-        // (between the `session` and `ready` frames) reconstruct history up to
-        // the prelude `seq` we already adopted, so counting them would double.
-        if (!attachReplayActive) receivedSeq += bytes.length;
         recordOutputActivity();
         maybeSeedPrompt();
         return;
