@@ -18,7 +18,14 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("./ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "../components/TerminalTab.svelte";
-import { ghosttyFixture, ghosttyHasFocus, mountGhosttyTerminal, pressInGhostty, typeInGhostty } from "./ghosttyTab";
+import {
+  ghosttyFixture,
+  ghosttyHasFocus,
+  holdGhosttyLoads,
+  mountGhosttyTerminal,
+  pressInGhostty,
+  typeInGhostty,
+} from "./ghosttyTab";
 import { SoftwareCanvasContext } from "./softwareCanvas";
 import {
   attach,
@@ -63,6 +70,21 @@ test("the product's glyph painter and overlay scrollbar install on the fixture's
   await opened();
   const hooks = warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web"));
   expect(hooks, "no compat hook failed open").toEqual([]);
+});
+
+// The widget dials once it has loaded and opened, so the mount waits for the
+// widget before it looks for the socket; a socket wait first would give up at
+// its own bound, a second, on a load slower than that.
+test("mountTerminal outlasts a load slower than a second", async () => {
+  const release = holdGhosttyLoads();
+  const [tab] = seatTerminals([terminalTab()]);
+  const mounting = mountTerminal(TerminalTab, tab!);
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  expect(TerminalSocket.all, "nothing dials before the widget opens").toHaveLength(0);
+  release();
+  await mounting;
+  expect(ghosttyFixture.terminals).toHaveLength(1);
+  expect(TerminalSocket.all).toHaveLength(1);
 });
 
 test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {

@@ -179,6 +179,23 @@ export const ghosttyFixture: GhosttyRuntime = { module: null, terminals: [] };
 
 let coreCompiled: Promise<void> | null = null;
 
+/// Set while a case holds the fixture's loads back.
+let heldLoads: { until: Promise<void>; release(): void } | null = null;
+
+/// Hold every fixture load until the returned release runs, or until the
+/// next `resetTerminals`: a load as slow as the case needs, for a wait that
+/// must outlast it.
+export function holdGhosttyLoads(): () => void {
+  let release = () => {};
+  const until = new Promise<void>((resolve) => (release = resolve));
+  const held = { until, release };
+  heldLoads = held;
+  return () => {
+    if (heldLoads === held) heldLoads = null;
+    held.release();
+  };
+}
+
 /// The `vi.mock("../terminal/backend", ...)` factory. Every terminal opens on
 /// the widget, as in the product, and the loader hands out the vendored core
 /// instead of fetching it.
@@ -193,6 +210,7 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
     ...actual,
     loadGhosttyKit: async (): Promise<GhosttyKit> => {
       await coreCompiled;
+      if (heldLoads) await heldLoads.until;
       return fixtureKit(actual.ghosttyKitFrom);
     },
   };
@@ -275,6 +293,10 @@ function resetGhosttyFixture(): void {
   // the file on the software canvas.
   servedTerminals.clear();
   giveCanvasesBack();
+  if (heldLoads) {
+    heldLoads.release();
+    heldLoads = null;
+  }
 }
 
 /// Data the terminal emits as typed input, as a key or a paste does.
