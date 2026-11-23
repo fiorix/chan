@@ -97,3 +97,29 @@ These apply to every suite and every scenario pack.
 9. Recursively delete only a path the run created and positively identified. Never aim a destructive step at a user workspace, a checkout, a home directory, an unresolved variable, a symlink, or a glob.
 
 Report failures, skips, and manual-only coverage explicitly. A skipped check is not a pass.
+
+## Native input recorder
+
+Browser check `343-native-input-record` and `desktop-observations/native-input-record.sh` record trusted input in Chrome and WebKitGTK. Both use `browser-smoke/lib/native-input/cases.mjs`, the shared Ghostty capture, and the raw PTY fixture. The Chrome leg runs through the browser rig. The desktop leg runs inside a desktop guest under `xvfb-run`, with `CHAN_BIN`, `CHAN_DESKTOP_BIN` and `NATIVE_INPUT_SHA` set to the built candidate. The shell takes one new output directory. These are guest instruments; the host control starts no browser, server or chan process:
+
+```sh
+node --test scripts/e2e/browser-smoke/lib/native-input/recorder.test.mjs
+```
+
+A guest source copy without `.git` needs the full candidate SHA in `scripts/e2e/browser-smoke/lib/native-input/worktree-sha.txt`, written after the source sync; `NATIVE_INPUT_SHA` is an alternative when the executor preserves it. Fixtures record this SHA, the instrument source hash, the engine version, the input mechanism and the keyboard layout. Chrome records the fields supplied by CDP. The desktop driver records the X server layout and uses XTEST through xdotool.
+
+Each fixture keeps `header`, `setup`, `steps`, `domEvents`, `observed`, `contract` and `verdict`. `observed.widget` taps the real app widget's public `onData`; `observed.pty` records the app's complete PTY input. An adapter-owned key has a null widget contract, meaning no widget emission. These are two layers of the same app terminal, not an isolated widget test. Program output and the cursor reply used to drain input are separate from input bytes; `setup.barrier` records that reply. Focus occurs before the per-case reset so its click cannot satisfy a mouse case. Capture listeners see adapter-stopped events, and a microtask records their final `defaultPrevented` state.
+
+`ok` means trusted events and exact bytes matched the written contract. `witnessed` means the named events occurred without a byte contract. `unavailable` means the engine refused a drive or did not complete an exploratory composition. `not-driven` names a platform or driver gap in the summary. `failed` remains red, including known protocol deviations. Byte mismatches retain both a fixture and a masked error file. Copied fixtures enforce the same trust and byte rules. Summary counts distinguish instrument failures from property failures; neither is a pass. WebKit's driver exits 10 for property failures and 3 for instrument failures; its shell maps those to 1 and 3. Chrome throws for either kind and leaves the summary in `native-input-chrome/` under the check output directory.
+
+Chrome's IME path supplies composition through CDP and records the engine's trusted events. It does not establish a native input method, keyCode 229 ordering, macOS Option/dead keys or Windows Alt codes. WebKitGTK composition requires an installed and configured input method and stays not-driven here. The case list retains the other layout and platform gaps with their reasons. A composition commit is only witnessed, never a byte pass. Each composition attempt ends with Escape outside its measurement, including failed attempts.
+
+### Native input contracts
+
+Expected bytes are constants in the case list. The protocol references and chan's keyboard ownership rules below establish them; recordings never update expectations. The host control also cross-checks Ctrl+Alt+A, Ctrl+V and plain typing against the app's pure evaluators. That cross-check is secondary to these contracts.
+
+- The [XTerm control sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) keyboard tables define normal-mode arrows as `CSI A/B/D/C`, F1 as `SS3 P`, F12 as `CSI 24~`, Home/End as `CSI H/F`, PageUp/PageDown as `CSI 5~/6~`, Delete/Insert as `CSI 3~/2~`, Alt+Up as `CSI 1;3A`, Shift+Up as `CSI 1;2A` and Shift+Tab as `CSI Z`. Chan's adapter owns these keys, so the widget emits nothing for these cases.
+- Chan's `ghosttyKeys.ts`, `xtermKeyboard.ts` and `clipboardChord.ts` define app ownership: Backspace and Shift+Backspace send DEL; Tab, Enter and Escape send HT, CR and ESC; Alt+Enter sends ESC CR; Linux Ctrl+Alt+A sends ESC SOH; Ctrl+V sends SYN; Ctrl+Shift+A stays with the browser. These adapter-owned cases emit nothing at the widget tap.
+- Plain `ab` and the Ctrl+Shift+V paste chord deliver their text once through the widget and PTY. Paste uses the native clipboard, with bracketed paste disabled in the raw fixture. Composition guards emit nothing while a composition is active. The commit observation has no byte oracle.
+- Without mouse tracking, a left press/release and wheel ticks produce trusted mouse events and no PTY input. SGR mouse bytes are covered by pointer check 337. Its buttonless hover enables 1003 and 1006 through PTY output and expects SGR code 35, the motion bit 32 plus no-button code 3.
+- The [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes) defines flag 1 as disambiguation. The program sends `CSI > 1 u`, then `CSI ? u`; the recorder requires `CSI ? 1 u` before driving Ctrl+C. Unicode `c` is 99 and the Ctrl modifier is 1 + 4 = 5, so the input contract is `CSI 99;5u` from the widget through the PTY. The program pops its flags after the measurement. Legacy ETX is a failing observation, not an alternative expectation.
