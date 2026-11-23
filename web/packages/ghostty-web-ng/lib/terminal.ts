@@ -33,7 +33,7 @@ import type {
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
+import { CanvasRenderer, type FontMetrics, type PaintLayer } from './renderer';
 import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
 import type { ILink } from './types';
 
@@ -148,6 +148,7 @@ export class Terminal {
       disableStdin: options.disableStdin ?? false,
       copy: options.copy,
       joinDrawnWraps: options.joinDrawnWraps,
+      testHooks: options.testHooks,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -258,7 +259,7 @@ export class Terminal {
     this.canvas.style.height = `${metrics.height * this.rows}px`;
 
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY);
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
   }
 
   /**
@@ -528,7 +529,7 @@ export class Terminal {
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this.scrollbarOpacity);
+      this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
 
       // Start render loop
       this.startRenderLoop();
@@ -624,7 +625,7 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
     }
 
@@ -744,7 +745,7 @@ export class Terminal {
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY);
+      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
@@ -879,6 +880,31 @@ export class Terminal {
    */
   public getViewportY(): number {
     return this.viewportY;
+  }
+
+  /** Add a layer above the widget; an unopened terminal retains no registration. */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (!this.isOpen) return () => {};
+    return this.renderer!.addPaintLayer(layer);
+  }
+
+  /**
+   * Repaint synchronously at the current scrollbar opacity. During a paint
+   * callback, request a full next frame instead of recursively rendering.
+   */
+  public refresh(): void {
+    if (!this.isOpen) return;
+    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+  }
+
+  /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */
+  public getMetrics(): Readonly<FontMetrics> | undefined {
+    return this.isOpen ? this.renderer!.getMetrics() : undefined;
+  }
+
+  private paintScrollbarOpacity(): number {
+    const fixed = this.options.testHooks?.scrollbarOpacity;
+    return fixed !== undefined ? Math.max(0, Math.min(1, fixed)) : this.scrollbarOpacity;
   }
 
   // ==========================================================================
@@ -1155,9 +1181,11 @@ export class Terminal {
         //    render state up to date and lists the rows that changed
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.scrollbarOpacity);
-
-        this.animationFrameId = requestAnimationFrame(loop);
+        try {
+          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
+        } finally {
+          if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);
+        }
       }
     };
     loop();
@@ -1661,7 +1689,7 @@ export class Terminal {
     }
     if (event.button !== 0 || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
-        this.scrollbarOpacity <= 0 || !this.canvas?.isConnected) return false;
+        this.paintScrollbarOpacity() <= 0 || !this.canvas?.isConnected) return false;
     const geometry = this.scrollbarGeometry();
     if (!geometry) return false;
     const { rect, track, thumb, history, top } = geometry;
@@ -1736,6 +1764,7 @@ export class Terminal {
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    if (this.options.testHooks?.scrollbarOpacity !== undefined) return;
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
@@ -1793,7 +1822,7 @@ export class Terminal {
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1818,7 +1847,7 @@ export class Terminal {
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1828,7 +1857,7 @@ export class Terminal {
         this.scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
         if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, 0);
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
         }
       }
     };

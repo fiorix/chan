@@ -28,6 +28,25 @@ export interface RendererOptions {
   devicePixelRatio?: number; // Default: window.devicePixelRatio
 }
 
+/** A snapshot of the rows repainted beneath a layer, in CSS pixels. */
+export interface PaintFrame {
+  readonly ctx: CanvasRenderingContext2D;
+  readonly metrics: Readonly<FontMetrics>;
+  readonly pixelRatio: number;
+  readonly viewportOffset: number;
+  readonly topRow: number;
+  readonly full: boolean;
+  readonly changedRows: readonly number[];
+  readonly rows: number;
+  readonly cols: number;
+}
+
+/** Numeric layers paint in stable ascending order; the sole mask paints last. */
+export interface PaintLayer {
+  readonly order: number | 'mask';
+  paint(frame: PaintFrame): void;
+}
+
 export interface FontMetrics {
   width: number; // Character cell width in CSS pixels
   height: number; // Character cell height in CSS pixels
@@ -85,6 +104,11 @@ export class CanvasRenderer {
   private theme: RendererTheme;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
+
+  private paintLayers: PaintLayer[] = [];
+  private repaintAll = false;
+  private rendering = false;
+  private paintedScrollbar = false;
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -158,27 +182,61 @@ export class CanvasRenderer {
   // ==========================================================================
 
   private measureFont(): FontMetrics {
-    // Use an offscreen canvas for measurement
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
-
-    // Set font (use actual pixel size for accurate measurement)
+    const ctx = document.createElement('canvas').getContext('2d')!;
     ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+    const ink = ctx.measureText('M');
+    const ascent = ink.actualBoundingBoxAscent || this.fontSize * 0.8;
+    const descent = ink.actualBoundingBoxDescent || this.fontSize * 0.2;
+    const natural = {
+      width: Math.ceil(ink.width),
+      height: Math.ceil(ascent + descent) + 2,
+      baseline: Math.ceil(ascent) + 1,
+    };
+    const measured = this.measureCell();
+    const ratio = this.devicePixelRatio;
+    if (!measured || !Number.isFinite(ratio) || ratio <= 0 ||
+        !Number.isFinite(measured.width) || measured.width <= 0 ||
+        !Number.isFinite(measured.height) || measured.height <= 0) return natural;
+    const width = Math.floor(measured.width * ratio) / ratio;
+    const height = Math.ceil(measured.height * ratio) / ratio;
+    if (width <= 0 || height <= 0) return natural;
+    return {
+      width,
+      height,
+      baseline: Math.max(0, Math.min(height, natural.baseline + (height - natural.height) / 2)),
+    };
+  }
 
-    // Measure width using 'M' (typically widest character)
-    const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
-
-    // Measure height using ascent + descent with padding for glyph overflow
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
-
-    // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
-    // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
-
-    return { width, height, baseline };
+  private measureCell(): { width: number; height: number } | null {
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const ctx = new OffscreenCanvas(100, 100).getContext('2d');
+        const probe = ctx?.measureText('W');
+        if (ctx && probe && 'fontBoundingBoxAscent' in probe && 'fontBoundingBoxDescent' in probe) {
+          ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+          const measured = ctx.measureText('W');
+          return { width: measured.width, height: measured.fontBoundingBoxAscent + measured.fontBoundingBoxDescent };
+        }
+      }
+    } catch {
+      // Engines without offscreen text metrics use the same DOM measurement.
+    }
+    const parent = this.canvas.parentElement;
+    if (!parent) return null;
+    const span = document.createElement('span');
+    span.textContent = 'W'.repeat(32);
+    span.setAttribute('aria-hidden', 'true');
+    Object.assign(span.style, {
+      display: 'inline-block', visibility: 'hidden', position: 'absolute',
+      top: '0', left: '-9999em', lineHeight: 'normal', whiteSpace: 'pre',
+      fontKerning: 'none', fontFamily: this.fontFamily, fontSize: `${this.fontSize}px`,
+    });
+    parent.appendChild(span);
+    try {
+      return { width: span.offsetWidth / 32, height: span.offsetHeight };
+    } finally {
+      span.remove();
+    }
   }
 
   // ==========================================================================
@@ -236,6 +294,40 @@ export class CanvasRenderer {
     viewportY: number = 0,
     scrollbarOpacity: number = 1
   ): void {
+    if (this.rendering) {
+      this.repaintAll = true;
+      return;
+    }
+    this.rendering = true;
+    const layers = [...this.paintLayers];
+    forceAll ||= this.repaintAll;
+    this.repaintAll = false;
+    let begun = false;
+    try {
+      const dirty = term.beginFrame();
+      begun = true;
+      this.paintFrame(term, forceAll || dirty === ABI.GhosttyRenderStateDirty.FULL,
+        viewportY, scrollbarOpacity, layers);
+    } catch (error) {
+      this.repaintAll = true;
+      throw error;
+    } finally {
+      try {
+        if (begun) term.endFrame();
+      } finally {
+        this.rendering = false;
+        this.currentTerm = null;
+      }
+    }
+  }
+
+  private paintFrame(
+    term: VtTerminal,
+    forceAll: boolean,
+    viewportY: number,
+    scrollbarOpacity: number,
+    layers: readonly PaintLayer[],
+  ): void {
     // The canvas scale is absolute, not relative: a host that resets the
     // drawing state at an unchanged size leaves an identity transform
     // behind, and the next repaint must heal it without waiting for a
@@ -252,11 +344,10 @@ export class CanvasRenderer {
     // the scrollbar reads the fraction.
     const historyRows = Math.max(0, Math.floor(viewportY));
 
-    // A resize, a screen switch, new colours or output that scrolled change
-    // every row.
-    if (term.beginFrame() === ABI.GhosttyRenderStateDirty.FULL) {
-      forceAll = true;
-    }
+    // The scrollbar touches every row. Fresh content under it also removes
+    // the previous strip when it disappears and prevents alpha accumulation.
+    const scrollbar = scrollbarOpacity > 0 && scrollbackLength > 0;
+    if (scrollbar || this.paintedScrollbar) forceAll = true;
 
     // Resize canvas if dimensions changed
     const needsResize =
@@ -280,28 +371,12 @@ export class CanvasRenderer {
     const highlights = this.highlightSource?.frame(scrollbackLength - historyRows, dims.rows, dims.cols);
     this.currentHighlightSpans = highlights?.spans ?? [];
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line).
-    // A cursor hidden or shown where it stands repaints its line as a move
-    // does: the core marks no row dirty for it.
-    const cursorMoved =
-      cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    const cursorShownChanged = cursor.visible !== this.lastCursorShown;
-    if (cursorMoved || cursorShownChanged || this.cursorBlink) {
-      // Mark cursor lines as needing redraw
-      if (!forceAll && !term.isRowDirty(cursor.y)) {
-        // Need to redraw cursor line
-        if (term.readRow(cursor.y, this.cells)) {
-          this.renderLine(this.cells, cursor.y, dims.cols);
-        }
-      }
-      if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
-        // Also redraw old cursor line if cursor moved to different line
-        if (!forceAll && !term.isRowDirty(this.lastCursorPosition.y)) {
-          if (term.readRow(this.lastCursorPosition.y, this.cells)) {
-            this.renderLine(this.cells, this.lastCursorPosition.y, dims.cols);
-          }
-        }
-      }
+    const cursorRows = new Set<number>();
+    const cursorShown = cursor.visible && this.cursorVisible;
+    const cursorMoved = cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
+    if (historyRows === 0 && (cursorMoved || cursorShown !== this.lastCursorShown)) {
+      cursorRows.add(cursor.y);
+      cursorRows.add(this.lastCursorPosition.y);
     }
 
     // Check if we need to redraw selection-related lines
@@ -382,7 +457,7 @@ export class CanvasRenderer {
       const needsRender =
         historyRows > 0
           ? true
-          : forceAll || term.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
+          : forceAll || term.isRowDirty(y) || cursorRows.has(y) || selectionRows.has(y) || hyperlinkRows.has(y);
 
       if (needsRender) {
         rowsToRender.add(y);
@@ -392,6 +467,7 @@ export class CanvasRenderer {
       }
     }
 
+    const changedRows: number[] = [];
     // Render each line
     for (let y = 0; y < dims.rows; y++) {
       if (!rowsToRender.has(y)) {
@@ -400,6 +476,7 @@ export class CanvasRenderer {
 
       if (this.readViewRow(term, y, historyRows, scrollbackLength)) {
         this.renderLine(this.cells, y, dims.cols);
+        changedRows.push(y);
       }
     }
 
@@ -409,22 +486,49 @@ export class CanvasRenderer {
     // Link underlines are drawn during cell rendering (see renderCell)
 
     // Render cursor (only if the view shows no history row)
-    if (historyRows === 0 && cursor.visible && this.cursorVisible) {
+    if (historyRows === 0 && cursorShown && rowsToRender.has(cursor.y)) {
       this.renderCursor(cursor.x, cursor.y);
     }
 
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
-    if (scrollbarOpacity > 0) {
-      this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
-    }
-
-    // Update last cursor position and visibility
+    if (scrollbar) this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
+    this.paintedScrollbar = scrollbar;
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
-    this.lastCursorShown = cursor.visible;
+    this.lastCursorShown = cursorShown;
 
-    // ALWAYS end the frame after rendering, regardless of forceAll: what
-    // changed is painted now, and the next frame lists only newer changes.
-    term.endFrame();
+    if (changedRows.length === 0) return;
+    const frame: PaintFrame = Object.freeze({
+      ctx: this.ctx,
+      metrics: Object.freeze(this.getMetrics()),
+      pixelRatio: this.devicePixelRatio,
+      viewportOffset: viewportY,
+      topRow: scrollbackLength - historyRows,
+      full: changedRows.length === dims.rows,
+      changedRows: Object.freeze(changedRows),
+      rows: dims.rows,
+      cols: dims.cols,
+    });
+    const errors: unknown[] = [];
+    for (const layer of layers) {
+      this.ctx.save();
+      try {
+        // Layers only composite onto fresh pixels, even if they draw a full
+        // canvas. A failing ordinary layer must not skip the final mask.
+        this.ctx.beginPath();
+        for (const row of changedRows) {
+          this.ctx.rect(0, row * this.metrics.height, dims.cols * this.metrics.width, this.metrics.height);
+        }
+        this.ctx.clip();
+        this.ctx.beginPath();
+        layer.paint(frame);
+      } catch (error) {
+        errors.push(error);
+      } finally {
+        this.ctx.restore();
+        this.ctx.beginPath();
+      }
+    }
+    if (errors.length > 0) throw errors[0];
   }
 
   /**
@@ -883,6 +987,27 @@ export class CanvasRenderer {
     return { ...this.metrics };
   }
 
+  /** Register a copied layer; changes become visible on the next frame. */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (layer.order !== 'mask' && !Number.isFinite(layer.order)) {
+      throw new RangeError('Paint layer order must be finite or "mask"');
+    }
+    if (layer.order === 'mask' && this.paintLayers.some((entry) => entry.order === 'mask')) {
+      throw new Error('Only one mask paint layer can be registered');
+    }
+    const entry: PaintLayer = { order: layer.order, paint: layer.paint };
+    this.paintLayers.push(entry);
+    this.paintLayers.sort((a, b) => a.order === 'mask' ? 1 : b.order === 'mask' ? -1 : a.order - b.order);
+    this.repaintAll = true;
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      this.paintLayers = this.paintLayers.filter((candidate) => candidate !== entry);
+      this.repaintAll = true;
+    };
+  }
+
   /**
    * Get canvas element (needed by SelectionManager)
    */
@@ -983,6 +1108,8 @@ export class CanvasRenderer {
    * Clear entire canvas
    */
   public clear(): void {
+    this.repaintAll = true;
+    this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0);
     // clearRect first because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -994,6 +1121,7 @@ export class CanvasRenderer {
    * Cleanup resources
    */
   public dispose(): void {
+    this.paintLayers = [];
     this.stopCursorBlink();
   }
 }

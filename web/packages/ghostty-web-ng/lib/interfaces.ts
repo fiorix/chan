@@ -16,6 +16,9 @@ export interface ITerminalOptions {
   fontFamily?: string; // Default: 'monospace'
   disableStdin?: boolean; // Disable keyboard input (default: false)
 
+  /** Test-only paint controls. Omit in production. */
+  testHooks?: TerminalTestHooks;
+
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
@@ -26,6 +29,12 @@ export interface ITerminalOptions {
   copy?: (text: string) => void;
   /** Asked on each text read and word/line click; defaults to false. */
   joinDrawnWraps?: () => boolean;
+}
+
+/** Test-only instrumentation; observe repaints with an ordinary paint layer. */
+export interface TerminalTestHooks {
+  /** Fixed paint opacity in [0, 1], disabling automatic scrollbar fades while set. */
+  scrollbarOpacity?: number;
 }
 
 export interface ITheme {
