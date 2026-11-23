@@ -13,6 +13,7 @@ import { spawn, execFile } from "node:child_process";
 import { globSync, mkdtempSync, readdirSync, cpSync, writeFileSync, rmSync, mkdirSync, lstatSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -66,22 +67,28 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
       () => reject(new Error(`chan serve: no URL after 60s\n${stderrLines.join("\n")}`)),
       60_000,
     );
-    const scan = (chunk) => {
-      for (const line of chunk.toString().split("\n")) {
-        if (!line.trim()) continue;
-        stderrLines.push(line);
-        log?.(`[server] ${line}`);
-        const m = line.match(/https?:\/\/[^\s]+/);
-        if (m && !resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          resolve(m[0]);
-        }
+    const scan = (line) => {
+      if (!line.trim()) return;
+      log?.(`[server] ${line}`);
+      const m = line.match(/https?:\/\/[^\s]+/);
+      if (m && !resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(m[0]);
       }
     };
-    child.stderr.on("data", scan);
-    child.stdout.on("data", scan);
-    child.on("exit", (code) => {
+    // Pipe chunks need not end at a line boundary. Keep stderr evidence
+    // separate even though either stream can announce the launch URL.
+    createInterface({ input: child.stderr, crlfDelay: Infinity }).on("line", (line) => {
+      if (line.trim()) stderrLines.push(line);
+      scan(line);
+    });
+    createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", scan);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
       if (!resolved) {
         clearTimeout(timer);
         reject(new Error(`chan serve exited early (${code})\n${stderrLines.join("\n")}`));

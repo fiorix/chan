@@ -307,6 +307,7 @@ try {
     // checks that exercise settings writes assert against the toml files
     // in here, never the host's real global config.
     chanHome: server.chanHome,
+    stderrLines: server.stderrLines,
     repoRoot: REPO,
     serverPid: server.child.pid,
     get controlSocket() {
