@@ -18,7 +18,6 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, closeExtraPanes, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -98,10 +97,10 @@ async function waitFor(page, card, label, accept, timeout = 15_000) {
 }
 
 /// Open a terminal with a composer holding the given text.
-async function openComposer(ctx, page, cs, windowId, backend, name, text) {
-  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend);
-  const attachment = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === row.session_id);
-  assert.ok(attachment.attached, `the ${backend} terminal is attached`);
+async function openComposer(ctx, page, cs, windowId, name, text) {
+  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+  const attachment = await readTerminalAttachment(page, cs, "ghostty", (entry) => entry.session_id === row.session_id);
+  assert.ok(attachment.attached, "the ghostty terminal is attached");
   const terminal = attachment.selector;
   const card = `${terminal} .rich-prompt`;
   await page.click(`${terminal} .terminal-host`);
@@ -255,296 +254,288 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
+    const backend = "ghostty";
     const shot = (label) => ctx.shot(`294-${label}`).catch(() => {});
     const failures = [];
+    await page.evaluate(tracePrompts);
     try {
-      await page.evaluate(tracePrompts);
+      const name = `Press294-${backend}`;
+      const text = `PROMPT294-${backend}`;
+      const result = { backend, passed: false, pageErrors: [], cleanupErrors: [], steps: {} };
+      const onError = (error) => result.pageErrors.push(String(error));
+      page.on("pageerror", onError);
+      let opened = false;
+      const stop = join(ctx.workspaceDir, `.press294-${backend}.stop`);
       try {
-        for (const backend of ["xterm", "ghostty"]) {
-          const name = `Press294-${backend}`;
-          const text = `PROMPT294-${backend}`;
-          const result = { backend, passed: false, pageErrors: [], cleanupErrors: [], steps: {} };
-          const onError = (error) => result.pageErrors.push(String(error));
-          page.on("pageerror", onError);
-          let opened = false;
-          const stop = join(ctx.workspaceDir, `.press294-${backend}.stop`);
-          try {
-            await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
-            const { card, terminal } = await openComposer(ctx, page, cs, windowId, backend, name, text);
-            opened = true;
-            await page.evaluate(() => {
-              window.__prompt294.prompts.length = 0;
-            });
+        const { card, terminal } = await openComposer(ctx, page, cs, windowId, name, text);
+        opened = true;
+        await page.evaluate(() => {
+          window.__prompt294.prompts.length = 0;
+        });
 
-            // Step 1: a real press on Submit holds the composer, and the
-            // next key reaches it with no click. The release submits the
-            // draft; once it delivers, the typed key starts the next one.
-            result.steps.pressRecord = (await pressSubmit(page, card, `294-${backend}-press-held`, shot)).record;
-            await waitFor(page, card, "the submit delivers",
-              (value) => (value.text === "" && !value.pending ? value : false));
-            await page.keyboard.type("x");
-            result.steps.press = await waitFor(page, card, "the next key reaches the composer",
-              (value) => (value.text === "x" && value.where === "composer" ? value : false));
-            assert.equal(result.steps.press.editable, true);
-            await shot(`294-${backend}-pressed`);
-            await page.keyboard.down("Control");
-            await page.keyboard.press("Enter");
-            await page.keyboard.up("Control");
-            await waitFor(page, card, "the second draft delivers",
-              (value) => value.text === "" && !value.pending);
+        // Step 1: a real press on Submit holds the composer, and the
+        // next key reaches it with no click. The release submits the
+        // draft; once it delivers, the typed key starts the next one.
+        result.steps.pressRecord = (await pressSubmit(page, card, `294-${backend}-press-held`, shot)).record;
+        await waitFor(page, card, "the submit delivers",
+          (value) => (value.text === "" && !value.pending ? value : false));
+        await page.keyboard.type("x");
+        result.steps.press = await waitFor(page, card, "the next key reaches the composer",
+          (value) => (value.text === "x" && value.where === "composer" ? value : false));
+        assert.equal(result.steps.press.editable, true);
+        await shot(`294-${backend}-pressed`);
+        await page.keyboard.down("Control");
+        await page.keyboard.press("Enter");
+        await page.keyboard.up("Control");
+        await waitFor(page, card, "the second draft delivers",
+          (value) => value.text === "" && !value.pending);
 
-            // From here to the secondary press, the shell prints until the
-            // check releases it, at most 120 s: the server holds every submit
-            // in its queue (its drainer waits for quiet output), so each
-            // press below lands on a prompt that is still waiting. The
-            // marker is split in the command so only the output carries it.
-            rmSync(stop, { force: true });
-            await cs(["write", "--tab-name", name,
-              `i=0; while [ ! -e ${shellQuote(stop)} ] && [ $i -lt 600 ]; do printf 'HO%sLD\\n' ''; sleep .2; i=$((i+1)); done\n`]);
-            const holdDeadline = Date.now() + 15_000;
-            while (!(await cs(["scrollback", "--tab-name", name])).stdout.includes("HOLD")) {
-              if (Date.now() > holdDeadline) throw new Error("precondition: the shell never started holding the queue");
-              await sleep(200);
-            }
-
-            // Step 2: stop control. Submit again, catch the pending prompt,
-            // and press while it waits.
-            const keyboardSubmit = (draft) => async () => {
-              await page.click(`${card} .cm-content`);
-              await page.keyboard.down("Control");
-              await page.keyboard.press("KeyA");
-              await page.keyboard.up("Control");
-              await page.keyboard.type(draft);
-              await page.keyboard.down("Control");
-              await page.keyboard.press("Enter");
-              await page.keyboard.up("Control");
-            };
-            const recallText = `${text}-recall`;
-            if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
-              throw new Error("never caught a pending prompt in 4 submits");
-            }
-            result.steps.recallPress = (await pressSubmit(page, card, `294-${backend}-recall-press`, shot)).record;
-            result.steps.recall = await waitFor(page, card, "the run recalls",
-              (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
-            assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
-            await shot(`294-${backend}-recalled`);
-
-            // The failed recall: the cancel frame never goes out, so the
-            // ack timer fails the run instead. The drop is installed before
-            // the catch so no cancel can slip out first. The drop counter
-            // spans the backends, so this leg reads its own share of it, and
-            // the note the composer shows only on a failed run is the proof
-            // the recall failed rather than went through.
-            const droppedBefore = await page.evaluate(() => window.__prompt294.droppedCancels);
-            await page.evaluate(() => {
-              window.__prompt294.dropCancel = true;
-            });
-            const failText = `${text}-recall-fail`;
-            if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
-              throw new Error("never caught a pending prompt for the failed recall");
-            }
-            result.steps.failedPress = (await pressSubmit(page, card, `294-${backend}-failed-press`, shot)).record;
-            const failed = await waitFor(page, card, "the failed recall says the connection was lost",
-              (value) => value.note === "connection lost, message may still be queued", 9000);
-            const dropped = (await page.evaluate(() => window.__prompt294.droppedCancels)) - droppedBefore;
-            assert.ok(dropped > 0, "this leg dropped its own cancel frame");
-            assert.equal(failed.where, "composer", "focus holds through the failed recall");
-            assert.equal(failed.text, failText, "the failed recall keeps the text");
-            await page.evaluate(() => {
-              window.__prompt294.dropCancel = false;
-            });
-            result.steps.failedRecall = { where: failed.where, text: failed.text, dropped };
-            await shot(`294-${backend}-failed`);
-
-            // The secondary action: the failed recall's prompt is still
-            // queued behind the printing shell, and recall is offered once
-            // the composer is empty. A disabled button cannot take focus, so
-            // the press proves nothing unless the button is enabled.
-            await page.keyboard.down("Control");
-            await page.keyboard.press("KeyA");
-            await page.keyboard.up("Control");
-            await page.keyboard.press("Backspace");
-            await waitFor(page, card, "precondition: the composer is empty", (value) => value.text === "");
-            const secondaryButton = `${card} .rp-action:not(.rp-primary)`;
-            const secondary = await page.waitForFunction(
-              (selector) => {
-                const button = document.querySelector(selector);
-                return button && !button.disabled ? button.textContent?.trim() || "?" : false;
-              },
-              { timeout: 5000 },
-              secondaryButton,
-            ).then((handle) => handle.jsonValue()).catch(() => null);
-            if (!secondary) {
-              const seen = await page.$eval(secondaryButton, (button) => ({ label: button.textContent?.trim(), disabled: button.disabled }))
-                .catch(() => "absent");
-              throw new Error(`precondition: an enabled secondary recall once the composer is empty; it reads ${JSON.stringify(seen)}`);
-            }
-            const secondaryPoint = await installPressRecord(page, secondaryButton);
-            const { held, secondaryRecord } = await holdPress(page, secondaryPoint, async () => ({
-              held: await focusState(page, card),
-              secondaryRecord: await readPressRecord(page),
-            }));
-            try {
-              assert.equal(held.where, "composer", "the secondary press holds the composer");
-            } catch (error) {
-              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(secondaryRecord)}`);
-            }
-            result.steps.secondary = { label: secondary, where: held.where, record: secondaryRecord };
-            writeFileSync(stop, "");
-
-            // Two panes: B's composer is open while A is active. A real
-            // click on B's Submit sends without activating B.
-            await dispatchCommand(page, "app.pane.splitRight");
-            await page.waitForFunction(
-              () => document.querySelectorAll(".pane[data-pane-id]").length === 2,
-              { timeout: 10_000 },
-            );
-            const emptyPane = await page.evaluate(() => {
-              const panes = [...document.querySelectorAll(".pane[data-pane-id]")];
-              const empty = panes.find((pane) => !pane.querySelector(".terminal-tab"));
-              if (!empty) return null;
-              const box = empty.getBoundingClientRect();
-              return { id: empty.getAttribute("data-pane-id"), x: box.left + box.width / 2, y: box.top + 40 };
-            });
-            assert.ok(emptyPane, "the split leaves an empty pane");
-            await page.mouse.click(emptyPane.x, emptyPane.y);
-            await page.waitForFunction(
-              (id) => document.querySelector(".pane.focused")?.getAttribute("data-pane-id") === id,
-              { timeout: 10_000 },
-              emptyPane.id,
-            );
-            const nameB = `${name}-B`;
-            const textB = `${text}-B`;
-            const rowB = await openAttachedTerminal(ctx, page, cs, windowId, nameB, backend);
-            const attachmentB = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === rowB.session_id);
-            assert.ok(attachmentB.attached, "the second terminal is attached");
-            const cardB = `${attachmentB.selector} .rich-prompt`;
-            await page.click(`${attachmentB.selector} .terminal-host`);
-            await page.keyboard.down("Control");
-            await page.keyboard.down("Alt");
-            await page.keyboard.press("KeyP");
-            await page.keyboard.up("Alt");
-            await page.keyboard.up("Control");
-            await page.waitForSelector(`${cardB} .cm-content`, { visible: true, timeout: 15_000 });
-            await page.click(`${cardB} .cm-content`);
-            await page.keyboard.type(textB);
-            await waitFor(page, cardB, "B's draft is editable",
-              (value) => value.text === textB && value.editable && !value.pending);
-            await page.click(`${terminal} .terminal-host`);
-            const paneA = await activePaneId(page);
-            // The press moves no focus: A's element keeps the keyboard while
-            // B's button is held. Only the submit itself may then focus B's
-            // composer.
-            const pointB = await installPressRecord(page, `${cardB} .rp-primary`);
-            await page.evaluate(() => { window.__heldBefore294 = document.activeElement; });
-            const { heldB, unmovedB, recordB } = await holdPress(page, pointB, async () => ({
-              heldB: await focusState(page, cardB),
-              unmovedB: await page.evaluate(() => document.activeElement === window.__heldBefore294),
-              recordB: await readPressRecord(page),
-            }));
-            try {
-              assert.ok(unmovedB, `the press on B's button moves no focus (held at ${heldB.where})`);
-            } catch (error) {
-              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(recordB)}`);
-            }
-            const sentB = await waitFor(page, cardB, "B's submit sends and clears",
-              (value) => (value.text === "" && !value.pending ? value : false));
-            const promptsB = await page.evaluate(
-              (tab) => window.__prompt294.prompts.filter((prompt) => prompt.tab === tab),
-              nameB,
-            );
-            assert.equal(promptsB.length, 1, "exactly one prompt left B");
-            assert.equal(promptsB[0].data, textB);
-            assert.equal(sentB.where, "composer", "B's composer keeps the keyboard");
-            assert.equal(await activePaneId(page), paneA, "A is still the active pane");
-            result.steps.twoPane = { pane: paneA, prompts: promptsB.length, record: recordB };
-            await shot(`294-${backend}-twopane`);
-
-            // A deck run opened over Search returns to the Search input.
-            await dispatchCommand(page, "app.search.toggle");
-            await page.waitForSelector(".search .head input", { visible: true, timeout: 15_000 });
-            const searchInput = ".search .head input";
-            await page.click(searchInput);
-            await page.waitForFunction(
-              (selector) => document.activeElement === document.querySelector(selector),
-              { timeout: 15_000 },
-              searchInput,
-            );
-            // A run and a dismissal both hand the keyboard back to Search;
-            // the command the run dispatches tells them apart.
-            const queryBefore = await page.$eval(searchInput, (input) => input.value);
-            await page.evaluate(() => {
-              if (!window.__commands294) {
-                window.__commands294 = [];
-                window.addEventListener("chan:command", (event) => window.__commands294.push(event.detail?.name), true);
-              }
-            });
-            await dispatchCommand(page, "app.launcher.toggle");
-            await page.waitForSelector('[role="dialog"][aria-label="Command launcher"] .deck-input', {
-              visible: true,
-              timeout: 15_000,
-            });
-            await page.keyboard.type("Copy scrollback");
-            await page.waitForFunction(
-              (title) =>
-                document.querySelector('[role="option"][aria-selected="true"] .deck-result-title')?.textContent?.trim() ===
-                title,
-              { timeout: 15_000 },
-              "Copy scrollback",
-            );
-            await page.evaluate(() => { window.__commands294.length = 0; });
-            await page.keyboard.press("Enter");
-            await page.waitForFunction(
-              (selector) => document.activeElement === document.querySelector(selector),
-              { timeout: 15_000 },
-              searchInput,
-            );
-            const dispatched = await page.evaluate(() => window.__commands294.slice());
-            assert.ok(dispatched.includes("app.terminal.copyScrollback"),
-              `the deck ran Copy scrollback rather than closing: it dispatched ${JSON.stringify(dispatched)}`);
-            await page.keyboard.type("Q");
-            const query = await page.$eval(searchInput, (input) => input.value);
-            assert.equal(query, `${queryBefore}Q`, "typed text lands in the Search input");
-            await shot(`294-${backend}-search`);
-            result.steps.search = { queryBefore, query, dispatched };
-            await dispatchCommand(page, "app.search.toggle");
-
-            result.passed = true;
-          } catch (error) {
-            result.failure = String(error.message ?? error);
-            failures.push(`${backend}: ${result.failure}`);
-            result.final = await focusState(page, null).catch(() => null);
-            await shot(`294-${backend}-failure`).catch(() => {});
-          } finally {
-            page.off("pageerror", onError);
-            try { writeFileSync(stop, ""); } catch (error) { result.cleanupErrors.push(`queue release: ${error.message}`); }
-            if (opened) {
-              await page
-                .evaluate(() => Boolean(document.querySelector(".search .head input")))
-                .then((open) => (open ? dispatchCommand(page, "app.search.toggle") : null))
-                .catch((error) => {
-                  result.cleanupErrors.push(`search close: ${error.message}`);
-                });
-              await closeExtraPanes(page).catch((error) => {
-                result.cleanupErrors.push(`pane cleanup: ${error.message}`);
-              });
-              await closeEveryTerminal(page, "cleanup", token).catch((error) => {
-                result.cleanupErrors.push(`terminal cleanup: ${error.message}`);
-              });
-            }
-            writeFileSync(join(ctx.outDir, `294-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
-          }
-          if (result.passed && result.pageErrors.length) {
-            result.passed = false;
-            failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
-          }
+        // From here to the secondary press, the shell prints until the
+        // check releases it, at most 120 s: the server holds every submit
+        // in its queue (its drainer waits for quiet output), so each
+        // press below lands on a prompt that is still waiting. The
+        // marker is split in the command so only the output carries it.
+        rmSync(stop, { force: true });
+        await cs(["write", "--tab-name", name,
+          `i=0; while [ ! -e ${shellQuote(stop)} ] && [ $i -lt 600 ]; do printf 'HO%sLD\\n' ''; sleep .2; i=$((i+1)); done\n`]);
+        const holdDeadline = Date.now() + 15_000;
+        while (!(await cs(["scrollback", "--tab-name", name])).stdout.includes("HOLD")) {
+          if (Date.now() > holdDeadline) throw new Error("precondition: the shell never started holding the queue");
+          await sleep(200);
         }
+
+        // Step 2: stop control. Submit again, catch the pending prompt,
+        // and press while it waits.
+        const keyboardSubmit = (draft) => async () => {
+          await page.click(`${card} .cm-content`);
+          await page.keyboard.down("Control");
+          await page.keyboard.press("KeyA");
+          await page.keyboard.up("Control");
+          await page.keyboard.type(draft);
+          await page.keyboard.down("Control");
+          await page.keyboard.press("Enter");
+          await page.keyboard.up("Control");
+        };
+        const recallText = `${text}-recall`;
+        if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
+          throw new Error("never caught a pending prompt in 4 submits");
+        }
+        result.steps.recallPress = (await pressSubmit(page, card, `294-${backend}-recall-press`, shot)).record;
+        result.steps.recall = await waitFor(page, card, "the run recalls",
+          (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
+        assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
+        await shot(`294-${backend}-recalled`);
+
+        // The failed recall: the cancel frame never goes out, so the
+        // ack timer fails the run instead. The drop is installed before
+        // the catch so no cancel can slip out first. The counter delta
+        // proves this recall dropped its cancel; the composer's failure
+        // note proves the recall failed rather than went through.
+        const droppedBefore = await page.evaluate(() => window.__prompt294.droppedCancels);
+        await page.evaluate(() => {
+          window.__prompt294.dropCancel = true;
+        });
+        const failText = `${text}-recall-fail`;
+        if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
+          throw new Error("never caught a pending prompt for the failed recall");
+        }
+        result.steps.failedPress = (await pressSubmit(page, card, `294-${backend}-failed-press`, shot)).record;
+        const failed = await waitFor(page, card, "the failed recall says the connection was lost",
+          (value) => value.note === "connection lost, message may still be queued", 9000);
+        const dropped = (await page.evaluate(() => window.__prompt294.droppedCancels)) - droppedBefore;
+        assert.ok(dropped > 0, "this leg dropped its own cancel frame");
+        assert.equal(failed.where, "composer", "focus holds through the failed recall");
+        assert.equal(failed.text, failText, "the failed recall keeps the text");
+        await page.evaluate(() => {
+          window.__prompt294.dropCancel = false;
+        });
+        result.steps.failedRecall = { where: failed.where, text: failed.text, dropped };
+        await shot(`294-${backend}-failed`);
+
+        // The secondary action: the failed recall's prompt is still
+        // queued behind the printing shell, and recall is offered once
+        // the composer is empty. A disabled button cannot take focus, so
+        // the press proves nothing unless the button is enabled.
+        await page.keyboard.down("Control");
+        await page.keyboard.press("KeyA");
+        await page.keyboard.up("Control");
+        await page.keyboard.press("Backspace");
+        await waitFor(page, card, "precondition: the composer is empty", (value) => value.text === "");
+        const secondaryButton = `${card} .rp-action:not(.rp-primary)`;
+        const secondary = await page.waitForFunction(
+          (selector) => {
+            const button = document.querySelector(selector);
+            return button && !button.disabled ? button.textContent?.trim() || "?" : false;
+          },
+          { timeout: 5000 },
+          secondaryButton,
+        ).then((handle) => handle.jsonValue()).catch(() => null);
+        if (!secondary) {
+          const seen = await page.$eval(secondaryButton, (button) => ({ label: button.textContent?.trim(), disabled: button.disabled }))
+            .catch(() => "absent");
+          throw new Error(`precondition: an enabled secondary recall once the composer is empty; it reads ${JSON.stringify(seen)}`);
+        }
+        const secondaryPoint = await installPressRecord(page, secondaryButton);
+        const { held, secondaryRecord } = await holdPress(page, secondaryPoint, async () => ({
+          held: await focusState(page, card),
+          secondaryRecord: await readPressRecord(page),
+        }));
+        try {
+          assert.equal(held.where, "composer", "the secondary press holds the composer");
+        } catch (error) {
+          throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(secondaryRecord)}`);
+        }
+        result.steps.secondary = { label: secondary, where: held.where, record: secondaryRecord };
+        writeFileSync(stop, "");
+
+        // Two panes: B's composer is open while A is active. A real
+        // click on B's Submit sends without activating B.
+        await dispatchCommand(page, "app.pane.splitRight");
+        await page.waitForFunction(
+          () => document.querySelectorAll(".pane[data-pane-id]").length === 2,
+          { timeout: 10_000 },
+        );
+        const emptyPane = await page.evaluate(() => {
+          const panes = [...document.querySelectorAll(".pane[data-pane-id]")];
+          const empty = panes.find((pane) => !pane.querySelector(".terminal-tab"));
+          if (!empty) return null;
+          const box = empty.getBoundingClientRect();
+          return { id: empty.getAttribute("data-pane-id"), x: box.left + box.width / 2, y: box.top + 40 };
+        });
+        assert.ok(emptyPane, "the split leaves an empty pane");
+        await page.mouse.click(emptyPane.x, emptyPane.y);
+        await page.waitForFunction(
+          (id) => document.querySelector(".pane.focused")?.getAttribute("data-pane-id") === id,
+          { timeout: 10_000 },
+          emptyPane.id,
+        );
+        const nameB = `${name}-B`;
+        const textB = `${text}-B`;
+        const rowB = await openAttachedTerminal(ctx, page, cs, windowId, nameB, "ghostty");
+        const attachmentB = await readTerminalAttachment(page, cs, "ghostty", (entry) => entry.session_id === rowB.session_id);
+        assert.ok(attachmentB.attached, "the second terminal is attached");
+        const cardB = `${attachmentB.selector} .rich-prompt`;
+        await page.click(`${attachmentB.selector} .terminal-host`);
+        await page.keyboard.down("Control");
+        await page.keyboard.down("Alt");
+        await page.keyboard.press("KeyP");
+        await page.keyboard.up("Alt");
+        await page.keyboard.up("Control");
+        await page.waitForSelector(`${cardB} .cm-content`, { visible: true, timeout: 15_000 });
+        await page.click(`${cardB} .cm-content`);
+        await page.keyboard.type(textB);
+        await waitFor(page, cardB, "B's draft is editable",
+          (value) => value.text === textB && value.editable && !value.pending);
+        await page.click(`${terminal} .terminal-host`);
+        const paneA = await activePaneId(page);
+        // The press moves no focus: A's element keeps the keyboard while
+        // B's button is held. Only the submit itself may then focus B's
+        // composer.
+        const pointB = await installPressRecord(page, `${cardB} .rp-primary`);
+        await page.evaluate(() => { window.__heldBefore294 = document.activeElement; });
+        const { heldB, unmovedB, recordB } = await holdPress(page, pointB, async () => ({
+          heldB: await focusState(page, cardB),
+          unmovedB: await page.evaluate(() => document.activeElement === window.__heldBefore294),
+          recordB: await readPressRecord(page),
+        }));
+        try {
+          assert.ok(unmovedB, `the press on B's button moves no focus (held at ${heldB.where})`);
+        } catch (error) {
+          throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(recordB)}`);
+        }
+        const sentB = await waitFor(page, cardB, "B's submit sends and clears",
+          (value) => (value.text === "" && !value.pending ? value : false));
+        const promptsB = await page.evaluate(
+          (tab) => window.__prompt294.prompts.filter((prompt) => prompt.tab === tab),
+          nameB,
+        );
+        assert.equal(promptsB.length, 1, "exactly one prompt left B");
+        assert.equal(promptsB[0].data, textB);
+        assert.equal(sentB.where, "composer", "B's composer keeps the keyboard");
+        assert.equal(await activePaneId(page), paneA, "A is still the active pane");
+        result.steps.twoPane = { pane: paneA, prompts: promptsB.length, record: recordB };
+        await shot(`294-${backend}-twopane`);
+
+        // A deck run opened over Search returns to the Search input.
+        await dispatchCommand(page, "app.search.toggle");
+        await page.waitForSelector(".search .head input", { visible: true, timeout: 15_000 });
+        const searchInput = ".search .head input";
+        await page.click(searchInput);
+        await page.waitForFunction(
+          (selector) => document.activeElement === document.querySelector(selector),
+          { timeout: 15_000 },
+          searchInput,
+        );
+        // A run and a dismissal both hand the keyboard back to Search;
+        // the command the run dispatches tells them apart.
+        const queryBefore = await page.$eval(searchInput, (input) => input.value);
+        await page.evaluate(() => {
+          if (!window.__commands294) {
+            window.__commands294 = [];
+            window.addEventListener("chan:command", (event) => window.__commands294.push(event.detail?.name), true);
+          }
+        });
+        await dispatchCommand(page, "app.launcher.toggle");
+        await page.waitForSelector('[role="dialog"][aria-label="Command launcher"] .deck-input', {
+          visible: true,
+          timeout: 15_000,
+        });
+        await page.keyboard.type("Copy scrollback");
+        await page.waitForFunction(
+          (title) =>
+            document.querySelector('[role="option"][aria-selected="true"] .deck-result-title')?.textContent?.trim() ===
+            title,
+          { timeout: 15_000 },
+          "Copy scrollback",
+        );
+        await page.evaluate(() => { window.__commands294.length = 0; });
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(
+          (selector) => document.activeElement === document.querySelector(selector),
+          { timeout: 15_000 },
+          searchInput,
+        );
+        const dispatched = await page.evaluate(() => window.__commands294.slice());
+        assert.ok(dispatched.includes("app.terminal.copyScrollback"),
+          `the deck ran Copy scrollback rather than closing: it dispatched ${JSON.stringify(dispatched)}`);
+        await page.keyboard.type("Q");
+        const query = await page.$eval(searchInput, (input) => input.value);
+        assert.equal(query, `${queryBefore}Q`, "typed text lands in the Search input");
+        await shot(`294-${backend}-search`);
+        result.steps.search = { queryBefore, query, dispatched };
+        await dispatchCommand(page, "app.search.toggle");
+
+        result.passed = true;
+      } catch (error) {
+        result.failure = String(error.message ?? error);
+        failures.push(`${backend}: ${result.failure}`);
+        result.final = await focusState(page, null).catch(() => null);
+        await shot(`294-${backend}-failure`).catch(() => {});
       } finally {
-        await page.evaluate(() => window.__prompt294?.restore?.());
+        page.off("pageerror", onError);
+        try { writeFileSync(stop, ""); } catch (error) { result.cleanupErrors.push(`queue release: ${error.message}`); }
+        if (opened) {
+          await page
+            .evaluate(() => Boolean(document.querySelector(".search .head input")))
+            .then((open) => (open ? dispatchCommand(page, "app.search.toggle") : null))
+            .catch((error) => {
+              result.cleanupErrors.push(`search close: ${error.message}`);
+            });
+          await closeExtraPanes(page).catch((error) => {
+            result.cleanupErrors.push(`pane cleanup: ${error.message}`);
+          });
+          await closeEveryTerminal(page, "cleanup", token).catch((error) => {
+            result.cleanupErrors.push(`terminal cleanup: ${error.message}`);
+          });
+        }
+        writeFileSync(join(ctx.outDir, `294-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+      }
+      if (result.passed && result.pageErrors.length) {
+        result.passed = false;
+        failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
       }
     } finally {
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
+      await page.evaluate(() => window.__prompt294?.restore?.());
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },

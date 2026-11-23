@@ -22,7 +22,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shellQuote } from "../lib/program-status.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const OPEN = "\x1b[200~";
 const CLOSE = "\x1b[201~";
@@ -104,8 +103,6 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 30_000,
     });
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     // No agent's name is a whole word of this path but the stand-in's own.
     const dir = mkdtempSync(join(tmpdir(), "chan-batch-331-"));
     const log = join(dir, "input.jsonl");
@@ -116,7 +113,7 @@ export default {
     const stub = join(dir, "muse");
     const name = "MuseBatch331";
     const failures = [];
-    const result = { legs: [] };
+    const result = { backend: "ghostty", legs: [] };
     let opened = false;
 
     const queueDepth = async () => {
@@ -229,8 +226,7 @@ process.stdin.on("data", (bytes) => {
 `);
       writeFileSync(stub, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(recorder)}\n`);
       chmodSync(stub, 0o755);
-      await writeTerminalPrefs(page, token, { ghostty: false });
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "xterm", ["--command", shellQuote(stub)]);
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", shellQuote(stub)]);
       opened = true;
       await ctx.pollFile(ready, 30_000);
       if (row.agent !== "muse") throw new Error(`${name}: derived ${JSON.stringify(row.agent)}, expected muse`);
@@ -261,7 +257,6 @@ process.stdin.on("data", (bytes) => {
     } finally {
       rmSync(hold, { force: true });
       if (opened) await cs(["close", "--tab-name", name]).catch((error) => failures.push(`close: ${error.message}`));
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
       rmSync(dir, { recursive: true, force: true });
     }
     if (failures.length) {
