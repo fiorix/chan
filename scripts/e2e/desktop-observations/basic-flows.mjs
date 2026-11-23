@@ -17,14 +17,14 @@
 // in every selection that holds one of those four. The other groups drive
 // the rest of the basic flows by X input: `terminal` (typed input and its
 // output, then a text paste by Ctrl+Shift+V and by the terminal menu, on
-// each terminal backend), `editor` (typing in a note's rendered and source
+// Ghostty), `editor` (typing in a note's rendered and source
 // modes until its file holds the text, under document sessions and under
 // the page's own autosave, then a reload), `open` (a double-click on a
 // Files row), `search` (a query typed into Search and its hit opened by
 // Enter), `panes` (a split by chord, a focus by click, a tab dragged to
 // the other pane and both closed by chord) and `focus` (a pane focus move
 // from a terminal to a file browser, after a press into the terminal, on
-// each terminal backend). The optional `reload-focus` group reloads after
+// Ghostty). The optional `reload-focus` group reloads after
 // a trusted browser focus click, immediately and after a settled control.
 // The records are facts: what
 // the X clipboard offered
@@ -70,7 +70,7 @@ const xdo = (...words) => spawnSync("xdotool", words.map(String), { encoding: "u
 const IMAGE_GROUPS = ["native", "trusted", "drop", "xdnd"];
 const GROUPS = [...IMAGE_GROUPS, "terminal", "editor", "open", "search", "panes", "focus"];
 const OPTIONAL_GROUPS = ["reload-focus"];
-const BACKENDS = ["xterm", "ghostty"];
+const BACKENDS = ["ghostty"];
 // The text the terminal arms paste: a space and a newline, which a paste
 // must carry whole inside one bracketed pair.
 const PASTE_TEXT = "basic flows paste\nsecond line";
@@ -904,21 +904,11 @@ async function run() {
     return { opened: menu.met, at: menu.value };
   }
 
-  // The terminal: per backend, a command typed by X input whose output only
+  // The terminal: a command typed by X input whose output only
   // the shell computes, then a text pasted by Ctrl+Shift+V and by the menu
   // into cat -v under bracketed paste, read from the PTY's own scrollback.
-  async function writeBackend(ghostty) {
-    return settle(`(async () => {
-      const api = window.__flowsHelp.api;
-      const config = await api("/api/config");
-      await api("/api/config", { method: "PATCH", body: JSON.stringify({ expected_revision: config.revision,
-        preferences: { terminal: { ...config.preferences.terminal, ghostty: ${ghostty} } } }) });
-      return true;
-    })()`);
-  }
   async function terminalArm(backend) {
     const row = { arm: "terminal", surface: backend };
-    await writeBackend(backend === "ghostty");
     row.reloadMs = await reloadPage(`the ${backend} backend`);
     const tab = `basic-flows-${backend}-${stamp}`;
     const made = cs(["terminal", "new", "--tab-name", tab]);
@@ -1235,13 +1225,10 @@ async function run() {
   }
 
   if (want("terminal")) {
-    const ghostty = await settle(`window.__flowsHelp.api("/api/config").then((c) => c.preferences?.terminal?.ghostty ?? false)`);
     for (const backend of BACKENDS) await tryArm("terminal", backend, () => terminalArm(backend));
-    // The backend preference as it was.
-    await writeBackend(Boolean(ghostty));
   }
 
-  // The pane focus handoff, per backend: a terminal above a file browser in
+  // The pane focus handoff: a terminal above a file browser in
   // a split of its own. Each arm presses into the terminal by X input, with
   // the right button (its menu opens and Escape closes it; on ghostty the
   // press leaves the hidden textarea holding the keyboard) or the left one,
@@ -1252,7 +1239,6 @@ async function run() {
   // there. A typed x back in the terminal is each arm's control.
   async function focusArms(backend) {
     const rows = [];
-    await writeBackend(backend === "ghostty");
     const reloadMs = await reloadPage(`the ${backend} focus arms`);
     const tab = `basic-flows-focus-${backend}-${stamp}`;
     const made = cs(["terminal", "new", "--tab-name", tab]);
@@ -1371,11 +1357,9 @@ async function run() {
   }
 
   if (want("focus")) {
-    const ghostty = await settle(`window.__flowsHelp.api("/api/config").then((c) => c.preferences?.terminal?.ghostty ?? false)`);
     for (const backend of BACKENDS) {
       try { for (const row of await focusArms(backend)) record(row); } catch (error) { record({ arm: "focus", surface: `${backend}-setup`, error: String(error) }); }
     }
-    await writeBackend(Boolean(ghostty));
   }
 
   // The compact hash and restored pane IDs differ across reloads. Read the
@@ -1408,7 +1392,6 @@ async function run() {
 
   async function reloadFocusArms(backend) {
     const group = "reload-focus";
-    await writeBackend(backend === "ghostty");
     await reloadPage(`the ${backend} reload focus arms`);
     const tab = `basic-flows-reload-${backend}-${stamp}`;
     const made = cs(["terminal", "new", "--tab-name", tab]);
@@ -1543,15 +1526,13 @@ async function run() {
       }
       const closed = cs(["terminal", "close", "--tab-name", tab]);
       record({ arm: group, surface: `${backend}-cleanup`, terminalClose: closed.status, panes: layout().panes.length });
-      // Finish cleanup persistence before the next backend's setup reload.
+      // Finish cleanup persistence before a subsequent reload.
       await sleep(350);
     }
   }
 
   if (want("reload-focus")) {
-    const ghostty = await settle('window.__flowsHelp.api("/api/config").then((c) => c.preferences?.terminal?.ghostty ?? false)');
     for (const backend of BACKENDS) await reloadFocusArms(backend);
-    await writeBackend(Boolean(ghostty));
   }
 
   // 5. A real drop where no zone takes it, last: it must leave the window
@@ -1666,13 +1647,13 @@ function verdict() {
   if (states.includes("fault")) process.exit(10);
   if (states.every((s) => s === "held")) {
     say(`PASS: ${groups.map((g) => ({ native: "an image pasted with WKWebView's empty-Files clipboard shape landed in the editor and in the Rich Prompt through the desktop's clipboard read", trusted: "a real Ctrl+V landed the clipboard's image in the editor and in the Rich Prompt under every owner", drop: "a synthetic image file drop landed in the editor and in the Rich Prompt", xdnd: "a real image file drop landed in the editor and in the Rich Prompt, and one outside every drop zone left the window on its page and uploaded nothing",
-      terminal: "on both terminal backends a typed command ran and a text pasted by Ctrl+Shift+V and by the menu reached the PTY once and whole",
+      terminal: "on Ghostty a typed command ran and a text pasted by Ctrl+Shift+V and by the menu reached the PTY once and whole",
       editor: "text typed in a note's rendered and source modes reached its file under document sessions and under the page's autosave, and a reload showed it in both modes",
       open: "a double-click on a Files row opened the file in the editor",
       search: "a query typed into Search found the file and Enter opened it on the hit",
       panes: "a pane split by chord, took focus by click, received a tab dragged from the other pane and closed by chord",
-      focus: "on both terminal backends, after a left or right press into a terminal, a pane focus move to the file browser below by Alt+] and by a click on its strip handed the browser the keyboard, an ArrowDown moved its selection and no key reached the PTY",
-      "reload-focus": "on both terminal backends, an immediate reload after a trusted browser focus click restored browser focus and keyboard, as did the settled controls" })[g]).join("; ")}`);
+      focus: "on Ghostty, after a left or right press into a terminal, a pane focus move to the file browser below by Alt+] and by a click on its strip handed the browser the keyboard, an ArrowDown moved its selection and no key reached the PTY",
+      "reload-focus": "on Ghostty, an immediate reload after a trusted browser focus click restored browser focus and keyboard, as did the settled controls" })[g]).join("; ")}`);
     process.exit(0);
   }
   process.exit(3);
@@ -1893,7 +1874,7 @@ function verdict() {
     return (chords ?? []).map((c) => `${c.shift ? "Shift+" : ""}${c.alt ? "Alt+" : ""}${c.key} ${c.isTrusted ? "trusted" : "untrusted"} on ${c.surface}${c.defaultPrevented ? " taken" : ""}`).join(", ") || "none";
   }
 
-  // The terminal per backend: typed input and its output, then a text
+  // The terminal: typed input and its output, then a text
   // paste by chord and by the menu, each once and whole.
   function judgeTerminal() {
     const states = [];
