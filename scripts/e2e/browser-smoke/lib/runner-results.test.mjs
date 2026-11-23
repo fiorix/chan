@@ -39,7 +39,8 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
       connected: true, async newPage() { return page; },
       defaultBrowserContext() { return { async pages() { return []; } }; },
       async createBrowserContext() { return context; },
-      async close() { if (mode === "fatal-and-teardown") throw new Error("CONTROL_BROWSER_TEARDOWN"); }, process() { return { kill() {} }; },
+      async close() { if (mode === "fatal-and-teardown") throw new Error("CONTROL_BROWSER_TEARDOWN"); },
+      process() { return { kill(signal) { console.log("CONTROL_BROWSER_KILL " + signal); } }; },
     };
     page.browser = () => browser;
     export default { async launch() { return browser; } };
@@ -52,7 +53,7 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
       return "fixture-workspace";
     }
     export function launchServer() {
-      return { child: { pid: 1, kill() {} }, url: Promise.resolve("http://127.0.0.1:1/?t=fixture"), chanHome: "fixture-home" };
+      return { child: { pid: 1, kill(signal) { console.log("CONTROL_SERVER_KILL " + signal); } }, url: Promise.resolve("http://127.0.0.1:1/?t=fixture"), chanHome: "fixture-home" };
     }
     export async function teardownServer() {
       console.log("CONTROL_TEARDOWN");
@@ -247,6 +248,7 @@ test("a check-1 timer that throws during check 2 revokes aggregate success", (t)
   assert.deepEqual(r.checks.map((c) => c.status), ["passed", "error"]);
   assert.match(r.fatal, /CONTROL_LATE_CRASH/);
   assert.equal(r.errorPhase, "uncaught exception");
+  assert.equal(r.currentCheck, null);
   assert.match(log, /ERROR/);
 });
 
@@ -310,6 +312,13 @@ test("an import failure does not count as a body that ran", (t) => {
   assert.match(log, /0 ran/);
 });
 
+test("dependency-only success exits 0 without a smoke verdict", (t) => {
+  const { log, rc } = run(t, { args: ["--deps-only"] });
+  assert.equal(rc, 0);
+  assert.match(log, /puppeteer-core=1\.0\.0/);
+  assert.doesNotMatch(log, /ALL GREEN|CONTROL_SERVER_KILL|CONTROL_BROWSER_KILL/);
+});
+
 test("dependency-only failure emits one cause without a results-path TypeError", (t) => {
   const { log, rc } = run(t, { args: ["--deps-only"], startup: 'import "./CONTROL_MISSING_DRIVER.mjs";' });
   assert.equal(rc, 2);
@@ -359,10 +368,19 @@ test("unserializable environment details retain the error verdict", (t) => {
 });
 
 test("process.exit(0) in a check cannot report success", (t) => {
-  const { results: r, rc } = run(t, { body: "process.exit(0);", interrupted: true });
+  const { results: r, log, rc } = run(t, { body: "process.exit(0);", interrupted: true });
   assert.equal(rc, 2);
   assert.equal(r.currentCheck, "001-control.mjs");
   assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.deepEqual(r.checks, []);
+  assert.match(log, /CONTROL_SERVER_KILL SIGKILL/);
+  assert.match(log, /CONTROL_BROWSER_KILL SIGKILL/);
+});
+
+test("process.exit(1) before finalization is incomplete, not an assertion red", (t) => {
+  const { results: r, rc } = run(t, { body: "process.exit(1);", interrupted: true });
+  assert.equal(rc, 2);
+  assert.equal(r.currentCheck, "001-control.mjs");
   assert.deepEqual(r.checks, []);
 });
 

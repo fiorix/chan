@@ -147,7 +147,11 @@ process.on("unhandledRejection", (e) => recordCrash("unhandled rejection", e));
 process.on("uncaughtException", (e) => recordCrash("uncaught exception", e));
 process.on("exit", (code) => {
   // A check can exit directly without producing a final verdict.
-  if (!finished && !process.argv.includes("--deps-only")) process.exitCode = code || 2;
+  if (!finished && !process.argv.includes("--deps-only")) {
+    process.exitCode = code > 1 ? code : 2;
+    try { server?.child?.kill("SIGKILL"); } catch {}
+    try { browser?.process()?.kill("SIGKILL"); } catch {}
+  }
 });
 
 // The checks that start their own `chan devserver run` give it a throwaway
