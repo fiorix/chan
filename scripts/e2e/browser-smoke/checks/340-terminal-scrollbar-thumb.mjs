@@ -21,12 +21,21 @@ export default {
         result.grid = await pointerGrid(terminal.term);
         return terminal;
       }
+      async function waitForPaint(terminal, startRow, accept, label) {
+        const deadline = Date.now() + 8_000;
+        let pixels;
+        do {
+          await settlePointer(page);
+          pixels = await pointerStripPixels(terminal.term, startRow);
+          if (accept(Math.max(...pixels.samples))) return pixels;
+        } while (Date.now() < deadline);
+        assert.fail(`${label}: paint deadline expired after 8s (peak=${Math.max(...pixels.samples)})`);
+      }
       async function press(terminal, result) {
         // Explicit public positioning refreshes the fade before reading the
         // pixels, so a slow earlier command cannot leave an invisible target.
         await terminal.term.evaluate((t) => t.viewport.scrollBy(1));
-        await settlePointer(page);
-        const pixels = await pointerStripPixels(terminal.term);
+        const pixels = await waitForPaint(terminal, 0, (peak) => peak >= 12, "thumb visibility before press");
         const band = paintedThumbBand(pixels.samples);
         const point = result.thumb = { x: pixels.x, y: pixels.y + (band.start + band.end) / 2 / pixels.scaleY, band };
         result.styles = await terminal.trace.evaluate(({ canvas }) => ({ user: canvas.style.userSelect, webkit: canvas.style.webkitUserSelect }));
@@ -106,15 +115,11 @@ export default {
           "the hidden-strip fixture retains its scrollbar history");
         // Wait for the visible overlay to fade, measuring blank rows below
         // the marker. The first scan also proves the paint reader saw it.
-        const visible = await pointerStripPixels(terminal.term, markerRow + 1);
+        await terminal.term.evaluate((t) => { t.viewport.scrollBy(1); t.viewport.scrollToBottom(); });
+        const visible = await waitForPaint(terminal, markerRow + 1, (peak) => peak >= 12, "overlay visibility before fade");
         result.visiblePeak = Math.max(...visible.samples);
         assert.ok(result.visiblePeak >= 12, "the overlay was visible before waiting for its fade");
-        const deadline = Date.now() + 8_000;
-        let pixels;
-        do {
-          await settlePointer(page);
-          pixels = await pointerStripPixels(terminal.term, markerRow + 1);
-        } while (Math.max(...pixels.samples) > 1 && Date.now() < deadline);
+        const pixels = await waitForPaint(terminal, markerRow + 1, (peak) => peak <= 1, "overlay fade");
         result.hiddenPeak = Math.max(...pixels.samples);
         assert.ok(result.hiddenPeak <= 1, "the overlay is hidden in the actual canvas paint");
         const start = grid.x + grid.width - grid.w * 0.9;

@@ -10,6 +10,14 @@ import { launchServer, seedWorkspace, teardownServer } from "../lib/server.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitForLog(read, label) {
+  const deadline = Date.now() + 5_000;
+  while (read().length === 0) {
+    assert.ok(Date.now() < deadline, `${label}: stderr deadline expired after 5s`);
+    await sleep(25);
+  }
+  return read().map(maskTokens);
+}
 const seed = (programStatus) => `[terminal]\nghostty = false\nprogram_status = ${programStatus}\n`;
 const sha256 = (bytes) => bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
 function readOptional(path) {
@@ -148,12 +156,7 @@ export default {
         assert.equal(row.httpStatus, 422, "a non-boolean terminal.ghostty PATCH is rejected as an invalid body");
         assert.deepEqual(JSON.parse(row.body), { error: "the request body does not match what this route accepts" });
         assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
-        const deadline = Date.now() + 5_000;
-        while (rejections().length === 0) {
-          assert.ok(Date.now() < deadline, "extractor rejection log did not arrive within 5s");
-          await sleep(25);
-        }
-        row.rejections = rejections().map(maskTokens);
+        row.rejections = await waitForLog(rejections, "extractor rejection");
         assert.equal(row.rejections.length, 1, "exactly one logged rejection names terminal.ghostty");
         const control = await patch(true);
         row.controlStatus = control.status;
@@ -170,6 +173,7 @@ export default {
     await arm("f-stored-false-warning", async (row) => {
       const workspaceDir = seedWorkspace();
       const server = launchServer(ctx.chanBin, workspaceDir, undefined, {
+        env: { RUST_LOG: "warn,chan_server::extract=debug" },
         prepareChanHome(home) { writeFileSync(join(home, "server.toml"), seed(true), { mode: 0o600 }); },
       });
       const path = join(server.chanHome, "server.toml");
@@ -181,8 +185,7 @@ export default {
         const initial = await readConfig(serverUrl, "/api/workspace");
         assert.equal(initial.preferences.terminal.program_status, true, "startup consumed the seeded file");
         assert.equal(readFileSync(path, "utf8"), seed(true), "startup leaves the seeded file untouched");
-        await sleep(250); // Let stderr delivery catch up with the HTTP read.
-        row.startupWarnings = warnings().map(maskTokens);
+        row.startupWarnings = await waitForLog(warnings, "startup warning");
 
         // A changed live field proves this process loaded the second false
         // file, independently of the warning counter under test.
@@ -196,7 +199,18 @@ export default {
         }
         row.reloadConsumed = true;
         assert.equal(readFileSync(path, "utf8"), seed(false), "reload leaves the seeded file untouched");
-        await sleep(250);
+        // A later extractor log fences stderr delivery after the observed
+        // config reload; elapsed time alone cannot prove the pipe caught up.
+        const logIndex = server.stderrLines.length;
+        const current = await readConfig(serverUrl);
+        const fence = await api(serverUrl, "/api/config", {
+          method: "PATCH",
+          body: JSON.stringify({ expected_revision: current.revision,
+            preferences: { terminal: { ghostty: "log-fence" } } }),
+        });
+        assert.equal(fence.status, 422, "the stderr fence rejects its invalid body");
+        row.stderrFence = await waitForLog(() => server.stderrLines.slice(logIndex)
+          .filter((line) => line.includes("request rejected") && line.includes("terminal.ghostty")), "reload stderr fence");
         row.warningsAfterReload = warnings().map(maskTokens);
         assert.equal(row.startupWarnings.length, 1, "startup logs exactly one terminal.ghostty warning");
         assert.equal(row.warningsAfterReload.length, 1, "reloading false does not repeat the warning");
