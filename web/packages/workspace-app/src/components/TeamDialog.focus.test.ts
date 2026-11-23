@@ -33,7 +33,7 @@ vi.mock("../state/teamOrchestrator.svelte", async (importOriginal) => {
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { api } from "../api/client";
 import {
@@ -75,7 +75,7 @@ async function rendererFor(tabId: string): Promise<Terminal> {
     expect(found, `the terminal of ${tabId} mounted`).not.toBeNull();
     return found!;
   });
-  return openedGhostty(root);
+  return seatedGhostty(root);
 }
 
 describe("Team Bootstrap keyboard focus", () => {

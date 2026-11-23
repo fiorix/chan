@@ -36,7 +36,7 @@ import {
   type FileTab,
   type LeafNode,
 } from "../state/tabs.svelte";
-import { openedGhostty } from "../__tests__/ghosttyTab";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { taskFrames } from "../__tests__/terminalTab";
 
@@ -394,7 +394,7 @@ describe("a chord relayed from a focused extension frame", () => {
     expect(relay(frame.contentWindow, COLEMAK_T)).toBe(1);
     await settle();
     expect(terminalCount()).toBe(1);
-    await openedGhostty();
+    await seatedGhostty();
   });
 
   test("the G on KeyT is not advertised, so nothing is recreated", async () => {

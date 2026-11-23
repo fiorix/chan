@@ -47,7 +47,7 @@ import {
   type Tab,
 } from "../state/tabs.svelte";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 
@@ -133,7 +133,7 @@ async function mountPane(tabs: Tab[]): Promise<{ target: HTMLElement; term: Term
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  const term = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${tabs[0]!.id}"]`) ?? target);
+  const term = await seatedGhostty(target.querySelector(`[data-terminal-tab-id="${tabs[0]!.id}"]`) ?? target);
   await settle();
   return { target, term };
 }
@@ -496,7 +496,7 @@ describe("the tab strip", () => {
     const tab = stripTab(target, 1);
     const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
     const pressed = part === "padding" ? tab : label;
-    const selected = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${second.id}"]`)!);
+    const selected = await seatedGhostty(target.querySelector(`[data-terminal-tab-id="${second.id}"]`)!);
     expect(ghosttyHasFocus(selected), "the second terminal starts without the keyboard").toBe(false);
 
     press(pressed, "mousedown", button);

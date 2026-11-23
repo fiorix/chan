@@ -20,7 +20,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { api } from "../api/client";
 import { updateGlobalConfigSerial } from "../api/preferenceWrite";
-import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
@@ -413,7 +413,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
   // Characterization: pins the no-fallback shape with a terminal active.
   test("terminal active in the focused pane: the target is empty", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
-    await openedGhostty(pane(LEFT));
+    await seatedGhostty(pane(LEFT));
     await showDock();
     await click(row(dock(), LEFT_PATH));
     expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
@@ -440,7 +440,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
 
   test("the keyboard returns to the terminal's input", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
-    const term = await openedGhostty(pane(LEFT));
+    const term = await seatedGhostty(pane(LEFT));
     await showDock();
     await click(row(dock(), LEFT_PATH));
     expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
@@ -492,7 +492,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
 
   test("launcher toggle returns the keyboard to the terminal's input", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
-    const term = await openedGhostty(pane(LEFT));
+    const term = await seatedGhostty(pane(LEFT));
     await showDock();
     await click(row(dock(), LEFT_PATH));
     expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");

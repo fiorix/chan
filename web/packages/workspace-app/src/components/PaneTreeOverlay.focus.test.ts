@@ -32,7 +32,7 @@ import { refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { closePaneTree, openPaneTree, paneTree } from "../state/paneTree.svelte";
 import { layout, type FileTab, type LeafNode, type Node } from "../state/tabs.svelte";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 
@@ -108,7 +108,7 @@ async function mountWindow(): Promise<Terminal> {
   const target = (): HTMLElement => document.body.appendChild(document.createElement("div"));
   mounted.push(mount(Workspace, { target: target() }));
   mounted.push(mount(PaneTreeOverlay, { target: target() }));
-  const term = await openedGhostty();
+  const term = await seatedGhostty();
   await settle();
   return term;
 }

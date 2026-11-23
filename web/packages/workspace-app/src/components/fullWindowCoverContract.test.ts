@@ -51,7 +51,7 @@ import {
 } from "../state/store.svelte";
 import { capsForMode } from "../state/windowCaps";
 import { windowLifecycle } from "../state/windowLifecycle.svelte";
-import { openedGhostty } from "../__tests__/ghosttyTab";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { taskFrames } from "../__tests__/terminalTab";
 
@@ -368,7 +368,7 @@ describe("a chord behind a full-window cover", () => {
     await settle();
 
     expect(terminalCount()).toBe(1);
-    await openedGhostty();
+    await seatedGhostty();
   });
 
   test("the preflight cover blocks it", async () => {

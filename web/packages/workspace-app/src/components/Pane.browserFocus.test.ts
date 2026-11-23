@@ -23,7 +23,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 
 import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { terminalTab } from "../__tests__/tabs";
 import { fbTreeInstance } from "../state/store.svelte";
 import { api } from "../api/client";
@@ -127,7 +127,7 @@ function selected(): string | null {
 
 /// The top pane's terminal, once its widget has opened.
 function terminal(): Promise<Terminal> {
-  return openedGhostty(pane(TOP));
+  return seatedGhostty(pane(TOP));
 }
 
 /// The terminal holding the keyboard in its input textarea, as after a press

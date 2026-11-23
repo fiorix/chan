@@ -25,7 +25,7 @@ import { demoSocketFactory } from "../demo/socket";
 import { setSocketFactory } from "../api/transport";
 import { refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { cancelPaneMode, enterPaneMode, layout, type LeafNode, type Tab } from "../state/tabs.svelte";
-import { openedGhostty } from "../__tests__/ghosttyTab";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 import { fileTab } from "../__tests__/tabs";
 
@@ -74,7 +74,7 @@ async function mountPane(withTerminal = true): Promise<{ target: HTMLElement; su
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  const term = tab ? await openedGhostty(target) : null;
+  const term = tab ? await seatedGhostty(target) : null;
   await settle();
   const surface = term ? term.element : target.querySelector<HTMLElement>(".welcome");
   if (!surface) throw new Error("the focused surface did not mount");
@@ -97,7 +97,7 @@ async function mountSplitPane(otherTabs: Tab[] = []): Promise<{ target: HTMLElem
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(Workspace, { target }));
-  const term = await openedGhostty(target.querySelector(`[data-terminal-tab-id="${tab.id}"]`) ?? target);
+  const term = await seatedGhostty(target.querySelector(`[data-terminal-tab-id="${tab.id}"]`) ?? target);
   await settle();
   const surface = term.element;
   const other = target.querySelector<HTMLElement>(`[data-pane-id="${right.id}"]`);
@@ -297,7 +297,7 @@ describe("left press on the pane strip stretch", () => {
 
   test("focuses another pane's active terminal", async () => {
     const { other } = await mountSplitPane([terminalTab({ id: "menu-focus-other-terminal" })]);
-    const destination = (await openedGhostty(other)).element;
+    const destination = (await seatedGhostty(other)).element;
     if (!destination) throw new Error("the other terminal did not mount");
     const press = pressWithBrowserFocus(other.querySelector<HTMLElement>(".tabs .dead-zone")!, 0);
     await settle();
