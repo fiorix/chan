@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // GhosttyFind over the binding's terminal on the vendored core, ghostty-web's
-// own SelectionManager and chan's viewport controller. The viewport is a
-// stand-in with ghostty-web's semantics (an offset of lines scrolled back from
+// public highlight/selection APIs and chan's viewport controller. The viewport
+// is a stand-in with ghostty-web's semantics (an offset of lines scrolled back from
 // the bottom, clamped to the history and anchored through output; a resize that
 // hands the core the new grid, fires a content change and repaints), and
 // frames run and the clock moves only when a case says so. The scan budget
@@ -11,9 +11,10 @@
 // costs nothing unless a case makes it move during one.
 
 import { readFileSync } from "node:fs";
-import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { Terminal, type SelectionRange } from "@chan/ghostty-web-ng";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { FIND_COST_PRIORS, FIND_FRAME_BUDGET_MS, FIND_SCAN_BUDGET_MS, FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
+import { SoftwareCanvasContext, softwareGetContext } from "../__tests__/softwareCanvas";
 import { GhosttyViewportController } from "./ghosttyViewport";
 import { GhosttyVt, type MatchRange, type VtSearch, VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { SCROLLBACK_MB_DEFAULT, scrollbackLinesFromMb } from "./scrollback";
@@ -26,14 +27,27 @@ beforeAll(async () => {
   vendored = await WebAssembly.compile(readFileSync(VENDORED));
 });
 
-type Anchor = { col: number; absoluteRow: number };
+const terminals: Terminal[] = [];
+const controllers: GhosttyFind[] = [];
+let widgetFrames: ReturnType<typeof manualFrames>;
 
-/// The selection manager's members a case reads and sets.
-type Manager = {
-  selectionStart: Anchor | null;
-  selectionEnd: Anchor | null;
-  getDirtySelectionRows(): Set<number>;
-};
+beforeEach(() => {
+  widgetFrames = manualFrames();
+  vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => widgetFrames.request(() => run(0)));
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => widgetFrames.cancel(id));
+  const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    softwareGetContext(contexts, HTMLCanvasElement.prototype.getContext),
+  );
+});
+
+afterEach(() => {
+  for (const find of controllers.splice(0)) find.dispose();
+  for (const term of terminals.splice(0)) term.dispose();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 /// Frames that run only when a case runs them.
 function manualFrames() {
@@ -81,11 +95,20 @@ function manualClock() {
 
 async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit = 10_000, budgetMs = 0 } = {}) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const core = vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
-  if (lines.length) core.write(lines.map((line) => `${line}\r\n`).join(""));
+  const term = new Terminal({
+    ghostty: vt, cols, rows, scrollback: scrollbackLimit, cursorBlink: false,
+    smoothScrollDuration: 0,
+    theme: { background: "#000000", foreground: "#ffffff", selectionBackground: "#ff0000" },
+  });
+  terminals.push(term);
+  const host = document.createElement("div");
+  document.body.append(host);
+  term.open(host);
+  const core = term.wasmTerm as VtTerminal;
+  if (lines.length) term.write(lines.map((line) => `${line}\r\n`).join(""));
   const clamp = (y: number) => Math.max(0, Math.min(core.getScrollbackLength(), y));
   const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
-  /// The selection each resize's repaint drew.
+  /// The highlight visible when each resize returns, before the next scan.
   const painted: Array<MatchRange | null> = [];
   const view = {
     cols,
@@ -109,25 +132,24 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     },
     write(data: string | Uint8Array) {
       const before = core.getScrollbackLength();
-      core.write(data);
+      term.write(data);
       const growth = view.viewportY >= 1 ? Math.max(0, core.getScrollbackLength() - before) : 0;
       view.viewportY = clamp(view.viewportY + growth);
-      for (const listener of changeListeners) listener({ kind: "write" });
     },
     onChange(listener: (change: { kind: "write" | "resize" }) => void) {
       changeListeners.add(listener);
-      return { dispose: () => changeListeners.delete(listener) };
+      const subscription = term.onChange(listener);
+      return { dispose() { changeListeners.delete(listener); subscription.dispose(); } };
     },
     /// ghostty-web's resize: the core takes the grid, the event fires, and
-    /// the whole grid is repainted with the selection held then. The
+    /// the whole grid is repainted with the highlight held then. The
     /// viewport offset stays as it was.
     resize(newCols: number, newRows: number) {
       if (newCols === view.cols && newRows === view.rows) return;
       view.cols = newCols;
       view.rows = newRows;
-      core.resize(newCols, newRows);
-      for (const listener of changeListeners) listener({ kind: "resize" });
-      painted.push(selected(manager as unknown as Manager));
+      term.resize(newCols, newRows);
+      painted.push(highlighted(term));
     },
   };
   const viewport = new GhosttyViewportController(view, {
@@ -136,14 +158,6 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     isAlternateScreen: () => core.isAlternateScreen(),
     cellHeight: () => 16,
   });
-  const canvas = document.createElement("canvas");
-  const renderer = { getCanvas: () => canvas, getMetrics: () => ({ width: 8, height: 16, baseline: 12 }) };
-  const manager = new SelectionManager(
-    view as unknown as Terminal,
-    renderer as unknown as ConstructorParameters<typeof SelectionManager>[1],
-    core as unknown as ConstructorParameters<typeof SelectionManager>[2],
-    document.createElement("textarea"),
-  );
   const frames = manualFrames();
   const clock = manualClock();
   const counts: FindCount[] = [];
@@ -154,23 +168,31 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     created.push(search);
     return search;
   });
+  const resizingBeforeFind = new Set((core as unknown as { resizeListeners: Set<unknown> }).resizeListeners);
   const find = new GhosttyFind(core, {
     viewport,
-    selection: manager as unknown as ConstructorParameters<typeof GhosttyFind>[1]["selection"],
+    highlights: term.highlights,
+    getSelectionRange: () => term.getSelectionRange(),
     onCount: (count) => counts.push(count),
     frames,
     budgetMs,
     clock: clock.now,
   });
-  return { core, view, viewport, changeListeners, manager: manager as unknown as Manager, frames, clock, counts, created, find, painted };
+  controllers.push(find);
+  return { core, view, viewport, changeListeners, term, frames, clock, counts, created, find, painted, resizingBeforeFind };
 }
 
-/// The selection as a match range, null when nothing is selected.
-function selected(manager: Manager): MatchRange | null {
-  const start = manager.selectionStart;
-  const end = manager.selectionEnd;
-  if (!start || !end) return null;
-  return { startRow: start.absoluteRow, startCol: start.col, endRow: end.absoluteRow, endCol: end.col };
+function asMatchRange(range: SelectionRange | null): MatchRange | null {
+  if (!range) return null;
+  return { startRow: range.start.absoluteRow, startCol: range.start.col, endRow: range.end.absoluteRow, endCol: range.end.col };
+}
+
+function highlighted(term: Terminal): MatchRange | null {
+  return asMatchRange(term.highlights.get("search-active")?.ranges[0] ?? null);
+}
+
+function selected(term: Terminal): MatchRange | null {
+  return asMatchRange(term.getSelectionRange());
 }
 
 const range = (startRow: number, startCol: number, endRow: number, endCol: number): MatchRange => ({
@@ -207,7 +229,7 @@ async function prunable() {
   const f = await fixture(lines, { cols: 80, rows: 5, scrollbackLimit: 1000 });
   f.find.find("needle");
   f.frames.settle();
-  expect(selected(f.manager)).toEqual(range(900, 5, 900, 10));
+  expect(highlighted(f.term)).toEqual(range(900, 5, 900, 10));
   return f;
 }
 
@@ -230,12 +252,12 @@ function prune(core: VtTerminal, viewport: GhosttyViewportController): number {
 
 describe("a query", () => {
   test("selects its newest match on the first frame that finds one and counts on until the scan ends", async () => {
-    const { manager, frames, counts, find, view } = await fixture(numbered(3000, (i) => i % 10 === 5));
+    const { term, frames, counts, find, view } = await fixture(numbered(3000, (i) => i % 10 === 5));
     find.find("needle");
     expect(counts, "nothing is read before a frame").toEqual([]);
 
     frames.frame();
-    expect(selected(manager)).toEqual(needleAt(2995));
+    expect(highlighted(term)).toEqual(needleAt(2995));
     const first = counts.at(-1)!;
     expect(first).toMatchObject({ index: 1, partial: true });
     expect(first.total).toBeGreaterThan(0);
@@ -244,53 +266,53 @@ describe("a query", () => {
 
     expect(frames.settle()).toBeGreaterThan(1);
     expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
-    expect(selected(manager), "the selection stays on the newest match").toEqual(needleAt(2995));
+    expect(highlighted(term), "the selection stays on the newest match").toEqual(needleAt(2995));
     // On the screen already: rows 2991 to 3000 are in view.
     expect(view.viewportY).toBe(0);
   });
 
   test("with no match reads 0 of 0, with a plus while the scan runs", async () => {
-    const { frames, counts, find, manager } = await fixture(numbered(3000));
+    const { frames, counts, find, term } = await fixture(numbered(3000));
     find.find("absent");
     frames.frame();
     expect(counts.at(-1)).toEqual({ index: 0, total: 0, partial: true });
     frames.settle();
     expect(counts.at(-1)).toEqual({ index: 0, total: 0, partial: false });
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
   });
 
   test("a changed query drops the old highlight and selects the new query's newest match", async () => {
-    const { frames, find, manager, counts } = await fixture(["alpha one", "beta", "alpha two", "gamma"]);
+    const { frames, find, term, counts } = await fixture(["alpha one", "beta", "alpha two", "gamma"]);
     find.find("alpha");
     frames.settle();
-    expect(selected(manager)).toEqual(range(2, 0, 2, 4));
+    expect(highlighted(term)).toEqual(range(2, 0, 2, 4));
     find.find("beta");
     frames.settle();
-    expect(selected(manager)).toEqual(range(1, 0, 1, 3));
+    expect(highlighted(term)).toEqual(range(1, 0, 1, 3));
     expect(counts.at(-1)).toEqual({ index: 1, total: 1, partial: false });
     find.find("delta");
     frames.settle();
-    expect(selected(manager), "no match, no highlight").toBeNull();
+    expect(highlighted(term), "no match, no highlight").toBeNull();
     expect(counts.at(-1)).toEqual({ index: 0, total: 0, partial: false });
   });
 
   test("a needle across a soft wrap is selected over both rows", async () => {
-    const { frames, find, manager } = await fixture(["x".repeat(17) + "needle"], { cols: 20 });
+    const { frames, find, term } = await fixture(["x".repeat(17) + "needle"], { cols: 20 });
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(range(0, 17, 1, 2));
+    expect(highlighted(term)).toEqual(range(0, 17, 1, 2));
   });
 });
 
 describe("a step", () => {
   test("walks to older matches and back to newer ones, both wrapping", async () => {
-    const { frames, find, manager, counts } = await fixture(SHORT);
+    const { frames, find, term, counts } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
-    const walk: Array<[number | null, MatchRange | null]> = [[counts.at(-1)!.index, selected(manager)]];
+    const walk: Array<[number | null, MatchRange | null]> = [[counts.at(-1)!.index, highlighted(term)]];
     for (const direction of ["older", "older", "older", "newer", "newer"] as const) {
       find.step("needle", direction);
-      walk.push([counts.at(-1)!.index, selected(manager)]);
+      walk.push([counts.at(-1)!.index, highlighted(term)]);
     }
     expect(walk).toEqual([
       [1, SHORT_MATCH(5)],
@@ -305,27 +327,32 @@ describe("a step", () => {
 
   test("with another query searches for it first and lands on its newest match", async () => {
     // As after the bar reopens with the query it kept.
-    const { find, manager, counts } = await fixture(SHORT);
+    const { find, term, counts } = await fixture(SHORT);
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
     expect(counts.at(-1)).toMatchObject({ index: 1 });
   });
 
-  test("marks the rows of the highlight it moves for repaint", async () => {
-    // At the bottom of the buffer ghostty-web repaints only rows marked so.
-    const { frames, find, manager } = await fixture(SHORT);
+  test("repaints the previous highlight rows without output or a forced paint", async () => {
+    const { frames, find, term } = await fixture(SHORT);
+    const canvas = term.element!.querySelector("canvas")!;
+    const context = canvas.getContext("2d") as unknown as SoftwareCanvasContext;
+    const height = canvas.height / term.rows;
     find.find("needle");
     frames.settle();
-    manager.getDirtySelectionRows().clear();
+    widgetFrames.frame();
+    expect(context.pixelAt(1, 5 * height + 1)).toEqual({ r: 255, g: 0, b: 0, a: 1 });
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(SHORT_MATCH(3));
-    expect([...manager.getDirtySelectionRows()]).toContain(5);
+    widgetFrames.frame();
+    expect(highlighted(term)).toEqual(SHORT_MATCH(3));
+    expect(context.pixelAt(1, 5 * height + 1)).toEqual({ r: 0, g: 0, b: 0, a: 1 });
+    expect(context.pixelAt(1, 3 * height + 1)).toEqual({ r: 255, g: 0, b: 0, a: 1 });
   });
 });
 
 describe("a step while the scan runs", () => {
   test("Shift+Enter right after the bar reopens waits for the scan and lands on the oldest match", async () => {
-    const { frames, find, manager, counts } = await fixture(LONG);
+    const { frames, find, term, counts } = await fixture(LONG);
     find.find("needle");
     frames.settle();
     find.step("needle", "older");
@@ -334,15 +361,15 @@ describe("a step while the scan runs", () => {
 
     // The reopened bar keeps its query, and Shift+Enter is its first step.
     find.step("needle", "newer");
-    expect(selected(manager), "no match before the scan completes").toBeNull();
+    expect(highlighted(term), "no match before the scan completes").toBeNull();
     const shown: Array<MatchRange | null> = [];
     while (frames.pending()) {
       frames.frame();
-      shown.push(selected(manager));
+      shown.push(highlighted(term));
     }
     expect(shown.length, "the scan took frames").toBeGreaterThan(2);
     expect(shown.slice(0, -1).filter((s) => s !== null), "no match highlighted on the way").toEqual([]);
-    expect(selected(manager)).toEqual(needleAt(5));
+    expect(highlighted(term)).toEqual(needleAt(5));
     const after = counts.slice(seen);
     expect(after.at(-1)).toEqual({ index: 300, total: 300, partial: false });
     expect(after.length).toBeGreaterThan(2);
@@ -352,16 +379,16 @@ describe("a step while the scan runs", () => {
   });
 
   test("Shift+Enter at the newest match waits for the scan instead of wrapping to the oldest found so far", async () => {
-    const { frames, find, manager, counts } = await fixture(LONG);
+    const { frames, find, term, counts } = await fixture(LONG);
     find.find("needle");
     frames.frame();
-    expect(selected(manager)).toEqual(nth(1));
+    expect(highlighted(term)).toEqual(nth(1));
     const found = counts.at(-1)!.total;
     find.step("needle", "newer");
-    expect(selected(manager), "the step waits").toEqual(nth(1));
+    expect(highlighted(term), "the step waits").toEqual(nth(1));
     expect(counts.at(-1)).toEqual({ index: 1, total: found, partial: true });
     frames.settle();
-    expect(selected(manager)).toEqual(needleAt(5));
+    expect(highlighted(term)).toEqual(needleAt(5));
     expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
   });
 
@@ -376,13 +403,13 @@ describe("a step while the scan runs", () => {
     // A step that stays among the matches found so far applies at once.
     for (let k = 2; k <= found; k++) {
       f.find.step("needle", "older");
-      expect(selected(f.manager)).toEqual(nth(k));
+      expect(highlighted(f.term)).toEqual(nth(k));
       expect(f.counts.at(-1)).toEqual({ index: k, total: found, partial: true });
     }
     f.find.step("needle", "newer");
-    expect(selected(f.manager)).toEqual(nth(found - 1));
+    expect(highlighted(f.term)).toEqual(nth(found - 1));
     f.find.step("needle", "older");
-    expect(selected(f.manager)).toEqual(nth(found));
+    expect(highlighted(f.term)).toEqual(nth(found));
     return { ...f, found };
   }
 
@@ -390,67 +417,67 @@ describe("a step while the scan runs", () => {
   async function waitingPastTheOldestFound() {
     const f = await atTheOldestFound();
     f.find.step("needle", "older");
-    expect(selected(f.manager), "the step waits rather than wrap to the newest").toEqual(nth(f.found));
+    expect(highlighted(f.term), "the step waits rather than wrap to the newest").toEqual(nth(f.found));
     expect(f.counts.at(-1)).toEqual({ index: f.found, total: f.found, partial: true });
     return f;
   }
 
   test("Enter at the oldest match found so far waits for the next older one instead of wrapping to the newest", async () => {
-    const { frames, manager, counts, found } = await waitingPastTheOldestFound();
+    const { frames, term, counts, found } = await waitingPastTheOldestFound();
     let ran = 0;
-    while (selected(manager)?.startRow === nth(found).startRow) {
+    while (highlighted(term)?.startRow === nth(found).startRow) {
       expect(frames.pending(), "the scan goes on while the step waits").toBe(1);
       frames.frame();
       ran++;
     }
     expect(ran).toBeGreaterThan(0);
-    expect(selected(manager), "the next older match").toEqual(nth(found + 1));
+    expect(highlighted(term), "the next older match").toEqual(nth(found + 1));
     expect(counts.at(-1)).toMatchObject({ index: found + 1 });
     frames.settle();
     expect(counts.at(-1)).toEqual({ index: found + 1, total: 300, partial: false });
   });
 
   test("steps pressed while one waits apply in the order pressed once the scan allows them", async () => {
-    const { frames, find, manager, counts } = await fixture(LONG);
+    const { frames, find, term, counts } = await fixture(LONG);
     // As after the bar reopens: Shift+Enter three times, then Enter.
     find.step("needle", "newer");
     find.step("needle", "newer");
     find.step("needle", "newer");
     find.step("needle", "older");
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     frames.settle();
     // As on a finished scan: the oldest match, two newer, one older again.
-    expect(selected(manager)).toEqual(nth(299));
+    expect(highlighted(term)).toEqual(nth(299));
     expect(counts.at(-1)).toEqual({ index: 299, total: 300, partial: false });
   });
 
   test("closing the bar drops a step that waits", async () => {
-    const { frames, find, manager, counts } = await waitingPastTheOldestFound();
+    const { frames, find, term, counts } = await waitingPastTheOldestFound();
     find.close();
     expect(frames.pending()).toBe(0);
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     // Reopened, Enter lands at once on the newest match, not one past it.
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(nth(1));
+    expect(highlighted(term)).toEqual(nth(1));
     expect(counts.at(-1)).toMatchObject({ index: 1, partial: true });
     frames.settle();
-    expect(selected(manager)).toEqual(nth(1));
+    expect(highlighted(term)).toEqual(nth(1));
     expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
   });
 
   test("a new query drops a step that waits", async () => {
-    const { frames, find, manager, counts } = await waitingPastTheOldestFound();
+    const { frames, find, term, counts } = await waitingPastTheOldestFound();
     // Rows 29, 290 to 299 and 2900 to 2999 hold it; 2999 is the newest.
     find.find("line <29");
     frames.settle();
-    expect(selected(manager)).toEqual(range(2999, 0, 2999, 7));
+    expect(highlighted(term)).toEqual(range(2999, 0, 2999, 7));
     expect(counts.at(-1)).toEqual({ index: 1, total: 111, partial: false });
   });
 
   test("a resize keeps the steps that wait behind the match it keeps, and they apply from it", async () => {
     // Enter walked to the oldest match found so far and pressed three more
     // times; the first of those waits for the scan and the others behind it.
-    const { frames, find, view, viewport, manager, counts, found } = await waitingPastTheOldestFound();
+    const { frames, find, view, viewport, term, counts, found } = await waitingPastTheOldestFound();
     find.step("needle", "older");
     find.step("needle", "older");
     const viewportY = view.viewportY;
@@ -458,60 +485,85 @@ describe("a step while the scan runs", () => {
     // The lines are too short to wrap at 30 columns, so every match keeps
     // its row; the core still forgets its selected match and scans again.
     view.resize(30, 10);
-    expect(selected(manager), "the highlight stays on the kept match").toEqual(nth(found));
+    expect(highlighted(term), "the highlight stays on the kept match").toEqual(nth(found));
     expect(view.viewportY, "on the screen, so the viewport stays").toBe(viewportY);
     frames.frame();
-    expect(selected(manager)).toEqual(nth(found));
+    expect(highlighted(term)).toEqual(nth(found));
     expect(counts.at(-1)).toMatchObject({ index: null, partial: true });
     frames.settle();
     // Selected again, then the three steps from it, each in its turn.
-    expect(selected(manager)).toEqual(nth(found + 3));
+    expect(highlighted(term)).toEqual(nth(found + 3));
     expect(counts.at(-1)).toEqual({ index: found + 3, total: 300, partial: false });
     expect(viewport.shows(nth(found + 3).startRow), "the last step scrolled to its match").toBe(true);
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(nth(found + 4));
+    expect(highlighted(term)).toEqual(nth(found + 4));
   });
 
   test("a resize keeps a new query's selection of its newest match and drops the steps pressed behind it", async () => {
-    const { frames, find, view, manager, counts } = await fixture(LONG);
+    const { frames, find, view, term, counts } = await fixture(LONG);
     find.find("needle");
     find.step("needle", "older");
-    expect(selected(manager), "nothing scanned yet").toBeNull();
+    expect(highlighted(term), "nothing scanned yet").toBeNull();
     view.resize(30, 10);
     frames.frame();
-    expect(selected(manager)).toEqual(nth(1));
+    expect(highlighted(term)).toEqual(nth(1));
     expect(counts.at(-1)).toMatchObject({ index: 1, partial: true });
     frames.settle();
-    expect(selected(manager)).toEqual(nth(1));
+    expect(highlighted(term)).toEqual(nth(1));
     expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
   });
 
   test("a selection the user makes while a step waits stays theirs, and the step moves the count", async () => {
-    const { frames, find, manager, counts } = await fixture(LONG);
+    const { frames, find, term, counts, viewport } = await fixture(LONG);
+    const reveal = vi.spyOn(viewport, "reveal");
     find.step("needle", "newer");
-    expect(selected(manager)).toBeNull();
-    manager.selectionStart = { col: 0, absoluteRow: 2998 };
-    manager.selectionEnd = { col: 3, absoluteRow: 2998 };
+    expect(highlighted(term)).toBeNull();
+    term.setSelection({ start: { col: 0, absoluteRow: 2998 }, end: { col: 3, absoluteRow: 2998 } });
     frames.settle();
-    expect(selected(manager)).toEqual(range(2998, 0, 2998, 3));
+    expect(selected(term)).toEqual(range(2998, 0, 2998, 3));
+    expect(highlighted(term)).toEqual(nth(300));
+    expect(reveal).not.toHaveBeenCalled();
     expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
     // The next step is asked for over the user's selection, as any is.
     find.step("needle", "newer");
-    expect(selected(manager)).toEqual(nth(299));
+    expect(highlighted(term)).toEqual(nth(299));
   });
 
-  test("a step that waited highlights over the selection there was when it was pressed", async () => {
-    const { frames, find, manager } = await fixture(LONG);
-    manager.selectionStart = { col: 0, absoluteRow: 2998 };
-    manager.selectionEnd = { col: 3, absoluteRow: 2998 };
+  test("an existing highlight cannot authorize a delayed reveal over a changed user selection", async () => {
+    const { frames, find, term, viewport, counts } = await fixture(LONG);
+    find.find("needle");
+    frames.frame();
+    expect(highlighted(term)).toEqual(nth(1));
+    expect(counts.at(-1)).toMatchObject({ index: 1, partial: true });
+    const reveal = vi.spyOn(viewport, "reveal");
     find.step("needle", "newer");
-    expect(selected(manager), "nothing moves while it waits").toEqual(range(2998, 0, 2998, 3));
+    expect(highlighted(term), "the wrapping step waits").toEqual(nth(1));
+    term.setSelection({ start: { col: 0, absoluteRow: 2998 }, end: { col: 3, absoluteRow: 2998 } });
     frames.settle();
-    expect(selected(manager)).toEqual(needleAt(5));
+    expect(highlighted(term)).toEqual(nth(300));
+    expect(selected(term)).toEqual(range(2998, 0, 2998, 3));
+    expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
+    expect(reveal).not.toHaveBeenCalled();
+    find.step("needle", "newer");
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(15);
+    expect(selected(term)).toEqual(range(2998, 0, 2998, 3));
+  });
+
+  test("a step that waited reveals alongside the unchanged selection at its press", async () => {
+    const { frames, find, term, viewport } = await fixture(LONG);
+    const reveal = vi.spyOn(viewport, "reveal");
+    term.setSelection({ start: { col: 0, absoluteRow: 2998 }, end: { col: 3, absoluteRow: 2998 } });
+    find.step("needle", "newer");
+    expect(highlighted(term), "nothing moves while it waits").toBeNull();
+    expect(selected(term)).toEqual(range(2998, 0, 2998, 3));
+    frames.settle();
+    expect(highlighted(term)).toEqual(needleAt(5));
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(5);
+    expect(selected(term)).toEqual(range(2998, 0, 2998, 3));
   });
 
   test("a step whose scan completes just inside its cap lands at completion on the oldest match", async () => {
-    const { frames, find, manager, counts, clock } = await fixture(LONG);
+    const { frames, find, term, counts, clock } = await fixture(LONG);
     // As after the bar reopens: Shift+Enter, then every frame of the scan a
     // millisecond short of the cap.
     find.step("needle", "newer");
@@ -519,21 +571,21 @@ describe("a step while the scan runs", () => {
     const shown: Array<MatchRange | null> = [];
     while (frames.pending()) {
       frames.frame();
-      shown.push(selected(manager));
+      shown.push(highlighted(term));
     }
     expect(shown.length, "the scan took frames").toBeGreaterThan(2);
     expect(shown.slice(0, -1).filter((s) => s !== null), "no match highlighted on the way").toEqual([]);
-    expect(selected(manager)).toEqual(needleAt(5));
+    expect(highlighted(term)).toEqual(needleAt(5));
     expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
   });
 
   test("steps queued behind a capped step apply in order, each as the scan or its own cap allows", async () => {
-    const { frames, find, manager, counts, clock } = await fixture(LONG);
+    const { frames, find, term, counts, clock } = await fixture(LONG);
     // As after the bar reopens: Shift+Enter, then Enter 600 ms later.
     find.step("needle", "newer");
     clock.set(600);
     find.step("needle", "older");
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     clock.set(FIND_WAIT_CAP_MS);
     frames.frame();
     // Shift+Enter's cap ran out: it lands on the oldest match found so far.
@@ -542,10 +594,10 @@ describe("a step while the scan runs", () => {
     const found = counts.at(-1)!.total;
     expect(found).toBeGreaterThan(1);
     expect(found).toBeLessThan(300);
-    expect(selected(manager)).toEqual(nth(found));
+    expect(highlighted(term)).toEqual(nth(found));
     expect(counts.at(-1)).toEqual({ index: found, total: found, partial: true });
     frames.frame();
-    expect(selected(manager)).toEqual(nth(found + 1));
+    expect(highlighted(term)).toEqual(nth(found + 1));
     expect(counts.at(-1)).toMatchObject({ index: found + 1 });
   });
 });
@@ -576,28 +628,28 @@ describe("a step while output outpaces the scan", () => {
       f.frames.frame();
     };
     f.find.step("needle", "newer");
-    expect(selected(f.manager)).toBeNull();
+    expect(highlighted(f.term)).toBeNull();
     return { ...f, outputFrame };
   }
 
   test("a step that would wrap lands among the matches found so far once its cap runs out, and not before", async () => {
-    const { clock, created, find, manager, counts, frames, viewport, core, outputFrame } = await waitingUnderOutput();
+    const { clock, created, find, term, counts, frames, viewport, core, outputFrame } = await waitingUnderOutput();
     const reveal = vi.spyOn(viewport, "reveal");
     for (let at = 0; at < FIND_WAIT_CAP_MS; at += TICK) {
       clock.set(at);
       outputFrame();
       expect(created.at(-1)!.state().complete, `${at} ms: the scan runs`).toBe(false);
-      expect(selected(manager), `${at} ms: the step waits`).toBeNull();
+      expect(highlighted(term), `${at} ms: the step waits`).toBeNull();
       expect(counts.at(-1), `${at} ms`).toMatchObject({ index: null, partial: true });
     }
     clock.set(FIND_WAIT_CAP_MS - 1);
     outputFrame();
     expect(created.at(-1)!.state().complete).toBe(false);
-    expect(selected(manager), "a millisecond short of the cap").toBeNull();
+    expect(highlighted(term), "a millisecond short of the cap").toBeNull();
 
     clock.set(FIND_WAIT_CAP_MS);
     outputFrame();
-    const landed = selected(manager);
+    const landed = highlighted(term);
     expect(landed, "the step lands once its cap runs out").not.toBeNull();
     const state = created.at(-1)!.state();
     expect(state.complete, "the scan still runs").toBe(false);
@@ -612,7 +664,7 @@ describe("a step while output outpaces the scan", () => {
   });
 
   test("a resize drops a step that waits, so its cap running out lands nothing", async () => {
-    const { clock, view, viewport, manager, counts, frames, outputFrame } = await waitingUnderOutput();
+    const { clock, view, viewport, term, counts, frames, outputFrame } = await waitingUnderOutput();
     const reveal = vi.spyOn(viewport, "reveal");
     clock.set(TICK);
     outputFrame();
@@ -621,11 +673,11 @@ describe("a step while output outpaces the scan", () => {
     for (let at = FIND_WAIT_CAP_MS; at <= 2 * FIND_WAIT_CAP_MS; at += TICK) {
       clock.set(at);
       outputFrame();
-      expect(selected(manager), `${at} ms`).toBeNull();
+      expect(highlighted(term), `${at} ms`).toBeNull();
       expect(counts.at(-1), `${at} ms`).toMatchObject({ index: null, partial: true });
     }
     frames.settle();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     expect(counts.at(-1)).toMatchObject({ index: null, partial: false });
     expect(reveal).not.toHaveBeenCalled();
   });
@@ -648,12 +700,12 @@ describe("reveal", () => {
     ["near the top, clamped to the top", 0, 2, SCROLLBACK],
     ["near the bottom, clamped to the bottom", SCROLLBACK, 199, 0],
   ])("a match %s", async (_name, from, row, to) => {
-    const { core, frames, find, manager, view } = await fixture(numbered(200));
+    const { core, frames, find, term, view } = await fixture(numbered(200));
     expect(core.getScrollbackLength()).toBe(SCROLLBACK);
     view.viewportY = from;
     find.find(`<${row}>`);
     frames.settle();
-    expect(selected(manager)?.startRow).toBe(row);
+    expect(highlighted(term)?.startRow).toBe(row);
     expect(view.viewportY).toBe(to);
     // Wherever the viewport ends, the match is on the screen.
     const onScreen = row - SCROLLBACK + view.viewportY;
@@ -664,28 +716,46 @@ describe("reveal", () => {
   test("on the alternate screen the highlight is on the screen's own rows", async () => {
     // The alternate screen has no history, so ghostty-web's offset clamps
     // to 0 there and a match is always on the screen.
-    const { core, frames, find, manager, viewport } = await fixture(numbered(30, (i) => i === 25));
+    const { core, frames, find, term, viewport } = await fixture(numbered(30, (i) => i === 25));
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(needleAt(25));
+    expect(highlighted(term)).toEqual(needleAt(25));
     viewport.write("\x1b[?1049h\x1b[2J\x1b[Hfirst\r\nsecond needle\r\n");
+    expect(highlighted(term), "the widget clears the layer before the search frame").toBeNull();
     frames.settle();
     expect(core.getScrollbackLength()).toBe(0);
-    expect(selected(manager), "the primary's highlight goes with its screen").toBeNull();
+    expect(highlighted(term), "the primary's highlight goes with its screen").toBeNull();
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(range(1, 7, 1, 12));
+    expect(highlighted(term)).toEqual(range(1, 7, 1, 12));
     // Back on the primary screen the core selects the primary's match
     // again, and the highlight follows it.
     viewport.write("\x1b[?1049l");
+    expect(highlighted(term), "the return switch also clears the layer").toBeNull();
     frames.settle();
     expect(core.getScrollbackLength()).toBe(21);
-    expect(selected(manager)).toEqual(needleAt(25));
+    expect(highlighted(term)).toEqual(needleAt(25));
+  });
+});
+
+describe("screen recovery", () => {
+  test("republishes identical active coordinates when the primary screen returns", async () => {
+    const { frames, find, term, viewport } = await fixture(SHORT);
+    find.find("needle");
+    frames.settle();
+    const active = highlighted(term);
+    expect(active).toEqual(SHORT_MATCH(5));
+    viewport.write("\x1b[?1049h");
+    expect(highlighted(term)).toBeNull();
+    viewport.write("\x1b[?1049l");
+    expect(highlighted(term)).toBeNull();
+    frames.settle();
+    expect(highlighted(term)).toEqual(active);
   });
 });
 
 describe("output while the bar is open", () => {
   test("is fed once a frame however many writes came, and the count follows", async () => {
-    const { frames, find, manager, counts, created, viewport } = await fixture(SHORT);
+    const { frames, find, term, counts, created, viewport } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
     const feed = vi.spyOn(created[0]!, "feed");
@@ -697,23 +767,25 @@ describe("output while the bar is open", () => {
     frames.settle();
     // The core keeps the selection on its text; two newer matches arrived.
     expect(counts.at(-1)).toEqual({ index: 3, total: 5, partial: false });
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
   });
 
   test("moves the highlight with its match when the history is pruned", async () => {
-    const { core, frames, manager, viewport } = await prunable();
+    const { core, frames, term, viewport } = await prunable();
     const pruned = prune(core, viewport);
     frames.settle();
-    expect(selected(manager)).toEqual(range(900 - pruned, 5, 900 - pruned, 10));
+    expect(highlighted(term)).toEqual(range(900 - pruned, 5, 900 - pruned, 10));
   });
 
   test("leaves a selection the user made alone when its match moves", async () => {
-    const { core, frames, manager, viewport } = await prunable();
-    manager.selectionStart = { col: 0, absoluteRow: 2 };
-    manager.selectionEnd = { col: 3, absoluteRow: 4 };
-    prune(core, viewport);
+    const { core, frames, term, viewport } = await prunable();
+    term.setSelection({ start: { col: 0, absoluteRow: 900 }, end: { col: 3, absoluteRow: 900 } });
+    const text = term.getSelection();
+    const pruned = prune(core, viewport);
     frames.settle();
-    expect(selected(manager)).toEqual(range(2, 0, 4, 3));
+    expect(selected(term)).toEqual(range(900 - pruned, 0, 900 - pruned, 3));
+    expect(term.getSelection()).toBe(text);
+    expect(highlighted(term)).toEqual(range(900 - pruned, 5, 900 - pruned, 10));
   });
 });
 
@@ -743,7 +815,7 @@ describe("a resize while the bar is open", () => {
     f.find.step("needle", "older");
     f.frames.settle();
     expect(f.frames.pending()).toBe(0);
-    expect(selected(f.manager)).toEqual(NEEDLE_D);
+    expect(highlighted(f.term)).toEqual(NEEDLE_D);
     expect(f.counts.at(-1)).toEqual({ index: 3, total: 6, partial: false });
     return f;
   }
@@ -772,7 +844,7 @@ describe("a resize while the bar is open", () => {
   ] as const;
 
   test("moves the highlight to the match's place in the new grid before ghostty-web repaints", async () => {
-    const { core, view, manager, frames, painted } = await walked();
+    const { core, view, term, frames, painted } = await walked();
     for (const [cols, rows] of SIZES) {
       view.resize(cols, rows);
       const third = fresh(core)[2]!;
@@ -780,48 +852,49 @@ describe("a resize while the bar is open", () => {
       expect(textAt(core, third)).toBe("needle");
       expect(core.plainText({ ...third, endRow: third.startRow, endCol: third.startCol + 7 }), "needle d's").toBe("needle d");
       frames.settle();
-      expect(selected(manager)).toEqual(third);
+      expect(highlighted(term)).toEqual(third);
     }
   });
 
   test("selects the match again once the rescan finds it, and the count has its index back", async () => {
-    const { core, view, manager, frames, counts, created } = await walked();
+    const { core, view, term, frames, counts, created } = await walked();
     for (const [cols, rows] of SIZES) {
       view.resize(cols, rows);
       frames.settle();
       const third = fresh(core)[2]!;
       expect(created[0]!.state().active, `${cols}x${rows}: the core's own selection`).toEqual(third);
-      expect(selected(manager)).toEqual(third);
+      expect(highlighted(term)).toEqual(third);
       expect(counts.at(-1)).toEqual({ index: 3, total: 6, partial: false });
     }
   });
 
   test("a step after it goes on from the match it kept", async () => {
-    const { core, view, manager, frames, find, counts } = await walked();
+    const { core, view, term, frames, find, counts } = await walked();
     view.resize(12, 6);
     frames.settle();
     const matches = fresh(core);
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(matches[3]);
+    expect(highlighted(term)).toEqual(matches[3]);
     expect(counts.at(-1)).toEqual({ index: 4, total: 6, partial: false });
     find.step("needle", "newer");
     find.step("needle", "newer");
-    expect(selected(manager)).toEqual(matches[1]);
+    expect(highlighted(term)).toEqual(matches[1]);
     expect(counts.at(-1)).toEqual({ index: 2, total: 6, partial: false });
   });
 
   test("keeps a selection the user made, and still selects the kept match again for the count", async () => {
-    const { core, view, manager, frames, painted, find, counts } = await walked();
-    manager.selectionStart = { col: 0, absoluteRow: 2 };
-    manager.selectionEnd = { col: 3, absoluteRow: 2 };
+    const { core, view, term, frames, painted, find, counts } = await walked();
+    term.setSelection({ start: { col: 0, absoluteRow: 2 }, end: { col: 3, absoluteRow: 2 } });
+    const text = term.getSelection();
     view.resize(12, 6);
     frames.settle();
-    expect(painted).toEqual([range(2, 0, 2, 3)]);
-    expect(selected(manager)).toEqual(range(2, 0, 2, 3));
+    expect(painted).toEqual([fresh(core)[2]]);
+    expect(highlighted(term)).toEqual(fresh(core)[2]);
+    expect(term.getSelection()).toBe(text);
     expect(counts.at(-1)).toEqual({ index: 3, total: 6, partial: false });
     // The next step is asked for over the user's selection, as any is.
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(fresh(core)[3]);
+    expect(highlighted(term)).toEqual(fresh(core)[3]);
   });
 
   test("leaves the viewport where it was when the match was off the screen", async () => {
@@ -850,21 +923,21 @@ describe("a resize while the bar is open", () => {
     // wraps, the screen fills with them, and the needle's row moves up
     // into the history.
     const lines = [...numbered(11), "top needle", ...Array.from({ length: 8 }, (_, i) => `${i} ${"x".repeat(33)}`)];
-    const { core, view, viewport, frames, find, manager, counts } = await fixture(lines);
+    const { core, view, viewport, frames, find, term, counts } = await fixture(lines);
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(range(11, 4, 11, 9));
+    expect(highlighted(term)).toEqual(range(11, 4, 11, 9));
     expect(view.viewportY).toBe(0);
     expect(viewport.shows(11)).toBe(true);
     const reveal = vi.spyOn(viewport, "reveal");
     view.resize(20, 10);
-    const kept = selected(manager)!;
+    const kept = highlighted(term)!;
     expect(textAt(core, kept)).toBe("needle");
     expect(reveal).toHaveBeenCalledWith(kept.startRow);
     expect(view.viewportY, "scrolled back to it").toBeGreaterThan(0);
     expect(viewport.shows(kept.startRow)).toBe(true);
     frames.settle();
-    expect(selected(manager)).toEqual(kept);
+    expect(highlighted(term)).toEqual(kept);
     expect(viewport.shows(kept.startRow)).toBe(true);
     expect(counts.at(-1)).toEqual({ index: 1, total: 1, partial: false });
   });
@@ -872,14 +945,14 @@ describe("a resize while the bar is open", () => {
   test("while the rescan runs the count has the total found so far and no index, and the highlight stays", async () => {
     // 20,000 lines, a needle on every one ending in 5: at 12 columns every
     // line wraps, every match moves, and the rescan takes frames.
-    const { core, view, frames, find, manager, counts } = await fixture(numbered(20_000, (i) => i % 10 === 5), { scrollbackLimit: 100_000 });
+    const { core, view, frames, find, term, counts } = await fixture(numbered(20_000, (i) => i % 10 === 5), { scrollbackLimit: 100_000 });
     find.find("needle");
     frames.settle();
     for (let k = 2; k <= 5; k++) find.step("needle", "older");
-    expect(selected(manager)).toEqual(needleAt(19_955));
+    expect(highlighted(term)).toEqual(needleAt(19_955));
     expect(counts.at(-1)).toEqual({ index: 5, total: 2000, partial: false });
     view.resize(12, 10);
-    const kept = selected(manager)!;
+    const kept = highlighted(term)!;
     expect(kept).not.toEqual(needleAt(19_955));
     expect(textAt(core, kept)).toBe("needle");
     const shown: FindCount[] = [];
@@ -887,7 +960,7 @@ describe("a resize while the bar is open", () => {
       if (i > 10_000) throw new Error("the rescan never completed");
       frames.frame();
       shown.push(counts.at(-1)!);
-      expect(selected(manager), `frame ${i}`).toEqual(kept);
+      expect(highlighted(term), `frame ${i}`).toEqual(kept);
     }
     const landed = shown.findIndex((c) => c.index !== null);
     expect(landed, "frames with no index first").toBeGreaterThan(1);
@@ -899,29 +972,29 @@ describe("a resize while the bar is open", () => {
   });
 
   test("a step pressed while it rescans waits behind the kept match and applies from it", async () => {
-    const { core, view, frames, find, manager, counts } = await fixture(LONG);
+    const { core, view, frames, find, term, counts } = await fixture(LONG);
     find.find("needle");
     frames.settle();
     for (let k = 2; k <= 5; k++) find.step("needle", "older");
     // At 12 columns every line wraps; the walk back to the fifth match takes
     // five selects, one a frame.
     view.resize(12, 10);
-    const kept = selected(manager);
+    const kept = highlighted(term);
     find.step("needle", "older");
-    expect(selected(manager), "the step waits").toEqual(kept);
+    expect(highlighted(term), "the step waits").toEqual(kept);
     frames.frame();
-    expect(selected(manager)).toEqual(kept);
+    expect(highlighted(term)).toEqual(kept);
     expect(counts.at(-1)).toMatchObject({ index: null });
     frames.settle();
     const sixth = fresh(core)[5]!;
-    expect(selected(manager)).toEqual(sixth);
+    expect(highlighted(term)).toEqual(sixth);
     // "line <2945> " fills the row above it.
     expect(textAt(core, { ...sixth, startRow: sixth.startRow - 1, startCol: 0 })).toBe("line <2945> needle");
     expect(counts.at(-1)).toEqual({ index: 6, total: 300, partial: false });
   });
 
   test("a walk that has not reached the match when its cap runs out loses it, and the search scans again", async () => {
-    const { core, view, frames, find, manager, counts, clock, created } = await fixture(LONG);
+    const { core, view, frames, find, term, counts, clock, created } = await fixture(LONG);
     find.find("needle");
     frames.settle();
     for (let k = 2; k <= 150; k++) find.step("needle", "older");
@@ -930,20 +1003,20 @@ describe("a resize while the bar is open", () => {
     // walk to the 150th match starts at the newest and takes 150 selects,
     // one a frame.
     view.resize(12, 10);
-    const kept = selected(manager);
+    const kept = highlighted(term);
     frames.frame();
     expect(created[0]!.state(), "walking").toMatchObject({ index: 0, complete: true });
     frames.frame();
-    expect(selected(manager)).toEqual(kept);
+    expect(highlighted(term)).toEqual(kept);
     expect(counts.at(-1)).toMatchObject({ index: null });
     clock.set(FIND_WAIT_CAP_MS);
     frames.frame();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     frames.settle();
     expect(created[0]!.state().index, "no match selected").toBeNull();
     expect(counts.at(-1)).toEqual({ index: null, total: 300, partial: false });
     find.step("needle", "older");
-    expect(selected(manager), "the next step starts over").toEqual(fresh(core)[0]);
+    expect(highlighted(term), "the next step starts over").toEqual(fresh(core)[0]);
     expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
   });
 
@@ -951,9 +1024,9 @@ describe("a resize while the bar is open", () => {
     // libghostty-vt 1.0 forgets its selected match on every resize. A core
     // that kept it would have it selected when find's frame reads it; the
     // case selects it on the search itself before that frame.
-    const { view, frames, manager, counts, created } = await walked();
+    const { view, frames, term, counts, created } = await walked();
     view.resize(12, 6);
-    const kept = selected(manager)!;
+    const kept = highlighted(term)!;
     const search = created[0]!;
     for (let i = 0; search.state().active?.startRow !== kept.startRow || search.state().active?.startCol !== kept.startCol; i++) {
       if (i > 6) throw new Error("the search never selected the kept match");
@@ -966,7 +1039,7 @@ describe("a resize while the bar is open", () => {
     frames.settle();
     expect(next).not.toHaveBeenCalled();
     expect(prev).not.toHaveBeenCalled();
-    expect(selected(manager)).toEqual(kept);
+    expect(highlighted(term)).toEqual(kept);
     expect(counts.at(-1)).toEqual({ index: 3, total: 6, partial: false });
   });
 
@@ -989,11 +1062,11 @@ describe("a resize while the bar is open", () => {
   });
 
   test("a kept match overwritten while the walk runs is lost once the walk has gone round", async () => {
-    const { viewport, view, frames, find, manager, counts } = await fixture(SHORT);
+    const { viewport, view, frames, find, term, counts } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(SHORT_MATCH(3));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(3));
     // The rows keep their places at 30 columns; with one select a frame the
     // walk from the newest needs two.
     view.resize(30, 10);
@@ -1001,10 +1074,10 @@ describe("a resize while the bar is open", () => {
     // A program writes over row 3 before the walk reaches it.
     viewport.write("\x1b[4;1Hxxxxxx");
     frames.settle();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     expect(counts.at(-1)).toEqual({ index: null, total: 2, partial: false });
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
     expect(counts.at(-1)).toEqual({ index: 1, total: 2, partial: false });
   });
 
@@ -1012,7 +1085,7 @@ describe("a resize while the bar is open", () => {
     // 20,000 lines, a needle on every one ending in 5. The rescan at 12
     // columns finds the 101st match on its second frame and the walk starts
     // there; a second resize makes the core forget the walk's place.
-    const { view, frames, find, manager, counts, created } = await fixture(numbered(20_000, (i) => i % 10 === 5), { scrollbackLimit: 100_000 });
+    const { view, frames, find, term, counts, created } = await fixture(numbered(20_000, (i) => i % 10 === 5), { scrollbackLimit: 100_000 });
     find.find("needle");
     frames.settle();
     for (let k = 2; k <= 101; k++) find.step("needle", "older");
@@ -1026,17 +1099,17 @@ describe("a resize while the bar is open", () => {
     frames.frame();
     expect(created[0]!.state(), "no select before the rescan finds it again").toMatchObject({ index: null, complete: false });
     frames.settle();
-    expect(selected(manager)).toEqual(needleAt(19_995 - 1000));
+    expect(highlighted(term)).toEqual(needleAt(19_995 - 1000));
     expect(counts.at(-1)).toEqual({ index: 101, total: 2000, partial: false });
   });
 
   test("a match below a scrolled-back screen stays off it when the screen grows", async () => {
     // 200 numbered lines on a ten-row screen: rows 191 to 200 are the
     // screen, 191 rows of history above them.
-    const { view, viewport, frames, find, manager } = await fixture(numbered(200));
+    const { view, viewport, frames, find, term } = await fixture(numbered(200));
     find.find("<150>");
     frames.settle();
-    expect(selected(manager)?.startRow).toBe(150);
+    expect(highlighted(term)?.startRow).toBe(150);
     // Scrolled back to where the match is the row just below the screen.
     view.viewportY = 51;
     expect(viewport.shows(150)).toBe(false);
@@ -1046,16 +1119,16 @@ describe("a resize while the bar is open", () => {
     expect(view.viewportY).toBe(51);
     frames.settle();
     expect(view.viewportY).toBe(51);
-    expect(selected(manager)?.startRow).toBe(150);
+    expect(highlighted(term)?.startRow).toBe(150);
   });
 
   test.each([
     ["before the resize reaches find", true],
     ["while the rescan runs", false],
   ])("a match whose row was pruned %s is lost, and the next step starts over", async (_name, pruneFirst) => {
-    const { core, view, viewport, frames, find, manager, counts, painted } = await prunable();
+    const { core, view, viewport, frames, find, term, counts, painted } = await prunable();
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(range(0, 6, 0, 11));
+    expect(highlighted(term)).toEqual(range(0, 6, 0, 11));
     expect(counts.at(-1)).toEqual({ index: 2, total: 2, partial: false });
     const pruned = pruneFirst ? prune(core, viewport) : 0;
     // The lines are too short to wrap at 60 columns.
@@ -1063,47 +1136,47 @@ describe("a resize while the bar is open", () => {
     expect(painted).toEqual([pruneFirst ? null : range(0, 6, 0, 11)]);
     const late = pruneFirst ? pruned : prune(core, viewport);
     frames.settle();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     expect(counts.at(-1)).toEqual({ index: null, total: 1, partial: false });
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(range(900 - late, 5, 900 - late, 10));
+    expect(highlighted(term)).toEqual(range(900 - late, 5, 900 - late, 10));
     expect(counts.at(-1)).toEqual({ index: 1, total: 1, partial: false });
   });
 
   test("a match the resize cuts is lost once the scan finds no match there", async () => {
     // The alternate screen crops its rows on a resize rather than reflowing
     // them: at 36 columns the newer needle has lost its last three letters.
-    const { view, viewport, frames, find, manager, counts, painted } = await fixture([], { cols: 40, rows: 5 });
+    const { view, viewport, frames, find, term, counts, painted } = await fixture([], { cols: 40, rows: 5 });
     viewport.write(`\x1b[?1049h\x1b[Hab needle cd\r\n${"x".repeat(32)} needle\r\n`);
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(range(1, 33, 1, 38));
+    expect(highlighted(term)).toEqual(range(1, 33, 1, 38));
     expect(counts.at(-1)).toEqual({ index: 1, total: 2, partial: false });
     view.resize(36, 5);
     expect(painted, "the highlight goes with the kept cells, the last one cropped to the edge").toEqual([range(1, 33, 1, 35)]);
     frames.settle();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     expect(counts.at(-1)).toEqual({ index: null, total: 1, partial: false });
     // A lost match stays lost: the next resize has nothing to keep.
     view.resize(40, 5);
     expect(painted.at(-1)).toBeNull();
     frames.settle();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     find.step("needle", "older");
-    expect(selected(manager)).toEqual(range(0, 3, 0, 8));
+    expect(highlighted(term)).toEqual(range(0, 3, 0, 8));
     expect(counts.at(-1)).toEqual({ index: 1, total: 1, partial: false });
   });
 
   test("a resize right after a new query keeps nothing of the old query's match", async () => {
-    const { view, frames, find, manager, counts, painted } = await fixture(SHORT);
+    const { view, frames, find, term, counts, painted } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
     find.find("c");
     view.resize(30, 10);
     expect(painted, "the old highlight goes").toEqual([null]);
     frames.settle();
-    expect(selected(manager)).toEqual(range(2, 0, 2, 0));
+    expect(highlighted(term)).toEqual(range(2, 0, 2, 0));
     expect(counts.at(-1)).toEqual({ index: 1, total: 1, partial: false });
   });
 });
@@ -1324,7 +1397,7 @@ describe("output a feed would take too long to take in", () => {
     expect(restart, "before any frame").toHaveBeenCalledTimes(1);
     f.frames.settle();
     // From the kept match, needle b, one older.
-    expect(selected(f.manager)).toEqual(range(0, 0, 0, 5));
+    expect(highlighted(f.term)).toEqual(range(0, 0, 0, 5));
     expect(f.counts.at(-1)).toEqual({ index: 2, total: 2, partial: false });
   });
 
@@ -1518,14 +1591,14 @@ describe("output a feed would take too long to take in", () => {
       f.find.find("needle");
       f.frames.settle();
       for (let k = 2; k <= 5; k++) f.find.step("needle", "older");
-      expect(selected(f.manager)).toEqual(needleAt(19_955));
+      expect(highlighted(f.term)).toEqual(needleAt(19_955));
       expect(f.counts.at(-1)).toEqual({ index: 5, total: 2000, partial: false });
       return f;
     }
 
     test("the count is partial with no index and never more than the buffer holds, and the kept match gets its index back", async () => {
       const f = await selectedFifth();
-      const kept = selected(f.manager);
+      const kept = highlighted(f.term);
       expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
       const total = truth(f.core).length;
       const shown: FindCount[] = [f.counts.at(-1)!];
@@ -1533,7 +1606,7 @@ describe("output a feed would take too long to take in", () => {
         if (i > 10_000) throw new Error("the rescan never completed");
         f.frames.frame();
         shown.push(f.counts.at(-1)!);
-        expect(selected(f.manager), `frame ${i}`).toEqual(kept);
+        expect(highlighted(f.term), `frame ${i}`).toEqual(kept);
       }
       // Until the rescan finds the match again the count has no index: "0
       // of 0+" while the filler has given it nothing, then "? of n+".
@@ -1549,21 +1622,21 @@ describe("output a feed would take too long to take in", () => {
     test("a step pressed while it rescans waits behind the kept match and applies from it", async () => {
       const f = await selectedFifth();
       expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
-      const kept = selected(f.manager);
+      const kept = highlighted(f.term);
       f.find.step("needle", "older");
-      expect(selected(f.manager), "the step waits").toEqual(kept);
+      expect(highlighted(f.term), "the step waits").toEqual(kept);
       f.frames.settle();
-      expect(selected(f.manager)).toEqual(needleAt(19_945));
+      expect(highlighted(f.term)).toEqual(needleAt(19_945));
       expect(f.counts.at(-1)).toEqual({ index: 6, total: 2000, partial: false });
     });
 
     test("a selection the user made stays theirs, and the kept match still gets its index back", async () => {
       const f = await selectedFifth();
-      f.manager.selectionStart = { col: 0, absoluteRow: 3 };
-      f.manager.selectionEnd = { col: 4, absoluteRow: 3 };
+      f.term.setSelection({ start: { col: 0, absoluteRow: 3 }, end: { col: 4, absoluteRow: 3 } });
       expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
       f.frames.settle();
-      expect(selected(f.manager)).toEqual(range(3, 0, 3, 4));
+      expect(selected(f.term)).toEqual(range(3, 0, 3, 4));
+      expect(highlighted(f.term)).toEqual(needleAt(19_955));
       expect(f.counts.at(-1)).toEqual({ index: 5, total: 2000, partial: false });
     });
 
@@ -1574,16 +1647,16 @@ describe("output a feed would take too long to take in", () => {
       f.frames.settle();
       // The oldest match of all: newer from nothing selected, once complete.
       f.find.step("needle", "newer");
-      const oldest = selected(f.manager)!;
+      const oldest = highlighted(f.term)!;
       expect(f.counts.at(-1)).toMatchObject({ index: f.counts.at(-1)!.total, partial: false });
       expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
-      expect(selected(f.manager), "gone with its row").toBeNull();
+      expect(highlighted(f.term), "gone with its row").toBeNull();
       f.frames.settle();
       const all = truth(f.core);
       expect(all).not.toContainEqual(oldest);
       expect(f.counts.at(-1)).toEqual({ index: null, total: all.length, partial: false });
       f.find.step("needle", "older");
-      expect(selected(f.manager)).toEqual(all[0]);
+      expect(highlighted(f.term)).toEqual(all[0]);
       expect(f.counts.at(-1)).toEqual({ index: 1, total: all.length, partial: false });
     });
 
@@ -1592,10 +1665,10 @@ describe("output a feed would take too long to take in", () => {
       f.find.find("needle");
       f.frames.settle();
       f.find.step("needle", "newer");
-      expect(selected(f.manager)).not.toBeNull();
+      expect(highlighted(f.term)).not.toBeNull();
       filler(f.viewport, Math.ceil(LIMIT) + 500);
       f.find.step("needle", "older");
-      expect(selected(f.manager), "no frame has run").toBeNull();
+      expect(highlighted(f.term), "no frame has run").toBeNull();
       expect(f.frames.pending()).toBe(1);
     });
 
@@ -1607,18 +1680,18 @@ describe("output a feed would take too long to take in", () => {
       for (let i = 0; i < 5; i++) {
         filler(f.viewport, 200);
         f.frames.frame();
-        const now = selected(f.manager)!;
+        const now = highlighted(f.term)!;
         expect(textAt(f.core, now), `frame ${i}, history ${history()}`).toBe("needle");
         expect(now.startRow).toBeLessThan(19_955 - Math.ceil(LIMIT));
       }
       f.frames.settle();
-      expect(textAt(f.core, selected(f.manager)!)).toBe("needle");
+      expect(textAt(f.core, highlighted(f.term)!)).toBe("needle");
       expect(f.counts.at(-1)).toMatchObject({ index: 5, partial: false });
     });
 
     test("output that restarts the search frame after frame holds a step behind the kept match no longer than the cap from the first restart", async () => {
       const f = await selectedFifth();
-      const kept = selected(f.manager);
+      const kept = highlighted(f.term);
       // Feeds that take twice the budget teach find that 1,000 rows do, so
       // from some frame on every 1,000-row frame restarts.
       costly(f, () => 2 * FIND_FRAME_BUDGET_MS);
@@ -1640,8 +1713,8 @@ describe("output a feed would take too long to take in", () => {
       const landed = shown.findIndex((c) => c.index !== null && c.total > 0);
       expect(landed, "not before the cap").toBeGreaterThanOrEqual(FIND_WAIT_CAP_MS / 100 - 1);
       expect(shown[landed]).toMatchObject({ index: 1, partial: true });
-      expect(selected(f.manager)).not.toEqual(kept);
-      expect(textAt(f.core, selected(f.manager)!)).toBe("needle");
+      expect(highlighted(f.term)).not.toEqual(kept);
+      expect(textAt(f.core, highlighted(f.term)!)).toBe("needle");
     });
   });
 });
@@ -1705,46 +1778,46 @@ describe("the tracked cells", () => {
 
 describe("closing", () => {
   test("clears the highlight it wrote", async () => {
-    const { frames, find, manager } = await fixture(SHORT);
+    const { frames, find, term } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
     find.close();
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
   });
 
   test("keeps a selection the user made since", async () => {
-    const { frames, find, manager } = await fixture(SHORT);
+    const { frames, find, term } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
-    manager.selectionStart = { col: 0, absoluteRow: 0 };
-    manager.selectionEnd = { col: 1, absoluteRow: 0 };
+    term.setSelection({ start: { col: 0, absoluteRow: 0 }, end: { col: 1, absoluteRow: 0 } });
     find.close();
-    expect(selected(manager)).toEqual(range(0, 0, 0, 1));
+    expect(selected(term)).toEqual(range(0, 0, 0, 1));
+    expect(highlighted(term)).toBeNull();
   });
 
   test("an empty query closes the search too", async () => {
-    const { frames, find, manager, created } = await fixture(SHORT);
+    const { frames, find, term, created } = await fixture(SHORT);
     find.find("needle");
     frames.settle();
     const free = vi.spyOn(created[0]!, "free");
     find.find("");
     expect(free).toHaveBeenCalledTimes(1);
-    expect(selected(manager)).toBeNull();
+    expect(highlighted(term)).toBeNull();
     // The next query starts a search of its own.
     find.find("needle");
     frames.settle();
     expect(created).toHaveLength(2);
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
   });
 });
 
 describe("dispose", () => {
   test("stops the scan, frees the search and stops watching changes", async () => {
-    const { core, frames, find, counts, created, viewport, changeListeners: observers } = await fixture(numbered(3000, (i) => i % 10 === 5));
+    const { core, frames, find, counts, created, viewport, changeListeners: observers, resizingBeforeFind } = await fixture(numbered(3000, (i) => i % 10 === 5));
     const resizing = (core as unknown as { resizeListeners: Set<unknown> }).resizeListeners;
     expect(observers.size).toBe(1);
-    expect(resizing.size).toBe(1);
+    expect(resizing.size).toBe(resizingBeforeFind.size + 1);
     find.find("needle");
     frames.frame();
     expect(frames.pending(), "mid-scan").toBe(1);
@@ -1755,7 +1828,7 @@ describe("dispose", () => {
     expect(frames.pending()).toBe(0);
     expect(free).toHaveBeenCalledTimes(1);
     expect(observers.size).toBe(0);
-    expect(resizing.size, "nor the core's resizes").toBe(0);
+    expect(resizing, "only the widget's resize subscriptions remain").toEqual(resizingBeforeFind);
     viewport.write("needle late\r\n");
     expect(frames.pending()).toBe(0);
     expect(counts).toHaveLength(seen);
@@ -1769,14 +1842,14 @@ describe("attach", () => {
     expect(GhosttyFind.attach(term, viewport, () => {})).toBeNull();
   });
 
-  test("finds through the binding's terminal and ghostty-web's selection manager", async () => {
-    const { core, manager, view, viewport } = await fixture(SHORT);
-    const term = { wasmTerm: core, selectionManager: manager } as unknown as Terminal;
+  test("finds through the binding and public widget highlight facade", async () => {
+    const { term, view, viewport } = await fixture(SHORT);
     const counts: FindCount[] = [];
     const find = GhosttyFind.attach(term, viewport, (count) => counts.push(count));
     expect(find).not.toBeNull();
+    controllers.push(find!);
     find!.step("needle", "older");
-    expect(selected(manager)).toEqual(SHORT_MATCH(5));
+    expect(highlighted(term)).toEqual(SHORT_MATCH(5));
     expect(counts.at(-1)).toMatchObject({ index: 1 });
     expect(view.viewportY).toBe(0);
     find!.dispose();

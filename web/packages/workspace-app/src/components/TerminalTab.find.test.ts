@@ -70,7 +70,6 @@ async function renderGhostty(text = NEEDLES): Promise<Terminal> {
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(text);
   expect(term.wasmTerm!.plainText()).toContain(text.split("\r\n").at(-1)!);
-  // Let the widget's initial focus retry finish before the bar takes focus.
   await new Promise((resolve) => setTimeout(resolve, 0));
   return term;
 }
@@ -79,44 +78,8 @@ async function output(text: string): Promise<void> {
   await socketOutput(TerminalSocket.all[0]!, text);
 }
 
-// Read selected cells from the public renderer, so both positions and
-// copyable text come from the widget.
-function selection(term: Terminal) {
-  if (!term.hasSelection()) {
-    expect(term.getSelection()).toBe("");
-    return null;
-  }
-  const canvas = term.element!.querySelector("canvas")!;
-  const context = canvas.getContext("2d")!;
-  const width = canvas.width / (window.devicePixelRatio || 1) / term.cols;
-  const height = canvas.height / (window.devicePixelRatio || 1) / term.rows;
-  const top = term.getScrollbackLength() - Math.floor(term.getViewportY());
-  const cells: Array<{ col: number; absoluteRow: number }> = [];
-  const fill = context.fillRect;
-  const spy = vi.spyOn(context, "fillRect").mockImplementation(function (x, y, w, h) {
-    if (context.fillStyle === term.options.theme.selectionBackground && w === width && h === height) {
-      cells.push({ col: x / width, absoluteRow: top + y / height });
-    }
-    fill.call(context, x, y, w, h);
-  });
-  try {
-    term.renderer!.render(term.wasmTerm!, true, term.getViewportY());
-  } finally {
-    spy.mockRestore();
-  }
-  expect(cells.length, "the selected range is painted in the viewport").toBeGreaterThan(0);
-  const start = cells[0]!;
-  const end = cells.at(-1)!;
-  const lines = [];
-  for (let row = start.absoluteRow; row <= end.absoluteRow; row++) {
-    lines.push(term.buffer.active.getLine(row)!.translateToString(
-      true,
-      row === start.absoluteRow ? start.col : 0,
-      row === end.absoluteRow ? end.col + 1 : term.cols,
-    ));
-  }
-  expect(term.getSelection(), "copied text covers the painted cells").toBe(lines.join("\n"));
-  return { start, end };
+function activeHighlight(term: Terminal) {
+  return term.highlights.get("search-active")?.ranges[0] ?? null;
 }
 
 // Finite work (search and fitting) drains; a callback that reschedules
@@ -157,8 +120,8 @@ async function findNeedle(term: Terminal) {
   const input = await openFindWithQuery("needle");
   frames.settle();
   await tick();
-  expect(selection(term)).toEqual(match(5));
-  expect(term.getSelection()).toBe("needle");
+  expect(activeHighlight(term)).toEqual(match(5));
+  expect(term.getSelectionRange()).toBeNull();
   expect(countElement()?.textContent).toBe("1 of 3");
   return { input, frames };
 }
@@ -212,6 +175,39 @@ function pressEnter(input: HTMLInputElement, shiftKey = false): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey, bubbles: true }));
 }
 
+describe("find and user selection coexistence", () => {
+  test.each(["Escape", "empty query"] as const)("query and steps preserve selection, and %s clears only search-active", async (close) => {
+    const term = await renderGhostty();
+    const users = { start: { col: 0, absoluteRow: 1 }, end: { col: 7, absoluteRow: 1 } };
+    term.setSelection(users);
+    const text = term.getSelection();
+    term.highlights.set("annotation", [match(3)]);
+    const frames = holdFrames();
+    const input = await openFindWithQuery("needle");
+    frames.settle();
+    await tick();
+    expect(term.getSelectionRange(), "query preserves the user's range").toEqual(users);
+    expect(term.getSelection()).toBe(text);
+    expect(activeHighlight(term)).toEqual(match(5));
+    pressEnter(input);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(3));
+    expect(term.getSelectionRange(), "stepping preserves the user's range").toEqual(users);
+    typeQuery(input, "needle b");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toEqual(users);
+    expect(term.getSelectionRange()).toEqual(users);
+    if (close === "Escape") input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    else typeQuery(input, "");
+    await tick();
+    expect(activeHighlight(term)).toBeNull();
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(term.getSelection()).toBe(text);
+    expect(term.highlights.get("annotation")?.ranges).toEqual([match(3)]);
+  });
+});
+
 describe("terminal find command routing", () => {
   test("app.find.open opens the find bar on the focused terminal", async () => {
     await renderTerminal(terminalTab(), true);
@@ -247,20 +243,20 @@ describe("terminal find command routing", () => {
     expect(findInput()).toBeNull();
   });
 
-  test("typing a changed query selects its newest match instead of keeping an older selection", async () => {
+  test("typing a changed query highlights its newest match without creating a selection", async () => {
     const term = await renderGhostty("\x1b[2J\x1b[3J\x1b[Hne a\r\nnee b\r\nxx\r\nne c");
     const frames = holdFrames();
     const input = await openFindWithQuery("nee");
     frames.settle();
     await tick();
-    expect(selection(term)).toEqual({ start: { col: 0, absoluteRow: 1 }, end: { col: 2, absoluteRow: 1 } });
-    expect(term.getSelection()).toBe("nee");
+    expect(activeHighlight(term)).toEqual({ start: { col: 0, absoluteRow: 1 }, end: { col: 2, absoluteRow: 1 } });
+    expect(term.getSelection()).toBe("");
 
     typeQuery(input, "ne");
     frames.settle();
     await tick();
-    expect(selection(term)).toEqual({ start: { col: 0, absoluteRow: 3 }, end: { col: 1, absoluteRow: 3 } });
-    expect(term.getSelection()).toBe("ne");
+    expect(activeHighlight(term)).toEqual({ start: { col: 0, absoluteRow: 3 }, end: { col: 1, absoluteRow: 3 } });
+    expect(term.getSelection()).toBe("");
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -269,11 +265,11 @@ describe("terminal find command routing", () => {
     const { input } = await findNeedle(term);
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
     pressEnter(input, true);
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -282,11 +278,11 @@ describe("terminal find command routing", () => {
     await findNeedle(term);
     fireCommand("app.find.next");
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
     fireCommand("app.find.prev");
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -362,7 +358,7 @@ describe("terminal find count", () => {
     pressEnter(input);
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(1));
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
   });
 
@@ -397,6 +393,7 @@ describe("terminal find count", () => {
     typeQuery(input, "");
     frames.settle();
     await tick();
+    expect(activeHighlight(term)).toBeNull();
     expect(term.hasSelection()).toBe(false);
     expect(term.getSelection()).toBe("");
     expect(countElement()?.textContent).toBe("");
@@ -408,6 +405,7 @@ describe("terminal find count", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
     expect(term.hasSelection()).toBe(false);
     expect(term.getSelection()).toBe("");
     fireCommand("app.find.open");
@@ -489,8 +487,8 @@ describe("the find stepping chords in the find input", () => {
     const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
     input.dispatchEvent(event);
     await tick();
-    expect(selection(term)).toEqual(match(row));
-    expect(term.getSelection()).toBe("needle");
+    expect(activeHighlight(term)).toEqual(match(row));
+    expect(term.getSelectionRange()).toBeNull();
     expect(countElement()?.textContent).toBe(count);
     return event;
   }
@@ -578,12 +576,12 @@ describe("terminal find on the ghostty backend", () => {
     expect(frames.pending(), "the scan waits for a frame").toBe(1);
     frames.frame();
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3+");
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
   });
 
   // A screen reader speaks each change to a live region; the shown count
@@ -624,7 +622,7 @@ describe("terminal find on the ghostty backend", () => {
       expect(shown.at(-1)).toBe(`1 of ${total}`);
       expect(heard.slice(0, -1).every((text) => text === ""), "nothing heard while partial").toBe(true);
       expect(heard.at(-1), "the settled count heard once the scan completes").toBe(`1 of ${total}`);
-      expect(selection(term)).toEqual(match(3005));
+      expect(activeHighlight(term)).toEqual(match(3005));
 
       // Enter steps at once on the screen; the region holds the step until
       // an interval has passed since it last spoke.
@@ -681,7 +679,7 @@ describe("terminal find on the ghostty backend", () => {
 
     pressEnter(findInput()!, true);
     await tick();
-    expect(selection(term), "nothing selected while the scan runs").toBeNull();
+    expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
     expect(countElement()?.textContent).toBe("");
     const shown: string[] = [];
     do {
@@ -689,13 +687,13 @@ describe("terminal find on the ghostty backend", () => {
       frames.frame();
       await tick();
       shown.push(countElement()!.textContent!);
-      if (shown.at(-1)!.endsWith("+")) expect(selection(term), "nothing selected while the scan runs").toBeNull();
+      if (shown.at(-1)!.endsWith("+")) expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
     } while (shown.at(-1)!.endsWith("+"));
     const total = term.wasmTerm!.plainText()!.split("needle").length - 1;
     expect(shown.length).toBeGreaterThan(2);
     for (const text of shown.slice(0, -1)) expect(text).toMatch(/^\? of \d+\+$/);
     expect(shown.at(-1)).toBe(`${total} of ${total}`);
-    expect(selection(term)).toEqual({ start: { col: 6, absoluteRow: 5 }, end: { col: 11, absoluteRow: 5 } });
+    expect(activeHighlight(term)).toEqual({ start: { col: 6, absoluteRow: 5 }, end: { col: 11, absoluteRow: 5 } });
   });
 
   test("Enter steps to older output and Shift+Enter to newer", async () => {
@@ -704,17 +702,17 @@ describe("terminal find on the ghostty backend", () => {
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(1));
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
 
     pressEnter(input, true);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
   });
 
@@ -724,12 +722,12 @@ describe("terminal find on the ghostty backend", () => {
 
     fireCommand("app.find.prev");
     await tick();
-    expect(selection(term), "newer than the newest wraps to the oldest").toEqual(match(1));
+    expect(activeHighlight(term), "newer than the newest wraps to the oldest").toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
 
     fireCommand("app.find.next");
     await tick();
-    expect(selection(term), "older than the oldest wraps to the newest").toEqual(match(5));
+    expect(activeHighlight(term), "older than the oldest wraps to the newest").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
@@ -740,10 +738,10 @@ describe("terminal find on the ghostty backend", () => {
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("0 of 0");
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
   });
 
-  test("Escape closes the bar, clears the selection and the count, and focuses the terminal", async () => {
+  test("Escape closes the bar, clears the highlight and the count, and focuses the terminal", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const free = vi.spyOn(VtSearch.prototype, "free");
@@ -751,7 +749,7 @@ describe("terminal find on the ghostty backend", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
     expect(free).toHaveBeenCalledTimes(1);
     expect(document.activeElement, "the element the terminal reads keys from").toBe(term.element);
 
@@ -764,15 +762,14 @@ describe("terminal find on the ghostty backend", () => {
     expect(countElement()?.textContent).toBe("");
     pressEnter(findInput()!);
     await tick();
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3+");
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
-  // ghostty-web's focus() focuses again on a zero-delay timer. A bar that
-  // reopens before that timer runs, as a quick Escape and find chord can,
+  // A bar that reopens during the same task or just after Escape closes it
   // keeps the keyboard, and the next Escape is the bar's.
   test.each(["in Escape's own task", "once Escape has closed it"])(
     "a bar reopened %s keeps the keyboard",
@@ -813,12 +810,12 @@ describe("terminal find on the ghostty backend", () => {
     },
   );
 
-  test("an emptied query clears the selection and the count", async () => {
+  test("an emptied query clears the highlight and the count", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input } = await findNeedle(term);
     typeQuery(input, "");
     await tick();
-    expect(selection(term)).toBeNull();
+    expect(activeHighlight(term)).toBeNull();
     expect(countElement()?.textContent).toBe("");
   });
 
@@ -857,15 +854,15 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     const target = { input, count: countElement()!, box: document.querySelector(".terminal-find")! }[part];
     click(target);
-    expect(selection(term)).toEqual(match(5));
+    expect(activeHighlight(term)).toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(activeHighlight(term), "a later frame keeps it too").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
   });
 
   test("a click elsewhere in the page keeps the selection and find highlight", async () => {
@@ -874,18 +871,18 @@ describe("terminal find on the ghostty backend", () => {
     const elsewhere = document.createElement("button");
     document.body.append(elsewhere);
     click(elsewhere);
-    expect(selection(term), "an outside click keeps the selection").toEqual(match(5));
+    expect(activeHighlight(term), "an outside click keeps the highlight").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(activeHighlight(term), "a later frame keeps it too").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term), "a step highlights again").toEqual(match(3));
+    expect(activeHighlight(term), "a step highlights again").toEqual(match(3));
   });
 
-  test("a tap in the terminal clears find's highlight, and find leaves it cleared", async () => {
+  test("a tap in the terminal leaves find's highlight in place", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const canvas = term.element!.querySelector("canvas")!;
@@ -894,15 +891,16 @@ describe("terminal find on the ghostty backend", () => {
     const at = { clientX: 2 * 8 + 1, clientY: 2 * 19 + 1 };
     mousePointer(canvas, "pointerdown", at);
     mousePointer(canvas, "pointerup", at);
-    expect(selection(term), "ghostty-web's press clears it").toBeNull();
+    expect(term.getSelectionRange()).toBeNull();
+    expect(activeHighlight(term), "a press clears only the user selection").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term), "find leaves it cleared").toBeNull();
+    expect(activeHighlight(term), "find keeps its active match").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
-    expect(selection(term), "a step highlights again").toEqual(match(3));
+    expect(activeHighlight(term), "a step highlights again").toEqual(match(3));
   });
 
   test("a selection the user drags after find's highlight stays theirs through a click in the bar", async () => {
@@ -910,14 +908,17 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     const copied = drag(term, { col: 0, row: 0 }, { col: 2, row: 1 });
     const users = { start: { col: 0, absoluteRow: 0 }, end: { col: 2, absoluteRow: 1 } };
-    expect(selection(term), "ghostty-web made the user's selection").toEqual(users);
+    expect(term.getSelectionRange(), "the widget made the user's selection").toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(copied, "and copied it on release").toHaveBeenCalledTimes(1);
     click(input);
-    expect(selection(term)).toEqual(users);
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     await output("\r\nmore needle");
     frames.settle();
     await tick();
-    expect(selection(term), "find does not take it over").toEqual(users);
+    expect(term.getSelectionRange(), "find does not take it over").toEqual(users);
+    expect(activeHighlight(term)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("2 of 4");
   });
 
@@ -926,22 +927,22 @@ describe("terminal find on the ghostty backend", () => {
     const { input, frames } = await findNeedle(term);
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     // ghostty-web's own resize, where the fit and a broadcast grid end. The
     // rows are short and keep their places; the core still forgets its
     // selected match and scans again.
     term.resize(60, 24);
-    expect(selection(term), "kept before ghostty-web repaints").toEqual(match(3));
+    expect(activeHighlight(term), "kept before ghostty-web repaints").toEqual(match(3));
     frames.settle();
     await tick();
-    expect(selection(term)).toEqual(match(3));
+    expect(activeHighlight(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(1));
+    expect(activeHighlight(term)).toEqual(match(1));
     expect(countElement()?.textContent).toBe("3 of 3");
   });
 
@@ -952,7 +953,7 @@ describe("terminal find on the ghostty backend", () => {
     frames.settle();
     await tick();
     const earlier = { start: { col: 6, absoluteRow: 6 }, end: { col: 10, absoluteRow: 6 } };
-    expect(selection(term)).toEqual(earlier);
+    expect(activeHighlight(term)).toEqual(earlier);
     expect(countElement()?.textContent).toBe("1 of 1");
 
     await TerminalSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
@@ -962,7 +963,7 @@ describe("terminal find on the ghostty backend", () => {
     await tick();
     // The core keeps the selection on its text; the line's match is newer.
     expect(countElement()?.textContent).toBe("2 of 2");
-    expect(selection(term)).toEqual(earlier);
+    expect(activeHighlight(term)).toEqual(earlier);
   });
 
   /// Each call of a write method in `source`, as the name written to and the
@@ -1037,7 +1038,7 @@ describe("terminal find on the ghostty backend", () => {
     pressEnter(findInput()!);
     frames.settle();
     await tick();
-    expect(selection(next)).toEqual(match(5));
+    expect(activeHighlight(next)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
