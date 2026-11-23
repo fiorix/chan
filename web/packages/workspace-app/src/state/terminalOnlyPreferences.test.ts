@@ -27,7 +27,6 @@ function preferences(overrides: Partial<Preferences> = {}): Preferences {
       session_cap: 8,
       ring_bytes: 1024,
       font_size: 20,
-      ghostty: true,
       scrollback_mb: 80,
       mouse_capture: false,
       secret_masking: true,
@@ -97,12 +96,11 @@ describe("a standalone terminal loads its preferences at boot", () => {
     expect(prefs?.terminal_colors?.mode).toBe("custom");
     expect(prefs?.terminal_colors?.custom?.background).toBe("#101820");
     // The whole payload arrives, not an appearance slice of it, so every
-    // setting the same source feeds reaches the terminal. These four are the
+    // setting the same source feeds reaches the terminal. These three are the
     // non-appearance settings that source drives, asserted here because an
     // appearance-only fix would satisfy the colour and font-size cases above
-    // while still leaving the backend, scrollback, mouse capture, and secret
-    // masking on their defaults.
-    expect(prefs?.terminal.ghostty).toBe(true);
+    // while still leaving scrollback, mouse capture, and secret masking on
+    // their defaults.
     expect(prefs?.terminal.scrollback_mb).toBe(80);
     expect(prefs?.terminal.mouse_capture).toBe(false);
     expect(prefs?.terminal.secret_masking).toBe(true);

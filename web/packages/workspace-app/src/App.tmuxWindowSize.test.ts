@@ -16,6 +16,8 @@ vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitA
 vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
+vi.mock("./terminal/backend", async (importOriginal) =>
+  (await import("./__tests__/xterm")).xtermStandInBackendModule(importOriginal));
 
 import { api, sessionWindowId } from "./api/client";
 import { setSocketFactory } from "./api/transport";

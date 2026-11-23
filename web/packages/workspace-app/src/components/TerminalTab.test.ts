@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 // Static top-level import avoids per-test dynamic import timeouts under
 // the full parallel suite (contended Svelte transform/import across
@@ -52,10 +53,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     hasMouseTracking() { return false; }
     hasFocusEvents() { return false; }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...(await importOriginal<typeof import("../terminal/backend")>()),
     loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  };
+  });
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
@@ -98,6 +99,9 @@ function keyHandler(): (e: KeyboardEvent) => boolean {
   if (!handler) throw new Error("no key handler registered");
   return handler;
 }
+
+// Every case runs on the xterm stand-in unless it names ghostty.
+beforeEach(() => useXtermStandIn());
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
@@ -184,7 +188,8 @@ describe("TerminalTab CLI reload notice", () => {
   });
 
   test.each(["xterm", "ghostty"] as const)("%s publishes one larger grid after dismissal and none while inactive", async (backend) => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty" }));
+    useXtermStandIn(backend === "xterm");
+    __testSetStandalonePreferences(terminalPreferences());
     xterm.fit.size = { cols: 100, rows: 30 };
     noticeSize.grid = { cols: 100, rows: 30 };
     const [tab, hidden] = seatTerminals([

@@ -61,6 +61,8 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
 
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
@@ -108,7 +110,7 @@ type Model = { model: Terminal };
 /// A mounted xterm.js terminal whose program asked for bracketed paste when
 /// `bracketed`, with nothing sent yet.
 async function attached(bracketed: boolean) {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: false }));
+  __testSetStandalonePreferences(terminalPreferences());
   const [tab] = seatTerminals([terminalTab()]);
   const { target, term } = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;

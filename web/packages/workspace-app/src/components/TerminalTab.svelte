@@ -174,7 +174,6 @@
   import { trackUserInput, type UserInputTracker } from "../terminal/xtermUserInput";
   import {
     loadGhosttyKit,
-    terminalBackendFromPrefs,
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
@@ -484,8 +483,9 @@
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
   let receivedSeq = 0;
-  // Reports what the ghostty core has parsed; xterm.js queues its writes, so
-  // that backend never dials with `ack` and never paces the program.
+  // Reports each frame as the ghostty core takes it, in the same task as its
+  // parse; xterm.js queues its writes, so that backend never dials with `ack`
+  // and never paces the program.
   const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -606,9 +606,8 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend (Settings: terminal.ghostty, on by default).
-  // Read once in start() under the same spawn-time-only contract as the
-  // scrollback / mouse_capture settings above it. The ghostty backend
+  // Terminal backend: set in start(), Ghostty unless its load failed and
+  // the terminal fell back to xterm.js. The ghostty backend
   // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
   // addons (search, serialize, web-links, WebGL) and xterm-internal
   // hooks (OSC guards, keyboard-protocol tracking, Shift-selection
@@ -1289,35 +1288,29 @@
         readyFont.error,
       );
     }
-    // Backend honors the Settings toggle under the same spawn-time
-    // contract (read once here; flipping it affects only newly opened
-    // terminals). An absent field (a server older than the key) means
-    // xterm.js, which such a server can still drive. The ghostty
-    // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
-    // terminal gets its own WASM instance (see backend.ts); a failed load
-    // falls back to xterm.js rather than breaking the spawn (fail-open,
-    // matching the mouse filter's philosophy).
-    backend = terminalBackendFromPrefs(terminalPrefs);
+    // Every terminal opens on Ghostty.
+    // The kit lazy-loads on the first spawn and each terminal gets its own
+    // WASM instance (see backend.ts). A failed load falls back to xterm.js
+    // rather than breaking the spawn.
+    backend = "ghostty";
     let ghosttyKit: GhosttyKit | null = null;
     let ghosttyInstance: GhosttyVt | null = null;
-    if (backend === "ghostty") {
-      try {
-        ghosttyKit = await loadGhosttyKit();
-        ghosttyInstance = await ghosttyKit.instantiate({
-          cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
-          onResizeReply: sendGeneratedTerminalInput,
-        });
-      } catch (err) {
-        console.warn(
-          "[chan] ghostty-web failed to load; falling back to xterm.js:",
-          err,
-        );
-        backend = "xterm";
-      }
-      // The wasm fetch yields: a teardown (or a restart racing it) may
-      // have disposed this component while the load was in flight.
-      if (!host || term) return;
+    try {
+      ghosttyKit = await loadGhosttyKit();
+      ghosttyInstance = await ghosttyKit.instantiate({
+        cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
+        onResizeReply: sendGeneratedTerminalInput,
+      });
+    } catch (err) {
+      console.warn(
+        "[chan] ghostty-web failed to load; falling back to xterm.js:",
+        err,
+      );
+      backend = "xterm";
     }
+    // The wasm fetch yields: a teardown (or a restart racing it) may
+    // have disposed this component while the load was in flight.
+    if (!host || term) return;
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -3659,16 +3652,12 @@
         </div>
       {:else if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
-             body): the live engine and the masking toggle, Find + Copy
+             body): the masking toggle, Find + Copy
              (selection or scrollback) + Paste + Copy scrollback, the Rich
              Prompt rows, then the window's command launcher. Each action
              row is worded by its catalog command. Name / Group / broadcast
              / MCP / spawn config lives on the tab-name menu. -->
         <div class="action-list">
-          <div class="terminal-backend-label" data-terminal-backend={backend}>
-            <span>Terminal engine</span>
-            <span class="terminal-backend-value">{backend}</span>
-          </div>
           {@render toggleRow("app.terminal.secretMasking.toggle", toggleSecretMaskingFromMenu)}
           <div class="msep" role="separator"></div>
           <button class="mbtn" role="menuitem" onclick={openFind}>
@@ -4397,19 +4386,6 @@
   }
   .broadcast-section-label .mbtn-icon {
     color: var(--text-secondary);
-  }
-  .terminal-backend-label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 4px 8px 6px;
-    color: var(--text-secondary);
-    font-size: 12px;
-  }
-  .terminal-backend-value {
-    color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .terminal-link-target {
     display: flex;

@@ -23,6 +23,7 @@
 
 import { afterAll, afterEach } from "vitest";
 
+import { XtermStandInRequested } from "./src/__tests__/xterm";
 import { trackTimers } from "./src/demo/timers";
 
 /// The Storage surface the SPA actually uses: `getItem`, `setItem`,
@@ -116,11 +117,20 @@ afterAll(() => {
 // own teardown has run (a setup file's `afterEach` runs last); one that
 // arrives after the last test fails the file, once its timers are released.
 // A test that replaces console.warn itself has taken charge of what it hears.
+//
+// The one report it lets through is a load failed with XtermStandInRequested,
+// matched by its class: a file on the transitional stand-in route in
+// src/__tests__/xterm.ts asks for that failure to run its terminals on the
+// xterm stand-in. The exception goes with the route.
 const TERMINAL_INIT_FAILURE = "[chan] ghostty-web failed to load";
 const terminalInitFailures: string[] = [];
 const environmentWarn = console.warn;
 console.warn = function (this: Console, ...args: unknown[]) {
-  if (typeof args[0] === "string" && args[0].startsWith(TERMINAL_INIT_FAILURE)) {
+  if (
+    typeof args[0] === "string" &&
+    args[0].startsWith(TERMINAL_INIT_FAILURE) &&
+    !(args[1] instanceof XtermStandInRequested)
+  ) {
     terminalInitFailures.push(args.map((arg) => String(arg)).join(" "));
   }
   return environmentWarn.apply(this, args);

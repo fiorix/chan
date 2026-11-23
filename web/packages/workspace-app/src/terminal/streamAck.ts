@@ -14,9 +14,10 @@ const TAIL_MS = 50;
 /// rarely idles on a report, at a cost of a few small frames per window.
 const REPORTS_PER_WINDOW = 8;
 
-/// Reports the raw output position the terminal has parsed, which is what
+/// Reports the raw output position the terminal has taken, which is what
 /// paces the program: a browser that keeps accepting frames while its page is
-/// stalled gives the server no other signal. Reports start only after a
+/// stalled gives the server no other signal. A frame counts as the terminal
+/// takes it, in the same task as its parse. Reports start only after a
 /// session frame advertised a window, since an older server answers an
 /// unknown frame with a visible error.
 export class StreamAck {
@@ -45,7 +46,8 @@ export class StreamAck {
     this.#reported = this.#position;
   }
 
-  /// Record a binary frame the terminal has finished parsing.
+  /// Record a binary frame as the terminal takes it, in the same task as its
+  /// parse.
   parsed(bytes: number, replaying: boolean): void {
     if (this.#every === null) return;
     const raw = replaying ? Math.min(bytes, this.#replayLeft) : bytes;

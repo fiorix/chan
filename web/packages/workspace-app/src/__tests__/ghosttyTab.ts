@@ -10,17 +10,26 @@
 //   vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 //     (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 //
-// and every terminal it opens, through `mountTerminal` or through the app,
-// is the widget over the vendored core.
+// and every terminal it opens, through `mountGhosttyTerminal`, which returns
+// it, through `mountTerminal` or through the app, is the widget over the
+// vendored core.
 
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { mount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
-import type { GhosttyKit, TerminalBackend, ghosttyKitFrom } from "../terminal/backend";
-import { SoftwareCanvasContext } from "./softwareCanvas";
-import { attach, receive, TERMINAL_PANE, TerminalSocket, useGhosttyFixture } from "./terminalTab";
+import type { GhosttyKit, ghosttyKitFrom } from "../terminal/backend";
+import { SoftwareCanvasContext, softwareGetContext } from "./softwareCanvas";
+import {
+  attach,
+  ghosttyFixtureDeclared,
+  mountTerminal,
+  receive,
+  TERMINAL_PANE,
+  TerminalSocket,
+  useGhosttyFixture,
+} from "./terminalTab";
 
 export type GhosttyRuntime = {
   module: WebAssembly.Module | null;
@@ -58,11 +67,8 @@ export function installSoftwareCanvas() {
   const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    let context = contexts.get(this);
-    if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
-    return context as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  const environment = HTMLCanvasElement.prototype.getContext;
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(softwareGetContext(contexts, environment));
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     const id = ++nextFrame;
     frames.set(id, callback);
@@ -174,19 +180,17 @@ export const ghosttyFixture: GhosttyRuntime = { module: null, terminals: [] };
 let coreCompiled: Promise<void> | null = null;
 
 /// The `vi.mock("../terminal/backend", ...)` factory. Every terminal opens on
-/// the widget whatever the terminal preferences say, the way the product
-/// opens one when the preference selects nothing, and the loader hands out
-/// the vendored core instead of fetching it.
+/// the widget, as in the product, and the loader hands out the vendored core
+/// instead of fetching it.
 export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   coreCompiled ??= compileGhosttyCore(ghosttyFixture);
   // Awaited by the first load; a failure here surfaces there, as a terminal
   // that cannot initialize.
   coreCompiled.catch(() => {});
-  useGhosttyFixture({ opened: openedGhostty, press: pressInGhostty, reset: resetGhosttyFixture });
+  useGhosttyFixture({ opened: openedGhostty, reset: resetGhosttyFixture });
   return {
     ...actual,
-    terminalBackendFromPrefs: (): TerminalBackend => "ghostty",
     loadGhosttyKit: async (): Promise<GhosttyKit> => {
       await coreCompiled;
       return fixtureKit(actual.ghosttyKitFrom);
@@ -195,9 +199,35 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
 }
 
 /// The `vi.mock("../terminal/ghosttyCompat", ...)` factory: jsdom has no font
-/// metrics to align the widget's cells with.
+/// metrics, so the cell measure and the grid alignment built on it are
+/// stubbed. The glyph painter and the overlay scrollbar are the product's,
+/// over the software context.
 export async function ghosttyCompatModule(importOriginal: <T>() => Promise<T>) {
-  return { ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()), ...ghosttyCompatStubs() };
+  const { measureXtermCellDimensions, alignGhosttyRendererToXterm } = ghosttyCompatStubs();
+  return {
+    ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
+    measureXtermCellDimensions,
+    alignGhosttyRendererToXterm,
+  };
+}
+
+/// Mount `TerminalTab` for a seated tab, as `mountTerminal` does, and return
+/// the fixture's widget it opened. Throws before mounting unless the file
+/// declared the fixture, so a file whose mocks did not apply fails rather
+/// than running on another terminal.
+export async function mountGhosttyTerminal(
+  TerminalTab: Component<any>,
+  tab: TerminalTabState,
+  props: { focused?: boolean; active?: boolean; side?: "a" | "b" } = {},
+): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: Terminal }> {
+  if (!ghosttyFixtureDeclared()) {
+    throw new Error(
+      'mountGhosttyTerminal needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
+        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+    );
+  }
+  const { target, component } = await mountTerminal(TerminalTab, tab, props);
+  return { target, component, term: await openedGhostty(target) };
 }
 
 /// The fixture terminal open inside `within`, once there is one.
@@ -212,22 +242,16 @@ export async function openedGhostty(within: Node = document): Promise<Terminal> 
   );
 }
 
-/// What the app's key handler answered for each key the widget asked it
-/// about: true when the app consumed the key.
-const keyAnswers = new WeakMap<KeyboardEvent, boolean>();
-
 /// Type a key into the terminal: the keydown goes to the element the widget
-/// focuses and listens on, and the widget asks the app's key handler about
-/// it. `handled` is false when the app consumed the key, so the terminal
-/// sends nothing for it. A key the widget never asked about is an error, not
-/// an answer.
-function pressInGhostty(term: Terminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
+/// focuses, where the app's key handling listens ahead of the widget's own.
+/// What the key did is what the product shows for it: the input frames on
+/// the terminal's socket, and whether the returned event's default action
+/// was prevented.
+export function pressInGhostty(term: Terminal, init: KeyboardEventInit): KeyboardEvent {
   if (!term.element) throw new Error("the Ghostty terminal is not open");
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   term.element.dispatchEvent(event);
-  const consumed = keyAnswers.get(event);
-  if (consumed === undefined) throw new Error("the widget never asked the app's key handler about this key");
-  return { event, handled: !consumed };
+  return event;
 }
 
 function resetGhosttyFixture(): void {
@@ -244,24 +268,6 @@ export function typeInGhostty(term: Terminal, data: string): void {
 export function ghosttyHasFocus(term: Terminal): boolean {
   const focused = document.activeElement;
   return !!term.element && !!focused && term.element.contains(focused);
-}
-
-/// Counts the full repaints of the terminal from now on: the app's repaint
-/// and the widget's own after a resize both draw every row.
-export function watchGhosttyRepaints(term: Terminal): { readonly count: number } {
-  const renderer = term.renderer;
-  if (!renderer) throw new Error("the Ghostty terminal is not open");
-  const render = renderer.render;
-  let count = 0;
-  renderer.render = function (this: typeof renderer, ...args: Parameters<typeof render>) {
-    if (args[1] === true) count += 1;
-    return render.apply(this, args);
-  };
-  return {
-    get count() {
-      return count;
-    },
-  };
 }
 
 function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
@@ -290,14 +296,6 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
       this.#close();
     }
 
-    override attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
-      super.attachCustomKeyEventHandler((event) => {
-        const consumed = handler(event);
-        keyAnswers.set(event, consumed);
-        return consumed;
-      });
-    }
-
     #close(): void {
       if (!this.#open) return;
       this.#open = false;
@@ -308,33 +306,31 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
 }
 
 // jsdom implements no 2D context, and a test environment may answer with
-// none at all. While a fixture terminal is open every canvas gets a software
-// one, since the widget also measures its font on a detached canvas; the
-// environment's own answer comes back with the last terminal. A test that
+// none at all. While a fixture terminal is open every canvas asked for a 2D
+// context gets a software one, since the widget also measures its font on a
+// detached canvas; any other context id gets the environment's own answer,
+// and so does every canvas once the last terminal closes. A test that
 // installed its own context (`installSoftwareCanvas`) keeps it.
 const softwareContexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
 let openTerminals = 0;
 let environmentGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
-
-const softwareGetContext = function (this: HTMLCanvasElement) {
-  let context = softwareContexts.get(this);
-  if (!context) softwareContexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
-  return context as unknown as CanvasRenderingContext2D;
-} as unknown as typeof HTMLCanvasElement.prototype.getContext;
+let servedGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 
 function serveCanvases(): void {
   openTerminals += 1;
   const current = HTMLCanvasElement.prototype.getContext;
-  if (current === softwareGetContext || vi.isMockFunction(current)) return;
+  if (current === servedGetContext || vi.isMockFunction(current)) return;
   environmentGetContext = current;
-  HTMLCanvasElement.prototype.getContext = softwareGetContext;
+  servedGetContext = softwareGetContext(softwareContexts, current);
+  HTMLCanvasElement.prototype.getContext = servedGetContext;
 }
 
 function releaseCanvases(): void {
   openTerminals -= 1;
   if (openTerminals > 0 || !environmentGetContext) return;
-  if (HTMLCanvasElement.prototype.getContext === softwareGetContext) {
+  if (HTMLCanvasElement.prototype.getContext === servedGetContext) {
     HTMLCanvasElement.prototype.getContext = environmentGetContext;
   }
   environmentGetContext = null;
+  servedGetContext = null;
 }

@@ -21,6 +21,7 @@
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -198,10 +199,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm?.free();
     }
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...actual,
     loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: Terminal as never }),
-  };
+  });
 });
 // Renderer hooks the stand-in has no renderer for.
 vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
@@ -233,7 +234,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  __testSetStandalonePreferences(terminalPreferences());
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(LINUX);
   vi.stubGlobal("ClipboardItem", class {
     constructor(readonly items: Record<string, Blob>) {}
@@ -253,6 +254,7 @@ afterEach(() => {
   TerminalSocket.all.splice(0);
   ghostty.terminals.splice(0);
   xterm.terminals.splice(0);
+  useXtermStandIn(false);
   __testSetStandalonePreferences(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -502,7 +504,8 @@ describe("the Linux desktop PRIMARY selection", () => {
   });
 
   async function renderXterm() {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: false }));
+    useXtermStandIn();
+    __testSetStandalonePreferences(terminalPreferences());
     const [tab] = seatTerminals([terminalTab()]);
     const target = document.createElement("div");
     document.body.append(target);

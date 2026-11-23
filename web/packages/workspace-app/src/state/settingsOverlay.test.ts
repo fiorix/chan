@@ -38,9 +38,9 @@ describe("settings overlay state", () => {
     openSettings();
     expect(settingsPanel.target).toBeNull();
 
-    openSettings({ section: "terminal", field: "terminal.engine" });
+    openSettings({ section: "terminal", field: "terminal.secretMasking" });
     expect(settingsPanel.open).toBe(true);
-    expect(settingsPanel.target).toEqual({ section: "terminal", field: "terminal.engine" });
+    expect(settingsPanel.target).toEqual({ section: "terminal", field: "terminal.secretMasking" });
   });
 
   test("syncOverlayStack tracks settings; topOverlay + closeOverlay agree", () => {

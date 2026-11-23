@@ -8,6 +8,7 @@
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 import type { VtHost } from "@chan/ghostty-web-ng/vt";
 
 const ghostty = vi.hoisted(() => {
@@ -167,7 +168,7 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (importOriginal) => ({
+vi.mock("../terminal/backend", async (importOriginal) => (await import("../__tests__/xterm")).xtermStandInSwitch({
   ...(await importOriginal<typeof import("../terminal/backend")>()),
   loadGhosttyKit: vi.fn(async () => {
     ghostty.record.kitLoads += 1;
@@ -279,7 +280,7 @@ beforeEach(() => {
     realFocus: false,
     themes: [],
   });
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
+  __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
 });
 
 afterEach(() => {
@@ -340,12 +341,12 @@ function key(term: Record<string, any>, init: KeyboardEventInit): { event: Keybo
 
 const MASKING_ROW = "Secret masking (this terminal)";
 
-/// What the open body menu says of the terminal: its engine and whether its
-/// masking row is checked, with how many times the ghostty kit was asked for.
+/// The engine the terminal was built on, whether the open body menu's
+/// masking row is checked, and how many times the ghostty kit was asked for.
 async function spawned(target: HTMLElement): Promise<{ engine: string; masking: boolean; kitLoads: number }> {
   await openBodyMenu(target);
   return {
-    engine: document.body.querySelector(".terminal-backend-value")?.textContent ?? "",
+    engine: ghostty.record.terminals.length > 0 ? "ghostty" : xterm.terminals.length > 0 ? "xterm" : "",
     masking: menuRow(MASKING_ROW).getAttribute("aria-checked") === "true",
     kitLoads: ghostty.record.kitLoads,
   };
@@ -357,7 +358,7 @@ describe("a control terminal whose masking starts on", () => {
     ["on", { secret_masking: true }],
   ] as const)("with the preference %s it spawns on ghostty, masked", async (_name, masking) => {
     ui.terminalControl = true;
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, ...masking }));
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15, ...masking }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
     expect(ghostty.record.terminals, "one ghostty terminal built").toHaveLength(1);
@@ -374,13 +375,13 @@ describe("a control terminal whose masking starts on", () => {
 
   test("with the preference off it starts unmasked on the configured backend", async () => {
     ui.terminalControl = true;
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: false }));
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
   test("a terminal of any other window masks on ghostty with the preference on", async () => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: true }));
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: true }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
   });
@@ -388,22 +389,18 @@ describe("a control terminal whose masking starts on", () => {
 
 describe("choosing the backend", () => {
   test("the ghostty setting spawns the terminal on ghostty with chan's options", async () => {
-    const { target, term } = await mountGhostty();
+    const { term } = await mountGhostty();
     expect(xterm.terminals, "no xterm built").toHaveLength(0);
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
-    await openBodyMenu(target);
-    expect(document.body.querySelector(".terminal-backend-value")?.textContent).toBe("ghostty");
   });
 
   test("a kit that fails to load falls back to xterm", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     ghostty.record.kitFails = true;
     const [tab] = seatTerminals([terminalTab()]);
-    const { target } = await mountTerminal(TerminalTab, tab!);
+    await mountTerminal(TerminalTab, tab!);
     expect(ghostty.record.terminals).toHaveLength(0);
     expect(xterm.terminals).toHaveLength(1);
-    await openBodyMenu(target);
-    expect(document.body.querySelector(".terminal-backend-value")?.textContent).toBe("xterm");
   });
 
   test("the xterm-only pieces stay off ghostty", async () => {
@@ -962,7 +959,8 @@ describe("focus reports", () => {
   });
 
   test("on xterm the component adds no report: xterm.js sends its own", async () => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: false, font_size: 15 }));
+    useXtermStandIn();
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
     const [tab] = seatTerminals([terminalTab()]);
     const { target } = await mountTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;
@@ -1050,7 +1048,7 @@ describe("secret masking", () => {
   });
 
   test("a renderer without the hooks reports the failure and leaves masking off", async () => {
-    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: true }));
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: true }));
     ghostty.record.bareRenderer = true;
     const { target } = await mountGhostty();
     expect(ui.status).toBe("Secret masking stopped working in this terminal");

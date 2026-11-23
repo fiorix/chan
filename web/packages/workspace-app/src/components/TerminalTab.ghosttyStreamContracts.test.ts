@@ -54,7 +54,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   canvas = installSoftwareCanvas();
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: true, secret_masking: false }));
+  __testSetStandalonePreferences(terminalPreferences({ secret_masking: false }));
 });
 
 afterEach(async () => {

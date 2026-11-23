@@ -202,6 +202,68 @@ mod tests {
         assert_eq!(read_from(&path), 80);
     }
 
+    /// The WARN events about `terminal.ghostty` that `f` gives on this thread.
+    fn ghostty_warnings<T>(f: impl FnOnce() -> T) -> (usize, T) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Count(Arc<AtomicUsize>);
+        struct Key(bool);
+        impl tracing::field::Visit for Key {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0 |= field.name() == "key" && value == "terminal.ghostty";
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        impl tracing::Subscriber for Count {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut key = Key(false);
+                event.record(&mut key);
+                if key.0 && *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let out = tracing::subscriber::with_default(Count(Arc::clone(&count)), f);
+        (count.load(Ordering::Relaxed), out)
+    }
+
+    #[test]
+    fn a_stored_terminal_ghostty_warns_once_and_a_write_drops_it() {
+        // The only test in this binary that loads a stored `false`, so this
+        // process's one warning is its to read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.toml");
+        let body = "[search]\naggression = \"aggressive\"\n\
+                    [terminal]\nghostty = false\nbackground_opacity = 90\n";
+        std::fs::write(&path, body).unwrap();
+        let (warnings, ()) = ghostty_warnings(|| {
+            assert_eq!(read_from(&path), 90);
+            assert_eq!(read_from(&path), 90);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                body,
+                "a read leaves the file alone"
+            );
+            assert_eq!(write_to(&path, 85).unwrap(), 85);
+            assert_eq!(read_from(&path), 85);
+        });
+        assert_eq!(warnings, 1, "the desktop process warns once");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("ghostty"), "{saved}");
+        assert!(saved.contains("background_opacity = 85"), "{saved}");
+        assert!(saved.contains("aggression = \"aggressive\""), "{saved}");
+    }
+
     #[test]
     fn publish_emits_once_per_distinct_value() {
         let dir = tempfile::tempdir().unwrap();

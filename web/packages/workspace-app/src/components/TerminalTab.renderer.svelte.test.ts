@@ -17,6 +17,8 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
   isTauriDesktop: () => host.desktop,

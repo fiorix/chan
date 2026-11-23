@@ -19,7 +19,8 @@
 // whose `onkeydown` runs the same close a second time.
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { useXtermStandIn } from "../__tests__/xterm";
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
@@ -66,10 +67,6 @@ class TestWebSocket {
     this.onclose?.();
   }
 }
-
-// `ghostty` flips both the backend the component picks and which renderer
-// mock receives the keystroke; the ghostty kit loader is mocked below.
-const rendererPrefs = vi.hoisted(() => ({ ghostty: false }));
 
 vi.mock("@xterm/xterm", () => ({
   // Upstream's helper textarea, its capture-phase keydown listener and its
@@ -202,14 +199,13 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     blur() {}
     dispose() {}
   }
-  return {
+  return (await import("../__tests__/xterm")).xtermStandInSwitch({
     ...actual,
-    terminalBackendFromPrefs: () => (rendererPrefs.ghostty ? "ghostty" : "xterm"),
     loadGhosttyKit: async () => ({
       instantiate: async () => ({}) as never,
       Terminal: GhosttyTerminal as never,
     }),
-  };
+  });
 });
 
 globalThis.ResizeObserver = TestResizeObserver as any;
@@ -229,11 +225,15 @@ Object.defineProperty(document, "fonts", {
 
 const PANE_ID = "ctrl-d-double-close-pane";
 
+// Every case runs on the xterm stand-in except the one that names ghostty,
+// which opens on the ghostty kit mocked above.
+beforeEach(() => useXtermStandIn());
+
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   sockets.splice(0);
   document.body.innerHTML = "";
-  rendererPrefs.ghostty = false;
+  useXtermStandIn(false);
 });
 
 function terminalTab(): TerminalTabState {
@@ -331,7 +331,7 @@ describe("Ctrl+D on an exited terminal", () => {
   });
 
   test("ghostty: closes its own tab and leaves the neighbour", async () => {
-    rendererPrefs.ghostty = true;
+    useXtermStandIn(false);
     const pane = resetLayout([terminalTab(), neighbourTab()]);
     await mountExitedTerminal(pane);
 
