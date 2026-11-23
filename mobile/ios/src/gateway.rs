@@ -186,6 +186,8 @@ pub struct FetchEffect {
 /// with the config registry for its live-state projection.
 #[derive(Default)]
 pub struct GatewayManager {
+    pub(crate) fabric: std::sync::OnceLock<Arc<crate::wireguard::Fabric>>,
+    pub(crate) transport_invalidate: std::sync::OnceLock<crate::config::GatewayRemoveHook>,
     state: Mutex<GatewayState>,
     #[cfg(test)]
     after_cancel_intent: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -210,6 +212,8 @@ struct GatewayState {
 pub(super) struct GatewayAttempt {
     cancel: CancellationToken,
     credentials: Mutex<CredentialCommit>,
+    kept: std::sync::atomic::AtomicBool,
+    redemption: Mutex<Option<CancellationToken>>,
     policy: tokio::sync::Mutex<()>,
     /// The connect that replaced this attempt during its browser wait, set
     /// before this attempt is cancelled. It waits for this attempt's
@@ -226,11 +230,10 @@ pub(super) struct GatewayAttempt {
     pub(super) signin_hooks: auth::SigninTestHooks,
 }
 
-/// What a sign-in's credential commit writes, as one unit the commit can
-/// take back whole.
+/// A sign-in's credential writes, with best-effort undo before keeping them.
 pub(super) trait CredentialWrites {
-    /// Write everything or nothing: an error leaves no write of this call
-    /// behind, what it replaced put back.
+    /// Stage the credential pair. On failure, restore owned writes where
+    /// possible while retaining any durable enrollment uncertainty.
     fn write(&mut self) -> Result<(), String>;
     /// Put back what a successful [`Self::write`] replaced, as far as no
     /// later write has replaced it again.
@@ -238,8 +241,14 @@ pub(super) trait CredentialWrites {
     /// Whether what the writes were for is gone by the time they end (the
     /// gateway's row removed), which undoes them as a withdrawal does.
     fn abandoned(&self) -> bool;
-    /// Cleanup that may run only once the writes are irrevocably kept.
-    fn kept(&mut self) {}
+    /// Hold ownership stable through the attempt's final keep decision.
+    fn decide_keep(&mut self, decide: impl FnOnce() -> bool) -> Result<bool, String> {
+        Ok(!self.abandoned() && decide())
+    }
+    /// Activation runs only after the credential pair is irrevocably kept.
+    fn activate(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -247,9 +256,62 @@ enum CredentialCommit {
     #[default]
     Open,
     Cancelled,
+    Kept,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CredentialOutcome {
+    Unkept,
+    Kept { activation: Result<(), String> },
+}
+
+#[cfg(test)]
+impl CredentialOutcome {
+    fn is_kept(&self) -> bool {
+        matches!(self, Self::Kept { .. })
+    }
+}
+
+pub(super) struct RedemptionGuard(CancellationToken);
+
+impl Drop for RedemptionGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 impl GatewayAttempt {
+    pub(super) fn prepare_credentials<T>(
+        &self,
+        prepare: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let commit = self
+            .credentials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *commit != CredentialCommit::Open || self.is_cancelled() {
+            return Err("sign-in attempt cancelled".into());
+        }
+        prepare()
+    }
+
+    pub(super) fn begin_redemption(&self) -> Option<RedemptionGuard> {
+        let commit = self
+            .credentials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *commit != CredentialCommit::Open || self.is_cancelled() {
+            return None;
+        }
+        let mut current = self.redemption.lock().unwrap();
+        if current.is_some() {
+            return None;
+        }
+        let finished = CancellationToken::new();
+        *current = Some(finished.clone());
+        Some(RedemptionGuard(finished))
+    }
+
     pub(super) fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -262,34 +324,49 @@ impl GatewayAttempt {
         }
     }
 
-    /// Run a sign-in's credential writes under this attempt's credential
-    /// lock. The commit ends all kept (`Ok(true)`) or none kept: `Ok(false)`
-    /// when cancelled, `Err` when a write failed, which `writes` takes back
-    /// itself. A cancel before the writes start refuses them. One that lands
-    /// while they run lets them finish, since a write abandoned midway could
-    /// leave an enrolled row without its token, and then undoes them before
-    /// the lock is released. Every cancellation waits for this lock in
-    /// [`Self::finish_cancellation`], through the attempts the cancelled one
-    /// replaced, so it returns only once nothing of the commit is left. The
-    /// writes are kept while a connect that replaced this attempt is still
-    /// live, and undone when the row they were for is gone.
+    /// Keep the durable pair at the ownership-checked decision point. A
+    /// subsequent activation error never makes that pair revocable again.
     pub(super) fn commit_credentials(
         &self,
         writes: &mut impl CredentialWrites,
-    ) -> Result<bool, String> {
-        let mut commit = self.credentials.lock().unwrap();
-        if *commit == CredentialCommit::Cancelled || self.cancel.is_cancelled() {
-            *commit = CredentialCommit::Cancelled;
-            return Ok(false);
+    ) -> Result<CredentialOutcome, String> {
+        let mut commit = self
+            .credentials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *commit != CredentialCommit::Open || self.cancel.is_cancelled() {
+            if *commit == CredentialCommit::Open {
+                *commit = CredentialCommit::Cancelled;
+            }
+            return Ok(CredentialOutcome::Unkept);
         }
         writes.write()?;
-        if self.withdrawn() || writes.abandoned() {
-            writes.undo();
-            *commit = CredentialCommit::Cancelled;
-            return Ok(false);
+        let decided = writes.decide_keep(|| {
+            if self.withdrawn() {
+                return false;
+            }
+            *commit = CredentialCommit::Kept;
+            self.kept.store(true, std::sync::atomic::Ordering::Release);
+            true
+        });
+        match decided {
+            Ok(true) => Ok(CredentialOutcome::Kept {
+                activation: writes.activate(),
+            }),
+            Ok(false) => {
+                writes.undo();
+                *commit = CredentialCommit::Cancelled;
+                Ok(CredentialOutcome::Unkept)
+            }
+            Err(error) => {
+                writes.undo();
+                Err(error)
+            }
         }
-        writes.kept();
-        Ok(true)
+    }
+
+    pub(super) fn credentials_kept(&self) -> bool {
+        self.kept.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether nothing wants this attempt's credentials any more: it was
@@ -316,15 +393,25 @@ impl GatewayAttempt {
     /// supersedes is still writing or undoing, and none of those attempts
     /// can start one after it.
     async fn finish_cancellation(self: &Arc<Self>) {
-        let attempt = Arc::clone(self);
-        let _ = tokio::task::spawn_blocking(move || {
-            let mut next = Some(attempt);
-            while let Some(attempt) = next {
-                *attempt.credentials.lock().unwrap() = CredentialCommit::Cancelled;
-                next = attempt.predecessor.get().and_then(std::sync::Weak::upgrade);
+        let mut next = Some(Arc::clone(self));
+        while let Some(attempt) = next {
+            let closing = Arc::clone(&attempt);
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut commit = closing
+                    .credentials
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *commit == CredentialCommit::Open {
+                    *commit = CredentialCommit::Cancelled;
+                }
+            })
+            .await;
+            let redemption = attempt.redemption.lock().unwrap().clone();
+            if let Some(finished) = redemption {
+                finished.cancelled().await;
             }
-        })
-        .await;
+            next = attempt.predecessor.get().and_then(std::sync::Weak::upgrade);
+        }
     }
 
     /// Record that the browser's callback reached this attempt.
@@ -348,6 +435,10 @@ impl GatewayState {
 }
 
 impl GatewayManager {
+    pub(crate) fn transport_ready(&self, id: &str) -> bool {
+        !self.state.lock().unwrap().teardowns.contains_key(id)
+    }
+
     /// The volatile GatewayEntry fields for `gateway_id`, including a
     /// discovery failure before a runtime exists.
     pub fn view(&self, gateway_id: &str) -> Option<GatewayRuntimeView> {
@@ -960,11 +1051,40 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     else {
         return Ok(());
     };
-    let Some(discovery) =
-        publish_discovery(&app, &state, &gateway_id, &label, &attempt, discovered)?
-    else {
-        return Ok(());
+    let discovery = match publish_discovery(&app, &state, &gateway_id, &label, &attempt, discovered)
+    {
+        Ok(Some(discovery)) => discovery,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            fail_connect(
+                &app,
+                &state,
+                &gateway_id,
+                &label,
+                &attempt,
+                "Gateway transport unavailable",
+                &error,
+            );
+            return Err(error);
+        }
     };
+    if let Some(fabric) = state.gateway_manager.fabric.get() {
+        let Some(settled) = attempt.wait(fabric.settled_gateway(&gateway_id)).await else {
+            return Ok(());
+        };
+        if let Err(error) = settled {
+            fail_connect(
+                &app,
+                &state,
+                &gateway_id,
+                &label,
+                &attempt,
+                "Gateway transport unavailable",
+                &error,
+            );
+            return Err(error);
+        }
+    }
     // A keyring read can block. Its result remains owned by this attempt even
     // when cancellation stops waiting for the blocking task.
     let origin = discovery.identity_origin.clone();
@@ -990,8 +1110,44 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     else {
         return Ok(());
     };
+    let gateway = gateway_row(&state, &gateway_id)?;
+    let needs_enrollment = gateway.wireguard.is_none()
+        && gateway.wireguard_public_key.is_some()
+        && (gateway.wireguard_enrollment.is_none()
+            || gateway.wireguard_enrolled_key != gateway.wireguard_public_key
+            || gateway.wireguard_pending_enrollment.is_some());
+    if needs_enrollment {
+        let refusal = if gateway
+            .wireguard_pending_enrollment
+            .as_ref()
+            .is_some_and(|pending| {
+                Some(&pending.public_key) == gateway.wireguard_public_key.as_ref()
+            }) {
+            Some(crate::wireguard_keys::FRESH_KEY_REQUIRED)
+        } else if !discovery
+            .wireguard
+            .as_ref()
+            .is_some_and(|entry| entry.mobile_enrollment)
+        {
+            Some("this gateway does not support mobile WireGuard enrollment")
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            fail_connect(
+                &app,
+                &state,
+                &gateway_id,
+                &label,
+                &attempt,
+                "WireGuard enrollment unavailable",
+                error,
+            );
+            return Err(error.into());
+        }
+    }
     let pat = match pat {
-        Some(pat) => pat,
+        Some(pat) if !needs_enrollment => pat,
         stored => {
             let _ = &stored;
             return signin_leg(
@@ -1078,13 +1234,36 @@ fn publish_discovery<R: tauri::Runtime>(
     // Registry writes and disconnect take these locks in the same order.
     // Keep both through persistence and adoption so a stale result cannot
     // replace a successor's tunnels or revive a disconnected row.
-    let store = state.store.lock().unwrap();
-    let mut live = state.gateway_manager.state.lock().unwrap();
+    let mut store = state.store.lock().unwrap();
+    let live = state.gateway_manager.state.lock().unwrap();
     if !live.owns(gateway_id, attempt) {
         return Ok(None);
     }
     let (title, msg) = match result {
         Ok(discovery) => {
+            if let Some(fabric) = state.gateway_manager.fabric.get() {
+                let mut config = store.get().map_err(|error| error.to_string())?;
+                let gateway = config
+                    .gateways
+                    .iter_mut()
+                    .find(|gateway| gateway.id == gateway_id)
+                    .ok_or("gateway was removed")?;
+                let discovered = crate::wireguard::reconcile_discovery(gateway, &discovery)?;
+                let prepared = crate::wireguard::prepare(gateway);
+                prepared.validate()?;
+                let changed = discovered || gateway.wireguard_protection != prepared.protection;
+                gateway.wireguard_protection = prepared.protection.clone();
+                let gateway = gateway.clone();
+                if changed {
+                    store.save(&config).map_err(|error| error.to_string())?;
+                }
+                if fabric.changes_routes(gateway_id, &prepared, gateway.enabled) {
+                    if let Some(invalidate) = state.gateway_manager.transport_invalidate.get() {
+                        invalidate(gateway_id);
+                    }
+                }
+                fabric.reconcile(&gateway, prepared)?;
+            }
             return Ok(Some(discovery));
         }
         Err(error) => {
@@ -1097,19 +1276,38 @@ fn publish_discovery<R: tauri::Runtime>(
             (title, format!("gateway discovery failed: {text}"))
         }
     };
+    drop(live);
+    drop(store);
+    fail_connect(app, state, gateway_id, label, attempt, title, &msg);
+    Err(msg)
+}
+
+fn fail_connect<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    gateway_id: &str,
+    label: &str,
+    attempt: &Arc<GatewayAttempt>,
+    title: &str,
+    message: &str,
+) {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return;
+    }
     live.attempts.remove(gateway_id);
+    attempt.cancel.cancel();
     if let Some(rt) = live.runtimes.get_mut(gateway_id) {
         rt.status = GatewayStatus::Disconnected;
         rt.pending_signin = false;
-        rt.last_error = Some(msg.clone());
+        rt.last_error = Some(message.into());
     } else {
-        live.discovery_errors.insert(gateway_id.into(), msg.clone());
+        live.discovery_errors
+            .insert(gateway_id.into(), message.into());
     }
     drop(live);
-    drop(store);
-    emit_notice(app, "error", "gateway", gateway_id, label, title, &msg);
+    emit_notice(app, "error", "gateway", gateway_id, label, title, message);
     signal_rows_changed(app, state);
-    Err(msg)
 }
 
 fn publish_pat_load<R: tauri::Runtime>(
@@ -1531,6 +1729,43 @@ pub(super) async fn resume_gateway_signin<R: tauri::Runtime>(
         }
         return;
     };
+    let label = gateway_row(&state, &gateway_id)
+        .map(|row| display_label(&row))
+        .unwrap_or_else(|_| gateway_id.clone());
+    let discovery =
+        match publish_discovery(&app, &state, &gateway_id, &label, &attempt, Ok(discovery)) {
+            Ok(Some(discovery)) => discovery,
+            Ok(None) => return,
+            Err(error) => {
+                fail_connect(
+                    &app,
+                    &state,
+                    &gateway_id,
+                    &label,
+                    &attempt,
+                    "Gateway transport unavailable",
+                    &error,
+                );
+                return;
+            }
+        };
+    if let Some(fabric) = state.gateway_manager.fabric.get() {
+        let Some(settled) = attempt.wait(fabric.settled_gateway(&gateway_id)).await else {
+            return;
+        };
+        if let Err(error) = settled {
+            fail_connect(
+                &app,
+                &state,
+                &gateway_id,
+                &label,
+                &attempt,
+                "Gateway transport unavailable",
+                &error,
+            );
+            return;
+        }
+    }
     let status = auth::AuthStatus {
         is_signed_in: true,
         label: Some(pat.label.clone()),
@@ -1850,6 +2085,11 @@ fn invalidate_gateway(
     if let Some(attempt) = &attempt {
         attempt.cancel.cancel();
     }
+    if let Some(fabric) = state.gateway_manager.fabric.get() {
+        if let Err(error) = fabric.deny(gateway_id) {
+            tracing::error!(%error, "denying WireGuard gateway failed");
+        }
+    }
     let runtime = live.runtimes.remove(gateway_id);
     if let Some(cancel) = runtime.as_ref().and_then(|rt| rt.poll_cancel.as_ref()) {
         cancel.cancel();
@@ -1880,42 +2120,76 @@ pub async fn cascade_disconnect<R: tauri::Runtime>(
         previous,
         finished,
     } = invalidate_gateway(state, gateway_id, reason);
-    signal_rows_changed(app, state);
-    if let Some(previous) = previous {
-        previous.cancelled().await;
+    if state
+        .gateway_manager
+        .fabric
+        .get()
+        .is_some_and(|fabric| fabric.is_configured(gateway_id))
+    {
+        crate::wireguard::invalidate_native(app, state, gateway_id);
     }
-    let _policy = match &attempt {
-        Some(attempt) => {
-            // No gateway/store lock is held while waiting for a keyring call.
-            auth::clear_gateway_signin(gateway_id, attempt);
-            attempt.finish_cancellation().await;
-            Some(attempt.policy.lock().await)
+    signal_rows_changed(app, state);
+    let app = app.clone();
+    let state = Arc::clone(state);
+    let gateway_id = gateway_id.to_string();
+    let wireguard = state
+        .gateway_manager
+        .fabric
+        .get()
+        .is_some_and(|fabric| fabric.is_configured(&gateway_id));
+    let cleanup = async move {
+        if let Some(fabric) = state.gateway_manager.fabric.get() {
+            fabric.wait_retired(&gateway_id).await;
         }
-        None => None,
-    };
-    if let Some(runtime) = runtime {
-        for row in &runtime.roster {
-            let synth_id = synthesized_row_id(gateway_id, &row.owner, &row.devserver_id);
-            let policy_lock = state.native_policy_lock(&synth_id);
-            let _policy_guard = policy_lock.lock().await;
-            state.bump_native_policy_generation(&synth_id);
-            await_devserver_teardown(state, &synth_id).await;
+        if let Some(previous) = previous {
+            previous.cancelled().await;
         }
-        if reason == CascadeReason::Unauthorized {
-            if let Err(e) = auth::clear_gateway_pat(&runtime.discovery.identity_origin) {
-                tracing::warn!(gateway = %gateway_id, error = %e, "clearing gateway PAT failed");
+        let _policy = match &attempt {
+            Some(attempt) => {
+                // No gateway/store lock is held while waiting for a keyring call.
+                auth::clear_gateway_signin(&gateway_id, attempt);
+                attempt.finish_cancellation().await;
+                Some(attempt.policy.lock().await)
+            }
+            None => None,
+        };
+        if let Some(runtime) = runtime {
+            for row in &runtime.roster {
+                let synth_id = synthesized_row_id(&gateway_id, &row.owner, &row.devserver_id);
+                let policy_lock = state.native_policy_lock(&synth_id);
+                let _policy_guard = policy_lock.lock().await;
+                state.bump_native_policy_generation(&synth_id);
+                await_devserver_teardown(&state, &synth_id).await;
+            }
+            if reason == CascadeReason::Unauthorized {
+                if let Err(e) = auth::clear_gateway_pat(&runtime.discovery.identity_origin) {
+                    tracing::warn!(gateway = %gateway_id, error = %e, "clearing gateway PAT failed");
+                }
             }
         }
+        let mut live = state.gateway_manager.state.lock().unwrap();
+        if live
+            .teardowns
+            .get(&gateway_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &finished))
+        {
+            live.teardowns.remove(&gateway_id);
+        }
+        finished.cancel();
+        drop(live);
+        signal_rows_changed(&app, &state);
+    };
+    if wireguard {
+        let mut cleanup = tauri::async_runtime::spawn(cleanup);
+        if tokio::time::timeout(Duration::from_secs(5), &mut cleanup)
+            .await
+            .is_err()
+        {
+            tracing::warn!("gateway teardown continues while reconnect remains parked");
+        }
+    } else {
+        cleanup.await;
     }
-    let mut live = state.gateway_manager.state.lock().unwrap();
-    if live
-        .teardowns
-        .get(gateway_id)
-        .is_some_and(|current| Arc::ptr_eq(current, &finished))
-    {
-        live.teardowns.remove(gateway_id);
-    }
-    finished.cancel();
 }
 
 /// Startup autoconnect: every enabled gateway connects non-interactively
@@ -2089,7 +2363,8 @@ pub(crate) mod tests {
                 stores += 1;
                 Ok(())
             }))
-            .unwrap());
+            .unwrap()
+            .is_kept());
         assert_eq!(stores, 1, "a fresh attempt runs its credential store");
         expire_signin(
             f.app.handle(),
@@ -2105,7 +2380,10 @@ pub(crate) mod tests {
                 Ok(())
             }))
             .unwrap();
-        assert!(!stored, "an expired attempt refuses credential commitment");
+        assert!(
+            !stored.is_kept(),
+            "an expired attempt refuses credential commitment"
+        );
         assert_eq!(stores, 1, "expiry must not call the credential store");
         let view = f.state.gateway_manager.view("gw-keychain").unwrap();
         assert_eq!(view.status, GatewayStatus::Disconnected);
@@ -2314,7 +2592,7 @@ pub(crate) mod tests {
                 during: Some(Box::new(move || cancel(&state, &app, &attempt))),
             };
             let committed = f.attempt.commit_credentials(&mut writes).unwrap();
-            assert_eq!(committed, kept, "{case}");
+            assert_eq!(committed.is_kept(), kept, "{case}");
             assert_eq!(writes.writes, 1, "{case}: the commit runs to its end");
             assert_eq!(
                 writes.undos,
@@ -2467,9 +2745,12 @@ pub(crate) mod tests {
             native_trust,
             wireguard: None,
             wireguard_public_key: None,
+            wireguard_key_file: None,
+            wireguard_pending_enrollment: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
             wireguard_cleanup: None,
+            wireguard_protection: Default::default(),
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -3043,6 +3324,85 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn transport_preparation_failure_releases_the_attempt_for_retry() {
+        let (origin, server) = spawn_gateway_stub(false).await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Ok(()));
+        assert!(state.gateway_manager.fabric.set(fabric).is_ok());
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut config = store.get().unwrap();
+            config.gateways[0].wireguard_protection.hosts = vec!["127.0.0.1".into()];
+            store.save(&config).unwrap();
+        }
+        let app = tauri::test::mock_app();
+        assert!(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false
+        )
+        .await
+        .is_err());
+        assert!(!state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .attempts
+            .contains_key("gw-keychain"));
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut config = store.get().unwrap();
+            config.gateways[0].wireguard_protection.hosts.clear();
+            store.save(&config).unwrap();
+        }
+        let retry = begin_connect(&state, "gw-keychain")
+            .unwrap()
+            .expect("retry admitted");
+        let discovery = devserver::discover_gateway(&origin).await;
+        assert!(publish_discovery(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "test",
+            &retry.attempt,
+            discovery
+        )
+        .unwrap()
+        .is_some());
+        fail_connect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "test",
+            &retry.attempt,
+            "Gateway transport unavailable",
+            "previous connections are still closing",
+        );
+        let successor = begin_connect(&state, "gw-keychain")
+            .unwrap()
+            .expect("timeout retry admitted");
+        fail_connect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "test",
+            &retry.attempt,
+            "Gateway transport unavailable",
+            "stale failure",
+        );
+        assert!(state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .owns("gw-keychain", &successor.attempt));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn connect_gateway_rejects_pre_mobile_discovery_payload() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -3165,9 +3525,12 @@ pub(crate) mod tests {
             native_trust: Vec::new(),
             wireguard: None,
             wireguard_public_key: None,
+            wireguard_key_file: None,
+            wireguard_pending_enrollment: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
             wireguard_cleanup: None,
+            wireguard_protection: Default::default(),
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -3656,9 +4019,12 @@ pub(crate) mod tests {
                 native_trust: Vec::new(),
                 wireguard: None,
                 wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
                 wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
@@ -3744,6 +4110,220 @@ pub(crate) mod tests {
                 .is_some(),
             "the roster poll is running"
         );
+        server.abort();
+    }
+    #[tokio::test]
+    async fn cancellation_waits_for_the_accepted_redemption_and_closes_later_admission() {
+        let attempt = Arc::new(GatewayAttempt::default());
+        let redemption = attempt.begin_redemption().unwrap();
+        attempt.cancel.cancel();
+        let cancelled = attempt.finish_cancellation();
+        tokio::pin!(cancelled);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut cancelled)
+                .await
+                .is_err()
+        );
+        assert!(attempt.begin_redemption().is_none());
+        drop(redemption);
+        tokio::time::timeout(Duration::from_secs(2), cancelled)
+            .await
+            .unwrap();
+        assert!(!attempt
+            .commit_credentials(&mut writes(|| panic!("cancelled commit ran")))
+            .unwrap()
+            .is_kept());
+    }
+
+    #[tokio::test]
+    async fn cached_pat_cannot_skip_unenrolled_key_or_open_a_sheet_at_startup() {
+        let (requests, mut roster_requests) = tokio::sync::mpsc::unbounded_channel();
+        let (origin, server) = spawn_gateway_stub_full(
+            false,
+            Some(requests),
+            Some(serde_json::json!({
+                "endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY, "mobile_enrollment": true,
+            })),
+        )
+        .await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            let key =
+                crate::wireguard_keys::generate(&store.wireguard_dir(), "gw-keychain").unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(key.public_key);
+            cfg.gateways[0].wireguard_key_file = Some(key.path);
+            store.save(&cfg).unwrap();
+        }
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "cached".into(),
+                secret: "cached-secret".into(),
+                label: "cached".into(),
+                expires_at: String::new(),
+            },
+        );
+        let app = tauri::test::mock_app();
+        connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        let view = state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert!(view.last_error.unwrap().contains("sign-in required"));
+        assert!(roster_requests.try_recv().is_err());
+        assert!(
+            state.store.lock().unwrap().get().unwrap().gateways[0]
+                .wireguard_pending_enrollment
+                .is_none(),
+            "startup never exposed the key"
+        );
+        auth::clear_gateway_pat(&origin).unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_activation_preserves_the_kept_disposition() {
+        struct ActivationWrites {
+            during: Option<Box<dyn FnOnce()>>,
+            undo: bool,
+        }
+        impl CredentialWrites for ActivationWrites {
+            fn write(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            fn undo(&mut self) {
+                self.undo = true;
+            }
+            fn abandoned(&self) -> bool {
+                false
+            }
+            fn activate(&mut self) -> Result<(), String> {
+                self.during.take().unwrap()();
+                Err("activation refused".into())
+            }
+        }
+        for action in ["disconnect", "remove", "replace", "replace-disconnect"] {
+            let fixture = SigninFixture::new("https://activation-cancel.example.test");
+            let state = Arc::clone(&fixture.state);
+            let mut writes = ActivationWrites {
+                during: Some(Box::new(move || {
+                    if action.starts_with("replace") {
+                        begin_connect(&state, "gw-keychain").unwrap().unwrap();
+                    }
+                    if action != "replace" {
+                        invalidate_gateway(
+                            &state,
+                            "gw-keychain",
+                            if action == "remove" {
+                                CascadeReason::Removed
+                            } else {
+                                CascadeReason::UserDisconnect
+                            },
+                        );
+                    }
+                })),
+                undo: false,
+            };
+            assert_eq!(
+                fixture.attempt.commit_credentials(&mut writes).unwrap(),
+                CredentialOutcome::Kept {
+                    activation: Err("activation refused".into())
+                },
+                "{action}"
+            );
+            assert!(!writes.undo, "{action}");
+            fixture.attempt.finish_cancellation().await;
+            assert!(
+                fixture.attempt.credentials_kept(),
+                "cancellation preserves kept evidence: {action}"
+            );
+            assert!(matches!(
+                fixture.attempt.commit_credentials(&mut writes).unwrap(),
+                CredentialOutcome::Unkept
+            ));
+            assert!(
+                !writes.undo,
+                "a repeated commit does not undo the kept pair: {action}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn disconnect_waits_through_real_redemption_and_its_compensation() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let revoking = Arc::new(tokio::sync::Semaphore::new(0));
+        let finish_revoke = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered_server = Arc::clone(&entered);
+        let release_server = Arc::clone(&release);
+        let revoking_server = Arc::clone(&revoking);
+        let finish_server = Arc::clone(&finish_revoke);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new()
+            .route(
+                "/mobile/authorize/redeem",
+                axum::routing::post(move || {
+                    let entered = Arc::clone(&entered_server);
+                    let release = Arc::clone(&release_server);
+                    async move {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                        axum::Json(redeem_answer(None))
+                    }
+                }),
+            )
+            .route(
+                "/mobile/v1/token",
+                axum::routing::delete(move |headers: axum::http::HeaderMap| {
+                    let revoking = Arc::clone(&revoking_server);
+                    let finish = Arc::clone(&finish_server);
+                    async move {
+                        assert_eq!(
+                            headers[axum::http::header::AUTHORIZATION],
+                            "Bearer fixture-only"
+                        );
+                        revoking.add_permits(1);
+                        finish.acquire().await.unwrap().forget();
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let fixture = SigninFixture::new(&origin);
+        let callback = tokio::spawn(fixture.callback("code=code&state=nonce-1"));
+        entered.acquire().await.unwrap().forget();
+        let cancellation = fixture.cancel();
+        tokio::pin!(cancellation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut cancellation)
+                .await
+                .is_err()
+        );
+        release.add_permits(1);
+        revoking.acquire().await.unwrap().forget();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut cancellation)
+                .await
+                .is_err()
+        );
+        finish_revoke.add_permits(1);
+        callback.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), cancellation)
+            .await
+            .unwrap();
+        assert!(!fixture.attempt.credentials_kept());
+        assert!(auth::load_gateway_pat(&origin).unwrap().is_none());
+        assert_eq!(revoking.available_permits(), 0, "exactly one revoke");
         server.abort();
     }
 }

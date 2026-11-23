@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use rand_core::{OsRng, RngCore};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::clock::Instant;
 use crate::config::{Cidr, Config, Endpoint};
@@ -119,13 +119,14 @@ struct Inner {
     wire: Arc<Mutex<Wire>>,
     addresses: Vec<IpAddr>,
     allowed_ips: Vec<Cidr>,
-    driver: JoinHandle<()>,
+    driver: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    abort: AbortHandle,
     resolution: watch::Receiver<Resolution>,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.driver.abort();
+        self.abort.abort();
         self.shared.stack.lock().shut_down();
     }
 }
@@ -211,13 +212,15 @@ impl Tunnel {
             pending_initiation: false,
         };
         let driver = tokio::spawn(driver.run());
+        let abort = driver.abort_handle();
         Ok(Tunnel {
             inner: Arc::new(Inner {
                 shared,
                 wire,
                 addresses: config.addresses.iter().map(|c| c.addr).collect(),
                 allowed_ips: config.peer.allowed_ips,
-                driver,
+                driver: tokio::sync::Mutex::new(Some(driver)),
+                abort,
                 resolution,
             }),
         })
@@ -334,13 +337,33 @@ impl Tunnel {
     /// traffic again; only a new tunnel does. Reads no lock, so like
     /// [`Self::status`] it never waits on a poll.
     pub fn is_closed(&self) -> bool {
-        self.inner.driver.is_finished()
+        self.inner.abort.is_finished()
     }
 
     /// The peer's AllowedIPs: the destinations `connect` carries. A
     /// caller holding several tunnels routes by them.
     pub fn allowed_ips(&self) -> &[Cidr] {
         &self.inner.allowed_ips
+    }
+
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Close the shared stack even when an outstanding dial holds a clone.
+    pub(crate) fn shut_down(&self) {
+        self.inner.abort.abort();
+        self.inner.shared.stack.lock().shut_down();
+    }
+
+    pub(crate) async fn stopped(&self) {
+        // Serializing the join lets concurrent retirement waits observe the
+        // same completion; cancelling a wait leaves the handle available.
+        let mut driver = self.inner.driver.lock().await;
+        if let Some(task) = driver.as_mut() {
+            let _ = task.await;
+            *driver = None;
+        }
     }
 }
 
@@ -1476,7 +1499,7 @@ mod tests {
         let Pair { a, b: _b, .. } = pair().await;
         assert!(!a.is_closed());
 
-        a.inner.driver.abort();
+        a.inner.abort.abort();
         timeout(WAIT, async {
             while !a.is_closed() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1507,5 +1530,39 @@ mod tests {
         assert!(failures <= 6, "{failures} failures in four ticks");
 
         round_trip(&a, &mut listener).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_closes_clones_and_releases_the_driver_socket() {
+        let Pair { a, b, a_at, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        let clone = a.clone();
+        let (client, server) = tokio::join!(a.connect(b_port(listener.port())), listener.accept());
+        let mut client = client.unwrap();
+        let _server = server.unwrap();
+        a.shut_down();
+        // Both waits observe actual task completion; shutdown remains idempotent.
+        clone.shut_down();
+        tokio::join!(a.stopped(), clone.stopped());
+        let _released = UdpSocket::bind(a_at)
+            .await
+            .expect("retired driver released its UDP socket");
+        assert!(a.inner.driver.lock().await.is_none());
+        assert_eq!(
+            clone
+                .connect(b_port(listener.port()))
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            client
+                .write_all(b"after shutdown")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::ConnectionAborted
+        );
     }
 }

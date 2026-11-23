@@ -17,7 +17,7 @@
 //! mint), `created_via_mobile` (mobile-authorize mint), `created_via_admin`
 //! (chan-gateway-admin mint), `desktop.redeem` (one-time desktop code cashed
 //! in), `mobile.redeem` (one-time mobile code cashed in), `used` (validate
-//! succeeded), `revoked` (the owner's revoke from the SPA, or a desktop PAT
+//! succeeded), `revoked` (the owner's revoke from the SPA, or a client PAT
 //! whose WireGuard enrollment failed before delivery), `revoked_via_desktop`
 //! (a desktop giving back the PAT it presents), `revoked_via_mobile` (a mobile
 //! client giving back the PAT it presents), `revoked_via_admin` (operator

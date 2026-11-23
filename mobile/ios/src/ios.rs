@@ -4,8 +4,8 @@
 //! installed launcher) on device and points one Tauri webview at the
 //! loopback launcher URL. It keeps no other desktop boot step: no CLI
 //! stems, no handoff endpoint (iOS is single-instance by OS design), no
-//! migrations (a fresh sandbox has no legacy rows), no WireGuard fabric,
-//! no window restore, and no terminal seeding, so an empty library opens
+//! migrations (a fresh sandbox has no legacy rows), no window restore,
+//! and no terminal seeding, so an empty library opens
 //! the launcher and nothing else.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,6 +55,40 @@ pub fn run() {
         })
         .setup(move |app| {
             let _ = BACK_APP.set(app.handle().clone());
+            let fabric = tauri::async_runtime::block_on(crate::wireguard::Fabric::bind())
+                .map_err(std::io::Error::other)?;
+            let prepared = {
+                let mut store = state_for_setup.store.lock().unwrap();
+                let mut config = store.get()?;
+                let mut changed = false;
+                let prepared = config.gateways.iter_mut().map(|gateway| {
+                    let prepared = crate::wireguard::prepare(gateway);
+                    changed |= gateway.wireguard_protection != prepared.protection;
+                    gateway.wireguard_protection = prepared.protection.clone();
+                    (gateway.clone(), prepared)
+                }).collect::<Vec<_>>();
+                for (_, prepared) in &prepared { prepared.validate().map_err(std::io::Error::other)?; }
+                if changed { store.save(&config)?; }
+                prepared
+            };
+            for (_, prepared) in &prepared {
+                fabric.protect(&prepared.protection).map_err(std::io::Error::other)?;
+            }
+            fabric.install_native_proxy().map_err(std::io::Error::other)?;
+            let capability = crate::webview_proxy::install(fabric.address());
+            if let Err(reason) = &capability { tracing::warn!(%reason, "WireGuard WebView routing unavailable"); }
+            fabric.set_capability(capability);
+            for (gateway, prepared) in prepared {
+                fabric.reconcile(&gateway, prepared).map_err(std::io::Error::other)?;
+            }
+            tauri::async_runtime::block_on(fabric.settled()).map_err(std::io::Error::other)?;
+            let _ = state_for_setup.gateway_manager.fabric.set(fabric);
+            let app_for_invalidate = app.handle().clone();
+            let _ = state_for_setup.gateway_manager.transport_invalidate.set(Arc::new(move |id| {
+                let state = app_for_invalidate.state::<Arc<AppState>>();
+                crate::wireguard::invalidate_native(&app_for_invalidate, &state, id);
+            }));
+
             let registry_deps = embedded::RegistryDeps {
                 config_store: Arc::clone(&state_for_setup.store),
                 devserver_remove_hook: Arc::clone(&state_for_setup.devserver_remove_hook),
@@ -127,8 +161,8 @@ pub fn run() {
                 move |id: &str| {
                     let app = app_for_gw_remove.clone();
                     let id = id.to_string();
+                    let state = Arc::clone(&app.state::<Arc<AppState>>());
                     tauri::async_runtime::spawn(async move {
-                        let state = Arc::clone(&app.state::<Arc<AppState>>());
                         crate::gateway::cascade_disconnect(
                             &app,
                             &state,
@@ -139,6 +173,10 @@ pub fn run() {
                     });
                 },
             ));
+            WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::External(url))
+                .title("Chan")
+                .build()?;
+            ensure_back_gesture();
             // Reconnect enabled gateways from the last run. Never opens a
             // browser: PAT-less rows park as sign-in required until the
             // user taps Connect.
@@ -172,10 +210,6 @@ pub fn run() {
                     rx,
                 ));
             }
-            WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::External(url))
-                .title("Chan")
-                .build()?;
-            ensure_back_gesture();
             Ok(())
         })
         .invoke_handler(crate::app_invoke_handler())
@@ -329,13 +363,13 @@ fn install_back_gesture() -> bool {
                 if Allocated::as_ptr(&allocated).is_null() {
                     continue;
                 }
-                // UIRectEdgeLeft == 1 << 0, stable API contract.
+                // UIRectEdgeLeft == 1 << 1, stable API contract.
                 let swipe: Retained<AnyObject> = msg_send![
                     allocated,
                     initWithTarget: &*target,
                     action: sel!(handleSwipe:)
                 ];
-                let _: () = msg_send![&*swipe, setEdges: 1usize];
+                let _: () = msg_send![&*swipe, setEdges: 2usize];
                 let _: () = msg_send![&*window, addGestureRecognizer: &*swipe];
                 installed = true;
             }

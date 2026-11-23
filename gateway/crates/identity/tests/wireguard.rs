@@ -136,6 +136,7 @@ async fn discovery_lists_every_ingress_and_repeats_the_first_as_the_single_pair(
     assert_eq!(
         discovered(enrollment()).await,
         json!({
+            "mobile_enrollment": true,
             "endpoint": "p1.proxy.example.test:51820",
             "public_key": key(7),
             "allowed_ips": ["10.7.0.1/32"],
@@ -172,7 +173,7 @@ async fn discovery_lists_every_ingress_and_repeats_the_first_as_the_single_pair(
     assert_eq!(wireguard["ingresses"][0]["id"], "p2");
     assert_eq!(wireguard["ingresses"][1]["id"], "p1");
     assert!(wireguard.get("persistent_keepalive").is_none());
-    assert_eq!(wireguard.as_object().unwrap().len(), 4);
+    assert_eq!(wireguard.as_object().unwrap().len(), 5);
 }
 
 #[tokio::test]

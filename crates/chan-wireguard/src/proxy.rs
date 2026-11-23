@@ -27,9 +27,12 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http_body_util::{Either, Empty};
@@ -43,12 +46,13 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use parking_lot::{Mutex, RwLock};
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
-use crate::tunnel::Tunnel;
+use crate::{config::Cidr, tunnel::Tunnel};
 
 /// The most a request head may take; one longer is answered `431`. hyper
 /// reads a head into one buffer bounded by this, so a client that never
@@ -112,19 +116,123 @@ impl HostRoute {
     /// Whether the request authority `name`, already a well-formed DNS
     /// name, is this entry's name or falls under its wildcard.
     fn matches(&self, name: &str) -> bool {
-        match self.name.strip_prefix("*.") {
-            Some(suffix) => {
-                // The suffix and the dot in front of it, after at least one
-                // label; every name here is ASCII, so byte offsets are
-                // character offsets.
-                let Some(head) = name.len().checked_sub(suffix.len() + 1) else {
-                    return false;
-                };
-                head > 0
-                    && name.as_bytes()[head] == b'.'
-                    && name[head + 1..].eq_ignore_ascii_case(suffix)
+        host_matches(&self.name, name)
+    }
+}
+
+fn host_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => {
+            // The suffix and the dot in front of it, after at least one
+            // label; every name here is ASCII, so byte offsets are
+            // character offsets.
+            let Some(head) = name.len().checked_sub(suffix.len() + 1) else {
+                return false;
+            };
+            head > 0
+                && name.as_bytes()[head] == b'.'
+                && name[head + 1..].eq_ignore_ascii_case(suffix)
+        }
+        None => name.eq_ignore_ascii_case(pattern),
+    }
+}
+
+/// Destinations that must never use the host's direct network path.
+///
+/// Live routes take precedence. Keep this set independently of live tunnels,
+/// including destinations of an ingress that failed to start or was retired.
+#[derive(Clone, Debug, Default)]
+pub struct ProtectedDestinations {
+    /// Exact DNS names or `*.` suffix patterns, as in [`HostRoute::name`].
+    pub hosts: Vec<String>,
+    /// Address ranges refused when no live tunnel route carries them.
+    pub networks: Vec<Cidr>,
+}
+
+impl ProtectedDestinations {
+    /// Validate host patterns and network prefixes without publishing policy.
+    pub fn validate(&self) -> io::Result<()> {
+        if self.hosts.iter().any(|host| host.parse::<IpAddr>().is_ok()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "use protected networks for IP addresses, not host patterns",
+            ));
+        }
+        if self
+            .hosts
+            .iter()
+            .any(|host| !is_dns_name(host.strip_prefix("*.").unwrap_or(host)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a protected host is not a DNS name or *. and a DNS name",
+            ));
+        }
+        if self
+            .networks
+            .iter()
+            .any(|network| network.prefix > if network.addr.is_ipv4() { 32 } else { 128 })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a protected network has an invalid prefix length",
+            ));
+        }
+        Ok(())
+    }
+
+    fn host(&self, host: &Host) -> bool {
+        match host {
+            Host::Name(name) => self
+                .hosts
+                .iter()
+                .any(|pattern| host_matches(pattern, name.strip_suffix('.').unwrap_or(name))),
+            Host::Ip(_) => false,
+        }
+    }
+
+    fn address(&self, address: IpAddr) -> bool {
+        self.networks
+            .iter()
+            .any(|network| network.contains(address) || admitted_alias(network, address).is_some())
+    }
+}
+
+// An explicit mapped-v6 range also names its IPv4 spelling. A generic IPv6
+// range such as ::/0 keeps its family meaning instead of capturing IPv4.
+fn admitted_alias(network: &Cidr, address: IpAddr) -> Option<IpAddr> {
+    let alias = match address {
+        IpAddr::V4(address) => match network.addr {
+            IpAddr::V6(prefix) if network.prefix >= 96 && prefix.to_ipv4_mapped().is_some() => {
+                Some(IpAddr::V6(address.to_ipv6_mapped()))
             }
-            None => name.eq_ignore_ascii_case(&self.name),
+            _ => None,
+        },
+        IpAddr::V6(address) => address.to_ipv4_mapped().map(IpAddr::V4),
+    }?;
+    network.contains(alias).then_some(alias)
+}
+
+/// Completion of the connections and drivers retired by a protected-table update.
+///
+/// The proxy remains alive until this value is dropped or its wait completes.
+/// Dropping the value does not undo denial or restart retired connections.
+#[derive(Debug)]
+pub struct Retirement {
+    _proxy: Arc<ConnectProxy>,
+    tunnels: Vec<Tunnel>,
+    connections: Vec<watch::Receiver<()>>,
+}
+
+impl Retirement {
+    /// Wait for retired tunnel drivers and cancelled direct connections to end.
+    /// The caller may apply its own timeout; cancellation leaves protection set.
+    pub async fn wait(self) {
+        for tunnel in self.tunnels {
+            tunnel.stopped().await;
+        }
+        for mut ended in self.connections {
+            while ended.changed().await.is_ok() {}
         }
     }
 }
@@ -178,7 +286,9 @@ fn check_route(route: &ProxyRoute) -> io::Result<()> {
 /// opened. A connection already open keeps the stream it opened, so
 /// replacing or removing its route does not end it; it ends when its
 /// tunnel does, which is when the last handle of that tunnel is dropped,
-/// the route's own included.
+/// the route's own included. [`replace_protected_routes`](Self::replace_protected_routes)
+/// opts into denied destinations and explicit retirement instead; legacy
+/// mutations then refuse without changing the protected policy.
 pub struct ConnectProxy {
     local: SocketAddr,
     router: Arc<Router>,
@@ -221,6 +331,27 @@ impl ConnectProxy {
         routes: Vec<(String, ProxyRoute)>,
         bind: SocketAddr,
     ) -> io::Result<ConnectProxy> {
+        Self::bind_routed_inner(routes, bind, false).await
+    }
+
+    /// Bind a routed proxy that always connects exact loopback authorities directly.
+    ///
+    /// The exception is immutable and precedes routes and protected destinations:
+    /// `localhost` (ASCII case-insensitive), `127.0.0.1`, and `::1` remain local.
+    /// Other names and addresses are not exempt, even if they resolve or map to
+    /// loopback. Existing local connections keep this exception through updates.
+    pub async fn bind_routed_with_loopback_bypass(
+        routes: Vec<(String, ProxyRoute)>,
+        bind: SocketAddr,
+    ) -> io::Result<ConnectProxy> {
+        Self::bind_routed_inner(routes, bind, true).await
+    }
+
+    async fn bind_routed_inner(
+        routes: Vec<(String, ProxyRoute)>,
+        bind: SocketAddr,
+        bypass_loopback: bool,
+    ) -> io::Result<ConnectProxy> {
         if !bind.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -239,7 +370,12 @@ impl ConnectProxy {
         let local = listener.local_addr()?;
         let count = table.len();
         let router = Arc::new(Router {
-            routes: RwLock::new(table),
+            table: RwLock::new(Routing {
+                routes: table,
+                protected: None,
+                direct: Vec::new(),
+                bypass_loopback,
+            }),
         });
         let accept = tokio::spawn(accept_loop(listener, router.clone()));
         tracing::debug!(%local, routes = count, "proxy listening");
@@ -263,7 +399,9 @@ impl ConnectProxy {
     /// direct path; a refusal leaves the table as it was.
     pub fn add_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
         check_route(&route)?;
-        let mut routes = self.router.routes.write();
+        let mut table = self.router.table.write();
+        table.require_legacy()?;
+        let routes = &mut table.routes;
         if routes.iter().any(|(held, _)| held == id) {
             return Err(held_id(id));
         }
@@ -282,7 +420,9 @@ impl ConnectProxy {
     pub fn replace_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
         check_route(&route)?;
         let replaced = {
-            let mut routes = self.router.routes.write();
+            let mut table = self.router.table.write();
+            table.require_legacy()?;
+            let routes = &mut table.routes;
             let replaced = match routes.iter_mut().find(|(held, _)| held == id) {
                 Some((_, held)) => Some(std::mem::replace(held, route)),
                 None => {
@@ -306,10 +446,15 @@ impl ConnectProxy {
 
     /// Remove the route under `id`, so its destinations are connected
     /// directly from the next connection on; `false` when no route has
-    /// that id. Connections open through it end with its tunnel.
+    /// that id, or when protected routing is enabled. Connections open through
+    /// it end with its tunnel.
     pub fn remove_route(&self, id: &str) -> bool {
         let removed = {
-            let mut routes = self.router.routes.write();
+            let mut table = self.router.table.write();
+            if table.protected.is_some() {
+                return false;
+            }
+            let routes = &mut table.routes;
             let removed = routes
                 .iter()
                 .position(|(held, _)| held == id)
@@ -341,14 +486,98 @@ impl ConnectProxy {
                 return Err(held_id(id));
             }
         }
-        let previous = std::mem::replace(&mut *self.router.routes.write(), routes);
+        let previous = {
+            let mut table = self.router.table.write();
+            table.require_legacy()?;
+            std::mem::replace(&mut table.routes, routes)
+        };
         drop(previous);
         Ok(())
     }
 
+    /// Atomically publish routes and destinations that cannot fall back directly.
+    ///
+    /// A live mapped route takes precedence over protected host patterns. Other
+    /// protected names are refused before DNS; resolved protected addresses are
+    /// refused unless a live route carries them. The caller retains protection
+    /// for failed and removed ingresses in each complete replacement set.
+    ///
+    /// An unchanged id, tunnel instance and host map keeps its streams. Removing
+    /// or replacing a route stops its tunnel even if another handle exists; a
+    /// changed id or map must therefore use a fresh tunnel. Already direct
+    /// connections newly covered by either routes or protection are cancelled.
+    /// Await the returned retirement before treating their teardown as complete.
+    ///
+    /// Invalid input leaves policy and connections unchanged. After the first
+    /// successful call, legacy route mutations refuse without changing policy.
+    /// Hold the proxy in an `Arc` so the owned retirement can keep it alive.
+    pub fn replace_protected_routes(
+        self: &Arc<Self>,
+        routes: Vec<(String, ProxyRoute)>,
+        protected: ProtectedDestinations,
+    ) -> io::Result<Retirement> {
+        protected.validate()?;
+        let mut ids = std::collections::HashSet::new();
+        for (id, route) in &routes {
+            check_route(route)?;
+            if !ids.insert(id) {
+                return Err(held_id(id));
+            }
+        }
+        let (previous, tunnels, connections) = {
+            let mut table = self.router.table.write();
+            let mut tunnels = Vec::new();
+            for (id, previous) in &table.routes {
+                let kept = routes.iter().any(|(next_id, next)| {
+                    id == next_id
+                        && previous.tunnel.same_instance(&next.tunnel)
+                        && previous.hosts == next.hosts
+                });
+                if !kept {
+                    if routes
+                        .iter()
+                        .any(|(_, next)| previous.tunnel.same_instance(&next.tunnel))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "a changed protected route requires a fresh tunnel",
+                        ));
+                    }
+                    if !tunnels
+                        .iter()
+                        .any(|held: &Tunnel| held.same_instance(&previous.tunnel))
+                    {
+                        tunnels.push(previous.tunnel.clone());
+                    }
+                }
+            }
+            let previous = std::mem::replace(&mut table.routes, routes);
+            table.protected = Some(protected);
+            let direct: Vec<_> = table.direct.iter().filter_map(Weak::upgrade).collect();
+            table.direct.retain(|entry| entry.strong_count() != 0);
+            let mut connections = Vec::new();
+            for attempt in direct {
+                if !table.permits_direct(&attempt.host, &attempt.addresses.lock()) {
+                    attempt.connection.cancel.send_replace(true);
+                    connections.push(attempt.connection.ended.clone());
+                }
+            }
+            (previous, tunnels, connections)
+        };
+        for tunnel in &tunnels {
+            tunnel.shut_down();
+        }
+        drop(previous);
+        Ok(Retirement {
+            _proxy: self.clone(),
+            tunnels,
+            connections,
+        })
+    }
+
     /// How many routes the table holds.
     pub fn routes(&self) -> usize {
-        self.router.routes.read().len()
+        self.router.table.read().routes.len()
     }
 }
 
@@ -375,22 +604,51 @@ impl fmt::Debug for ConnectProxy {
     }
 }
 
-/// The live table, shared by the proxy, its accept task and every
-/// connection. A reader holds the lock only to find a route and clone its
-/// tunnel handle out, never across an await, and a writer only for one
-/// edit of the list, so the lock is never contended for long.
+/// Policy and direct registrations share one lock so publication cannot miss
+/// a direct dial that has already selected its destination.
 struct Router {
-    routes: RwLock<Vec<(String, ProxyRoute)>>,
+    table: RwLock<Routing>,
 }
 
-impl Router {
-    /// The tunnel and the addresses of the first host entry, in table
-    /// order, that names `name`. A name with an empty label matches none.
-    fn mapped(&self, name: &str) -> Option<(Tunnel, Vec<IpAddr>)> {
+struct Routing {
+    routes: Vec<(String, ProxyRoute)>,
+    protected: Option<ProtectedDestinations>,
+    direct: Vec<Weak<DirectAttempt>>,
+    bypass_loopback: bool,
+}
+
+impl Routing {
+    fn bypasses_loopback(&self, host: &Host) -> bool {
+        self.bypass_loopback
+            && match host {
+                Host::Name(name) => name.eq_ignore_ascii_case("localhost"),
+                Host::Ip(ip) => {
+                    *ip == IpAddr::V4(Ipv4Addr::LOCALHOST) || *ip == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                }
+            }
+    }
+
+    fn require_legacy(&self) -> io::Result<()> {
+        if self.protected.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "use replace_protected_routes on a protected proxy",
+            ));
+        }
+        Ok(())
+    }
+
+    fn mapped(&self, host: &Host) -> Option<(Tunnel, Vec<IpAddr>)> {
+        let Host::Name(name) = host else { return None };
+        let name = if self.protected.is_some() {
+            name.strip_suffix('.').unwrap_or(name)
+        } else {
+            name
+        };
         if !is_dns_name(name) {
             return None;
         }
-        self.routes.read().iter().find_map(|(_, route)| {
+        self.routes.iter().find_map(|(_, route)| {
             route
                 .hosts
                 .iter()
@@ -399,14 +657,75 @@ impl Router {
         })
     }
 
-    /// The tunnel of the first route whose peer's AllowedIPs contain `ip`.
-    fn tunnel_for(&self, ip: IpAddr) -> Option<Tunnel> {
-        self.routes
-            .read()
+    fn tunnel_for(&self, ip: IpAddr) -> Option<(Tunnel, IpAddr)> {
+        // Exact matches retain the table's existing family and route priority.
+        let exact = self
+            .routes
             .iter()
             .map(|(_, route)| &route.tunnel)
-            .find(|tunnel| tunnel.allowed_ips().iter().any(|cidr| cidr.contains(ip)))
-            .cloned()
+            .find(|tunnel| tunnel.allowed_ips().iter().any(|cidr| cidr.contains(ip)));
+        if let Some(tunnel) = exact {
+            return Some((tunnel.clone(), ip));
+        }
+        self.protected.as_ref()?;
+        self.routes.iter().find_map(|(_, route)| {
+            route
+                .tunnel
+                .allowed_ips()
+                .iter()
+                .find_map(|network| admitted_alias(network, ip))
+                .map(|address| (route.tunnel.clone(), address))
+        })
+    }
+
+    fn protects_host(&self, host: &Host) -> bool {
+        self.protected
+            .as_ref()
+            .is_some_and(|protected| protected.host(host))
+    }
+
+    fn protects_address(&self, address: IpAddr) -> bool {
+        self.protected
+            .as_ref()
+            .is_some_and(|protected| protected.address(address))
+    }
+
+    fn permits_direct(&self, host: &Host, addresses: &[SocketAddr]) -> bool {
+        if self.bypasses_loopback(host) {
+            return true;
+        }
+        self.mapped(host).is_none()
+            && !self.protects_host(host)
+            && !addresses.iter().any(|address| {
+                self.tunnel_for(address.ip()).is_some() || self.protects_address(address.ip())
+            })
+    }
+}
+
+/// Only potentially direct operations are registered. A weak entry disappears
+/// when its resolution, dial or upstream stream ends, including cancellation.
+struct DirectAttempt {
+    host: Host,
+    addresses: Mutex<Vec<SocketAddr>>,
+    connection: Arc<ConnectionControl>,
+}
+
+struct ConnectionControl {
+    cancel: watch::Sender<bool>,
+    ended: watch::Receiver<()>,
+}
+
+impl ConnectionControl {
+    fn cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+}
+
+async fn cancelled(receiver: &mut watch::Receiver<bool>) {
+    while !*receiver.borrow_and_update() {
+        if receiver.changed().await.is_err() {
+            break;
+        }
     }
 }
 
@@ -461,6 +780,7 @@ struct Connection {
     router: Arc<Router>,
     peer: SocketAddr,
     side: Mutex<JoinSet<()>>,
+    control: Arc<ConnectionControl>,
 }
 
 async fn serve(router: Arc<Router>, client: TcpStream, peer: SocketAddr) {
@@ -469,10 +789,16 @@ async fn serve(router: Arc<Router>, client: TcpStream, peer: SocketAddr) {
     if let Err(e) = client.set_nodelay(true) {
         tracing::debug!(error = %e, "proxy client socket nodelay");
     }
+    let (cancel, mut cancellation) = watch::channel(false);
+    let (ended, completion) = watch::channel(());
     let connection = Arc::new(Connection {
         router,
         peer,
         side: Mutex::new(JoinSet::new()),
+        control: Arc::new(ConnectionControl {
+            cancel,
+            ended: completion,
+        }),
     });
     let service = service_fn({
         let connection = connection.clone();
@@ -481,21 +807,40 @@ async fn serve(router: Arc<Router>, client: TcpStream, peer: SocketAddr) {
             async move { Ok::<_, Infallible>(connection.handle(request).await) }
         }
     });
-    let served = server::Builder::new()
+    let mut builder = server::Builder::new();
+    builder
         .timer(TokioTimer::new())
         .header_read_timeout(HEAD_TIMEOUT)
-        .max_buf_size(MAX_HEAD)
-        .serve_connection(TokioIo::new(client), service)
-        .with_upgrades()
-        .await;
-    if let Err(e) = served {
-        tracing::debug!(%peer, error = %e, "proxy connection ended");
+        .max_buf_size(MAX_HEAD);
+    {
+        let served = builder
+            .serve_connection(TokioIo::new(client), service)
+            .with_upgrades();
+        tokio::pin!(served);
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut cancellation) => {},
+            result = &mut served => {
+                if let Err(e) = result {
+                    tracing::debug!(%peer, error = %e, "proxy connection ended");
+                }
+            }
+        }
     }
-    // hyper is done with the connection once it hands an upgrade over or
-    // the last response is written; the splice and the destination
-    // connections run on, and this task's end must mean theirs.
+    // The HTTP connection is gone before side tasks are joined, so a cancelled
+    // request or response body cannot retain an upstream past completion.
     let mut side = std::mem::take(&mut *connection.side.lock());
-    while side.join_next().await.is_some() {}
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut cancellation) => {
+                side.shutdown().await;
+                break;
+            },
+            joined = side.join_next() => if joined.is_none() { break; },
+        }
+    }
+    drop(ended);
 }
 
 impl Connection {
@@ -623,7 +968,12 @@ impl Connection {
         &self,
         authority: &Authority,
     ) -> Result<(Box<dyn Io>, SocketAddr, &'static str), StatusCode> {
-        match timeout(CONNECT_TIMEOUT, connect(&self.router, authority)).await {
+        match timeout(
+            CONNECT_TIMEOUT,
+            connect(&self.router, authority, &self.control),
+        )
+        .await
+        {
             Ok(Ok(opened)) => Ok(opened),
             Ok(Err(e)) => {
                 tracing::debug!(peer = %self.peer, error = %e, "proxy destination unreachable");
@@ -714,11 +1064,13 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, upgrade: bool) {
 
 /// The destination of a request: an address literal, or a name resolved
 /// at connect time, and the port.
+#[derive(Clone)]
 struct Authority {
     host: Host,
     port: u16,
 }
 
+#[derive(Clone)]
 enum Host {
     Ip(IpAddr),
     Name(String),
@@ -842,38 +1194,205 @@ fn is_dns_name(host: &str) -> bool {
 /// and goes through the tunnel of the first route whose AllowedIPs
 /// contain a resolved address, or directly when none does.
 async fn connect(
-    router: &Router,
+    router: &Arc<Router>,
     authority: &Authority,
+    control: &Arc<ConnectionControl>,
 ) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
-    if let Host::Name(name) = &authority.host {
-        if let Some((tunnel, addresses)) = router.mapped(name) {
-            return connect_mapped(&tunnel, &addresses, authority.port).await;
-        }
+    let initial = match authority.host {
+        Host::Ip(ip) => vec![SocketAddr::new(ip, authority.port)],
+        Host::Name(_) => Vec::new(),
+    };
+    let (route, attempt) = {
+        let mut table = router.table.write();
+        let route = table.select(&authority.host, &initial)?;
+        let attempt = if route.is_none() {
+            let attempt = Arc::new(DirectAttempt {
+                host: authority.host.clone(),
+                addresses: Mutex::new(initial.clone()),
+                connection: control.clone(),
+            });
+            table.direct.retain(|entry| entry.strong_count() != 0);
+            table.direct.push(Arc::downgrade(&attempt));
+            Some(attempt)
+        } else {
+            None
+        };
+        (route, attempt)
+    };
+    if let Some(route) = route {
+        return route.connect(authority.port).await;
     }
-    let addrs: Vec<SocketAddr> = match &authority.host {
-        Host::Ip(ip) => vec![SocketAddr::new(*ip, authority.port)],
+    let attempt = attempt.expect("a possibly direct destination is registered");
+    let addresses = match &authority.host {
+        Host::Ip(_) => initial,
         Host::Name(name) => tokio::net::lookup_host((name.as_str(), authority.port))
             .await?
             .collect(),
     };
-    if addrs.is_empty() {
+    connect_resolved(router, attempt, addresses, authority.port).await
+}
+
+async fn connect_resolved(
+    router: &Arc<Router>,
+    attempt: Arc<DirectAttempt>,
+    addresses: Vec<SocketAddr>,
+    port: u16,
+) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+    if addresses.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "the authority resolved to no address",
         ));
     }
-    for addr in &addrs {
-        if let Some(tunnel) = router.tunnel_for(addr.ip()) {
-            let stream = connect_tunnel(&tunnel, *addr).await?;
-            return Ok((Box::new(stream), *addr, "tunnel"));
+    let route = {
+        let table = router.table.write();
+        if attempt.connection.cancelled() {
+            return Err(protected_destination());
         }
+        let route = table.select(&attempt.host, &addresses)?;
+        *attempt.addresses.lock() = addresses.clone();
+        route
+    };
+    if let Some(route) = route {
+        drop(attempt);
+        return route.connect(port).await;
     }
-    let stream = TcpStream::connect(addrs.as_slice()).await?;
+    let connecting = TcpStream::connect(addresses.as_slice());
+    tokio::pin!(connecting);
+    let stream = poll_fn(|cx| {
+        let table = router.table.read();
+        if attempt.connection.cancelled()
+            || (table.protected.is_some() && !table.permits_direct(&attempt.host, &addresses))
+        {
+            return Poll::Ready(Err(protected_destination()));
+        }
+        connecting.as_mut().poll(cx)
+    })
+    .await?;
     if let Err(e) = stream.set_nodelay(true) {
         tracing::debug!(error = %e, "proxy destination socket nodelay");
     }
     let peer = stream.peer_addr()?;
-    Ok((Box::new(stream), peer, "direct"))
+    Ok((
+        Box::new(DirectIo {
+            stream,
+            router: router.clone(),
+            attempt,
+        }),
+        peer,
+        "direct",
+    ))
+}
+
+fn protected_destination() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "the destination requires a live tunnel route",
+    )
+}
+
+enum Routed {
+    Mapped(Tunnel, Vec<IpAddr>),
+    Address(Tunnel, SocketAddr),
+}
+
+impl Routed {
+    async fn connect(self, port: u16) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+        match self {
+            Self::Mapped(tunnel, addresses) => connect_mapped(&tunnel, &addresses, port).await,
+            Self::Address(tunnel, address) => {
+                let stream = connect_tunnel(&tunnel, address).await?;
+                Ok((Box::new(stream), address, "tunnel"))
+            }
+        }
+    }
+}
+
+impl Routing {
+    fn select(&self, host: &Host, addresses: &[SocketAddr]) -> io::Result<Option<Routed>> {
+        if self.bypasses_loopback(host) {
+            return Ok(None);
+        }
+        if let Some((tunnel, addresses)) = self.mapped(host) {
+            return Ok(Some(Routed::Mapped(tunnel, addresses)));
+        }
+        if self.protects_host(host) {
+            return Err(protected_destination());
+        }
+        for address in addresses {
+            if let Some((tunnel, ip)) = self.tunnel_for(address.ip()) {
+                let target = if ip == address.ip() {
+                    *address
+                } else {
+                    SocketAddr::new(ip, address.port())
+                };
+                return Ok(Some(Routed::Address(tunnel, target)));
+            }
+        }
+        if addresses
+            .iter()
+            .any(|address| self.protects_address(address.ip()))
+        {
+            return Err(protected_destination());
+        }
+        Ok(None)
+    }
+}
+
+/// Synchronize each direct IO poll with policy publication. Bytes already
+/// queued to the OS cannot be recalled, but no new poll may bypass denial.
+struct DirectIo {
+    stream: TcpStream,
+    router: Arc<Router>,
+    attempt: Arc<DirectAttempt>,
+}
+
+impl AsyncRead for DirectIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let _table = this.router.table.read();
+        if this.attempt.connection.cancelled() {
+            return Poll::Ready(Err(protected_destination()));
+        }
+        Pin::new(&mut this.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for DirectIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let _table = this.router.table.read();
+        if this.attempt.connection.cancelled() {
+            return Poll::Ready(Err(protected_destination()));
+        }
+        Pin::new(&mut this.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let _table = this.router.table.read();
+        if this.attempt.connection.cancelled() {
+            return Poll::Ready(Err(protected_destination()));
+        }
+        Pin::new(&mut this.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let _table = this.router.table.read();
+        if this.attempt.connection.cancelled() {
+            return Poll::Ready(Err(protected_destination()));
+        }
+        Pin::new(&mut this.stream).poll_shutdown(cx)
+    }
 }
 
 /// Connect a mapped name through its tunnel to the first of its addresses
@@ -2143,8 +2662,9 @@ mod tests {
         let ids = || {
             proxy
                 .router
-                .routes
+                .table
                 .read()
+                .routes
                 .iter()
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>()
@@ -2461,6 +2981,828 @@ mod tests {
         assert!(
             TcpStream::connect(at).await.is_err(),
             "nothing listens once the proxy is dropped"
+        );
+    }
+
+    fn protection(hosts: &[&str], addresses: &[&str]) -> ProtectedDestinations {
+        ProtectedDestinations {
+            hosts: hosts.iter().map(|name| (*name).to_owned()).collect(),
+            networks: addresses.iter().map(|address| cidr(address)).collect(),
+        }
+    }
+
+    async fn ping<
+        C: AsyncReadExt + AsyncWriteExt + Unpin,
+        S: AsyncReadExt + AsyncWriteExt + Unpin,
+    >(
+        client: &mut C,
+        server: &mut S,
+    ) {
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        timeout(WAIT, server.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"ping");
+        server.write_all(b"pong").await.unwrap();
+        timeout(WAIT, client.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"pong");
+    }
+
+    async fn ended<S: AsyncReadExt + Unpin>(stream: &mut S) {
+        let mut bytes = [0; 32];
+        let result = timeout(WAIT, stream.read(&mut bytes))
+            .await
+            .expect("retired stream must end");
+        assert!(
+            matches!(result, Ok(0) | Err(_)),
+            "retired stream returned {result:?}"
+        );
+    }
+
+    fn pending_direct(proxy: &ConnectProxy, name: &str) -> (Arc<DirectAttempt>, watch::Sender<()>) {
+        let (cancel, _) = watch::channel(false);
+        let (ended, completion) = watch::channel(());
+        let attempt = Arc::new(DirectAttempt {
+            host: Host::Name(name.into()),
+            addresses: Mutex::new(Vec::new()),
+            connection: Arc::new(ConnectionControl {
+                cancel,
+                ended: completion,
+            }),
+        });
+        proxy
+            .router
+            .table
+            .write()
+            .direct
+            .push(Arc::downgrade(&attempt));
+        (attempt, ended)
+    }
+
+    #[tokio::test]
+    async fn protected_names_refuse_without_resolution_and_legacy_mutation_cannot_erase_them() {
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        proxy
+            .replace_protected_routes(
+                Vec::new(),
+                protection(&["EXACT.invalid", "*.protected.invalid"], &[]),
+            )
+            .unwrap()
+            .wait()
+            .await;
+        for name in [
+            "exact.invalid",
+            "EXACT.invalid.",
+            "one.protected.invalid",
+            "two.one.protected.invalid.",
+        ] {
+            let (cancel, _) = watch::channel(false);
+            let (_ended, completion) = watch::channel(());
+            let control = Arc::new(ConnectionControl {
+                cancel,
+                ended: completion,
+            });
+            let error = match connect(
+                &proxy.router,
+                &Authority {
+                    host: Host::Name(name.into()),
+                    port: 443,
+                },
+                &control,
+            )
+            .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("protected name connected"),
+            };
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                error.to_string(),
+                "the destination requires a live tunnel route"
+            );
+            assert!(
+                proxy.router.table.read().direct.is_empty(),
+                "refusal precedes lookup registration"
+            );
+        }
+        assert!(!proxy
+            .router
+            .table
+            .read()
+            .protects_host(&Host::Name("protected.invalid".into())));
+        let Pair { a, .. } = pair().await;
+        assert_eq!(
+            proxy.add_route("gw", route(a.clone())).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            proxy
+                .replace_route("gw", route(a.clone()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            proxy
+                .replace_routes(vec![("gw".into(), route(a))])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(!proxy.remove_route("gw"));
+        assert_eq!(proxy.routes(), 0);
+        expect_refusal(&proxy, "CONNECT exact.invalid:443 HTTP/1.1\r\n\r\n", 502).await;
+    }
+
+    #[tokio::test]
+    async fn protected_publication_retires_direct_connect_but_keeps_unrelated_direct_traffic() {
+        let sentinel = TcpListener::bind(loopback()).await.unwrap();
+        let port = sentinel.local_addr().unwrap().port();
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        let mut old = send_connect(&proxy, &format!("localhost:{port}")).await;
+        let (mut server, _) = timeout(WAIT, sentinel.accept()).await.unwrap().unwrap();
+        assert_eq!(
+            status_of(&timeout(WAIT, read_head(&mut old)).await.unwrap().unwrap()),
+            200
+        );
+        ping(&mut old, &mut server).await;
+        // The initial ping proves the direct sentinel is reachable and active.
+
+        let mut unrelated = send_connect(&proxy, &format!("127.0.0.1:{port}")).await;
+        let (mut other_server, _) = timeout(WAIT, sentinel.accept()).await.unwrap().unwrap();
+        assert_eq!(
+            status_of(
+                &timeout(WAIT, read_head(&mut unrelated))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            ),
+            200
+        );
+        let retirement = proxy
+            .replace_protected_routes(Vec::new(), protection(&["localhost"], &[]))
+            .unwrap();
+        // The owned retirement is Send and keeps the proxy alive across spawn.
+        timeout(WAIT, tokio::spawn(retirement.wait()))
+            .await
+            .unwrap()
+            .unwrap();
+        ended(&mut old).await;
+        ended(&mut server).await;
+        ping(&mut unrelated, &mut other_server).await;
+        expect_refusal(
+            &proxy,
+            &format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n"),
+            502,
+        )
+        .await;
+        assert!(
+            timeout(Duration::from_millis(50), sentinel.accept())
+                .await
+                .is_err(),
+            "denied request reached direct sentinel"
+        );
+        drop(unrelated);
+        drop(other_server);
+        proxy
+            .replace_protected_routes(Vec::new(), protection(&["localhost"], &["127.0.0.1"]))
+            .unwrap()
+            .wait()
+            .await;
+        assert!(proxy
+            .router
+            .table
+            .read()
+            .direct
+            .iter()
+            .all(|entry| entry.strong_count() == 0));
+    }
+
+    #[tokio::test]
+    async fn protection_revalidates_pending_dns_and_mixed_answers_before_a_direct_dial() {
+        let sentinel = TcpListener::bind(loopback()).await.unwrap();
+        let direct = sentinel.local_addr().unwrap();
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        let (late, complete) = pending_direct(&proxy, "late.invalid");
+        let retirement = proxy
+            .replace_protected_routes(Vec::new(), protection(&["late.invalid"], &[]))
+            .unwrap();
+        let result = connect_resolved(&proxy.router, late, vec![direct], direct.port()).await;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+        drop(complete);
+        retirement.wait().await;
+
+        proxy
+            .replace_protected_routes(Vec::new(), protection(&[], &[B_ADDR]))
+            .unwrap()
+            .wait()
+            .await;
+        let (mixed, _complete) = pending_direct(&proxy, "mixed.invalid");
+        let result = connect_resolved(
+            &proxy.router,
+            mixed,
+            vec![direct, b_port(direct.port())],
+            direct.port(),
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+        assert!(timeout(Duration::from_millis(50), sentinel.accept())
+            .await
+            .is_err());
+        assert!(
+            proxy
+                .router
+                .table
+                .read()
+                .protects_address("::ffff:10.7.0.2".parse().unwrap()),
+            "IPv4-mapped IPv6 cannot bypass a protected IPv4 range"
+        );
+
+        // A live tunnel still wins over a mixed public/private DNS answer.
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(direct.port()).unwrap();
+        proxy
+            .replace_protected_routes(vec![("live".into(), route(a))], protection(&[], &[B_ADDR]))
+            .unwrap()
+            .wait()
+            .await;
+        let (mixed, _complete) = pending_direct(&proxy, "mixed.invalid");
+        let (opened, accepted) = timeout(WAIT, async {
+            tokio::join!(
+                connect_resolved(
+                    &proxy.router,
+                    mixed,
+                    vec![direct, b_port(direct.port())],
+                    direct.port()
+                ),
+                listener.accept()
+            )
+        })
+        .await
+        .unwrap();
+        let (mut opened, _, path) = opened.unwrap();
+        assert_eq!(path, "tunnel");
+        ping(&mut opened, &mut accepted.unwrap()).await;
+        assert!(timeout(Duration::from_millis(50), sentinel.accept())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn protected_retirement_stops_cloned_tunnels_and_preserves_healthy_ingress() {
+        let first = pair().await;
+        let healthy = pair_at("10.8.0.1", "10.8.0.2").await;
+        let mut first_listener = first.b.listen(0).unwrap();
+        let mut healthy_listener = healthy.b.listen(0).unwrap();
+        let old = mapped(first.a.clone(), vec![host("old.invalid", &[B_ADDR])]);
+        let live = mapped(healthy.a.clone(), vec![host("live.invalid", &["10.8.0.2"])]);
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        proxy
+            .replace_protected_routes(
+                vec![("old".into(), old), ("live".into(), live.clone())],
+                protection(&["*.invalid"], &[B_ADDR, "10.8.0.2"]),
+            )
+            .unwrap()
+            .wait()
+            .await;
+        let mut old_client =
+            send_connect(&proxy, &format!("old.invalid:{}", first_listener.port())).await;
+        let (head, accepted) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut old_client), first_listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let mut old_server = accepted.unwrap();
+        ping(&mut old_client, &mut old_server).await;
+        let mut live_client = send_connect(
+            &proxy,
+            &format!("live.invalid.:{}", healthy_listener.port()),
+        )
+        .await;
+        let (head, accepted) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut live_client), healthy_listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let mut live_server = accepted.unwrap();
+        let retirement = proxy
+            .replace_protected_routes(
+                vec![("live".into(), live)],
+                protection(&["*.invalid"], &[B_ADDR, "10.8.0.2"]),
+            )
+            .unwrap();
+        timeout(WAIT, retirement.wait()).await.unwrap();
+        ended(&mut old_client).await;
+        assert_eq!(
+            first
+                .a
+                .connect(b_port(first_listener.port()))
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        ping(&mut live_client, &mut live_server).await;
+        expect_refusal(
+            &proxy,
+            &format!(
+                "CONNECT old.invalid:{} HTTP/1.1\r\n\r\n",
+                first_listener.port()
+            ),
+            502,
+        )
+        .await;
+        let mut fresh =
+            send_connect(&proxy, &format!("live.invalid:{}", healthy_listener.port())).await;
+        let (head, accepted) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut fresh), healthy_listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let accepted = accepted.unwrap();
+        assert_eq!(
+            accepted.peer_addr().ip(),
+            "10.8.0.1".parse::<IpAddr>().unwrap()
+        );
+        exchange(fresh, accepted).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_protected_replacement_is_atomic_including_same_instance_map_changes() {
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        let original = mapped(a.clone(), vec![host("old.invalid", &[B_ADDR])]);
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        proxy
+            .replace_protected_routes(
+                vec![("old".into(), original.clone())],
+                protection(&["*.invalid"], &[]),
+            )
+            .unwrap()
+            .wait()
+            .await;
+        let changed = mapped(a.clone(), vec![host("new.invalid", &[B_ADDR])]);
+        let error = proxy
+            .replace_protected_routes(
+                vec![("old".into(), changed)],
+                ProtectedDestinations::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let invalid = ProtectedDestinations {
+            hosts: vec!["bad..name".into()],
+            networks: Vec::new(),
+        };
+        assert_eq!(
+            proxy
+                .replace_protected_routes(Vec::new(), invalid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let invalid = ProtectedDestinations {
+            hosts: Vec::new(),
+            networks: vec![Cidr {
+                addr: B_ADDR.parse().unwrap(),
+                prefix: 33,
+            }],
+        };
+        assert_eq!(
+            proxy
+                .replace_protected_routes(Vec::new(), invalid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            proxy
+                .replace_protected_routes(
+                    vec![("same".into(), original.clone()), ("same".into(), original)],
+                    ProtectedDestinations::default()
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(proxy.routes(), 1);
+        through_tunnel(
+            &proxy,
+            &format!("old.invalid:{}", listener.port()),
+            &mut listener,
+        )
+        .await;
+        expect_refusal(&proxy, "CONNECT new.invalid:443 HTTP/1.1\r\n\r\n", 502).await;
+    }
+
+    #[tokio::test]
+    async fn protected_publication_closes_plain_streaming_response_and_websocket_upgrade() {
+        for upgrade in [false, true] {
+            let listener = TcpListener::bind(loopback()).await.unwrap();
+            let target = listener.local_addr().unwrap();
+            let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+            let mut client = TcpStream::connect(proxy.local_addr()).await.unwrap();
+            let extra = if upgrade {
+                "Connection: Upgrade\r\nUpgrade: websocket\r\n"
+            } else {
+                ""
+            };
+            client
+                .write_all(
+                    format!(
+                        "GET http://localhost:{}/stream HTTP/1.1\r\nHost: localhost\r\n{extra}\r\n",
+                        target.port()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (mut server, _) = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+            assert!(timeout(WAIT, read_head(&mut server))
+                .await
+                .unwrap()
+                .is_some());
+            let answer: &[u8] = if upgrade {
+                b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n"
+            };
+            server.write_all(answer).await.unwrap();
+            assert_eq!(
+                status_of(
+                    &timeout(WAIT, read_head(&mut client))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                ),
+                if upgrade { 101 } else { 200 }
+            );
+            server.write_all(b"live").await.unwrap();
+            let mut bytes = [0; 4];
+            timeout(WAIT, client.read_exact(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&bytes, b"live");
+            timeout(
+                WAIT,
+                proxy
+                    .replace_protected_routes(Vec::new(), protection(&["localhost"], &[]))
+                    .unwrap()
+                    .wait(),
+            )
+            .await
+            .unwrap();
+            ended(&mut client).await;
+            ended(&mut server).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_address_aliases_preserve_exact_routes_and_ipv6_family_boundaries() {
+        let mapped_ip: IpAddr = "::ffff:10.7.0.2".parse().unwrap();
+        let ipv4: IpAddr = B_ADDR.parse().unwrap();
+        let mapped_network = Cidr {
+            addr: mapped_ip,
+            prefix: 128,
+        };
+        assert!(ProtectedDestinations {
+            hosts: Vec::new(),
+            networks: vec![mapped_network]
+        }
+        .address(ipv4));
+        assert!(protection(&[], &[B_ADDR]).address(mapped_ip));
+        let broad_network = Cidr {
+            addr: "::".parse().unwrap(),
+            prefix: 0,
+        };
+        assert!(!ProtectedDestinations {
+            hosts: Vec::new(),
+            networks: vec![broad_network]
+        }
+        .address(ipv4));
+
+        let make_v6 = |network| {
+            let key = StaticSecret::random_from_rng(OsRng);
+            let peer = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+            let mut cfg = config(
+                key,
+                peer,
+                "fd00::1",
+                B_ADDR,
+                "127.0.0.1:51820".parse().unwrap(),
+            );
+            cfg.addresses[0].prefix = 128;
+            cfg.peer.allowed_ips = vec![network];
+            Tunnel::start(cfg).unwrap()
+        };
+        let mapped = make_v6(mapped_network);
+        let broad = make_v6(broad_network);
+        let Pair { a, .. } = pair().await;
+        let mut table = Routing {
+            routes: vec![
+                ("mapped".into(), route(mapped.clone())),
+                ("v4".into(), route(a.clone())),
+            ],
+            protected: Some(ProtectedDestinations::default()),
+            direct: Vec::new(),
+            bypass_loopback: false,
+        };
+        let (selected, address) = table.tunnel_for(ipv4).unwrap();
+        assert!(selected.same_instance(&a));
+        assert_eq!(address, ipv4);
+        let (selected, address) = table.tunnel_for(mapped_ip).unwrap();
+        assert!(selected.same_instance(&mapped));
+        assert_eq!(address, mapped_ip);
+        table.routes.pop();
+        let (selected, address) = table.tunnel_for(ipv4).unwrap();
+        assert!(selected.same_instance(&mapped));
+        assert_eq!(address, mapped_ip);
+        table.routes = vec![("broad".into(), route(broad))];
+        assert!(
+            table.tunnel_for(ipv4).is_none(),
+            "IPv6 default route must not capture IPv4 loopback or other IPv4 authorities"
+        );
+
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        proxy
+            .replace_protected_routes(
+                Vec::new(),
+                ProtectedDestinations {
+                    hosts: Vec::new(),
+                    networks: vec![Cidr {
+                        addr: "::ffff:127.0.0.0".parse().unwrap(),
+                        prefix: 120,
+                    }],
+                },
+            )
+            .unwrap()
+            .wait()
+            .await;
+        expect_refusal(
+            &proxy,
+            &format!(
+                "CONNECT {} HTTP/1.1\r\n\r\n",
+                listener.local_addr().unwrap()
+            ),
+            502,
+        )
+        .await;
+        assert!(timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err());
+        let error = proxy
+            .replace_protected_routes(Vec::new(), protection(&["127.0.0.1"], &[]))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("networks"));
+        assert!(
+            proxy
+                .router
+                .table
+                .read()
+                .protects_address("127.0.0.1".parse().unwrap()),
+            "invalid replacement must retain protection"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_publication_cancels_a_real_pending_direct_dial() {
+        let sentinel = TcpListener::bind(loopback()).await.unwrap();
+        let target = sentinel.local_addr().unwrap();
+        let proxy = Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap());
+        let (attempt, complete) = pending_direct(&proxy, "dial.invalid");
+        let connecting = connect_resolved(&proxy.router, attempt, vec![target], target.port());
+        tokio::pin!(connecting);
+        // This current-thread runtime cannot process readiness during the first
+        // poll. The real socket starts connecting, but no upstream is returned.
+        poll_fn(|cx| {
+            assert!(connecting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let (mut server, _) = timeout(WAIT, sentinel.accept()).await.unwrap().unwrap();
+        let retirement = proxy
+            .replace_protected_routes(Vec::new(), protection(&["dial.invalid"], &[]))
+            .unwrap();
+        let result = timeout(WAIT, &mut connecting).await.unwrap();
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+        ended(&mut server).await;
+        drop(complete);
+        timeout(WAIT, retirement.wait()).await.unwrap();
+    }
+
+    async fn full_route_tunnel() -> (Tunnel, UdpSocket) {
+        let key = StaticSecret::random_from_rng(OsRng);
+        let peer = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let probe = UdpSocket::bind(loopback()).await.unwrap();
+        let address = probe.local_addr().unwrap();
+        let mut cfg = config(key, peer, A_ADDR, B_ADDR, address);
+        cfg.addresses.push(Cidr {
+            addr: "fd00::1".parse().unwrap(),
+            prefix: 128,
+        });
+        cfg.peer.allowed_ips = full_protection().networks;
+        let udp = UdpSocket::bind(loopback()).await.unwrap();
+        (Tunnel::start_on(cfg, udp, address).unwrap(), probe)
+    }
+
+    fn full_protection() -> ProtectedDestinations {
+        ProtectedDestinations {
+            hosts: vec!["localhost".into()],
+            networks: vec![
+                Cidr {
+                    addr: "0.0.0.0".parse().unwrap(),
+                    prefix: 0,
+                },
+                Cidr {
+                    addr: "::".parse().unwrap(),
+                    prefix: 0,
+                },
+            ],
+        }
+    }
+
+    async fn open_direct_at(
+        proxy: &ConnectProxy,
+        authority: &str,
+        listener: &TcpListener,
+    ) -> (TcpStream, TcpStream) {
+        let mut client = send_connect(proxy, authority).await;
+        let (server, _) = timeout(WAIT, listener.accept())
+            .await
+            .expect("exact loopback authority must reach local listener")
+            .unwrap();
+        let head = timeout(WAIT, read_head(&mut client))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status_of(&head), 200);
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn loopback_bypass_keeps_exact_authorities_local_across_full_route_updates() {
+        let (tunnel, probe) = full_route_tunnel().await;
+        let routed = mapped(tunnel, vec![host("localhost", &[B_ADDR])]);
+        let proxy = Arc::new(
+            ConnectProxy::bind_routed_with_loopback_bypass(
+                vec![("full".into(), routed.clone())],
+                loopback(),
+            )
+            .await
+            .unwrap(),
+        );
+        let v4 = TcpListener::bind(loopback()).await.unwrap();
+        let v6 = TcpListener::bind("[::1]:0").await.unwrap();
+        let authorities = [
+            v4.local_addr().unwrap().to_string(),
+            v6.local_addr().unwrap().to_string(),
+            format!("LoCaLhOsT:{}", v4.local_addr().unwrap().port()),
+        ];
+        let listeners = [&v4, &v6, &v4];
+        let mut connected = Vec::new();
+        for (authority, listener) in authorities.iter().zip(listeners) {
+            let (mut client, mut server) = open_direct_at(&proxy, authority, listener).await;
+            ping(&mut client, &mut server).await;
+            connected.push((client, server));
+        }
+        for routes in [vec![("full".into(), routed)], Vec::new()] {
+            timeout(
+                WAIT,
+                proxy
+                    .replace_protected_routes(routes, full_protection())
+                    .unwrap()
+                    .wait(),
+            )
+            .await
+            .unwrap();
+            for (client, server) in &mut connected {
+                ping(client, server).await;
+            }
+            for (authority, listener) in authorities.iter().zip(listeners) {
+                let (client, server) = open_direct_at(&proxy, authority, listener).await;
+                exchange(client, server).await;
+            }
+        }
+        let mut packet = [0; 256];
+        assert!(
+            probe.try_recv_from(&mut packet).is_err(),
+            "loopback bypass must never start a WireGuard handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_bypass_is_opt_in_and_existing_constructors_still_deny_loopback() {
+        let proxies = [
+            Arc::new(ConnectProxy::bind(Vec::new(), loopback()).await.unwrap()),
+            Arc::new(
+                ConnectProxy::bind_routed(Vec::new(), loopback())
+                    .await
+                    .unwrap(),
+            ),
+        ];
+        for proxy in proxies {
+            proxy
+                .replace_protected_routes(Vec::new(), full_protection())
+                .unwrap()
+                .wait()
+                .await;
+            for authority in ["127.0.0.1:80", "[::1]:80", "localhost:80"] {
+                expect_refusal(
+                    &proxy,
+                    &format!("CONNECT {authority} HTTP/1.1\r\n\r\n"),
+                    502,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_bypass_does_not_exempt_other_addresses_or_resolved_and_mapped_names() {
+        let sentinel = TcpListener::bind(loopback()).await.unwrap();
+        let port = sentinel.local_addr().unwrap().port();
+        let proxy = Arc::new(
+            ConnectProxy::bind_routed_with_loopback_bypass(Vec::new(), loopback())
+                .await
+                .unwrap(),
+        );
+        proxy
+            .replace_protected_routes(Vec::new(), full_protection())
+            .unwrap()
+            .wait()
+            .await;
+        for authority in [
+            format!("localhost.:{port}"),
+            format!("127.0.0.2:{port}"),
+            format!("[::ffff:127.0.0.1]:{port}"),
+        ] {
+            expect_refusal(
+                &proxy,
+                &format!("CONNECT {authority} HTTP/1.1\r\n\r\n"),
+                502,
+            )
+            .await;
+        }
+        {
+            let table = proxy.router.table.read();
+            for name in [
+                "localhost.",
+                "localhost.invalid",
+                "nested.localhost",
+                "gateway.invalid",
+            ] {
+                let name = Host::Name(name.into());
+                assert!(!table.bypasses_loopback(&name));
+                assert!(
+                    table
+                        .select(&name, &[sentinel.local_addr().unwrap()])
+                        .is_err(),
+                    "resolving a different name to loopback does not exempt it"
+                );
+            }
+        }
+        let (tunnel, probe) = full_route_tunnel().await;
+        proxy
+            .replace_protected_routes(
+                vec![(
+                    "mapped".into(),
+                    mapped(tunnel, vec![host("gateway.invalid", &["127.0.0.1"])]),
+                )],
+                full_protection(),
+            )
+            .unwrap()
+            .wait()
+            .await;
+        expect_refusal(
+            &proxy,
+            &format!("CONNECT gateway.invalid:{port} HTTP/1.1\r\n\r\n"),
+            502,
+        )
+        .await;
+        let mut packet = [0; 256];
+        let (len, _) = timeout(WAIT, probe.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            len, 148,
+            "mapped gateway request must start a WireGuard handshake"
+        );
+        assert!(
+            timeout(Duration::from_millis(50), sentinel.accept())
+                .await
+                .is_err(),
+            "a protected mapped or resolved name reached the direct sentinel"
         );
     }
 }

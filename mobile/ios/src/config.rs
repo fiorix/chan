@@ -14,7 +14,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-#[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -146,6 +145,12 @@ pub struct Gateway {
     /// until a key is generated, and left off the file then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_public_key: Option<String>,
+    /// Selected immutable generated key; absent rows use the legacy id.key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_key_file: Option<PathBuf>,
+    /// An exposed key cannot be reused after an unknown authorization outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_pending_enrollment: Option<PendingEnrollment>,
     /// The key the gateway enrolled at the last sign-in that sent one. A
     /// generated key that differs, a replaced one among them, is not
     /// enrolled yet.
@@ -162,6 +167,40 @@ pub struct Gateway {
     /// An obsolete owned client file whose removal follows a kept enrollment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_cleanup: Option<WireguardCleanup>,
+    /// Validated destinations retained independently of live tunnel state.
+    #[serde(default, skip_serializing_if = "WireguardProtection::is_empty")]
+    pub wireguard_protection: WireguardProtection,
+}
+
+/// Durable ownership of a key exposed to one authorization attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingEnrollment {
+    pub attempt_id: String,
+    pub public_key: String,
+}
+
+/// Public routing policy; contains no private key or session material.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardProtection {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<String>,
+}
+
+impl WireguardProtection {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hosts.is_empty() && self.networks.is_empty()
+    }
+
+    pub(crate) fn retain(&mut self, other: &Self) {
+        self.hosts.extend(other.hosts.iter().cloned());
+        self.hosts.sort();
+        self.hosts.dedup();
+        self.networks.extend(other.networks.iter().cloned());
+        self.networks.sort();
+        self.networks.dedup();
+    }
 }
 
 /// Byte ownership survives later changes to the enrolled key or parameters.
@@ -348,12 +387,28 @@ impl Config {
 
 pub struct ConfigStore {
     path: PathBuf,
+    #[cfg(test)]
+    save_failure: Option<SaveFailure>,
+    #[cfg(test)]
+    read_failure: bool,
+}
+
+#[cfg(test)]
+struct SaveFailure {
+    after_publication: bool,
+    skip: usize,
+    repeat: bool,
+    readback_error: bool,
 }
 
 impl ConfigStore {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             path: config_path()?,
+            #[cfg(test)]
+            save_failure: None,
+            #[cfg(test)]
+            read_failure: false,
         })
     }
 
@@ -361,7 +416,59 @@ impl ConfigStore {
     /// their path through [`ConfigStore::new`].
     #[cfg(test)]
     pub(crate) fn at_path(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            save_failure: None,
+            #[cfg(test)]
+            read_failure: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_save_for_test(&mut self, after_publication: bool, skip: usize) {
+        self.save_failure = Some(SaveFailure {
+            after_publication,
+            skip,
+            repeat: false,
+            readback_error: false,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_saves_for_test(&mut self, after_publication: bool, skip: usize) {
+        self.save_failure = Some(SaveFailure {
+            after_publication,
+            skip,
+            repeat: true,
+            readback_error: false,
+        });
+    }
+
+    #[cfg(test)]
+    fn fail_save_and_readback_for_test(&mut self) {
+        self.save_failure = Some(SaveFailure {
+            after_publication: true,
+            skip: 0,
+            repeat: false,
+            readback_error: true,
+        });
+    }
+
+    #[cfg(test)]
+    fn check_save_failure(&mut self, after_publication: bool) -> io::Result<()> {
+        if let Some(failure) = self.save_failure.as_mut() {
+            if failure.after_publication == after_publication {
+                if failure.skip == 0 {
+                    self.read_failure |= failure.readback_error;
+                    if !failure.repeat {
+                        self.save_failure = None;
+                    }
+                    return Err(io::Error::other("injected config save failure"));
+                }
+                failure.skip -= 1;
+            }
+        }
+        Ok(())
     }
 
     /// The directory of the gateways' WireGuard key and client files:
@@ -371,9 +478,32 @@ impl ConfigStore {
     }
 
     pub fn get(&self) -> io::Result<Config> {
+        #[cfg(test)]
+        if self.read_failure {
+            return Err(io::Error::other("injected config read failure"));
+        }
         match fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Ok(bytes) => {
+                let mut cfg: Config = serde_json::from_slice(&bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let dir = self.wireguard_dir();
+                for gateway in &mut cfg.gateways {
+                    for path in [
+                        gateway.wireguard_key_file.as_mut(),
+                        gateway
+                            .wireguard_enrollment
+                            .as_mut()
+                            .map(|entry| &mut entry.key_file),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        *path =
+                            crate::wireguard_keys::resolve_stored_key_path(&dir, &gateway.id, path);
+                    }
+                }
+                Ok(cfg)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e),
         }
@@ -401,14 +531,36 @@ impl ConfigStore {
     /// a config that reaches this process group- or world-readable does not
     /// stay that way.
     pub fn save(&mut self, cfg: &Config) -> io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(cfg)
+        #[cfg(test)]
+        self.check_save_failure(false)?;
+        // Container locations can change while the app's files survive.
+        // Only managed key references are stored relative to this config.
+        let mut stored = cfg.clone();
+        let dir = self.wireguard_dir();
+        for gateway in &mut stored.gateways {
+            for path in [
+                gateway.wireguard_key_file.as_mut(),
+                gateway
+                    .wireguard_enrollment
+                    .as_mut()
+                    .map(|entry| &mut entry.key_file),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *path = crate::wireguard_keys::stored_key_path(&dir, &gateway.id, path);
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&stored)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         chan_workspace::fs_ops::atomic_write(&self.path, &bytes)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        #[cfg(test)]
+        self.check_save_failure(true)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
         }
         Ok(())
     }
@@ -986,23 +1138,17 @@ impl GatewayConfigRegistry {
             manager,
         }
     }
-
-    // The iOS app runs no WireGuard fabric (the boot starts none), so a
-    // row's tunnel file is stored and validated but never adopted here;
-    // the projection below reports the file without a fabric status.
 }
 
 fn entry_from_gateway(
     g: &Gateway,
     view: Option<crate::gateway::GatewayRuntimeView>,
+    fabric: Option<&crate::wireguard::Fabric>,
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
     let file = g.wireguard.as_deref();
-    // No fabric runs on iOS: no tunnel status, no ingresses, and no
-    // fabric connect refusal to carry into `last_error`.
-    let wireguard_status: Option<String> = None;
-    let wireguard_ingresses: Vec<chan_server::WireguardIngressStatus> = Vec::new();
-    let wireguard_refusal: Option<String> = None;
+    let (wireguard_status, wireguard_ingresses, wireguard_refusal) =
+        fabric.map(|fabric| fabric.view(&g.id)).unwrap_or_default();
     GatewayEntry {
         id: g.id.clone(),
         url: g.url.clone(),
@@ -1019,7 +1165,8 @@ fn entry_from_gateway(
         wireguard_status,
         wireguard_ingresses,
         wireguard_public_key: g.wireguard_public_key.clone(),
-        wireguard_enrolled: g.wireguard_public_key.is_some()
+        wireguard_enrolled: g.wireguard_pending_enrollment.is_none()
+            && g.wireguard_public_key.is_some()
             && g.wireguard_enrolled_key == g.wireguard_public_key,
     }
 }
@@ -1056,7 +1203,13 @@ impl GatewayRegistry for GatewayConfigRegistry {
             .map(|cfg| {
                 cfg.gateways
                     .iter()
-                    .map(|g| entry_from_gateway(g, self.manager.view(&g.id)))
+                    .map(|g| {
+                        entry_from_gateway(
+                            g,
+                            self.manager.view(&g.id),
+                            self.manager.fabric.get().map(Arc::as_ref),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1070,7 +1223,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
         if cfg.gateways.iter().any(|g| g.url == url) {
             return Err(format!("gateway already configured: {url}"));
         }
-        let gw = Gateway {
+        let mut gw = Gateway {
             id: mint_unused_gateway_id(&cfg.gateways)?,
             url,
             label: input.label.unwrap_or_default().trim().to_string(),
@@ -1079,14 +1232,23 @@ impl GatewayRegistry for GatewayConfigRegistry {
             native_trust: Vec::new(),
             wireguard,
             wireguard_public_key: None,
+            wireguard_key_file: None,
+            wireguard_pending_enrollment: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
             wireguard_cleanup: None,
+            wireguard_protection: Default::default(),
             wireguard_hosts: Vec::new(),
         };
+        let prepared = crate::wireguard::prepare(&gw);
+        prepared.validate()?;
+        gw.wireguard_protection = prepared.protection.clone();
         cfg.gateways.push(gw.clone());
         store.save(&cfg).map_err(|e| e.to_string())?;
-        Ok(entry_from_gateway(&gw, None))
+        if let Some(fabric) = self.manager.fabric.get() {
+            fabric.reconcile(&gw, prepared)?;
+        }
+        Ok(entry_from_gateway(&gw, None, None))
     }
 
     fn update(&self, id: &str, input: GatewayInput) -> Result<Option<GatewayEntry>, String> {
@@ -1119,25 +1281,59 @@ impl GatewayRegistry for GatewayConfigRegistry {
                 gw.wireguard_enrolled_key = None;
             }
         }
+        let prepared = crate::wireguard::prepare(gw);
+        prepared.validate()?;
+        gw.wireguard_protection = prepared.protection.clone();
         let gw = gw.clone();
         store.save(&cfg).map_err(|e| e.to_string())?;
+        if let Some(fabric) = self.manager.fabric.get() {
+            if fabric.changes_routes(id, &prepared, gw.enabled) {
+                if let Some(invalidate) = self.manager.transport_invalidate.get() {
+                    invalidate(id);
+                }
+            }
+            fabric.reconcile(&gw, prepared)?;
+        }
         if previous.as_deref() != gw.wireguard.as_deref() {
             self.manager.clear_discovery_error(id);
         }
-        Ok(Some(entry_from_gateway(&gw, self.manager.view(id))))
+        Ok(Some(entry_from_gateway(
+            &gw,
+            self.manager.view(id),
+            self.manager.fabric.get().map(Arc::as_ref),
+        )))
     }
 
     fn remove(&self, id: &str) -> Result<bool, String> {
-        let keys = {
+        let (keys, removed, owned) = {
             let mut store = self.store.lock().unwrap();
             let mut cfg = store.get().map_err(|e| e.to_string())?;
+            let removed = cfg.gateways.iter().find(|g| g.id == id).cloned();
+            let keys = store.wireguard_dir();
+            let owned = removed
+                .as_ref()
+                .map(|row| owned_gateway_keys(&keys, row))
+                .unwrap_or_default();
             let before = cfg.gateways.len();
             cfg.gateways.retain(|g| g.id != id);
             if cfg.gateways.len() == before {
                 return Ok(false);
             }
             store.save(&cfg).map_err(|e| e.to_string())?;
-            store.wireguard_dir()
+            if let Some(fabric) = self.manager.fabric.get() {
+                fabric.deny(id)?;
+            }
+            if self
+                .manager
+                .fabric
+                .get()
+                .is_some_and(|fabric| fabric.is_configured(id))
+            {
+                if let Some(invalidate) = self.manager.transport_invalidate.get() {
+                    invalidate(id);
+                }
+            }
+            (keys, removed.expect("removed row existed"), owned)
         };
         // Row dropped: run the cascade so the HTTP DELETE matches the Tauri
         // command's teardown. Release the store first: every cascade takes it
@@ -1145,24 +1341,24 @@ impl GatewayRegistry for GatewayConfigRegistry {
         if let Some(hook) = self.on_remove.get() {
             hook(id);
         }
-        // The row's key and client file go with it. The row is gone either
-        // way, so a file that cannot be deleted is logged, not refused.
-        if let Err(e) = crate::wireguard_keys::remove(&keys, id) {
-            tracing::warn!(gateway = %id, dir = %keys.display(), error = %e, "removing the gateway's WireGuard files");
+        let store = self.store.lock().unwrap();
+        if let Ok(config) = store.get() {
+            for key in owned {
+                if removed.wireguard.as_ref() != Some(&key.path)
+                    && !key_referenced(&config, &keys, &key.path)
+                {
+                    if let Err(error) = crate::wireguard_keys::remove_owned(&keys, id, &key) {
+                        tracing::warn!(gateway = %id, %error, "removing the gateway's WireGuard key failed");
+                    }
+                }
+            }
         }
         Ok(true)
     }
 }
 
-/// Generate a WireGuard key pair for gateway `id` (the Gateways form's
-/// Generate WireGuard key action, over the desktop bridge): discover the
-/// gateway, refuse when its discovery offers no enrollment, then write the
-/// private half to the row's key file and store the public half on the row
-/// in one save, replacing any earlier key. A replaced key reads as not
-/// enrolled. The key file is written and the row saved under the store's
-/// lock, so concurrent generations serialize and the last one's key is both
-/// the file's and the row's; nothing is written before the discovery
-/// answers.
+/// Select a new immutable key only after discovery and platform capability
+/// permit mobile enrollment. A failed save never overwrites an enrolled key.
 pub(crate) async fn generate_wireguard_key(
     store: &Arc<Mutex<ConfigStore>>,
     manager: &crate::gateway::GatewayManager,
@@ -1178,25 +1374,105 @@ pub(crate) async fn generate_wireguard_key(
     let discovery = crate::devserver::discover_gateway(&url)
         .await
         .map_err(|e| format!("gateway discovery failed: {e}"))?;
-    if discovery.wireguard.is_none() {
+    if !discovery
+        .wireguard
+        .as_ref()
+        .is_some_and(|entry| entry.mobile_enrollment)
+    {
         return Ok(WireguardKeyOutcome::NotOffered);
     }
+    manager
+        .fabric
+        .get()
+        .ok_or("WireGuard: transport is unavailable")?
+        .capability()?;
     let mut guard = store.lock().unwrap();
     let mut cfg = guard.get().map_err(|e| e.to_string())?;
-    // The URL is immutable, so the row found again is the one discovered,
-    // unless it was removed meanwhile.
     let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
         return Ok(WireguardKeyOutcome::NotFound);
     };
-    let public = crate::wireguard_keys::generate(&guard.wireguard_dir(), id)?;
-    gw.wireguard_public_key = Some(public);
+    let dir = guard.wireguard_dir();
+    let previous = owned_gateway_keys(&dir, gw);
+    let generated = crate::wireguard_keys::generate(&dir, id)?;
+    gw.wireguard_public_key = Some(generated.public_key.clone());
+    gw.wireguard_key_file = Some(generated.path.clone());
     let gw = gw.clone();
-    guard.save(&cfg).map_err(|e| e.to_string())?;
+    if let Err(error) = guard.save(&cfg) {
+        // Atomic publication may have happened before a directory-sync or
+        // permission error. An unreadable store cannot justify deletion.
+        let uncertain = match guard.get() {
+            Ok(actual) if !key_referenced(&actual, &dir, &generated.path) => {
+                let _ = crate::wireguard_keys::remove_owned(&dir, id, &generated);
+                false
+            }
+            Ok(_) | Err(_) => true,
+        };
+        if uncertain {
+            if let Some(fabric) = manager.fabric.get() {
+                let _ = fabric.deny(id);
+                if let Some(invalidate) = manager.transport_invalidate.get() {
+                    invalidate(id);
+                }
+            }
+        }
+        return Err(error.to_string());
+    }
+    if let Some(fabric) = manager.fabric.get() {
+        let prepared = crate::wireguard::prepare(&gw);
+        if fabric.changes_routes(id, &prepared, gw.enabled) {
+            if let Some(invalidate) = manager.transport_invalidate.get() {
+                invalidate(id);
+            }
+        }
+        fabric.reconcile(&gw, prepared)?;
+    }
+    for key in previous {
+        if !key_referenced(&cfg, &dir, &key.path) {
+            if let Err(error) = crate::wireguard_keys::remove_owned(&dir, id, &key) {
+                tracing::warn!(gateway = %id, %error, "removing an unreferenced WireGuard key failed");
+            }
+        }
+    }
     drop(guard);
     tracing::info!(gateway = %id, "gateway WireGuard key generated");
     Ok(WireguardKeyOutcome::Generated(Box::new(
-        entry_from_gateway(&gw, manager.view(id)),
+        entry_from_gateway(&gw, manager.view(id), manager.fabric.get().map(Arc::as_ref)),
     )))
+}
+
+fn owned_gateway_keys(dir: &Path, gateway: &Gateway) -> Vec<crate::wireguard_keys::GeneratedKey> {
+    let mut owned = Vec::new();
+    if let (Some(public), Ok(path)) = (
+        &gateway.wireguard_public_key,
+        crate::wireguard_keys::selected_path(dir, gateway),
+    ) {
+        if let Some(key) = crate::wireguard_keys::capture_owned(dir, &gateway.id, &path, public) {
+            owned.push(key);
+        }
+    }
+    if let (Some(enrollment), Some(public)) = (
+        &gateway.wireguard_enrollment,
+        &gateway.wireguard_enrolled_key,
+    ) {
+        if let Some(key) =
+            crate::wireguard_keys::capture_owned(dir, &gateway.id, &enrollment.key_file, public)
+        {
+            owned.push(key);
+        }
+    }
+    owned
+}
+
+fn key_referenced(cfg: &Config, dir: &Path, path: &Path) -> bool {
+    cfg.gateways.iter().any(|gateway| {
+        gateway.wireguard.as_deref() == Some(path)
+            || crate::wireguard_keys::selected_path(dir, gateway)
+                .is_ok_and(|selected| selected == path)
+            || gateway
+                .wireguard_enrollment
+                .as_ref()
+                .is_some_and(|enrollment| enrollment.key_file == path)
+    })
 }
 
 pub(crate) fn now_millis() -> u64 {
@@ -1423,7 +1699,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("desktop").join("config.json");
-        let mut store = ConfigStore { path: path.clone() };
+        let mut store = ConfigStore::at_path(path.clone());
         let cfg = Config {
             launcher_theme: Some("dark".to_string()),
             ..Default::default()
@@ -1458,9 +1734,9 @@ mod tests {
     #[test]
     fn registry_list_elides_token_reports_has_token() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = DevserverConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
@@ -1499,9 +1775,9 @@ mod tests {
     #[test]
     fn registry_entry_url_never_carries_the_bearer() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = DevserverConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
@@ -1535,9 +1811,9 @@ mod tests {
     #[test]
     fn registry_list_connected_tracks_conns_membership() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let conns = Arc::new(crate::devserver::DevserverConns::default());
         let connecting = empty_connecting();
         let reg = DevserverConfigRegistry::new(
@@ -1591,9 +1867,9 @@ mod tests {
     #[test]
     fn registry_status_unreachable_when_feed_down_but_conn_lives() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let conns = Arc::new(crate::devserver::DevserverConns::default());
         let feed = Arc::new(crate::DevserverFeed::default());
         let reg = DevserverConfigRegistry::new(
@@ -1644,9 +1920,9 @@ mod tests {
     #[test]
     fn registry_update_keeps_replaces_and_clears_token() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = DevserverConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
@@ -1722,9 +1998,9 @@ mod tests {
     #[test]
     fn registry_update_and_remove_missing_id_signal_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = DevserverConfigRegistry::new(
             store,
             Arc::new(OnceLock::new()),
@@ -1753,9 +2029,9 @@ mod tests {
     #[test]
     fn registry_remove_fires_hook_only_when_a_row_was_removed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let hook_cell: Arc<OnceLock<DevserverRemoveHook>> = Arc::new(OnceLock::new());
         let fired_for_hook = Arc::clone(&fired);
@@ -1792,9 +2068,9 @@ mod tests {
     #[test]
     fn registry_add_rejects_an_empty_host() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = DevserverConfigRegistry::new(
             store,
             Arc::new(OnceLock::new()),
@@ -1903,9 +2179,9 @@ mod tests {
 
     fn registry_with_gateway_roster() -> (tempfile::TempDir, DevserverConfigRegistry) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         {
             let mut guard = store.lock().unwrap();
             let cfg = Config {
@@ -1919,9 +2195,12 @@ mod tests {
                     native_trust: Vec::new(),
                     wireguard: None,
                     wireguard_public_key: None,
+                    wireguard_key_file: None,
+                    wireguard_pending_enrollment: None,
                     wireguard_enrolled_key: None,
                     wireguard_enrollment: None,
                     wireguard_cleanup: None,
+                    wireguard_protection: Default::default(),
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -2029,9 +2308,9 @@ mod tests {
         // + offline -> Unreachable (the lost dot as a pre-connect signal).
         // Gateway-level trouble never reaches row status.
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         {
             let cfg = Config {
                 gateways: vec![Gateway {
@@ -2043,9 +2322,12 @@ mod tests {
                     native_trust: Vec::new(),
                     wireguard: None,
                     wireguard_public_key: None,
+                    wireguard_key_file: None,
+                    wireguard_pending_enrollment: None,
                     wireguard_enrolled_key: None,
                     wireguard_enrollment: None,
                     wireguard_cleanup: None,
+                    wireguard_protection: Default::default(),
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -2129,9 +2411,9 @@ mod tests {
     #[test]
     fn gateway_registry_add_normalizes_dedups_and_mints_ids() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = GatewayConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
@@ -2178,9 +2460,9 @@ mod tests {
     #[test]
     fn gateway_registry_update_renames_and_keeps_the_url_immutable() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let reg = GatewayConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
@@ -2271,9 +2553,9 @@ mod tests {
     #[test]
     fn gateway_registry_remove_fires_hook_and_reports_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.path().join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
         let hook_cell: Arc<OnceLock<GatewayRemoveHook>> = Arc::new(OnceLock::new());
         let removed_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&removed_ids);
@@ -2358,16 +2640,13 @@ mod tests {
         path
     }
 
-    /// A registry over a config holding `gateways`. The desktop also
-    /// starts a WireGuard fabric over them; iOS runs no fabric, so the
-    /// registry alone is the whole fixture.
+    /// Registry-only fixture over a config holding `gateways`. Transport
+    /// publication has separate tests with an attached fabric.
     async fn gateway_registry_over(
         dir: &std::path::Path,
         gateways: Vec<Gateway>,
     ) -> (Arc<Mutex<ConfigStore>>, GatewayConfigRegistry) {
-        let store = Arc::new(Mutex::new(ConfigStore {
-            path: dir.join("config.json"),
-        }));
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(dir.join("config.json"))));
         if !gateways.is_empty() {
             let mut guard = store.lock().unwrap();
             let mut cfg = guard.get().unwrap();
@@ -2422,7 +2701,7 @@ mod tests {
             .add(wg_input(url, Some(&format!("  {}  ", good.display()))))
             .expect("add");
         assert_eq!(added.wireguard.as_deref(), good.to_str());
-        // No fabric runs on iOS: the file is stored, with no tunnel status.
+        // This registry has no installed runtime fabric.
         assert_eq!(added.wireguard_status, None);
         assert_eq!(added.last_error, None);
         let cfg = store.lock().unwrap().get().unwrap();
@@ -2446,7 +2725,8 @@ mod tests {
         let cfg = store.lock().unwrap().get().unwrap();
         assert_eq!(cfg.gateways[0].wireguard, None);
         let text = fs::read_to_string(dir.path().join("config.json")).unwrap();
-        assert!(!text.contains("wireguard"), "{text}");
+        assert!(!text.contains("\"wireguard\":"), "{text}");
+        assert!(text.contains("wireguard_protection"), "{text}");
     }
 
     /// A gateway's discovery document on a loopback listener, carrying
@@ -2501,9 +2781,12 @@ mod tests {
             native_trust: Vec::new(),
             wireguard: None,
             wireguard_public_key: None,
+            wireguard_key_file: None,
+            wireguard_pending_enrollment: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
             wireguard_cleanup: None,
+            wireguard_protection: Default::default(),
             wireguard_hosts: Vec::new(),
         });
         guard.save(&cfg).unwrap();
@@ -2536,8 +2819,246 @@ mod tests {
             .encode(chan_wireguard::x25519::PublicKey::from(&secret).as_bytes())
     }
 
+    fn enrolled_parameters(key_file: PathBuf) -> WireguardEnrollment {
+        WireguardEnrollment {
+            key_file,
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: Some(25),
+            ingresses: vec![WireguardIngress {
+                id: "p1".into(),
+                endpoint: "192.0.2.1:51820".into(),
+                public_key: WG_PEER_KEY.into(),
+                hosts: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn managed_key_references_survive_relocated_config_and_files() {
+        let id = "gw-relocation";
+        for case in [
+            "immutable",
+            "distinct-pending",
+            "legacy-implicit",
+            "legacy-explicit",
+        ] {
+            let mut home = tempfile::tempdir().unwrap();
+            let store = store_with_gateway(home.path(), id, "https://gw.example.test");
+            let (
+                selected_name,
+                enrolled_name,
+                selected_public,
+                enrolled_public,
+                config_bytes,
+                pending,
+            ) = {
+                let mut guard = store.lock().unwrap();
+                let dir = guard.wireguard_dir();
+                let enrolled = crate::wireguard_keys::generate(&dir, id).unwrap();
+                let mut enrolled_path = enrolled.path;
+                if case.starts_with("legacy") {
+                    let legacy = crate::wireguard_keys::key_path(&dir, id);
+                    fs::rename(&enrolled_path, &legacy).unwrap();
+                    enrolled_path = legacy;
+                }
+                let (selected_path, selected_public) = if case == "distinct-pending" {
+                    let selected = crate::wireguard_keys::generate(&dir, id).unwrap();
+                    (selected.path, selected.public_key)
+                } else {
+                    (enrolled_path.clone(), enrolled.public_key.clone())
+                };
+                let pending = (case == "distinct-pending").then(|| PendingEnrollment {
+                    attempt_id: "in-flight".into(),
+                    public_key: selected_public.clone(),
+                });
+                let mut cfg = guard.get().unwrap();
+                let row = &mut cfg.gateways[0];
+                row.wireguard_key_file = (case != "legacy-implicit").then(|| selected_path.clone());
+                row.wireguard_public_key = Some(selected_public.clone());
+                row.wireguard_enrolled_key = Some(enrolled.public_key.clone());
+                row.wireguard_enrollment = Some(enrolled_parameters(enrolled_path.clone()));
+                row.wireguard_pending_enrollment = pending.clone();
+                guard.save(&cfg).unwrap();
+                assert_eq!(
+                    cfg.gateways[0]
+                        .wireguard_enrollment
+                        .as_ref()
+                        .unwrap()
+                        .key_file,
+                    enrolled_path
+                );
+                (
+                    selected_path.file_name().unwrap().to_owned(),
+                    enrolled_path.file_name().unwrap().to_owned(),
+                    selected_public,
+                    enrolled.public_key,
+                    fs::read(&guard.path).unwrap(),
+                    pending,
+                )
+            };
+            for _ in 0..2 {
+                let moved = tempfile::tempdir().unwrap();
+                let next_config = moved.path().join("desktop/config.json");
+                let next_dir = moved.path().join("desktop/wireguard");
+                fs::create_dir_all(&next_dir).unwrap();
+                fs::copy(home.path().join("desktop/config.json"), &next_config).unwrap();
+                for entry in fs::read_dir(home.path().join("desktop/wireguard")).unwrap() {
+                    let source = entry.unwrap().path();
+                    let destination = next_dir.join(source.file_name().unwrap());
+                    fs::copy(&source, &destination).unwrap();
+                    assert_eq!(fs::read(&source).unwrap(), fs::read(&destination).unwrap());
+                }
+                home.close().unwrap();
+                home = moved;
+                let mut reopened = ConfigStore::at_path(next_config.clone());
+                let cfg = reopened.get().unwrap();
+                let row = &cfg.gateways[0];
+                let selected = crate::wireguard_keys::selected_path(&next_dir, row).unwrap();
+                assert_eq!(selected, next_dir.join(&selected_name), "{case}");
+                assert_eq!(public_of_key_file(&selected), selected_public);
+                let enrollment = row.wireguard_enrollment.as_ref().unwrap();
+                assert_eq!(enrollment.key_file, next_dir.join(&enrolled_name));
+                assert_eq!(public_of_key_file(&enrollment.key_file), enrolled_public);
+                assert!(enrollment.configs(&enrolled_public).is_ok());
+                assert_eq!(row.wireguard_pending_enrollment, pending);
+                assert!(!owned_gateway_keys(&next_dir, row).is_empty());
+                assert_eq!(
+                    fs::read(&next_config).unwrap(),
+                    config_bytes,
+                    "read must not rewrite"
+                );
+                reopened.save(&cfg).unwrap();
+                assert_eq!(fs::read(&next_config).unwrap(), config_bytes);
+            }
+            let encoded: serde_json::Value = serde_json::from_slice(&config_bytes).unwrap();
+            let row = &encoded["gateways"][0];
+            if case == "legacy-implicit" {
+                assert!(row.get("wireguard_key_file").is_none());
+            } else {
+                assert_eq!(row["wireguard_key_file"], selected_name.to_str().unwrap());
+            }
+            assert_eq!(
+                row["wireguard_enrollment"]["key_file"],
+                enrolled_name.to_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn key_reference_codec_preserves_unmanaged_and_manual_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-relocation";
+        let store = store_with_gateway(home.path(), id, "https://gw.example.test");
+        let mut guard = store.lock().unwrap();
+        let dir = guard.wireguard_dir();
+        let managed = dir.join(format!("{id}.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.key"));
+        let references = [
+            PathBuf::from("/old-container/desktop/wireguard/gw-relocation.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.key"),
+            PathBuf::from("/arbitrary/gw-relocation.key"),
+            PathBuf::from("manual.key"),
+            PathBuf::from("../gw-relocation.key"),
+            PathBuf::from("./gw-relocation.key"),
+            PathBuf::from("nested/gw-relocation.key"),
+            PathBuf::from("nested//gw-relocation.key"),
+            PathBuf::from("gw-relocation.key/"),
+            PathBuf::from("gw-relocation.key//"),
+            PathBuf::from("gw-other.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.key"),
+            PathBuf::from("gw-relocation.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.key"),
+            PathBuf::from("gw-relocation.aaaa.key"),
+            dir.join("nested/gw-relocation.key"),
+            dir.join("./gw-relocation.key"),
+            dir.join("gw-relocation.key/"),
+            dir.join("manual.key"),
+        ];
+        for reference in references {
+            let mut cfg = guard.get().unwrap();
+            let row = &mut cfg.gateways[0];
+            row.wireguard_key_file = Some(reference.clone());
+            row.wireguard_enrollment = Some(enrolled_parameters(reference.clone()));
+            row.wireguard = Some(managed.clone());
+            row.wireguard_cleanup = Some(WireguardCleanup {
+                path: managed.clone(),
+                sha256: "owned-by-another-operation".into(),
+            });
+            guard.save(&cfg).unwrap();
+            let actual = guard.get().unwrap().gateways.remove(0);
+            assert_eq!(actual.wireguard_key_file.as_ref(), Some(&reference));
+            assert_eq!(
+                actual.wireguard_enrollment.as_ref().unwrap().key_file,
+                reference
+            );
+            assert_eq!(actual.wireguard.as_ref(), Some(&managed));
+            assert_eq!(actual.wireguard_cleanup.as_ref().unwrap().path, managed);
+            let encoded: serde_json::Value =
+                serde_json::from_slice(&fs::read(&guard.path).unwrap()).unwrap();
+            assert_eq!(
+                encoded["gateways"][0]["wireguard_key_file"],
+                reference.to_str().unwrap()
+            );
+            assert_eq!(
+                encoded["gateways"][0]["wireguard_enrollment"]["key_file"],
+                reference.to_str().unwrap()
+            );
+            assert_eq!(
+                encoded["gateways"][0]["wireguard"],
+                managed.to_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn current_absolute_keys_remain_usable_and_symlinks_are_not_owned() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-relocation";
+        let store = store_with_gateway(home.path(), id, "https://gw.example.test");
+        let mut guard = store.lock().unwrap();
+        let dir = guard.wireguard_dir();
+        let key = crate::wireguard_keys::generate(&dir, id).unwrap();
+        let mut cfg = guard.get().unwrap();
+        cfg.gateways[0].wireguard_key_file = Some(key.path.clone());
+        cfg.gateways[0].wireguard_public_key = Some(key.public_key.clone());
+        cfg.gateways[0].wireguard_enrolled_key = Some(key.public_key.clone());
+        cfg.gateways[0].wireguard_enrollment = Some(enrolled_parameters(key.path.clone()));
+        fs::write(&guard.path, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        let reopened = guard.get().unwrap();
+        assert_eq!(
+            reopened.gateways[0].wireguard_key_file.as_ref(),
+            Some(&key.path)
+        );
+        assert!(reopened.gateways[0]
+            .wireguard_enrollment
+            .as_ref()
+            .unwrap()
+            .configs(&key.public_key)
+            .is_ok());
+        guard.save(&reopened).unwrap();
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&fs::read(&guard.path).unwrap()).unwrap();
+        assert_eq!(
+            encoded["gateways"][0]["wireguard_key_file"],
+            key.path.file_name().unwrap().to_str().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            let link = dir.join(format!("{id}.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.key"));
+            std::os::unix::fs::symlink(&key.path, &link).unwrap();
+            cfg.gateways[0].wireguard_key_file = Some(link.clone());
+            cfg.gateways[0]
+                .wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .key_file = link.clone();
+            guard.save(&cfg).unwrap();
+            let reopened = guard.get().unwrap();
+            assert!(owned_gateway_keys(&dir, &reopened.gateways[0]).is_empty());
+            assert!(link.is_symlink());
+            assert!(key.path.is_file());
+        }
+    }
+
     fn wireguard_entry() -> serde_json::Value {
-        serde_json::json!({"endpoint": "wg.chan.app:51820", "public_key": WG_PEER_KEY})
+        serde_json::json!({"endpoint": "wg.chan.app:51820", "public_key": WG_PEER_KEY, "mobile_enrollment": true})
     }
 
     #[tokio::test]
@@ -2547,13 +3068,16 @@ mod tests {
         let id = "gw-1a2b3c4d";
         let store = store_with_gateway(home.path(), id, &origin);
         let manager = crate::gateway::GatewayManager::default();
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Ok(()));
+        assert!(manager.fabric.set(fabric).is_ok());
         let WireguardKeyOutcome::Generated(entry) =
             generate_wireguard_key(&store, &manager, id).await.unwrap()
         else {
             panic!("a gateway that enrolls peers gets a key");
         };
         let dir = home.path().join("desktop").join("wireguard");
-        let key_file = crate::wireguard_keys::key_path(&dir, id);
+        let key_file = stored_gateway(&store, id).wireguard_key_file.unwrap();
         let public = public_of_key_file(&key_file);
         assert_eq!(entry.wireguard_public_key.as_deref(), Some(public.as_str()));
         assert!(!entry.wireguard_enrolled);
@@ -2575,22 +3099,35 @@ mod tests {
         assert!(config.contains(&public), "the control finds the public key");
         assert!(!config.contains(private));
 
-        // Once enrolled, the key reads as enrolled; a new key replaces the
-        // file and the row and reads as not enrolled.
+        // A new selection preserves the enrolled file and requires sign-in.
         {
             let mut guard = store.lock().unwrap();
             let mut cfg = guard.get().unwrap();
             cfg.gateways[0].wireguard_enrolled_key = Some(public.clone());
+            cfg.gateways[0].wireguard_enrollment = Some(WireguardEnrollment {
+                key_file: key_file.clone(),
+                addresses: vec!["10.7.0.2/32".into()],
+                allowed_ips: vec!["10.7.0.1/32".into()],
+                persistent_keepalive: None,
+                ingresses: vec![WireguardIngress {
+                    id: "p1".into(),
+                    endpoint: "wg.chan.app:51820".into(),
+                    public_key: WG_PEER_KEY.into(),
+                    hosts: Vec::new(),
+                }],
+            });
             guard.save(&cfg).unwrap();
         }
         let gw = stored_gateway(&store, id);
-        assert!(entry_from_gateway(&gw, None).wireguard_enrolled);
+        assert!(entry_from_gateway(&gw, None, None).wireguard_enrolled);
         let WireguardKeyOutcome::Generated(again) =
             generate_wireguard_key(&store, &manager, id).await.unwrap()
         else {
             panic!("generating again answers the row");
         };
-        let replaced = public_of_key_file(&key_file);
+        let selected = stored_gateway(&store, id).wireguard_key_file.unwrap();
+        let replaced = public_of_key_file(&selected);
+        assert_eq!(public_of_key_file(&key_file), public);
         assert_ne!(replaced, public);
         assert_eq!(
             again.wireguard_public_key.as_deref(),
@@ -2601,7 +3138,7 @@ mod tests {
         assert_eq!(gw.wireguard_public_key.as_deref(), Some(replaced.as_str()));
         assert_eq!(gw.wireguard_enrolled_key.as_deref(), Some(public.as_str()));
 
-        // Removing the row deletes its key and client file.
+        // Removal deletes owned selected/enrolled keys, never a manual file.
         let conf = crate::wireguard_keys::conf_path(&dir, id);
         fs::write(&conf, "client file").unwrap();
         let reg = GatewayConfigRegistry::new(
@@ -2611,7 +3148,8 @@ mod tests {
         );
         assert!(reg.remove(id).unwrap());
         assert!(!key_file.exists());
-        assert!(!conf.exists());
+        assert!(!selected.exists());
+        assert!(conf.exists());
         server.abort();
     }
 
@@ -2706,26 +3244,26 @@ mod tests {
     fn gateway_entry_reads_enrolled_only_for_the_current_key() {
         let mut gw: Gateway =
             serde_json::from_str(r#"{"id":"gw-1a2b3c4d","url":"https://gw.chan.app"}"#).unwrap();
-        let entry = entry_from_gateway(&gw, None);
+        let entry = entry_from_gateway(&gw, None, None);
         assert_eq!(entry.wireguard_public_key, None);
         assert!(!entry.wireguard_enrolled);
         gw.wireguard_public_key = Some(WG_PEER_KEY.to_string());
-        let entry = entry_from_gateway(&gw, None);
+        let entry = entry_from_gateway(&gw, None, None);
         assert_eq!(entry.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
         assert!(
             !entry.wireguard_enrolled,
             "a key never sent is not enrolled"
         );
         gw.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
-        assert!(entry_from_gateway(&gw, None).wireguard_enrolled);
+        assert!(entry_from_gateway(&gw, None, None).wireguard_enrolled);
         gw.wireguard_enrolled_key = Some(WG_PRIVATE_KEY.to_string());
         assert!(
-            !entry_from_gateway(&gw, None).wireguard_enrolled,
+            !entry_from_gateway(&gw, None, None).wireguard_enrolled,
             "another key enrolled is not this one"
         );
         // An enrolled key with no current key is not an enrollment.
         gw.wireguard_public_key = None;
-        assert!(!entry_from_gateway(&gw, None).wireguard_enrolled);
+        assert!(!entry_from_gateway(&gw, None, None).wireguard_enrolled);
     }
 
     #[test]
@@ -2780,5 +3318,159 @@ mod tests {
         assert!(gw.wireguard_hosts.is_empty());
         assert_eq!(gw.wireguard_enrolled_key, None);
         assert_eq!(gw.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+    }
+    #[tokio::test]
+    async fn generating_requires_mobile_capability_and_platform_routing() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-capability";
+        let mut old = wireguard_entry();
+        old.as_object_mut().unwrap().remove("mobile_enrollment");
+        let (origin, server) = discovery_stub(Some(old)).await;
+        let store = store_with_gateway(home.path(), id, &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        assert!(matches!(
+            generate_wireguard_key(&store, &manager, id).await.unwrap(),
+            WireguardKeyOutcome::NotOffered
+        ));
+        assert!(!store.lock().unwrap().wireguard_dir().exists());
+        server.abort();
+        let (origin, server) = discovery_stub(Some(wireguard_entry())).await;
+        let home = tempfile::tempdir().unwrap();
+        let store = store_with_gateway(home.path(), id, &origin);
+        assert!(generate_wireguard_key(&store, &manager, id)
+            .await
+            .unwrap_err()
+            .contains("transport is unavailable"));
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Err("WireGuard requires iOS 17".into()));
+        assert!(manager.fabric.set(fabric).is_ok());
+        assert!(generate_wireguard_key(&store, &manager, id)
+            .await
+            .unwrap_err()
+            .contains("iOS 17"));
+        assert!(!store.lock().unwrap().wireguard_dir().exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_save_failures_preserve_the_previous_enrolled_key() {
+        let (origin, server) = discovery_stub(Some(wireguard_entry())).await;
+        for after in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let id = "gw-save";
+            let store = store_with_gateway(home.path(), id, &origin);
+            let manager = crate::gateway::GatewayManager::default();
+            let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+            fabric.set_capability(Ok(()));
+            assert!(manager.fabric.set(fabric).is_ok());
+            generate_wireguard_key(&store, &manager, id).await.unwrap();
+            let original = stored_gateway(&store, id);
+            let path = original.wireguard_key_file.clone().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            {
+                let mut guard = store.lock().unwrap();
+                let mut cfg = guard.get().unwrap();
+                cfg.gateways[0].wireguard_enrollment = Some(WireguardEnrollment {
+                    key_file: path.clone(),
+                    addresses: vec!["10.7.0.2/32".into()],
+                    allowed_ips: vec!["10.7.0.1/32".into()],
+                    persistent_keepalive: None,
+                    ingresses: vec![WireguardIngress {
+                        id: "p1".into(),
+                        endpoint: "wg.chan.app:51820".into(),
+                        public_key: WG_PEER_KEY.into(),
+                        hosts: Vec::new(),
+                    }],
+                });
+                cfg.gateways[0].wireguard_enrolled_key = original.wireguard_public_key.clone();
+                guard.save(&cfg).unwrap();
+                guard.fail_save_for_test(after, 0);
+            }
+            assert!(generate_wireguard_key(&store, &manager, id)
+                .await
+                .unwrap_err()
+                .contains("injected"));
+            let actual = stored_gateway(&store, id);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(actual.wireguard_enrollment.as_ref().unwrap().key_file, path);
+            assert_eq!(actual.wireguard_enrolled_key, original.wireguard_public_key);
+            assert_eq!(
+                actual.wireguard_key_file == original.wireguard_key_file,
+                !after
+            );
+            let count = fs::read_dir(store.lock().unwrap().wireguard_dir())
+                .unwrap()
+                .count();
+            assert_eq!(count, if after { 2 } else { 1 });
+            assert!(actual.wireguard_key_file.unwrap().exists());
+        }
+        server.abort();
+    }
+    #[tokio::test]
+    async fn an_unknown_generate_save_outcome_keeps_both_keys_and_denies_transport() {
+        let (origin, server) = discovery_stub(Some(wireguard_entry())).await;
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-unknown";
+        let store = store_with_gateway(home.path(), id, &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        let fabric = crate::wireguard::Fabric::bind().await.unwrap();
+        fabric.set_capability(Ok(()));
+        assert!(manager.fabric.set(Arc::clone(&fabric)).is_ok());
+        generate_wireguard_key(&store, &manager, id).await.unwrap();
+        let prior = stored_gateway(&store, id);
+        let previous_path = prior.wireguard_key_file.clone().unwrap();
+        let previous_bytes = fs::read(&previous_path).unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let row = &mut cfg.gateways[0];
+            row.wireguard_enrolled_key = prior.wireguard_public_key.clone();
+            row.wireguard_enrollment = Some(WireguardEnrollment {
+                key_file: previous_path.clone(),
+                addresses: vec!["10.7.0.2/32".into()],
+                allowed_ips: vec!["10.7.0.1/32".into()],
+                persistent_keepalive: None,
+                ingresses: vec![WireguardIngress {
+                    id: "p1".into(),
+                    endpoint: "127.0.0.1:9".into(),
+                    public_key: WG_PEER_KEY.into(),
+                    hosts: vec![WireguardHost {
+                        name: "*.private.example.test".into(),
+                        addresses: vec!["10.7.0.1".parse().unwrap()],
+                    }],
+                }],
+            });
+            fabric
+                .reconcile(row, crate::wireguard::prepare(row))
+                .unwrap();
+            guard.save(&cfg).unwrap();
+            guard.fail_save_and_readback_for_test();
+        }
+        fabric.settled_gateway(id).await.unwrap();
+        assert!(fabric
+            .require_destination(id, "https://tenant.private.example.test")
+            .is_ok());
+        assert!(generate_wireguard_key(&store, &manager, id)
+            .await
+            .unwrap_err()
+            .contains("injected"));
+        assert!(store.lock().unwrap().get().is_err());
+        assert!(fabric
+            .require_destination(id, "https://tenant.private.example.test")
+            .is_err());
+        let disk = ConfigStore::at_path(home.path().join("desktop/config.json"))
+            .get()
+            .unwrap();
+        let row = &disk.gateways[0];
+        assert_eq!(fs::read(&previous_path).unwrap(), previous_bytes);
+        assert_ne!(row.wireguard_key_file, prior.wireguard_key_file);
+        assert!(row.wireguard_key_file.as_ref().unwrap().exists());
+        assert_eq!(
+            fs::read_dir(store.lock().unwrap().wireguard_dir())
+                .unwrap()
+                .count(),
+            2
+        );
+        server.abort();
     }
 }

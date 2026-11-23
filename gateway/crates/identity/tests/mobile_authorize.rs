@@ -71,6 +71,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
+        Self::with_wireguard(None).await
+    }
+
+    async fn with_wireguard(wireguard: Option<identity::wireguard::WireguardEnrollment>) -> Self {
         let (url, schema, pool, store) =
             test_db::create_schema(test_db::MigrationOrder::SessionsFirst).await;
 
@@ -106,6 +110,7 @@ impl TestApp {
             devserver_proxy_origin: "https://proxy.chan.app".parse().unwrap(),
             entry_signer,
             providers: vec![Arc::new(provider)],
+            wireguard,
             workspace_admin: DevserverControlClient::new(
                 control.uri().parse().unwrap(),
                 "test-identity-admin-token".into(),
@@ -997,5 +1002,389 @@ async fn spa_tokens_create_rejects_mobile_scopes_and_reserves_desktop_and_mobile
         assert_eq!(body["error"], "username is reserved", "{reserved}");
     }
 
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_authorize_requires_valid_keys_and_an_enrollment_offer() {
+    use base64::Engine;
+    let app = TestApp::new().await;
+    let key = base64::engine::general_purpose::STANDARD.encode([7; 32]);
+    let invalid = [
+        key[..43].to_owned(),
+        format!("{key}="),
+        "!".repeat(44),
+        base64::engine::general_purpose::STANDARD.encode([7; 31]),
+    ];
+    let mut client = Client::new(&app);
+    for (key, expected) in invalid
+        .iter()
+        .map(|key| (key, "invalid wireguard_public_key"))
+        .chain([(&key, "wireguard enrollment not offered")])
+    {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("wireguard_public_key", key)
+            .finish();
+        let response = client.get(&format!("{MOBILE_AUTH_URI}&{query}")).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+            json!({"error":expected})
+        );
+    }
+    app.cleanup().await;
+}
+
+/// Two ingresses under the test config's proxy origin, `p1` first, on one
+/// shared pair of tunnel addresses.
+fn wireguard_enrollment() -> identity::wireguard::WireguardEnrollment {
+    use base64::Engine;
+    let ingress = |id: &str, byte| gateway_common::wireguard::Ingress {
+        id: id.into(),
+        endpoint: format!("{id}.proxy.chan.app:51820"),
+        public_key: base64::engine::general_purpose::STANDARD.encode([byte; 32]),
+    };
+    identity::wireguard::WireguardEnrollment::new(
+        vec![ingress("p1", 9), ingress("p2", 10)],
+        "proxy.chan.app",
+        &["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+        vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
+        Some(25),
+    )
+    .unwrap()
+}
+
+async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uuid) -> String {
+    use base64::Engine;
+    let email = "wireguard@example.com";
+    app.insert_user(uid, email).await;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "wireguard_public_key",
+            &base64::engine::general_purpose::STANDARD.encode([7; 32]),
+        )
+        .finish();
+    let response = client.get(&format!("{MOBILE_AUTH_URI}&{query}")).await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER);
+    assert_eq!(response.location, "/");
+    mount_oauth(app, uid, email, false, true).await;
+    mock_get_user(app, uid, email, false).await;
+    let callback = complete_oauth(client).await;
+    assert_eq!(callback.status, StatusCode::SEE_OTHER);
+    assert_eq!(callback.location, "/mobile/authorize/consent");
+    let response = client.get("/mobile/authorize/consent").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(response.body_str().contains("WireGuard key"));
+    // The page names both ingresses the fixture offers, by id and endpoint.
+    for ingress in [
+        "p1 at p1.proxy.chan.app:51820",
+        "p2 at p2.proxy.chan.app:51820",
+    ] {
+        assert!(response.body_str().contains(ingress), "{ingress}");
+    }
+    extract_csrf(response.body_str())
+}
+
+#[tokio::test]
+async fn full_flow_with_a_wireguard_key_enrolls_one_peer_and_answers_one_address_with_every_ingress(
+) {
+    use base64::Engine;
+    let key = |byte: u8| base64::engine::general_purpose::STANDARD.encode([byte; 32]);
+    let app = TestApp::with_wireguard(Some(wireguard_enrollment())).await;
+    let uid = Uuid::new_v4();
+    let mut client = Client::new(&app);
+    let csrf = consent_with_wireguard(&app, &mut client, uid).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{uid}/wireguard/peers")))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {PROFILE_TOKEN}"),
+        ))
+        .respond_with(move |request: &wiremock::Request| {
+            // The peer names a host, as a profile that keys peers by host
+            // answers it; identity reads the addresses and not the host.
+            let body: serde_json::Value = request.body_json().unwrap();
+            ResponseTemplate::new(201).set_body_json(json!({
+                "id":Uuid::new_v4(), "user_id":uid, "token_id":body["token_id"],
+                "host":"p1", "public_key":body["public_key"],
+                "addresses":["10.7.0.23/32", "fd00:7::23/128"],
+                "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z",
+            }))
+        })
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    let response = client
+        .post_form(
+            "/mobile/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url_with_prefix(
+        response.body_str(),
+        "chan://auth/callback?",
+    ));
+    assert!(!query.contains_key("error"));
+    let code = query.get("code").unwrap();
+    let response = client
+        .post_json(
+            "/mobile/authorize/redeem",
+            &json!({"code":code, "code_verifier":PKCE_VERIFIER}),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    let hosts = |id: &str| {
+        json!([
+            {"name":format!("{id}.proxy.chan.app"), "addresses":["10.7.0.1", "fd00:7::1"]},
+            {"name":format!("*.{id}.proxy.chan.app"), "addresses":["10.7.0.1", "fd00:7::1"]},
+        ])
+    };
+    // One address set, the first ingress in the single-peer fields, and
+    // both ingresses in the list.
+    assert_eq!(
+        payload["wireguard"],
+        json!({
+            "server_public_key":key(9), "endpoint":"p1.proxy.chan.app:51820",
+            "addresses":["10.7.0.23/32", "fd00:7::23/128"], "allowed_ips":["10.7.0.1/32", "fd00:7::1/128"],
+            "persistent_keepalive":25, "hosts":hosts("p1"),
+            "ingresses":[
+                {"id":"p1", "endpoint":"p1.proxy.chan.app:51820", "server_public_key":key(9), "hosts":hosts("p1")},
+                {"id":"p2", "endpoint":"p2.proxy.chan.app:51820", "server_public_key":key(10), "hosts":hosts("p2")},
+            ],
+        })
+    );
+    // The redeem names the peers discovery names: the single pair, which a
+    // client that reads no list compares, and the list entry for entry,
+    // with each key under the redeem's name for it.
+    let response = client.get("/.well-known/chan-gateway").await;
+    assert_eq!(response.status, StatusCode::OK);
+    let discovery =
+        serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["wireguard"].take();
+    assert_eq!(
+        payload["wireguard"]["server_public_key"],
+        discovery["public_key"]
+    );
+    for field in ["endpoint", "allowed_ips", "persistent_keepalive"] {
+        assert_eq!(payload["wireguard"][field], discovery[field], "{field}");
+    }
+    let mut listed = discovery["ingresses"].clone();
+    for ingress in listed.as_array_mut().unwrap() {
+        let ingress = ingress.as_object_mut().unwrap();
+        let public_key = ingress.remove("public_key").unwrap();
+        ingress.insert("server_public_key".into(), public_key);
+    }
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(payload["wireguard"]["ingresses"], listed);
+    let token: Uuid = payload["id"].as_str().unwrap().parse().unwrap();
+    let rows = app.api_tokens.list(uid).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, token);
+    assert!(rows[0].revoked_at.is_none());
+    assert!(payload["secret"].as_str().unwrap().starts_with("chan_pat_"));
+    // One enrollment for every ingress: profile is asked once, for the
+    // minted token, with the first ingress as the host.
+    let enrolls: Vec<serde_json::Value> = app
+        .profile
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path().ends_with("/wireguard/peers"))
+        .map(|request| request.body_json().unwrap())
+        .collect();
+    assert_eq!(
+        enrolls,
+        [json!({"token_id":token, "public_key":key(7), "host":"p1"})]
+    );
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")
+            .bind(token)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, ["created_via_mobile", "mobile.redeem"]);
+    assert_eq!(
+        client
+            .post_json(
+                "/mobile/authorize/redeem",
+                &json!({"code":code,"code_verifier":PKCE_VERIFIER})
+            )
+            .await
+            .status,
+        StatusCode::GONE
+    );
+    app.profile.verify().await;
+    assert!(app.control.received_requests().await.unwrap().is_empty());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn enroll_failure_revokes_the_pat_and_reports_wireguard_enroll_failed() {
+    let app = TestApp::with_wireguard(Some(wireguard_enrollment())).await;
+    let uid = Uuid::new_v4();
+    let mut client = Client::new(&app);
+    let csrf = consent_with_wireguard(&app, &mut client, uid).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{uid}/wireguard/peers")))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({"error":"wireguard pool exhausted"})),
+        )
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    let response = client
+        .post_form(
+            "/mobile/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url_with_prefix(
+        response.body_str(),
+        "chan://auth/callback?",
+    ));
+    assert_eq!(
+        query.get("error").map(String::as_str),
+        Some("wireguard_enroll_failed")
+    );
+    assert!(!query.contains_key("code"));
+    let rows = app.api_tokens.list(uid).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].revoked_at.is_some());
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")
+            .bind(rows[0].id)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, ["created_via_mobile", "revoked"]);
+    let requests = app.profile.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .any(|request| request.url.path().ends_with("/wireguard/peers")));
+    assert!(!requests
+        .iter()
+        .any(|request| request.url.path().contains("revoke")));
+    app.profile.verify().await;
+    assert!(app.control.received_requests().await.unwrap().is_empty());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn mobile_token_give_back_removes_its_peer_from_the_real_profile_active_set() {
+    use base64::Engine;
+    use gateway_common::wireguard::{PeerList, PeerListResponse};
+
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "mobile-peer@example.com").await;
+    let token = mint_pat(&app, uid, &["mobile.account"], TokenOrigin::Mobile).await;
+    let profile = profile::http::app(profile::http::AppState {
+        pool: app.pool.clone(),
+        auth_token: PROFILE_TOKEN.into(),
+        admin_token: None,
+        wireguard: profile::wireguard::Config::parse(
+            Some("10.7.0.0/24"),
+            None,
+            Some("10.7.0.1"),
+            None,
+        )
+        .unwrap(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, profile)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    let client = ProfileClient::new(
+        format!("http://{address}").parse().unwrap(),
+        PROFILE_TOKEN.into(),
+    )
+    .unwrap();
+    let public_key = base64::engine::general_purpose::STANDARD.encode([7; 32]);
+    let peer = client
+        .enroll_wireguard_peer(uid, token.token.id, &public_key, "p1")
+        .await
+        .unwrap();
+    assert_eq!(peer.public_key, public_key);
+    assert_eq!(peer.token_id, token.token.id);
+    let PeerListResponse::Modified { body, etag } =
+        client.list_wireguard_peers("p1", None).await.unwrap()
+    else {
+        panic!("unconditional list must return a body");
+    };
+    let listed: PeerList = serde_json::from_slice(&body).unwrap();
+    assert_eq!(listed.host, "p1");
+    assert_eq!(listed.peers.len(), 1);
+    assert_eq!(listed.peers[0].public_key, public_key);
+    assert_eq!(listed.peers[0].allowed_ips, peer.addresses);
+    assert_eq!(
+        send_bearer(
+            &app,
+            Method::DELETE,
+            "/desktop/v1/token",
+            Some(&token.secret),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert!(app.api_tokens.presented(&token.secret).await.is_ok());
+    assert!(app.api_tokens.list(uid).await.unwrap()[0]
+        .last_used_at
+        .is_none());
+    assert_eq!(
+        send_bearer(
+            &app,
+            Method::DELETE,
+            "/mobile/v1/token",
+            Some(&token.secret),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT,
+    );
+    let PeerListResponse::Modified {
+        body,
+        etag: revoked_etag,
+    } = client
+        .list_wireguard_peers("p1", Some(&etag))
+        .await
+        .unwrap()
+    else {
+        panic!("revocation must invalidate the active peer list");
+    };
+    assert_ne!(revoked_etag, etag);
+    let listed: PeerList = serde_json::from_slice(&body).unwrap();
+    assert!(listed.peers.is_empty());
+    assert!(app.api_tokens.presented(&token.secret).await.is_err());
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")
+            .bind(token.token.id)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        audits,
+        [
+            "created_via_mobile",
+            "wireguard_enrolled",
+            "revoked_via_mobile"
+        ]
+    );
+    assert!(app.control.received_requests().await.unwrap().is_empty());
+    assert!(app.profile.received_requests().await.unwrap().is_empty());
+    stop.send(()).unwrap();
+    server.await.unwrap();
     app.cleanup().await;
 }
