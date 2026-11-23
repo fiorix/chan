@@ -30,6 +30,7 @@ import type { Terminal } from "@chan/ghostty-web-ng";
 import { openedGhostty } from "../__tests__/ghosttyTab";
 import * as ghosttyPaste from "../terminal/ghosttyPaste";
 import { terminalPreferences } from "../__tests__/standalone";
+import { engineClick, modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import {
@@ -121,12 +122,15 @@ function canvas(term: Terminal): HTMLCanvasElement {
 }
 
 /// The user's drag from one screen cell to another, handled by
-/// ghostty-web's own mouse code; its release copies.
+/// ghostty-web's own pointer code; its release copies.
 function drag(term: Terminal, from: { col: number; row: number }, to: { col: number; row: number }): void {
+  const surface = canvas(term);
+  modelPointerCapture(surface);
+  vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
   const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 19 + 1 });
-  canvas(term).dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
-  canvas(term).dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1, ...at(to) }));
-  canvas(term).dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+  mousePointer(surface, "pointerdown", at(from));
+  mousePointer(surface, "pointermove", at(to));
+  mousePointer(surface, "pointerup", at(to));
 }
 
 /// Where chan's writer puts a copy on each platform, and what reads it back.
@@ -276,12 +280,7 @@ describe("the Linux desktop PRIMARY selection", () => {
   }
 
   function middle(host: HTMLElement): MouseEvent {
-    for (const type of ["mousedown", "mouseup"]) {
-      host.dispatchEvent(new MouseEvent(type, { button: 1, bubbles: true, cancelable: true }));
-    }
-    const event = new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true });
-    host.dispatchEvent(event);
-    return event;
+    return engineClick(host, 1).click;
   }
 
   function inputs(): string[] {

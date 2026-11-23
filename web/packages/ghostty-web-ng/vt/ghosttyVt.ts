@@ -530,14 +530,16 @@ class VtWasm {
   }
 }
 
-/// The subset of ghostty-web's terminal config this binding honors; zero
-/// means "keep the default", as in ghostty-web's own binding.
+/// Terminal construction limits and colors. Omitted colors use the built-in defaults;
+/// zero is explicit black, including in a partially specified palette.
 export type VtTerminalConfig = {
   scrollbackLimit?: number;
+  /** wasm32 byte budget; undefined uses lines, zero disables history. */
+  scrollbackMaxBytes?: number;
   fgColor?: number;
   bgColor?: number;
   cursorColor?: number;
-  palette?: number[];
+  palette?: (number | undefined)[];
 };
 
 /// Renderer measurements and delivery for replies generated outside a write.
@@ -1253,15 +1255,11 @@ export class VtTerminal {
     const fn = this.wasm.fn;
     const s = this.scratch;
     const O = ABI.GhosttyTerminalOption;
-    // ghostty-web counts scrollback in lines, zero meaning unlimited.
-    // Upstream also caps history in bytes, by default at one page (about a
-    // thousand short lines at 80 columns), and the first cap reached wins.
-    // SIZE_MAX, the wasm32 size_t's maximum, lifts the byte cap so the line
-    // count the user's setting maps to holds; a null value would restore
-    // the default.
-    this.wasm.view().setUint32(s + SCRATCH.slot, 0xffff_ffff, true);
+    // A supplied byte budget replaces the line ceiling. Without one,
+    // SIZE_MAX lifts the core's default byte cap so only lines limit history.
+    this.wasm.view().setUint32(s + SCRATCH.slot, config?.scrollbackMaxBytes ?? 0xffff_ffff, true);
     fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_BYTES, s + SCRATCH.slot);
-    const lines = config?.scrollbackLimit ?? 10_000;
+    const lines = config?.scrollbackMaxBytes === undefined ? config?.scrollbackLimit ?? 10_000 : 0;
     if (lines > 0) {
       this.wasm.view().setUint32(s + SCRATCH.slot, lines, true);
       fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, s + SCRATCH.slot);
@@ -1271,8 +1269,7 @@ export class VtTerminal {
     this.writeColors(config);
   }
 
-  /// Writes `config`'s colors as the core's defaults; zero keeps the
-  /// built-in default, as in ghostty-web's binding.
+  /// Writes the configured defaults, clearing any omitted override.
   private writeColors(config?: VtTerminalConfig): void {
     const fn = this.wasm.fn;
     const s = this.scratch;
@@ -1284,22 +1281,22 @@ export class VtTerminal {
       view.setUint8(s + SCRATCH.rgb + 2, rgb & 0xff);
       fn.ghostty_terminal_set(this.handle, option, s + SCRATCH.rgb);
     };
-    setColor(O.COLOR_FOREGROUND, config?.fgColor || DEFAULT_FG);
-    setColor(O.COLOR_BACKGROUND, config?.bgColor || DEFAULT_BG);
+    setColor(O.COLOR_FOREGROUND, config?.fgColor ?? DEFAULT_FG);
+    setColor(O.COLOR_BACKGROUND, config?.bgColor ?? DEFAULT_BG);
     // A null value clears the cursor color and puts the built-in palette
-    // back, so on a live terminal a color the config leaves at zero takes
+    // back, so on a live terminal a color the config omits takes
     // upstream's default rather than the one an earlier config wrote.
-    if (config?.cursorColor) setColor(O.COLOR_CURSOR, config.cursorColor);
+    if (config?.cursorColor !== undefined) setColor(O.COLOR_CURSOR, config.cursorColor);
     else fn.ghostty_terminal_set(this.handle, O.COLOR_CURSOR, 0);
     fn.ghostty_terminal_set(this.handle, O.COLOR_PALETTE, 0);
     const overrides = config?.palette ?? [];
-    if (overrides.some((c) => c)) {
+    if (overrides.some((c) => c !== undefined)) {
       const palette = this.wasm.alloc(768);
       try {
         fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.COLOR_PALETTE_DEFAULT, palette);
         const bytes = this.wasm.bytes();
         overrides.slice(0, 16).forEach((rgb, i) => {
-          if (!rgb) return;
+          if (rgb === undefined) return;
           bytes[palette + i * 3] = (rgb >> 16) & 0xff;
           bytes[palette + i * 3 + 1] = (rgb >> 8) & 0xff;
           bytes[palette + i * 3 + 2] = rgb & 0xff;
@@ -1687,6 +1684,9 @@ export class VtSearch {
   /// first rather than resolve a stale snapshot.
   private fed: number;
   private needle = "";
+  private matchBuffer = 0;
+  private matchCapacity = 0;
+  private matchCount = -1;
   /// Milliseconds the unit of `step` that last completed a scan took, on
   /// the clock `step` was given; null until a scan completes in `step`. The
   /// core checks every match it holds against the terminal's pages as a
@@ -1732,6 +1732,7 @@ export class VtSearch {
   /// complete.
   setNeedle(needle: string): void {
     if (!this.live()) return;
+    this.matchCount = -1;
     const S = LAYOUT.GhosttyString;
     const bytes = new TextEncoder().encode(needle);
     // One block: the `GhosttyString` header, then the bytes it points at,
@@ -1796,6 +1797,7 @@ export class VtSearch {
   /// `step` finishes it.
   feed(): void {
     if (!this.live()) return;
+    this.matchCount = -1;
     this.fed = this.terminal.changes();
     this.check("feeding", this.wasm.fn.ghostty_search_feed(this.handle));
   }
@@ -1865,6 +1867,47 @@ export class VtSearch {
     return found;
   }
 
+  /// Places a bounded batch from a newest-first result snapshot. Continue at
+  /// `next` while the terminal and needle are unchanged; a write, resize or
+  /// restart requires starting at zero. Scanning may append older matches.
+  /// The core only exports whole selection buffers, so a changed count still
+  /// copies that buffer once; endpoint placement visits only this batch.
+  /// No result is dropped when the time or batch boundary is reached.
+  readMatches(start: number, budgetMs: number): { ranges: MatchRange[]; next: number; total: number } {
+    if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('Invalid match offset');
+    const ranges: MatchRange[] = [];
+    if (!this.live()) return { ranges, next: 0, total: 0 };
+    const deadline = performance.now() + Math.max(0, budgetMs);
+    this.catchUp();
+    const total = this.count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
+    const S = LAYOUT.GhosttySelection;
+    if (total !== this.matchCount) {
+      if (total > this.matchCapacity) {
+        const capacity = Math.max(total, this.matchCapacity * 2, 256);
+        const buffer = this.wasm.alloc(capacity * S.size);
+        if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * S.size);
+        this.matchBuffer = buffer;
+        this.matchCapacity = capacity;
+      }
+      const B = LAYOUT.GhosttySelectionBuffer.fields;
+      const buf = this.scratch + SEARCH_SCRATCH.buffer;
+      const view = this.wasm.view();
+      view.setUint32(buf + B.ptr, this.matchBuffer, true);
+      view.setUint32(buf + B.cap, this.matchCapacity, true);
+      view.setUint32(buf + B.len, 0, true);
+      this.check('listing incremental matches', this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf));
+      this.matchCount = this.wasm.view().getUint32(buf + B.len, true);
+    }
+    let next = Math.min(start, this.matchCount);
+    const end = Math.min(next + 256, this.matchCount);
+    while (next < end) {
+      const range = this.range(this.matchBuffer + next++ * S.size);
+      if (range) ranges.push(range);
+      if (performance.now() >= deadline) break;
+    }
+    return { ranges, next, total: this.matchCount };
+  }
+
   /// The index of the match that starts at SCREEN row `row` and column
   /// `col`, counted as `SearchState.index` is (0 the newest) among the
   /// matches found so far; null when none starts there. Feeds first when the
@@ -1890,6 +1933,8 @@ export class VtSearch {
   /// after itself.
   free(): void {
     if (!this.handle) return;
+    if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * LAYOUT.GhosttySelection.size);
+    this.matchBuffer = this.matchCapacity = 0;
     this.wasm.fn.ghostty_search_free(this.handle);
     this.wasm.free(this.scratch, SEARCH_SCRATCH.size);
     this.handle = 0;

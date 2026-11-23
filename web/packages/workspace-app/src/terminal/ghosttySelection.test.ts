@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { CanvasRenderer, SelectionManager, Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { installGhosttyClickExtents, installGhosttySelection } from "./ghosttySelection";
 import { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
@@ -58,6 +59,9 @@ async function pinnedTerminal(input: string) {
   const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 });
   renderer.resize(COLS, ROWS);
   term.renderer = renderer;
+  const metrics = renderer.getMetrics();
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, COLS * metrics.width, ROWS * metrics.height));
+  modelPointerCapture(canvas);
   const manager = new SelectionManager(term, renderer, wasmTerm, document.createElement("textarea"));
   (term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
   const writes: string[] = [];
@@ -191,10 +195,10 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
     expect(install()).toBe(true);
     const at = (col: number, row: number) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at(0, 0) }));
-    canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(4, 1) }));
-    // ghostty-web hears the release on the document.
-    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(4, 1) }));
+    mousePointer(canvas, "pointerdown", at(0, 0));
+    mousePointer(canvas, "pointermove", at(4, 1));
+    // The engine retargets the release to the captured canvas.
+    mousePointer(canvas, "pointerup", at(4, 1));
     expect(writes).toEqual([COMMAND]);
     expect(writes[0]).toBe(chordText(term));
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -206,8 +210,8 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
     expect(install()).toBe(true);
     const at = { clientX: 2 * cell.width + 1, clientY: 1 };
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at }));
-    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at }));
+    mousePointer(canvas, "pointerdown", at);
+    mousePointer(canvas, "pointerup", at);
     expect(writes).toEqual([]);
     expect(term.hasSelection()).toBe(false);
     expect(clipboard.write).not.toHaveBeenCalled();

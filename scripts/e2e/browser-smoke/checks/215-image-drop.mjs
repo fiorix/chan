@@ -1,5 +1,5 @@
 // An image file dropped from outside the browser lands on the row it was
-// dropped on, in a workspace document and in the Rich Prompt, and a file
+// dropped on, in a workspace document, a draft and the Rich Prompt, and a file
 // dropped anywhere else on the page does nothing: the page stays where it is
 // and nothing is uploaded.
 //
@@ -15,7 +15,8 @@
 // the same browser context is asked whether such a drop reaches it with the
 // File; when it does not, every leg dispatches synthetic drag events carrying
 // a DataTransfer with the File instead, and the result says so ("synthetic,
-// untrusted").
+// untrusted"). Synthetic legs still prove application routing, but leave
+// native drop acceptance unavailable and fail after all surfaces are exercised.
 //
 // The drop legs assert the embed in the saved text on the row under the drop
 // point, the image loaded at the fixture's size, and the file where the
@@ -35,11 +36,10 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { draftsStore, filesUnder, listDrafts, waitFor } from "../lib/drafts.mjs";
+import { closeDraft, draftsStore, filesUnder, listDrafts, newDraft, waitFor } from "../lib/drafts.mjs";
 import { browserTab, openFileTab, showFiles } from "../lib/files.mjs";
 import { quadrantPng } from "../lib/png.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const IMAGE = /\.(png|jpe?g|webp|gif)$/i;
 const EMBED = /!\[[^\]]*\]\(([^)#\s]+)[^)]*\)/;
@@ -284,10 +284,14 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId, CHAN_WORKSPACE_PATH: ctx.workspaceDir },
       timeout: 60_000,
     });
-    const result = { browser: await ctx.browser.browser().version(), legs: {} };
+    const result = {
+      backend: "ghostty", browser: await ctx.browser.browser().version(), legs: {},
+      applicationRouting: "pending", nativeAcceptance: { status: "not-tested" },
+    };
     const navigations = [];
     let cdp = null;
     let openedBrowser = false;
+    let draftOpen = false;
     let terminalOpen = false;
     try {
       await page.evaluate(recordDrags);
@@ -295,6 +299,7 @@ export default {
       const mode = capability.reached ? "trusted" : "synthetic, untrusted";
       result.mode = mode;
       result.capability = capability.shape;
+      if (!capability.reached) result.nativeAcceptance = { status: "unavailable", reason: "no trusted image drop reached the probe" };
       console.log(`[smoke]   ${result.browser}; drop: ${mode}; blank page saw ${JSON.stringify(capability.shape)}`);
       cdp = await page.createCDPSession();
       await cdp.send("Page.enable");
@@ -331,13 +336,45 @@ export default {
         result.legs.document = { opens, point, shapes, dropped, image, line };
       }
 
+      // A draft: the image lands on the second row, inside its own store.
+      {
+        const scope = ".editor-tab.active";
+        const draft = await newDraft(ctx, page);
+        draftOpen = true;
+        const store = draftsStore(ctx, draft.name);
+        const own = join(store, draft.name);
+        await page.click(`${scope} .cm-content`);
+        await page.keyboard.type(`${rows.join("\n\n")}\n`);
+        await page.waitForFunction(
+          (selector, text) => [...document.querySelectorAll(`${selector} .cm-line`)].some((el) => el.textContent === text),
+          { timeout: 10_000 },
+          scope, rows[2],
+        );
+        const draftUrl = page.url();
+        const before = filesUnder(own);
+        const point = await endOfLine(page, scope, rows[1]);
+        if (!point.inZone) throw new Error(`draft: the drop point ${JSON.stringify(point)} is outside the drop zones`);
+        const shapes = await drop(page, cdp, mode, point, fixturePath, bytes);
+        const dropped = assertDropReached(shapes, "editor", "draft");
+        await waitImageLoaded(page, scope, "draft");
+        const image = await newImageIn(own, before, "draft");
+        const { line, ref } = await savedEmbedLine(join(store, draft.path), "draft");
+        if (!line.startsWith(rows[1])) throw new Error(`draft: the embed is on ${JSON.stringify(line)}, not on the drop row ${JSON.stringify(rows[1])}`);
+        if (ref !== `./${image}`) throw new Error(`draft: the text names ${ref}, not the image in its draft, ./${image}`);
+        if (!readFileSync(join(own, image)).equals(bytes)) throw new Error(`draft: ${image} does not hold the dropped file's bytes`);
+        assertSamePage(page, draftUrl, navigations, "draft");
+        await ctx.shot("draft");
+        result.legs.draft = { point, shapes, dropped, image, line };
+        await closeDraft(page, "discard");
+        draftOpen = false;
+      }
+
       // The Rich Prompt over a terminal running cat: the image lands on the
       // row typed into it, and in its draft's directory.
       {
         const scope = ".rich-prompt";
-        const prefs = await readTerminalPrefs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
         const known = new Set((await listDrafts(ctx)).drafts.map((d) => d.primary.draft_id));
-        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, prefs.ghostty ? "ghostty" : "xterm", ["--command", "cat"]);
+        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "ghostty", ["--command", "cat"]);
         terminalOpen = true;
         await page.evaluate(() => {
           window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.richPrompt" } }));
@@ -405,9 +442,31 @@ export default {
         const opened = entry.opens ? `; opened on try ${entry.opens}` : "";
         console.log(`[smoke]   ${leg}: at ${JSON.stringify(entry.point)}; ${entry.shapes.map((s) => s.type).join(",")}; last ${JSON.stringify(last)}${entry.image ? ` -> ${entry.image}` : ""}${opened}`);
       }
+      result.applicationRouting = "passed";
+      if (capability.reached) {
+        const missing = ["document", "draft", "richPrompt", "outside"].filter((leg) => {
+          const entry = result.legs[leg];
+          if (!entry?.shapes.length || entry.shapes.some((shape) => shape.trusted !== true)) return true;
+          // The outside guard can suppress the drop entirely; its dragover
+          // still has to come from the browser.
+          return leg === "outside"
+            ? !entry.shapes.some((shape) => shape.type === "dragover")
+            : !entry.dropped?.files?.some((file) => file.type === "image/png" && file.size > 0);
+        });
+        result.nativeAcceptance = { status: missing.length ? "failed" : "passed", missingTrustedLegs: missing };
+      }
+      console.log(`[smoke]   application routing: ${result.applicationRouting}; native drop acceptance: ${JSON.stringify(result.nativeAcceptance)}`);
+      if (result.nativeAcceptance.status !== "passed") {
+        throw new Error(`native drop acceptance ${result.nativeAcceptance.status}: ${JSON.stringify(result.nativeAcceptance)}; ${mode} application routing passed`);
+      }
       return result;
+    } catch (error) {
+      if (result.applicationRouting === "pending") result.applicationRouting = "failed";
+      error.smokeDetails = result;
+      throw error;
     } finally {
       await cdp?.detach().catch(() => {});
+      if (draftOpen) await closeDraft(page, "discard").catch(() => {});
       if (await page.$(".rich-prompt").catch(() => null)) {
         await page.keyboard.press("Escape").catch(() => {});
         await page.waitForFunction(() => !document.querySelector(".rich-prompt"), { timeout: 5_000 }).catch(() => {});

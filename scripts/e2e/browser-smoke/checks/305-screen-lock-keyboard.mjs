@@ -3,7 +3,7 @@
 // inactivity timer off until a leg arms it) and answers each PIN check as
 // the leg wants, so the workspace's own settings stay as they are; it also
 // captures its watcher socket. Legs:
-//   1. per backend, a focused terminal under the lock: a typed key reaches
+//   1. a focused Ghostty terminal under the lock: a typed key reaches
 //      the PTY after unlock, and none of the wake key, the PIN or Enter does;
 //   2. a reconnect cover arriving under the lock leaves the PIN field the
 //      keyboard: a digit typed then lands in it;
@@ -20,7 +20,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand, selectLauncherCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { keyboardAt } from "../lib/keyboard-owners.mjs";
 import { LOCK, PROMPT, TEAM, checkWindowId, inputValue, keyboardSurface, settle, until } from "../lib/keyboard-layers.mjs";
 
@@ -83,7 +82,7 @@ export default {
       return Object.values(JSON.parse(listed.stdout).groups ?? {}).flat().map((row) => row.name);
     };
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
+    const backend = "ghostty";
     const directory = mkdtempSync(join(ctx.workspaceDir, ".screenlock-305-"));
     // Wake the lock's card with a key and wait for its PIN field to hold the keyboard.
     const wake = async (label) => {
@@ -122,7 +121,7 @@ export default {
       keyboard: await keyboardSurface(page),
       pinFocused: await page.evaluate((pin) => document.activeElement === document.querySelector(pin), PIN),
     });
-    const result = { legs: {}, cleanupErrors: [] };
+    const result = { backend, legs: {}, cleanupErrors: [] };
     const failures = [];
     const leg = async (name, fn) => {
       const record = { passed: false };
@@ -143,42 +142,37 @@ export default {
       }
     };
     try {
-      for (const backend of ["xterm", "ghostty"]) {
-        await leg(`terminal-${backend}`, async (r) => {
-          await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
-          const name = `Lock305-${backend}`;
-          const recorder = join(directory, `${backend}.bytes`);
-          const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend,
-            ["--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`]);
-          await until("precondition: the recorder started", () => existsSync(recorder), Boolean);
-          const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-          await page.click(`${terminal} .terminal-host`);
-          r.before = await until("precondition: the terminal holds the keyboard", () => keyboardAt(page),
-            (at) => at === `terminal:${row.tab}`, 5000);
-          const offset = readFileSync(recorder).length;
-          await lockNow();
-          await wake("terminal lock");
-          await unlock("terminal lock");
-          r.afterUnlock = await until("the keyboard returns to the terminal", () => keyboardAt(page),
-            (at) => at === `terminal:${row.tab}`, 5000).catch(async () => `not returned: ${await keyboardAt(page)}`);
-          await page.keyboard.press("Z");
-          const deadline = Date.now() + 5000;
-          let bytes = [];
-          do {
-            bytes = [...readFileSync(recorder).subarray(offset)].map((b) => b.toString(16).padStart(2, "0"));
-            if (bytes.includes("5a")) break;
-            await sleep(100);
-          } while (Date.now() < deadline);
-          r.bytesSinceLock = bytes;
-          await ctx.shot(`305-terminal-${backend}-after-unlock`);
-          assert.equal(r.afterUnlock, `terminal:${row.tab}`, "the keyboard returns to the terminal after unlock");
-          assert.deepEqual(bytes, ["5a"], "after unlock a typed Z reaches the PTY, and nothing typed under the lock did");
-          await closeEveryTerminal(page, `${backend} terminal`, token);
-        });
-      }
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
-      const backend = original.ghostty ? "ghostty" : "xterm";
-      const plain = await openAttachedTerminal(ctx, page, cs, windowId, "Plain305", backend);
+      await leg(`terminal-${backend}`, async (r) => {
+        const name = `Lock305-${backend}`;
+        const recorder = join(directory, `${backend}.bytes`);
+        const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty",
+          ["--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`]);
+        await until("precondition: the recorder started", () => existsSync(recorder), Boolean);
+        const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
+        await page.click(`${terminal} .terminal-host`);
+        r.before = await until("precondition: the terminal holds the keyboard", () => keyboardAt(page),
+          (at) => at === `terminal:${row.tab}`, 5000);
+        const offset = readFileSync(recorder).length;
+        await lockNow();
+        await wake("terminal lock");
+        await unlock("terminal lock");
+        r.afterUnlock = await until("the keyboard returns to the terminal", () => keyboardAt(page),
+          (at) => at === `terminal:${row.tab}`, 5000).catch(async () => `not returned: ${await keyboardAt(page)}`);
+        await page.keyboard.press("Z");
+        const deadline = Date.now() + 5000;
+        let bytes = [];
+        do {
+          bytes = [...readFileSync(recorder).subarray(offset)].map((b) => b.toString(16).padStart(2, "0"));
+          if (bytes.includes("5a")) break;
+          await sleep(100);
+        } while (Date.now() < deadline);
+        r.bytesSinceLock = bytes;
+        await ctx.shot(`305-terminal-${backend}-after-unlock`);
+        assert.equal(r.afterUnlock, `terminal:${row.tab}`, "the keyboard returns to the terminal after unlock");
+        assert.deepEqual(bytes, ["5a"], "after unlock a typed Z reaches the PTY, and nothing typed under the lock did");
+        await closeEveryTerminal(page, `${backend} terminal`, token);
+      });
+      const plain = await openAttachedTerminal(ctx, page, cs, windowId, "Plain305", "ghostty");
       await page.click(`.pane[data-pane-id="${plain.pane}"] .terminal-tab.active .terminal-host`);
 
       await leg("reconnectUnderLock", async (r) => {
@@ -276,7 +270,6 @@ export default {
       result.verifications = lock.verifications;
       await load().catch((error) => result.cleanupErrors.push(`reload: ${error.message}`));
       await closeEveryTerminal(page, "305 cleanup", token).catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
-      await restoreTerminalPrefs(ctx, page, token, original).catch((error) => result.cleanupErrors.push(`terminal preferences: ${error.message}`));
       rmSync(directory, { recursive: true, force: true });
       for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
       writeFileSync(join(ctx.outDir, "305-screen-lock.json"), `${JSON.stringify(result, null, 2)}\n`);

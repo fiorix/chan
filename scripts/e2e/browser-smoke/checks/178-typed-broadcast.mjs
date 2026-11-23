@@ -1,6 +1,6 @@
 // Keys typed into a terminal of a broadcast group reach every member while
 // that terminal's output is being parsed, and a reply the terminal makes to
-// its program reaches that program alone. Two xterm.js terminals of one
+// its program reaches that program alone. Two Ghostty terminals of one
 // group each run `lib/typed-broadcast-reader.mjs`, which records the bytes
 // its PTY delivers; the source prints 720-character lines every 2 ms while
 // 36 keys are typed into it with a 10 ms delay. A silent arm, three arms
@@ -10,8 +10,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
 const SOURCE = "TypedBroadcastSource178";
 const TARGET = "TypedBroadcastTarget178";
@@ -61,9 +60,13 @@ async function selectTab(page, name) {
     const label = await tab.$eval(".path", (node) => node.textContent?.trim() ?? "").catch(() => "");
     if (label !== name) continue;
     await tab.click();
-    await page.waitForSelector(".terminal-tab.active .terminal.xterm .xterm-screen", { timeout: 10_000 });
-    await page.click(".terminal-tab.active .terminal.xterm .xterm-screen");
-    await page.waitForFunction(() => document.activeElement?.classList.contains("xterm-helper-textarea"), { timeout: 10_000 });
+    const surface = `.terminal-tab.active ${TERMINAL_SURFACES.ghostty}`;
+    await page.waitForSelector(surface, { visible: true, timeout: 10_000 });
+    await page.click(surface);
+    await page.waitForFunction(() => {
+      const host = document.querySelector('.terminal-tab.active .terminal-host[role="textbox"][aria-label="Terminal input"]');
+      return host && (document.activeElement === host || host.contains(document.activeElement));
+    }, { timeout: 10_000 });
     return;
   }
   throw new Error(`tab not found: ${name}`);
@@ -81,7 +84,6 @@ export default {
     );
     if (!windowId) throw new Error("could not resolve the page's window id");
     await ctx.waitWindowLive(windowId);
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
     const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
       cwd: ctx.workspaceDir, env, timeout: 30_000,
@@ -90,16 +92,14 @@ export default {
       source: join(ctx.outDir, "178-source-input.jsonl"),
       target: join(ctx.outDir, "178-target-input.jsonl"),
     };
-    const originalPrefs = await readTerminalPrefs(page, token);
     const opened = [];
     let sourcePid = null;
     let streaming = false;
     let failed = false;
-    const details = { arms: [] };
+    const details = { backend: "ghostty", arms: [] };
     try {
-      await writeTerminalPrefs(page, token, { ghostty: false });
       for (const [role, name] of [["source", SOURCE], ["target", TARGET]]) {
-        await openAttachedTerminal(ctx, page, cs, windowId, name, "xterm");
+        await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
         opened.push(name);
         await cs(["write", "--tab-name", name, `node ${reader} ${role} ${paths[role]}\n`]);
         const ready = await waitFor(() => Promise.resolve(rows(paths[role])),
@@ -195,10 +195,8 @@ export default {
       try {
         if (streaming && sourcePid) process.kill(sourcePid, "SIGUSR1");
         for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
-        await restoreTerminalPrefs(ctx, page, token, originalPrefs);
       } catch (error) {
-        // A terminal or preference left behind fails the check, unless the
-        // check has already failed.
+        // A terminal left behind fails the check, unless it already failed.
         if (!failed) throw error;
         console.log(`[smoke]   cleanup failed after the check's failure: ${error.message}`);
       }

@@ -25,7 +25,6 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { CLOSE_PROMPT, checkWindowId, keyboardSurface, settle, until } from "../lib/keyboard-layers.mjs";
 
 const COVER = '[data-cover="session-ended"]';
@@ -62,7 +61,7 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = (await readTerminalPrefs(page, token)).ghostty ? "ghostty" : "xterm";
+    const backend = "ghostty";
     const frame = (command) => page.evaluate((windowId, command) => {
       window.__watch303.dispatchEvent(new MessageEvent("message", {
         data: JSON.stringify({ type: "window_command", window_id: windowId, command }),
@@ -97,7 +96,7 @@ export default {
       if (!ok) failures.push(`${name}: ${JSON.stringify(detail)}`);
     };
     try {
-      await openAttachedTerminal(ctx, page, cs, windowId, "Close303", backend);
+      await openAttachedTerminal(ctx, page, cs, windowId, "Close303", "ghostty");
       await frame("window_hidden");
       await page.waitForSelector(COVER, { visible: true, timeout: 10_000 });
       result.coverUp = await until("precondition: the cover's button holds the keyboard", focusOn,

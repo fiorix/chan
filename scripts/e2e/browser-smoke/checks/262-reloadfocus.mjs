@@ -10,7 +10,6 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
@@ -162,7 +161,7 @@ async function markerSince(page, file, offset, label) {
 
 async function moveArm(page, file, engine, press, move) {
   const arm = `${engine}-${press}-${move}`;
-  const holder = await pressTerminal(page, press, expectedHolder(engine, press));
+  const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const before = await browserState(page);
   await MOVES[move](page);
@@ -171,7 +170,7 @@ async function moveArm(page, file, engine, press, move) {
   await page.keyboard.press("ArrowDown");
   const stepped = await selectionSettled(page, before.selected);
   const pty = await markerSince(page, file, offset, arm);
-  return { arm, holder, expected: expectedHolder(engine, press), focus, before, after, stepped, pty };
+  return { arm, holder, expected: expectedHolder(press), focus, before, after, stepped, pty };
 }
 
 /// The browser's state once its selection differs from `from`, or after the
@@ -188,9 +187,9 @@ async function selectionSettled(page, from, timeout = 3_000) {
 
 /// The keyboard holder a press leaves in the terminal: the host after a left
 /// press on ghostty, the textarea after a right one (the case the blur has to
-/// reach) and always on xterm.js.
-function expectedHolder(engine, press) {
-  return engine === "ghostty" && press === "left" ? "terminal" : "terminal-textarea";
+/// reach).
+function expectedHolder(press) {
+  return press === "left" ? "terminal" : "terminal-textarea";
 }
 
 function checkMove(result, failures) {
@@ -207,13 +206,13 @@ function checkMove(result, failures) {
 
 async function stayArm(page, file, engine, press) {
   const arm = `${engine}-${press}-hybrid-stay`;
-  const holder = await pressTerminal(page, press, expectedHolder(engine, press));
+  const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const committed = await hybridNav(page, []);
   const focus = await focusSettled(page, (held) => held.startsWith("terminal"));
   await page.keyboard.type("x");
   const pty = await ptySince(arm, file, offset);
-  return { arm, holder, expected: expectedHolder(engine, press), committed, focus, pty };
+  return { arm, holder, expected: expectedHolder(press), committed, focus, pty };
 }
 
 /// A press on the browser's own chrome, at a point whose element has no
@@ -409,7 +408,6 @@ async function trial(ctx, directory, engine, mode) {
   const page = await ctx.browser.newPage();
   page.on("pageerror", (error) => report.pageErrors.push(safeError(error)));
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-  let originalPrefs = null;
   let originalStrip = null;
   const timeout = setTimeout(() => { report.timedOut = true; void page.close().catch(() => {}); }, 120_000);
   try {
@@ -422,10 +420,8 @@ async function trial(ctx, directory, engine, mode) {
     await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
     // The preference refresh needs this page's watch subscription.
     await ctx.waitWindowLive(windowId);
-    originalPrefs = await readTerminalPrefs(page, token);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
     await openTerminal(page, engine);
     const file = join(directory, `${engine}-${mode}.bytes`);
     await startRecorder(page, file);
@@ -461,7 +457,7 @@ async function trial(ctx, directory, engine, mode) {
       }
     } catch (error) { report.cleanupFailures.push({ step: "terminals", ...safeError(error) }); }
     let preferencesPage = page.isClosed() ? ctx.page : page;
-    if ((originalPrefs || originalStrip?.on) && preferencesPage !== ctx.page) {
+    if (originalStrip?.on && preferencesPage !== ctx.page) {
       try {
         // A restored document has a new watch, even with the same window id.
         await ctx.waitWindowLive(windowId);
@@ -471,8 +467,6 @@ async function trial(ctx, directory, engine, mode) {
         preferencesPage = ctx.page;
       }
     }
-    try { if (originalPrefs) await writeTerminalPrefs(preferencesPage, token, { ghostty: originalPrefs.ghostty }); }
-    catch (error) { report.cleanupFailures.push({ step: "terminal-preference", ...safeError(error) }); }
     try { if (originalStrip?.on) await writePaneStripPreference(preferencesPage, token, true); }
     catch (error) { report.cleanupFailures.push({ step: "strip-preference", ...safeError(error) }); }
     await page.close().catch(() => {});
@@ -494,13 +488,15 @@ export default {
     const folder = seedFolder(ctx);
     const reports = [];
     try {
-      for (const engine of ["xterm", "ghostty"]) {
+      for (const engine of ["ghostty"]) {
         for (const mode of ["control", "sequence"]) {
           const report = await trial(ctx, directory, engine, mode);
           reports.push(report);
           if (report.cleanupFailures.length) throw new Error("reload focus cleanup failed; later trials refused");
         }
       }
+      assert.deepEqual(reports.map(({ engine, mode }) => `${engine}/${mode}`),
+        ["ghostty/control", "ghostty/sequence"], "every Ghostty trial ran exactly once");
       const incomplete = reports.filter((report) => !report.observed || report.error || report.sequenceFailures.length);
       assert.equal(incomplete.length, 0, "reload focus incomplete: inspect 262 artifacts for timing/setup failures");
       const failures = reports.filter((report) => report.failures.length);

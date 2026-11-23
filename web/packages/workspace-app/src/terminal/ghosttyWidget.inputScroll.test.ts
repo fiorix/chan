@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { pasteIntoGhostty } from "./ghosttyPaste";
 import { GhosttyViewportController } from "./ghosttyViewport";
@@ -42,6 +43,7 @@ async function openTerminal(options: { smoothScrollDuration?: number } = { smoot
   const textarea = host.querySelector("textarea");
   const canvas = host.querySelector("canvas");
   if (!textarea || !canvas) throw new Error("ghostty-web opened no textarea or canvas");
+  modelPointerCapture(canvas);
   const viewport = new GhosttyViewportController(term, {
     os: () => "linux",
     hasMouseTracking: () => false,
@@ -246,9 +248,7 @@ describe("the ghostty widget's input scroll", () => {
     scheduler.advance();
     const render = vi.spyOn(state.term.renderer!, "render");
     const painted = observePaintedViewports(state);
-    state.canvas.dispatchEvent(new MouseEvent("mousedown", {
-      bubbles: true, cancelable: true, clientX: 1, clientY: 1, button: 0,
-    }));
+    mousePointer(state.canvas, "pointerdown", { clientX: 1, clientY: 1 });
     expect(state.sent).toEqual([{ data: bytes, viewport: HISTORY_OFFSET }]);
     state.viewport.write("\x1b[42mresponse\x1b[0m");
     expect(state.term.getViewportY(), "the controller has restored history").toBe(HISTORY_OFFSET);
@@ -268,9 +268,7 @@ describe("the ghostty widget's input scroll", () => {
     state.viewport.write("\x1b[?1000h\x1b[?1006h");
     scheduler.advance();
     typeLetter(state);
-    state.canvas.dispatchEvent(new MouseEvent("mousedown", {
-      button: 0, clientX: 1, clientY: 1, bubbles: true, cancelable: true,
-    }));
+    mousePointer(state.canvas, "pointerdown", { clientX: 1, clientY: 1 });
     expect(state.sent).toEqual([
       { data: "a", viewport: 0 },
       { data: "\x1b[<0;1;1M", viewport: 0 },
@@ -290,9 +288,7 @@ describe("the ghostty widget's input scroll", () => {
     const state = await openTerminal();
     state.viewport.write("\x1b[?1000h" + mode);
     expect(state.term.getViewportY()).toBe(HISTORY_OFFSET);
-    state.canvas.dispatchEvent(new MouseEvent("mousedown", {
-      button: 0, clientX: 1, clientY: 1, bubbles: true, cancelable: true,
-    }));
+    mousePointer(state.canvas, "pointerdown", { clientX: 1, clientY: 1 });
     expect(state.sent.map(({ data }) => data)).toEqual([bytes]);
     expect(state.sent[0].viewport).toBe(HISTORY_OFFSET);
     expect(state.term.getViewportY()).toBe(HISTORY_OFFSET);

@@ -72,11 +72,11 @@ export function installStreamProbe() {
     }
   };
   const find = (name) => sockets.findLast((entry) => entry.name === name);
-  // The page treats a long gap between its 2 s wake probes as a machine sleep
-  // and replaces the socket, so whether a stall trips it depends on where the
-  // stall falls between two ticks. A stall that starts on a tick is measured
-  // alone. Only intervals made after this probe are seen, which is the
-  // terminal's own detector when the terminal opens after it.
+  // A long gap between the page's 2 s ticks triggers a wake probe; only
+  // silence through its deadline causes a redial. Whether a stall triggers
+  // that probe depends on where it falls between ticks. Starting on a tick
+  // measures the stall alone. Only intervals made after this instrument
+  // are seen, including the wake detector of a terminal opened afterward.
   const nativeSetInterval = globalThis.setInterval;
   const wakeProbes = [];
   let afterWakeProbe = null;

@@ -37,6 +37,7 @@ import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { TERMINAL_INPUT_PROBE_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
+import { engineClick, modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { FRESH_SHELL_ALT_EXIT, FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
 import {
   attach,
@@ -244,12 +245,10 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     expect(ghosttyMouseTracking(term)).toBe(true);
     socket.sent.splice(0);
     const { width, height } = ghosttyCellMetrics(term);
-    for (const type of ["mousedown", "mouseup"]) {
-      host.dispatchEvent(
-        new MouseEvent(type, {
-          button: 0, clientX: 150.5 * width, clientY: 3.5 * height, bubbles: true, cancelable: true,
-        }),
-      );
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    for (const type of ["pointerdown", "pointerup"] as const) {
+      mousePointer(canvas, type, { clientX: 150.5 * width, clientY: 3.5 * height });
     }
     const reports = sgr
       ? ["\x1b[<0;151;4M", "\x1b[<0;151;4m"]
@@ -261,6 +260,96 @@ describe("mouse events encoded by the Ghostty input handler", () => {
       ]),
     );
     expect(received).toEqual(reports.map((data) => [data, !sgr]));
+  });
+
+  test("on the Linux desktop a middle click pastes PRIMARY once and reports nothing; the other buttons still report", async () => {
+    const invoke = vi.fn(async (cmd: string, _args?: unknown) => (cmd === "read_primary_selection" ? "from PRIMARY" : undefined));
+    const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invoke } };
+    desktop.__TAURI_INTERNALS__ = { invoke };
+    cleanups.push(() => delete desktop.__TAURI_INTERNALS__);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[?1000h\x1b[?1006h");
+    expect(ghosttyMouseTracking(term)).toBe(true);
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    const { width, height } = ghosttyCellMetrics(term);
+    const at = { clientX: 2.5 * width, clientY: 1.5 * height };
+    socket.sent.splice(0);
+    invoke.mockClear();
+
+    const middle = engineClick(canvas, 1, at);
+    await vi.waitFor(() => expect(inputFrames(socket)).toEqual([{ type: "input", data: "from PRIMARY" }]));
+    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
+    expect(middle.down.defaultPrevented, "the widget leaves a cancelled press to the embedder").toBe(true);
+    expect(middle.click.defaultPrevented, "the middle click's auxclick is default-prevented").toBe(true);
+
+    socket.sent.splice(0);
+    for (const button of [0, 2] as const) {
+      expect(engineClick(canvas, button, at).down.defaultPrevented, `button ${button} stays the widget's`).toBe(false);
+    }
+    expect(inputFrames(socket).map((frame) => frame.data)).toEqual([
+      "\x1b[<0;3;2M", "\x1b[<0;3;2m", "\x1b[<2;3;2M", "\x1b[<2;3;2m",
+    ]);
+  });
+
+  /// `count` primary-button clicks in a row at `el` as the engine delivers
+  /// them: each press and release with its compatibility mouse events, then
+  /// a click carrying the count so far.
+  function engineClicks(el: Element, at: { clientX: number; clientY: number }, count: number, shiftKey = false): void {
+    for (let detail = 1; detail <= count; detail++) {
+      const mouse = (type: string, buttons: number) =>
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, detail, shiftKey, ...at }));
+      const compat = !mousePointer(el, "pointerdown", at, { shiftKey }).defaultPrevented;
+      if (compat) mouse("mousedown", 1);
+      mousePointer(el, "pointerup", at, { shiftKey });
+      if (compat) mouse("mouseup", 0);
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail, shiftKey, ...at }));
+    }
+  }
+
+  // The word wraps after "hel", so a Shift double click on "lo" copying the
+  // whole word is chan's extents, not the widget's own one-row double click.
+  test("on the Linux desktop a double or triple click a program reports copies nothing; with Shift a double click selects and copies the word", async () => {
+    const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
+    const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: typeof invoke } };
+    desktop.__TAURI_INTERNALS__ = { invoke };
+    cleanups.push(() => delete desktop.__TAURI_INTERNALS__);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux x86_64)");
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, `${" ".repeat(term.cols - 3)}hello world\x1b[?1000h\x1b[?1006h`);
+    expect(ghosttyLineText(term, 0)?.trimStart()).toBe("hel");
+    expect(ghosttyLineText(term, 1)).toBe("lo world");
+    expect(ghosttyMouseTracking(term)).toBe(true);
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    modelPointerCapture(canvas);
+    const { width, height } = ghosttyCellMetrics(term);
+    const afterWrap = { clientX: 0.5 * width, clientY: 1.5 * height };
+    socket.sent.splice(0);
+    invoke.mockClear();
+
+    for (const count of [2, 3]) {
+      socket.sent.splice(0);
+      engineClicks(canvas, afterWrap, count);
+      await vi.waitFor(() => expect(inputFrames(socket).map((frame) => frame.data)).toEqual(
+        Array.from({ length: count }, () => ["\x1b[<0;1;2M", "\x1b[<0;1;2m"]).flat(),
+      ));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke.mock.calls, `no clipboard or PRIMARY write after ${count} clicks`).toEqual([]);
+      expect(term.hasSelection()).toBe(false);
+      expect(term.getSelection()).toBe("");
+    }
+
+    socket.sent.splice(0);
+    engineClicks(canvas, afterWrap, 2, true);
+    await vi.waitFor(() => expect(invoke.mock.calls).toEqual([
+      ["write_clipboard_text", { text: "hello" }],
+      ["write_primary_selection", { text: "hello" }],
+    ]));
+    expect(inputFrames(socket), "Shift keeps the clicks from the program").toEqual([]);
+    expect(term.getSelection()).toBe("hello");
   });
 });
 

@@ -23,7 +23,6 @@ import { join } from "node:path";
 
 import { showFiles } from "../lib/files.mjs";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB = "SmokeThemeSwitch221";
 const DOC = "theme-switch-221.md";
@@ -97,7 +96,6 @@ export default {
     const shell = (args) => ctx.exec(ctx.chanBin, ["shell", ...args], { cwd: ctx.workspaceDir, env, timeout: 90_000 });
     const cs = (args) => shell(["terminal", ...args]);
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     const originalTheme = await themeChoice(page, token);
     const record = join(tmpdir(), `chan-smoke-221-${process.pid}-${Date.now()}.rec`);
 
@@ -122,7 +120,6 @@ export default {
     try {
       await emulate("dark");
       await waitHtmlTheme("dark", "first load");
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: true });
 
       // The layout: the page's pane on the left, a new pane on the right for
       // the terminal, so the terminal stays in view through every switch.
@@ -246,7 +243,6 @@ export default {
       await cdp.send("Emulation.setEmulatedMedia", { features: [] }).catch(() => {});
       await restoreThemeChoice(page, token, originalTheme).catch(() => {});
       if (terminalOpen) await cs(["close", "--tab-name", TAB]).catch(() => {});
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
       rmSync(record, { force: true });
     }
   },

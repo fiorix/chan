@@ -4,7 +4,7 @@
 // real two-line output and a full-width rule over a line keep theirs.
 //
 // Engine: headless Chrome through puppeteer-core; the result names the
-// browser's version. It says nothing about WebKit or the xterm.js engine.
+// browser's version. It says nothing about WebKit.
 //
 // The fixture is Muse Code's own output, recorded from a real session at 80
 // by 24 (fixtures/muse-code-block.json): a code block's line drawn to the
@@ -47,7 +47,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 const PROVENANCE = JSON.parse(readFileSync(join(FIXTURES, "muse-code-block.json"), "utf8"));
@@ -257,15 +256,12 @@ export default {
     const env = { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
     const cs = (args, opts = {}) =>
       ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], { cwd: ctx.workspaceDir, env, timeout: 90_000, ...opts });
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     const dir = mkdtempSync(join(tmpdir(), "chan-copy-330-"));
     const failures = [];
     const result = { browser: await ctx.browser.browser().version(), terminals: {} };
     try {
       for (const name of ["muse-code-block-scroll.bin", "muse-code-block-cup.bin"]) copyFileSync(join(FIXTURES, name), join(dir, name));
       for (const name of ["muse", "replay"]) writeFileSync(join(dir, name), standIn(dir), { mode: 0o755 });
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: true });
       if (!(await trackGhosttyTerminals(page))) throw new Error("no entry module of the page names a ghostty-web chunk");
       const sessions = await recordSessionFrames(page);
       await page.setViewport({ width: 1280, height: 900 });
@@ -351,7 +347,6 @@ export default {
     } finally {
       await cs(["close", "--tab-name", CONTROL]).catch(() => {});
       await cs(["close", "--tab-name", MUSE]).catch(() => {});
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     }

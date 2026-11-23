@@ -21,6 +21,8 @@
 // such a paste reaches it as an image File. When it does not, every leg
 // dispatches a synthetic ClipboardEvent carrying the File instead, and the
 // result says so ("synthetic, untrusted"); the product's legs never choose.
+// Synthetic legs still prove application routing, but leave native clipboard
+// acceptance unavailable and fail the check after all surfaces are exercised.
 //
 // Each leg asserts the embed in the editor, the image loaded at the fixture's
 // size, the document's text naming it, and the file where the document's
@@ -45,7 +47,6 @@ import {
 import { browserTab, openFileTab, showFiles } from "../lib/files.mjs";
 import { decodedPixels, pixelDifference, quadrantPng } from "../lib/png.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const IMAGE = /\.(png|jpe?g|webp|gif)$/i;
 const EMBED = /!\[[^\]]*\]\(([^)#\s]+)[^)]*\)/;
@@ -95,7 +96,11 @@ async function pressPaste(page) {
 /// File, asked of a blank page in the check's own browser context so that no
 /// product code stands between the key press and the event.
 async function trustedPasteReachesAPage(ctx, page, bytes) {
-  await writeClipboardImage(page, bytes);
+  try {
+    await writeClipboardImage(page, bytes);
+  } catch (error) {
+    return { reached: false, shape: null, error: error.message };
+  }
   const probe = await ctx.browser.newPage();
   try {
     await probe.setContent('<div id="target" contenteditable="true" style="width:320px;height:80px"></div>');
@@ -213,7 +218,10 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId, CHAN_WORKSPACE_PATH: ctx.workspaceDir },
       timeout: 60_000,
     });
-    const result = { browser: await ctx.browser.browser().version(), legs: {} };
+    const result = {
+      backend: "ghostty", browser: await ctx.browser.browser().version(), legs: {},
+      applicationRouting: "pending", nativeAcceptance: { status: "not-tested" },
+    };
     let openedBrowser = false;
     let draftOpen = false;
     let terminalOpen = false;
@@ -224,6 +232,8 @@ export default {
       const mode = capability.reached ? "trusted" : "synthetic, untrusted";
       result.mode = mode;
       result.capability = capability.shape;
+      result.capabilityError = capability.error ?? null;
+      if (!capability.reached) result.nativeAcceptance = { status: "unavailable", reason: "no trusted clipboard image reached the probe" };
       console.log(`[smoke]   ${result.browser}; paste: ${mode}; blank page saw ${JSON.stringify(capability.shape)}`);
 
       // A workspace document in a folder, opened from the Files tab.
@@ -275,9 +285,8 @@ export default {
       // The Rich Prompt over a terminal running cat.
       {
         const scope = ".rich-prompt";
-        const prefs = await readTerminalPrefs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
         const known = new Set((await listDrafts(ctx)).drafts.map((d) => d.primary.draft_id));
-        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, prefs.ghostty ? "ghostty" : "xterm", ["--command", "cat"]);
+        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "ghostty", ["--command", "cat"]);
         terminalOpen = true;
         await page.evaluate(() => {
           window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.richPrompt" } }));
@@ -317,7 +326,25 @@ export default {
         const opened = entry.opens ? `; opened on try ${entry.opens}` : "";
         console.log(`[smoke]   ${leg}: ${JSON.stringify(entry.shape)} -> ${entry.image}${opened}`);
       }
+      result.applicationRouting = "passed";
+      if (capability.reached) {
+        const missing = ["document", "draft", "richPrompt"].filter((leg) => {
+          const shape = result.legs[leg]?.shape;
+          const target = leg === "richPrompt" ? "rich-prompt" : "editor";
+          return shape?.trusted !== true || shape.target !== target ||
+            !shape.files?.some((file) => file.type === "image/png" && file.size > 0);
+        });
+        result.nativeAcceptance = { status: missing.length ? "failed" : "passed", missingTrustedLegs: missing };
+      }
+      console.log(`[smoke]   application routing: ${result.applicationRouting}; native clipboard acceptance: ${JSON.stringify(result.nativeAcceptance)}`);
+      if (result.nativeAcceptance.status !== "passed") {
+        throw new Error(`native clipboard acceptance ${result.nativeAcceptance.status}: ${JSON.stringify(result.nativeAcceptance)}; ${mode} application routing passed`);
+      }
       return result;
+    } catch (error) {
+      if (result.applicationRouting === "pending") result.applicationRouting = "failed";
+      error.smokeDetails = result;
+      throw error;
     } finally {
       if (draftOpen) await closeDraft(page, "discard").catch(() => {});
       if (await page.$(".rich-prompt").catch(() => null)) {

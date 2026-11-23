@@ -192,10 +192,6 @@ vi.mock("../terminal/ghosttyCompat", () => ({
   },
   installGhosttyCustomGlyphs: () => (ghostty.record.events.push("glyphs"), true),
   installGhosttyOverlayScrollbar: () => (ghostty.record.events.push("scrollbar"), true),
-  gateGhosttyScrollbarClicks: () => {
-    ghostty.record.events.push("gate");
-    return () => ghostty.record.events.push("ungate");
-  },
 }));
 vi.mock("../terminal/ghosttyTheme", () => ({
   applyGhosttyTheme: (term: unknown, theme: Record<string, string>) => {
@@ -427,14 +423,13 @@ describe("choosing the backend", () => {
 describe("the mount", () => {
   test("instantiate its own wasm, open, align to xterm's cell, install the hooks, then dial", async () => {
     await mountGhostty();
-    expect(ghostty.record.events.slice(0, 8)).toEqual([
+    expect(ghostty.record.events.slice(0, 7)).toEqual([
       "instantiate",
       "construct",
       "open",
       "align",
       "glyphs",
       "scrollbar",
-      "gate",
       "dial",
     ]);
   });
@@ -466,13 +461,6 @@ describe("the mount", () => {
     resizeObservers.at(-1)!.callback();
     expect(sentFrames(socket).filter((frame) => frame.type === "resize"))
       .toEqual([{ type: "resize", cols: 100, rows: 30 }]);
-  });
-
-  test("the scrollbar gate is removed when the terminal goes", async () => {
-    const { component } = await mountGhostty();
-    unmount(component);
-    ghosttyMounts.splice(ghosttyMounts.indexOf(component), 1);
-    expect(ghostty.record.events).toContain("ungate");
   });
 });
 

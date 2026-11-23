@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { mask, poll } from "../lib/launcher-devserver.mjs";
 import { readPaneStripPreference, windowSessions, writePaneStripPreference } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const TAB = ".tabs .tab-row > .tab";
@@ -161,9 +160,9 @@ async function snapshot(fixture) {
     allSessions: await allSessions(fixture) };
 }
 
-async function fixture(ctx, index, report, backend) {
+async function fixture(ctx, index, report) {
   const suffix = `${Date.now().toString(36)}-${index}`;
-  const result = { backend, windowId: `tab266-${suffix}`, token: new URL(ctx.serverUrl).searchParams.get("t"), files: [], page: null,
+  const result = { backend: "ghostty", windowId: `tab266-${suffix}`, token: new URL(ctx.serverUrl).searchParams.get("t"), files: [], page: null,
     labels: { control: `axc-control-${suffix}.md`, file: `axc-file-${suffix}.md`, live: `axc-live-${suffix}`, ended: `axc-ended-${suffix}` } };
   result.cs = async (args) => {
     try {
@@ -199,11 +198,8 @@ async function fixture(ctx, index, report, backend) {
   await writePaneStripPreference(page, result.token, false);
   for (const label of [result.labels.control, result.labels.file]) await result.cs(["open", label, "--window", result.windowId]);
   await poll("both clean file tabs", async () => (await state(page)).tabs.filter((tab) => tab.label?.endsWith(".md")).length === 2);
-  result.originalTerminalPrefs = await readTerminalPrefs(page, result.token);
-  report.originalGhostty = result.originalTerminalPrefs.ghostty;
-  await writeTerminalPrefs(page, result.token, { ghostty: backend === "ghostty" });
   for (const kind of ["live", "ended"]) {
-    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], backend);
+    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], "ghostty");
     result[`${kind}Session`] = row.session_id;
     result[`${kind}TabId`] = row.tab;
     result[`${kind}PaneId`] = row.pane;
@@ -247,11 +243,6 @@ async function cleanup(f, report) {
       };
       for (const row of await own()) await f.cs(["terminal", "close", "--tab-name", row.name]);
       await poll("cleanup removed fixture sessions from the registry", async () => (await own()).length === 0);
-    });
-    if (f.originalTerminalPrefs) await attempt(async () => {
-      await writeTerminalPrefs(f.page, f.token, { ghostty: f.originalTerminalPrefs.ghostty });
-      report.restoredGhostty = (await readTerminalPrefs(f.page, f.token)).ghostty;
-      assert.equal(report.restoredGhostty, report.originalGhostty, "instrument: terminal backend preference restored");
     });
     if (f.originalStrip) await attempt(() => writePaneStripPreference(f.page, f.token, f.originalStrip.on));
     await attempt(() => f.page.close());
@@ -586,15 +577,16 @@ async function closeControl(ctx, f, kind) {
 export default {
   name: "tab-accessibility",
   async run(ctx) {
-    const evidence = { engine: "Chrome", backends: ["xterm", "ghostty"], nativeAccessibility: "not exercised",
+    const backend = "ghostty";
+    const evidence = { engine: "Chrome", backends: ["ghostty"], nativeAccessibility: "not exercised",
       fixtures: [], arms: [], supplementalArms: [], status: "incomplete" };
     try {
       assert.ok(ctx.controlSocket, "instrument: real control socket is available");
-      for (const backend of evidence.backends) for (const kind of ["live", "file", "ended"]) for (const closing of [false, true]) {
+      for (const kind of ["live", "file", "ended"]) for (const closing of [false, true]) {
         const report = { backend, kind, closing, commands: [] };
         evidence.fixtures.push(report);
         try {
-          const f = await fixture(ctx, evidence.fixtures.length, report, backend);
+          const f = await fixture(ctx, evidence.fixtures.length, report);
           if (kind === "live" && !closing) {
             report.initialShot = await ctx.shot(`${backend}-strip-1600-before`, f.page);
             await f.page.setViewport({ width: 640, height: 1000 });
@@ -628,14 +620,14 @@ export default {
           delete report.fixture;
         }
       }
-      evidence.backendResults = evidence.backends.map((backend) => ({ backend,
+      evidence.backendResults = [{ backend,
         arms: evidence.arms.filter((arm) => arm.backend === backend).length,
         supplementalArms: evidence.supplementalArms.filter((arm) => arm.backend === backend).length,
         passed: evidence.arms.filter((arm) => arm.backend === backend && arm.status === "passed").length,
         supplementalPassed: evidence.supplementalArms.filter((arm) => arm.backend === backend && arm.status === "passed").length,
-      }));
+      }];
       evidence.status = evidence.backendResults.every((result) => result.arms === 18 && result.supplementalArms === 4) &&
-        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.status === "passed") && evidence.fixtures.every((report) =>
+        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.backend === "ghostty" && arm.status === "passed") && evidence.fixtures.every((report) =>
           !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length && report.focusTrace &&
           !report.focusTrace.error && report.focusTrace.dropped === 0) ? "passed" : "failed";
     } catch (error) { evidence.error = mask(error.message); }

@@ -1,7 +1,6 @@
-// A click on a link a terminal underlines opens the link menu, on ghostty
-// and on xterm.js.
+// A click on a link a Ghostty terminal underlines opens the link menu.
 //
-// Each backend gets a fresh terminal whose shell cds into a seeded folder,
+// A fresh terminal's shell cds into a seeded folder,
 // writes `stty size` to a file there, clears the screen and prints, one a
 // row from the top: a URL, an OSC 8 link to `./notes316.md` (text
 // NOTES-REL), an OSC 8 `file://<uname -n>/<abs>/notes316.md` (NOTES-ABS),
@@ -15,37 +14,36 @@
 // have opened.
 //
 // Before each click on a link the pointer moves to another row and then onto
-// the link, as a hand does, in every leg but resting-click: xterm.js reads a
-// row's links anew only when the pointer enters the row (Linkifier
-// `_handleHover`), so a link printed into the row under a pointer resting
-// there is found only once it leaves the row.
+// the link, as a hand does, in every leg but resting-click, which leaves
+// the pointer still while the link is printed underneath it.
 //
-// Legs, each on both backends unless noted:
+// Required legs:
 //   url-menu        a click on the URL opens the menu with "Open in
 //                   browser", the URL and its host on a line of its own,
 //                   and the menu takes the keyboard
 //                   onto that entry; pressing it reaches the opener.
-//   rel-editor      (ghostty) a click on NOTES-REL shows the relative
+//   rel-editor      a click on NOTES-REL shows the relative
 //                   target and "Open in editor"; pressing it opens an editor
 //                   tab on the seeded file, resolved against the shell's
-//                   directory. xterm.js's OSC 8 provider drops a target that
-//                   is not an absolute URL, so it underlines no relative
-//                   link and the leg does not run there.
+//                   directory.
 //   abs-editor      the same for NOTES-ABS, the file: URI on this host.
 //   missing         "Open in editor" on MISSING ends disabled, "not found".
 //   foreign         "Open in editor" on FOREIGN shows disabled with the host.
-//   home-editor     (ghostty) "Open in editor" on HOME opens the file in the
+//   home-editor     "Open in editor" on HOME opens the file in the
 //                   server's home: an editor tab, or, where the file is
 //                   outside the workspace and no host serves it, the refusal
-//                   naming the expanded path, never "not found". xterm.js
-//                   underlines no `~/` OSC 8 target, as with NOTES-REL.
+//                   naming the expanded path, never "not found".
 //   escape-typing   Escape closes the menu, and typing reaches the PTY.
 //   output-closes   output that clears the screen closes an open menu.
-//   resting-click   (ghostty) a URL printed into the row under a resting
+//   resting-click   a URL printed into the row under a resting
 //                   pointer opens the menu with no move off the row.
 //   ctrl-click      Ctrl with a click opens the URL with no menu.
 //   double-click    a double click on the URL leaves no menu and opens
 //                   nothing.
+//   out-and-back    a drag past half a cell and back opens no menu or link;
+//                   the clipboard text is recorded without an assertion.
+//   padding-release a row-zero press released just above the canvas opens
+//                   no link, including one in hidden history.
 // Then the shell prints a URL, turns on mouse tracking (1000, SGR 1006) and
 // becomes a raw recorder of what the PTY receives:
 //   tracked-click   a plain click reaches the PTY as a report; no menu, and
@@ -54,12 +52,13 @@
 //   shift-drag      Shift with a drag selects (the copy chord copies it);
 //                   the PTY reads nothing.
 //
-// Every leg runs and reports; the check fails naming each failed leg. At a
-// base without the menu the menu legs fail on the missing menu, not in setup.
+// Every leg runs and reports; the check fails naming each failed leg.
 
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const DIR = "linkcheck316";
@@ -69,6 +68,7 @@ const URL_ARG = "s://example.com/link316?q=1";
 const URL_316 = `http${URL_ARG}`;
 const TRACK_URL = "https://example.com/track316";
 const REST_URL = "https://example.com/rest316";
+const EDGE_URL = "https://example.com/edge316";
 const FOREIGN = "file://elsewhere.invalid/etc/hosts";
 const MENU = '.terminal-tab-menu-bubble[aria-label="terminal link menu"]';
 const SENTINEL = "SMOKE316_CLIPBOARD_SENTINEL";
@@ -227,14 +227,15 @@ export default {
       });
     }
 
-    async function runBackend(backend) {
-      const name = `SmokeLink316${backend === "ghostty" ? "G" : "X"}`;
+    async function runGhostty() {
+      const backend = "ghostty";
+      const name = "SmokeLink316G";
       const at = (leg) => `${backend}.${leg}`;
-      await writeTerminalPrefs(page, authToken, { ghostty: backend === "ghostty", mouse_capture: true });
-      await assertTerminalPrefs(ctx, { ghostty: backend === "ghostty", mouse_capture: true });
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend);
+      await writeTerminalPrefs(page, authToken, { mouse_capture: true });
+      await assertTerminalPrefs(ctx, { mouse_capture: true });
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
       tabs.push(name);
-      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES[backend]}`;
+      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
       const sizeFile = join(dir, `size316-${backend}`);
       rmSync(sizeFile, { force: true });
 
@@ -245,6 +246,8 @@ export default {
       await waitScrollback(name, "L316_READY");
       if (!existsSync(sizeFile)) throw new Error(`${backend}: the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
+      assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
+        "the PTY grid fits the link fixtures without wrapping");
       const home = existsSync(homeRecord) ? readFileSync(homeRecord, "utf8").trim() : "";
       if (home) homeFiles.add(join(home, HOME_FILE));
       await sleep(500);
@@ -344,49 +347,61 @@ export default {
         if (now.length !== before) throw new Error(`the opener got ${JSON.stringify(now.slice(before))}`);
       });
 
-      if (backend === "ghostty") {
-        await leg(at("rel-editor"), async () => {
-          await clickRow(ROW.rel);
-          const menu = await waitMenu("relative click");
-          if (menu.target !== `./${NOTES}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
-            throw new Error(`menu shows ${JSON.stringify(menu)}`);
+      await leg(at("out-and-back"), async () => {
+        const before = (await opened()).length;
+        const p = await cell(4, ROW.url);
+        await approach(p);
+        await seedPointerClipboard(page, SENTINEL);
+        await page.mouse.down();
+        try {
+          await page.mouse.move(p.x + p.w, p.y);
+          await page.mouse.move(p.x, p.y);
+        } finally { await page.mouse.up(); }
+        await expectNoMenu("out-and-back drag");
+        const copied = await page.evaluate(() => navigator.clipboard.readText());
+        const now = await opened();
+        assert.equal(now.length, before, "out-and-back drag opens no browser tab");
+        return { travel: p.w, threshold: p.w / 2, copied };
+      });
+
+      await leg(at("rel-editor"), async () => {
+        await clickRow(ROW.rel);
+        const menu = await waitMenu("relative click");
+        if (menu.target !== `./${NOTES}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
+          throw new Error(`menu shows ${JSON.stringify(menu)}`);
+        }
+        await press("open-editor");
+        await editorTabOpened("relative open");
+        await activateTab(name);
+        await sleep(500);
+      });
+      await leg(at("home-editor"), async () => {
+        if (!home) throw new Error("the shell wrote no $HOME");
+        await clickRow(ROW.home);
+        const menu = await waitMenu("home click");
+        if (menu.target !== `~/${HOME_FILE}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
+          throw new Error(`menu shows ${JSON.stringify(menu)}`);
+        }
+        await press("open-editor");
+        const expanded = join(home, HOME_FILE);
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const shown = await menuShown();
+          if (!shown) {
+            // Opened here, or routed to the window that serves it.
+            await activateTab(name).catch(() => {});
+            await sleep(500);
+            return { opened: expanded };
           }
-          await press("open-editor");
-          await editorTabOpened("relative open");
-          await activateTab(name);
-          await sleep(500);
-        });
-        await leg(at("home-editor"), async () => {
-          if (!home) throw new Error("the shell wrote no $HOME");
-          await clickRow(ROW.home);
-          const menu = await waitMenu("home click");
-          if (menu.target !== `~/${HOME_FILE}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
-            throw new Error(`menu shows ${JSON.stringify(menu)}`);
+          if (shown.reason) {
+            if (!shown.reason.includes(expanded)) throw new Error(`the open was refused without the home path: ${JSON.stringify(shown)}`);
+            await closeAnyMenu();
+            return { refusedNaming: expanded };
           }
-          await press("open-editor");
-          const expanded = join(home, HOME_FILE);
-          const deadline = Date.now() + 10_000;
-          for (;;) {
-            const shown = await menuShown();
-            if (!shown) {
-              // Opened here, or routed to the window that serves it.
-              await activateTab(name).catch(() => {});
-              await sleep(500);
-              return { opened: expanded };
-            }
-            if (shown.reason) {
-              if (!shown.reason.includes(expanded)) throw new Error(`the open was refused without the home path: ${JSON.stringify(shown)}`);
-              await closeAnyMenu();
-              return { refusedNaming: expanded };
-            }
-            if (Date.now() > deadline) throw new Error(`the open answered nothing: ${JSON.stringify(shown)}`);
-            await sleep(100);
-          }
-        });
-      } else {
-        results[at("rel-editor")] = "not run: xterm.js's OSC 8 provider drops a target that is not an absolute URL";
-        results[at("home-editor")] = "not run: xterm.js's OSC 8 provider drops a target that is not an absolute URL";
-      }
+          if (Date.now() > deadline) throw new Error(`the open answered nothing: ${JSON.stringify(shown)}`);
+          await sleep(100);
+        }
+      });
 
       await leg(at("abs-editor"), async () => {
         await clickRow(ROW.abs);
@@ -412,23 +427,52 @@ export default {
         });
       });
 
-      if (backend === "ghostty") {
-        // ghostty looks a link up at the click, so one printed into the row
-        // under a resting pointer is clickable with no move off the row.
-        await leg(at("resting-click"), async () => {
-          const p = await cell(2, 0);
-          await page.mouse.move(p.x, p.y);
-          await cs(["write", "--tab-name", name, `printf '\\033[H\\033[2Jhttp%s\\nR316_%s\\n' '${REST_URL.slice(4)}' READY\n`]);
-          await waitScrollback(name, "R316_READY");
-          await sleep(300);
-          await page.mouse.click(p.x, p.y);
-          const menu = await waitMenu("resting click");
-          if (menu.target !== REST_URL) throw new Error(`menu shows ${JSON.stringify(menu)}`);
-          await closeAnyMenu();
+      await leg(at("padding-release"), async () => {
+        // Fill history with links so a negative click row cannot silently
+        // pass merely because the wrongly mapped history row is empty.
+        await cs(["write", "--tab-name", name,
+          `printf '\\033[H\\033[2J'; i=0; while [ "$i" -lt ${rows + 4} ]; do printf 'http%s\\n' '${EDGE_URL.slice(4)}'; i=$((i+1)); done; printf '\\033[Hhttp%s\\nEDGE316_%s\\n' '${EDGE_URL.slice(4)}' READY\n`]);
+        const output = await waitScrollback(name, "EDGE316_READY");
+        const historyUrls = output.split(EDGE_URL).length - 1;
+        assert.ok(historyUrls > rows, "the PTY printed more link rows than fit on the screen");
+        await sleep(500);
+        const p = await cell(4, 0);
+        const edge = await page.$eval(surfaceQuery, (canvas) => {
+          const r = canvas.getBoundingClientRect();
+          const host = canvas.parentElement;
+          const h = host.getBoundingClientRect();
+          return { top: r.top, hostTop: h.top, padding: Number.parseFloat(getComputedStyle(host).paddingTop) };
         });
-      } else {
-        results[at("resting-click")] = "not run: xterm.js reads a row's links anew only when the pointer enters the row (the row's xterm.js limit)";
-      }
+        assert.ok(edge.top - edge.hostTop >= 2 && edge.padding >= 2, "the terminal has padding above the canvas");
+        assert.ok(p.w / 2 > 2, "the release is closer than the half-cell drag threshold");
+        const release = { x: p.x, y: edge.top - 1 };
+        assert.ok(await page.evaluate(({ query, point }) => {
+          const canvas = document.querySelector(query);
+          return document.elementFromPoint(point.x, point.y) === canvas.parentElement;
+        }, { query: surfaceQuery, point: release }), "the release point hits host padding, outside the canvas");
+        const before = (await opened()).length;
+        await page.mouse.move(p.x, edge.top + 1);
+        await page.mouse.down();
+        try { await page.mouse.move(release.x, release.y); }
+        finally { await page.mouse.up(); }
+        await expectNoMenu("padding release");
+        assert.equal((await opened()).length, before, "padding release opens no browser tab");
+        return { edge, release, historyUrls };
+      });
+
+      // ghostty looks a link up at the click, so one printed into the row
+      // under a resting pointer is clickable with no move off the row.
+      await leg(at("resting-click"), async () => {
+        const p = await cell(2, 0);
+        await page.mouse.move(p.x, p.y);
+        await cs(["write", "--tab-name", name, `printf '\\033[H\\033[2Jhttp%s\\nR316_%s\\n' '${REST_URL.slice(4)}' READY\n`]);
+        await waitScrollback(name, "R316_READY");
+        await sleep(300);
+        await page.mouse.click(p.x, p.y);
+        const menu = await waitMenu("resting click");
+        if (menu.target !== REST_URL) throw new Error(`menu shows ${JSON.stringify(menu)}`);
+        await closeAnyMenu();
+      });
 
       // The shell prints a URL, turns on mouse tracking and becomes a raw
       // recorder of what the PTY receives.
@@ -505,11 +549,15 @@ export default {
 
     let runError = null;
     try {
-      await runBackend("ghostty");
-      await runBackend("xterm");
+      await runGhostty();
       if (failures.length > 0) {
         throw new Error(`failed legs: ${failures.join(", ")}\n${JSON.stringify(results, null, 2)}`);
       }
+      const required = ["url-menu", "foreign", "missing", "escape-typing", "ctrl-click", "double-click",
+        "out-and-back", "rel-editor", "home-editor", "abs-editor", "output-closes", "padding-release",
+        "resting-click", "tracked-click", "shift-click", "shift-drag"]
+        .map((leg) => `ghostty.${leg}`);
+      assert.deepEqual(Object.keys(results).sort(), required.sort(), "all 16 Ghostty link-menu legs ran");
       return results;
     } catch (error) {
       runError = error;

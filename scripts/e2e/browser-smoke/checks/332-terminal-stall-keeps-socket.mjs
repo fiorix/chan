@@ -12,7 +12,6 @@ import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const WAKE_STALL_MS = 30_000;
 // Past the 45 s read deadline, whose timer is due while the page is stalled.
@@ -629,8 +628,6 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     const result = {};
     const pageErrors = [];
     const onError = (error) => pageErrors.push(String(error));
@@ -654,7 +651,6 @@ export default {
       return fixture;
     };
     try {
-      await writeTerminalPrefs(page, token, { ghostty: true });
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await ctx.waitWindowLive(windowId);
       await page.evaluate(installTrace);
@@ -696,7 +692,6 @@ export default {
       await page.evaluate(() => window.__stall332?.restore()).catch(() => {});
       await relay?.close().catch(() => {});
       for (const fixture of fixtures) await fixture.close().catch(() => {});
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
     }
   },
 };

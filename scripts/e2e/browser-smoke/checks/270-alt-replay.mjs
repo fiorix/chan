@@ -1,6 +1,6 @@
 // Socket frames establish every reasserted mode, including urxvt 1015.
-// The xterm click arm uses its supported 1016 pixel encoding; ghostty's
-// binding supports none of the newly tracked modes and runs the wire arm.
+// Ghostty also proves alternate-screen replay exclusion. These arms cover
+// the attach wire, not 1016 pixel-input encoding.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,7 +14,6 @@ const CPR = "\x1b[3;12R";
 const QUERY = "\x1b[3;12H\x1b[6n";
 const TRACKED_MODES = [1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
 const SUPPORT = {
-  xterm: "@xterm/xterm 6.0.0: src/common/InputHandler.ts selects SGR_PIXELS for 1016; src/browser/CoreBrowserTerminal.ts passes screenElement to src/browser/services/MouseService.ts, which floors CSS offsets after padding; src/common/services/CoreMouseService.ts emits those pixel coordinates unchanged",
   ghostty: "web/packages/ghostty-web-ng/lib/terminal.ts passes only hasSgrMouseMode(1006); lib/input-handler.ts sendMouseEvent chooses SGR cells or X10, and vt/ghosttyVt.ts hasMouseTracking excludes 9; this input binding implements none of the newly tracked modes 9, 1001, 1005, 1015, 1016",
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -216,8 +215,8 @@ async function selectionCopy(page, receipt, phase, sentinel, timeoutMs, required
   return null;
 }
 
-// Select the visible grid, rather than Copy scrollback, whose xterm serializer
-// includes the saved normal buffer even while the alternate screen is active.
+// Select the visible grid so the copy represents the alternate-screen draw
+// without including saved normal-buffer history.
 async function copyVisible(page, row, backend, receipts) {
   const receipt = { gesture: "ordinary-drag" };
   receipts.push(receipt);
@@ -227,8 +226,7 @@ async function copyVisible(page, row, backend, receipts) {
   try {
     await page.evaluate((value) => window.__copy270.reset("drag", value), sentinel);
     await page.mouse.move(box.x + 1, box.y + 1);
-    // This arm enables no mouse reporting. Shift extends an existing xterm
-    // selection and cannot create its first anchor on the alternate buffer.
+    // Mouse reporting is disabled, so an ordinary drag selects the grid.
     try {
       await page.mouse.down();
       await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2, { steps: 12 });
@@ -259,54 +257,6 @@ async function parsedOutput(fixture, bytes = "") {
   // after parsing the preceding output and the explicit cursor placement.
   await fixture.waitFor(() => inputSince(fixture, index).includes(Buffer.from(CPR)));
   return inputSince(fixture, index).toString("base64");
-}
-
-async function pixelClickBytes(page, fixture, row, ready) {
-  const box = await screenBox(page, row, "xterm");
-  assert.ok(ready.cols >= 20 && ready.rows >= 10, "the ready grid holds the target cell");
-  const selector = screenSelector(row, "xterm");
-  await page.evaluate((query) => {
-    const screen = document.querySelector(query);
-    const points = [];
-    const record = (event) => {
-      const rect = screen.getBoundingClientRect();
-      const style = getComputedStyle(screen);
-      const left = Number.parseInt(style.paddingLeft, 10) || 0;
-      const top = Number.parseInt(style.paddingTop, 10) || 0;
-      points.push({ type: event.type, trusted: event.isTrusted, button: event.button,
-        clientX: event.clientX, clientY: event.clientY,
-        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-        padding: { left, top },
-        x: Math.floor(Math.min(Math.max(event.clientX - rect.left - left, 0), rect.width - 1)),
-        y: Math.floor(Math.min(Math.max(event.clientY - rect.top - top, 0), rect.height - 1)) });
-    };
-    screen.addEventListener("mousedown", record, true);
-    screen.addEventListener("mouseup", record, true);
-    window.__mouse270 = { points, close: () => {
-      screen.removeEventListener("mousedown", record, true);
-      screen.removeEventListener("mouseup", record, true);
-    } };
-  }, selector);
-  const index = fixture.records.length;
-  let points;
-  try {
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    points = await page.evaluate(() => window.__mouse270.points);
-  } finally {
-    await page.evaluate(() => { window.__mouse270.close(); delete window.__mouse270; });
-  }
-  assert.deepEqual(points.map((point) => point.type), ["mousedown", "mouseup"]);
-  assert.ok(points.every((point) => point.trusted && point.button === 0), "trusted left press and release reached the screen");
-  assert.ok(points[0].x > ready.cols && points[0].y > ready.rows, "the coordinates distinguish pixels from cells");
-  await fixture.send("bytes", { base64: Buffer.from(QUERY).toString("base64") });
-  await fixture.waitFor(() => inputSince(fixture, index).includes(Buffer.from(CPR)));
-  const received = inputSince(fixture, index);
-  const end = received.indexOf(Buffer.from(CPR));
-  assert.ok(end >= 0, "the parser reply brackets all earlier mouse input");
-  const bytes = received.subarray(0, end);
-  const expected = points.map((point) => `\x1b[<0;${point.x};${point.y}${point.type === "mouseup" ? "m" : "M"}`).join("");
-  return { points, base64: bytes.toString("base64"), hex: bytes.toString("hex"),
-    expectedHex: Buffer.from(expected).toString("hex") };
 }
 
 async function reloadSame(ctx, page, cs, trace, row, name, before, fullReplay = false) {
@@ -345,141 +295,123 @@ export default {
     assert.ok(windowId, "the smoke window has an id");
     await ctx.waitWindowLive(windowId);
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
+    const originalMouseCapture = (await readTerminalPrefs(page, token)).mouse_capture;
     const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
       cwd: ctx.workspaceDir,
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
+    const backend = "ghostty";
     const failures = [];
     const results = [];
     try {
-      for (const backend of ["xterm", "ghostty"]) {
-        await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", mouse_capture: true });
-        for (const arm of backend === "xterm" ? ["1047", "modes", "1016"] : ["1047", "modes"]) {
-          const name = `AltReplay270-${backend}-${arm}`;
-          const result = { backend, arm, support: SUPPORT[backend], accepted: false };
-          const trace = await traceTerminalSockets(page);
-          const fixture = await startTerminalFixture({
-            logPath: join(ctx.outDir, `270-${backend}-${arm}-fixture.bin`), deadlineMs: 20_000,
-          });
-          let privateDir;
-          let creationAttempted = false;
-          const fail = (error) => {
-            const message = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
-            result.accepted = false;
-            (result.errors ??= []).push(message);
-            failures.push(`${backend}/${arm}: ${message}`);
-          };
-          try {
-            // Spawn env travels in the browser's initial socket URL, which the
-            // runner records. Source credentials only inside the owned PTY.
-            privateDir = mkdtempSync(join(tmpdir(), "chan-alt-replay-"));
-            const envFile = join(privateDir, "fixture-env");
-            writeFileSync(envFile, Object.entries(fixture.env)
-              .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`).join(""), { mode: 0o600 });
-            creationAttempted = true;
-            let row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend);
-            result.before = await prelude(trace, name);
-            const normal = `NORMAL270_${backend}`;
-            const initial = `ALT270_${backend}`;
-            const mode = arm === "1047" ? "1047" : "1049";
-            result.bootstrap = "stty -opost -echo && printf '\\033[H\\033[2J\\033[3J' && "
-              + `printf '%s\\r\\n' ${shellQuote(normal)} && `
-              + `printf '\\033[?${mode}h\\033[2J\\033[H%s\\r\\n' ${shellQuote(initial)} && `
-              + `. ${shellQuote(envFile)} && `
-              + fixture.command;
-            await cs(["write", "--tab-name", name, result.bootstrap + "\n"]);
-            result.fixture = await fixture.ready();
-            assert.ok(result.fixture.tty && result.fixture.raw, "the fixture records a real raw PTY");
-            result.initialParserReply = await parsedOutput(fixture);
+      await writeTerminalPrefs(page, token, { mouse_capture: true });
+      for (const arm of ["1047", "modes"]) {
+        const name = `AltReplay270-${backend}-${arm}`;
+        const result = { backend, arm, support: SUPPORT[backend], accepted: false };
+        const trace = await traceTerminalSockets(page);
+        const fixture = await startTerminalFixture({
+          logPath: join(ctx.outDir, `270-${backend}-${arm}-fixture.bin`), deadlineMs: 20_000,
+        });
+        let privateDir;
+        let creationAttempted = false;
+        const fail = (error) => {
+          const message = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
+          result.accepted = false;
+          (result.errors ??= []).push(message);
+          failures.push(`${backend}/${arm}: ${message}`);
+        };
+        try {
+          // Spawn env travels in the browser's initial socket URL, which the
+          // runner records. Source credentials only inside the owned PTY.
+          privateDir = mkdtempSync(join(tmpdir(), "chan-alt-replay-"));
+          const envFile = join(privateDir, "fixture-env");
+          writeFileSync(envFile, Object.entries(fixture.env)
+            .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`).join(""), { mode: 0o600 });
+          creationAttempted = true;
+          let row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+          result.before = await prelude(trace, name);
+          const normal = `NORMAL270_${backend}`;
+          const initial = `ALT270_${backend}`;
+          const mode = arm === "1047" ? "1047" : "1049";
+          result.bootstrap = "stty -opost -echo && printf '\\033[H\\033[2J\\033[3J' && "
+            + `printf '%s\\r\\n' ${shellQuote(normal)} && `
+            + `printf '\\033[?${mode}h\\033[2J\\033[H%s\\r\\n' ${shellQuote(initial)} && `
+            + `. ${shellQuote(envFile)} && `
+            + fixture.command;
+          await cs(["write", "--tab-name", name, result.bootstrap + "\n"]);
+          result.fixture = await fixture.ready();
+          assert.ok(result.fixture.tty && result.fixture.raw, "the fixture records a real raw PTY");
+          result.initialParserReply = await parsedOutput(fixture);
 
-            if (arm === "1047") {
-              result.selectionCopies = [];
-              result.initialVisible = await copyVisible(page, row, backend, result.selectionCopies);
-              assert.ok(result.initialVisible.includes(initial), "the alternate-screen draw is visible before reload");
-              assert.ok(!result.initialVisible.includes(normal), "the initial alternate screen excludes normal text");
-              await ctx.shot(`270-${backend}-1047-before`);
-              const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before, true);
-              row = restored.row;
-              result.after = restored.prelude;
-              assert.equal(result.after.request.session, result.before.session.id, "the reload request attaches the same PTY");
-              assert.equal(result.after.request.since, "0", "full replay requires an explicit since=0 request");
-              const live = `AFTER270_${backend}`;
-              result.restoredParserReply = await parsedOutput(fixture, `\x1b[H${live}`);
-              result.restoredVisible = await copyVisible(page, row, backend, result.selectionCopies);
-              await ctx.shot(`270-${backend}-1047-after`);
-              assert.ok(result.restoredVisible.includes(live), "the reattached view draws live output");
-              assert.ok(!result.restoredVisible.includes(normal), "normal-screen text never enters the reattached view");
-              assert.equal(result.after.session.replay_bytes, 0, "the 1047 attach replays no normal-screen bytes");
-              assert.ok(!result.after.binary.includes(normal), "the attach wire carries no normal-screen marker");
-            } else if (arm === "modes") {
-              result.programSetModes = TRACKED_MODES;
-              result.modesParserReply = await parsedOutput(fixture, `\x1b[?${TRACKED_MODES.join(";")}h`);
-              const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
-              row = restored.row;
-              result.after = restored.prelude;
-              result.restoredParserReply = await parsedOutput(fixture, `\x1b[HMODES270_${backend}`);
-              result.reassertedModes = TRACKED_MODES.filter((mode) => result.after.binary.includes(`\x1b[?${mode}h`));
-              await ctx.shot(`270-${backend}-modes-after`);
-              assert.deepEqual(result.reassertedModes, TRACKED_MODES, "the real attach prelude reasserts every mode the program set, including 1015");
-              result.clickAcceptance = backend === "ghostty"
-                ? { applicable: false, reason: SUPPORT.ghostty, coverage: "socket prelude only" }
-                : { applicable: true, coverage: "separate 1016 arm" };
-            } else {
-              result.modesParserReply = await parsedOutput(fixture, "\x1b[?1000;1016h");
-              result.mouseBefore = await pixelClickBytes(page, fixture, row, result.before.ready);
-              assert.equal(result.mouseBefore.hex, result.mouseBefore.expectedHex, "the renderer sends exact SGR pixel coordinates before reload");
-              const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
-              row = restored.row;
-              result.after = restored.prelude;
-              // No mode sequence is emitted after reload. The server's
-              // reassert alone must restore the program's input encoding.
-              result.restoredParserReply = await parsedOutput(fixture, `\x1b[HMOUSE270_${backend}`);
-              result.mouseAfter = await pixelClickBytes(page, fixture, row, result.after.ready);
-              // Echo the actual PTY receipt through the program's output path.
-              await parsedOutput(fixture, `\x1b[2;1HRAW270:${result.mouseAfter.hex}`);
-              await ctx.shot(`270-${backend}-1016-after`);
-              assert.equal(result.mouseAfter.hex, result.mouseAfter.expectedHex, "the reattached click reaches the PTY in SGR pixel encoding");
-              assert.ok(result.after.binary.includes("\x1b[?1016h"), "the attach prelude reasserts SGR pixel encoding");
-            }
-            result.accepted = true;
-          } catch (error) {
-            fail(error);
-            await ctx.shot(`270-${backend}-${arm}-failure`).catch(() => {});
-          } finally {
-            result.flush = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
-              fail(new Error(`fixture flush: ${error.message}`));
-              return null;
-            });
-            // Creation can succeed before the helper's attachment wait fails.
-            if (creationAttempted) await cs(["close", "--tab-name", name]).then(() => {
-              result.terminalClosed = true;
-            }).catch((error) => {
-              fail(new Error(`close owned terminal: ${error.message}`));
-            });
-            await fixture.close().then(() => { result.fixtureClosed = true; }).catch(fail);
-            if (privateDir) {
-              try {
-                rmSync(privateDir, { recursive: true });
-                result.credentialsRemoved = true;
-              } catch (error) { fail(error); }
-            }
-            result.records = fixture.records;
-            result.connections = trace.connections;
-            await trace.close().then(() => { result.traceClosed = true; }).catch(fail);
-            writeFileSync(join(ctx.outDir, `270-${backend}-${arm}.json`), JSON.stringify(result, null, 2) + "\n");
-            results.push({ backend, arm, accepted: result.accepted, errors: result.errors ?? [],
-              evidence: `270-${backend}-${arm}.json` });
+          if (arm === "1047") {
+            result.selectionCopies = [];
+            result.initialVisible = await copyVisible(page, row, backend, result.selectionCopies);
+            assert.ok(result.initialVisible.includes(initial), "the alternate-screen draw is visible before reload");
+            assert.ok(!result.initialVisible.includes(normal), "the initial alternate screen excludes normal text");
+            await ctx.shot(`270-${backend}-1047-before`);
+            const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before, true);
+            row = restored.row;
+            result.after = restored.prelude;
+            assert.equal(result.after.request.session, result.before.session.id, "the reload request attaches the same PTY");
+            assert.equal(result.after.request.since, "0", "full replay requires an explicit since=0 request");
+            const live = `AFTER270_${backend}`;
+            result.restoredParserReply = await parsedOutput(fixture, `\x1b[H${live}`);
+            result.restoredVisible = await copyVisible(page, row, backend, result.selectionCopies);
+            await ctx.shot(`270-${backend}-1047-after`);
+            assert.ok(result.restoredVisible.includes(live), "the reattached view draws live output");
+            assert.ok(!result.restoredVisible.includes(normal), "normal-screen text never enters the reattached view");
+            assert.equal(result.after.session.replay_bytes, 0, "the 1047 attach replays no normal-screen bytes");
+            assert.ok(!result.after.binary.includes(normal), "the attach wire carries no normal-screen marker");
+          } else if (arm === "modes") {
+            result.programSetModes = TRACKED_MODES;
+            result.modesParserReply = await parsedOutput(fixture, `\x1b[?${TRACKED_MODES.join(";")}h`);
+            const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
+            row = restored.row;
+            result.after = restored.prelude;
+            result.restoredParserReply = await parsedOutput(fixture, `\x1b[HMODES270_${backend}`);
+            result.reassertedModes = TRACKED_MODES.filter((mode) => result.after.binary.includes(`\x1b[?${mode}h`));
+            await ctx.shot(`270-${backend}-modes-after`);
+            assert.deepEqual(result.reassertedModes, TRACKED_MODES, "the real attach prelude reasserts every mode the program set, including 1015");
+            result.clickAcceptance = { applicable: false, reason: SUPPORT.ghostty, coverage: "socket prelude only" };
           }
+          result.accepted = true;
+        } catch (error) {
+          fail(error);
+          await ctx.shot(`270-${backend}-${arm}-failure`).catch(() => {});
+        } finally {
+          result.flush = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
+            fail(new Error(`fixture flush: ${error.message}`));
+            return null;
+          });
+          // Creation can succeed before the helper's attachment wait fails.
+          if (creationAttempted) await cs(["close", "--tab-name", name]).then(() => {
+            result.terminalClosed = true;
+          }).catch((error) => {
+            fail(new Error(`close owned terminal: ${error.message}`));
+          });
+          await fixture.close().then(() => { result.fixtureClosed = true; }).catch(fail);
+          if (privateDir) {
+            try {
+              rmSync(privateDir, { recursive: true });
+              result.credentialsRemoved = true;
+            } catch (error) { fail(error); }
+          }
+          result.records = fixture.records;
+          result.connections = trace.connections;
+          await trace.close().then(() => { result.traceClosed = true; }).catch(fail);
+          writeFileSync(join(ctx.outDir, `270-${backend}-${arm}.json`), JSON.stringify(result, null, 2) + "\n");
+          results.push({ backend, arm, accepted: result.accepted, errors: result.errors ?? [],
+            evidence: `270-${backend}-${arm}.json` });
         }
       }
     } finally {
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty, mouse_capture: original.mouse_capture });
+      await writeTerminalPrefs(page, token, { mouse_capture: originalMouseCapture });
     }
     const details = { arms: results, support: SUPPORT };
     if (failures.length) throw Object.assign(new Error(failures.join("\n")), { smokeDetails: details });
-    assert.equal(results.length, 5, "both backends ran every required arm");
+    assert.deepEqual(results.map(({ backend, arm }) => `${backend}/${arm}`), ["ghostty/1047", "ghostty/modes"],
+      "Ghostty ran every required replay and prelude arm");
     return details;
   },
 };

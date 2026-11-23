@@ -244,8 +244,8 @@ export default {
 
     async function assertLauncherChordAfterSurvey() {
       // macOS Option changes `event.key` for Ctrl+Alt+K (usually to `˚`).
-      // Dispatch that exact browser shape from the real xterm textarea: the
-      // terminal escape registry must match physical `code` like App does.
+      // Dispatch that browser shape from the focused Ghostty terminal element:
+      // the terminal escape registry must match physical `code` like App does.
       await page.evaluate(() => {
         const focused = document.activeElement;
         if (!(focused instanceof HTMLElement)) {

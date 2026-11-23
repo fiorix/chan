@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { waitRestoredTerminal } from "../checks/290-rich-prompt-disconnected.mjs";
-import { openAttachedTerminal } from "./terminal-attach.mjs";
+import { openAttachedTerminal, readTerminalAttachment } from "./terminal-attach.mjs";
 
 const original = { session_id: "original-session", window: "check-window", pane: "pane-1", tab: "term-2" };
 const restored = { ...original, pane: "pane-2", tab: "term-3" };
@@ -43,7 +43,7 @@ function fixture(t, backend, rows, visible = restored, box = { width: 800, heigh
   };
 }
 
-for (const backend of ["xterm", "ghostty"]) {
+for (const backend of ["ghostty"]) {
   test(`${backend}: resolve the original session under regenerated coordinates`, async (t) => {
     const f = fixture(t, backend, [restored]);
     const result = await waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0);
@@ -89,7 +89,7 @@ for (const backend of ["xterm", "ghostty"]) {
   });
 
   test(`${backend}: another backend cannot satisfy attachment`, async (t) => {
-    const other = backend === "xterm" ? "ghostty" : "xterm";
+    const other = "xterm";
     const f = fixture(t, other, [restored]);
     await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
   });
@@ -128,9 +128,9 @@ test("opening ghostty refuses xterm's nested WebGL canvas", async (t) => {
 
 for (const mismatch of [{ window: "another-window" }, { window_status: "offline" }]) {
   test(`opening reports the name-matched row when ${Object.keys(mismatch)[0]} prevents attachment`, async (t) => {
-    const row = { ...restored, name: "requested-xterm", window_status: "alive", ...mismatch };
-    const { ctx, page, cs } = openingFixture(t, "xterm", row);
-    await assert.rejects(openAttachedTerminal(ctx, page, cs, original.window, row.name, "xterm"), (error) => {
+    const row = { ...restored, name: "requested-ghostty", window_status: "alive", ...mismatch };
+    const { ctx, page, cs } = openingFixture(t, "ghostty", row);
+    await assert.rejects(openAttachedTerminal(ctx, page, cs, original.window, row.name, "ghostty"), (error) => {
       assert.match(error.message, /terminal not attached/);
       assert.ok(error.message.includes(`row=${JSON.stringify(row)}`), error.message);
       return true;
@@ -140,5 +140,79 @@ for (const mismatch of [{ window: "another-window" }, { window_status: "offline"
 
 test("a malformed roster fails instead of satisfying attachment", async () => {
   const cs = async () => ({ stdout: "{" });
-  await assert.rejects(waitRestoredTerminal({}, cs, original.window, original, "xterm", 0), SyntaxError);
+  await assert.rejects(waitRestoredTerminal({}, cs, original.window, original, "ghostty", 0), SyntaxError);
+});
+
+test("opening Ghostty requires its visible direct-child canvas and attached row", async (t) => {
+  const row = { ...restored, name: "requested-ghostty", window_status: "alive" };
+  const { ctx, page, cs, commands } = openingFixture(t, "ghostty", row);
+  assert.deepEqual(await openAttachedTerminal(ctx, page, cs, original.window, row.name, "ghostty"), row);
+  assert.deepEqual(commands, [["new", "--tab-name", row.name], ["list", "--json"]]);
+});
+
+const retiredBackend = /retired or unsupported terminal backend/;
+
+// Observe attempted reads independently from the returned error: a fixture's
+// missing browser method must never masquerade as the backend refusal.
+function refusingFixture(config) {
+  const reads = [], commands = [];
+  return {
+    reads, commands,
+    ctx: { serverUrl: "http://test.invalid" },
+    page: { evaluate: async (...args) => { reads.push(args); return config; } },
+    cs: async (args) => { commands.push(args); throw new Error("unexpected terminal command"); },
+  };
+}
+
+function synchronousRefusal(call, f) {
+  assert.throws(() => {
+    const result = call();
+    // A broken async boundary is a failure, without an unhandled rejection
+    // obscuring the assertion that diagnosed it.
+    result?.catch(() => {});
+  }, retiredBackend);
+  assert.deepEqual(f.reads, [], "refusal precedes every preference or DOM read");
+  assert.deepEqual(f.commands, [], "refusal precedes list and spawn commands");
+}
+
+for (const config of [{}, { ghostty: true }]) {
+  test(`requesting xterm refuses before reads/spawn with response ${JSON.stringify(config)}`, () => {
+    const f = refusingFixture(config);
+    synchronousRefusal(() => openAttachedTerminal(f.ctx, f.page, f.cs, original.window, "retired", "xterm"), f);
+  });
+}
+
+for (const backend of ["xterm", "unknown", "Ghostty", false, true, undefined, null, ["xterm", "ghostty"]]) {
+  test(`attachment boundaries synchronously refuse ${JSON.stringify(backend)}`, () => {
+    const f = refusingFixture({ ghostty: true });
+    synchronousRefusal(() => readTerminalAttachment(f.page, f.cs, backend, () => true), f);
+    synchronousRefusal(() => openAttachedTerminal(f.ctx, f.page, f.cs, original.window, "retired", backend), f);
+  });
+}
+
+test("a leftover two-backend caller fails before spawning either arm", async () => {
+  const f = refusingFixture({});
+  await assert.rejects(async () => {
+    for (const backend of ["xterm", "ghostty"]) {
+      await openAttachedTerminal(f.ctx, f.page, f.cs, original.window, "leftover", backend);
+    }
+  }, retiredBackend);
+  assert.deepEqual(f.reads, []);
+  assert.deepEqual(f.commands, []);
+});
+
+test("non-JSON backend values still get the explicit refusal without coercion", () => {
+  const cyclic = {};
+  cyclic.self = cyclic;
+  for (const backend of [1n, Symbol("ghostty"), cyclic]) {
+    const f = refusingFixture({});
+    synchronousRefusal(() => openAttachedTerminal(f.ctx, f.page, f.cs, original.window, "invalid", backend), f);
+  }
+});
+
+test("restoration refuses the retired backend before any roster read", async () => {
+  const f = refusingFixture({});
+  await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "xterm", 0), retiredBackend);
+  assert.deepEqual(f.reads, []);
+  assert.deepEqual(f.commands, []);
 });

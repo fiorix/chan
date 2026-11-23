@@ -46,7 +46,6 @@
 // protocol timeout on this page.
 
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB = "SmokeGhosttyFind211";
 const MARK = "FIND211_";
@@ -92,14 +91,10 @@ export default {
         ...opts,
       });
 
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
-    const flipped = original.ghostty !== true;
     const pageViewport = page.viewport();
     let resized = false;
     const readings = {};
     try {
-      if (flipped) await writeTerminalPrefs(page, token, { ghostty: true });
       const chunk = await page.evaluate(async () => {
         for (const script of document.querySelectorAll('script[type="module"][src]')) {
           const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
@@ -380,7 +375,6 @@ export default {
     } finally {
       if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
-      if (flipped) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
     }
   },
 };

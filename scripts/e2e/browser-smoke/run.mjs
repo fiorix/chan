@@ -14,6 +14,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -42,24 +43,25 @@ let currentCheck = null;
 let currentRecorder = null;
 let server = null;
 let browser = null;
-let resultsWritten = false;
+let finished = false;
 
 function unrunnable(...lines) {
   throw new Error(lines.join("\n"));
 }
 
-// Setup and evidence errors cannot establish a product assertion. Classify
-// typed I/O and browser errors without guessing from their message wording.
+// Setup and evidence errors cannot establish a product assertion. Inside a
+// check, only an explicit environment tag or disconnected browser overrides FAIL.
 function checkError(error, phase) {
   const environmental = phase !== "check" || error?.smokeEnvironment ||
-    ["ENOENT", "EACCES", "ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ETIMEDOUT"].includes(error?.code) ||
-    error?.name === "TimeoutError" || browser?.connected === false;
+    browser?.connected === false;
   const status = environmental ? "error" : "failed";
   const detail = maskTokens(error?.stack ?? String(error));
   currentCheck.errors ??= [];
   currentCheck.errors.push({ phase, status, detail });
   currentCheck.error = currentCheck.errors.map((entry) => `${entry.phase}: ${entry.detail}`).join("\n");
-  if (currentCheck.status !== "error") currentCheck.status = status;
+  if (currentCheck.status !== "error" && currentCheck.status !== "failed") {
+    currentCheck.status = status;
+  }
   currentCheck.ok = false;
   if (currentCheck.skipped) currentCheck.skipReason = currentCheck.reason;
   currentCheck.skipped = false;
@@ -67,43 +69,63 @@ function checkError(error, phase) {
 }
 
 function recordFatal(error, phase) {
-  results.fatal = maskTokens(error?.stack ?? String(error));
-  results.errorPhase = phase;
+  const detail = maskTokens(error?.stack ?? String(error));
+  results.fatal ??= detail;
+  results.errorPhase ??= phase;
   if (currentCheck && !results.checks.includes(currentCheck)) {
     checkError(error, phase);
     results.checks.push(currentCheck);
   }
-  console.error(`[smoke] ERROR (${phase}): ${results.fatal}`);
+  console.error(`[smoke] ERROR (${phase}): ${detail}`);
 }
 
-function writeResults() {
+function serialize(value) {
+  return JSON.stringify(value, (_key, entry) =>
+    typeof entry === "string" ? maskTokens(entry) : entry, 2);
+}
+
+function snapshotDetails(value) {
+  return JSON.parse(serialize(value ?? null));
+}
+
+function writeResults(final = false) {
   const path = join(outDir, "results.json");
-  if (resultsWritten) return path;
-  results.finishedAt = new Date().toISOString();
+  results.ran = results.checks.filter((c) => c.ran).length;
+  results.passed = results.checks.filter((c) => c.status === "passed").length;
   results.skipped = results.checks.filter((c) => c.skipped).length;
   results.failed = results.checks.filter((c) => c.status === "failed").length;
   results.errors = results.checks.filter((c) => c.status === "error").length;
-  results.status = results.fatal || results.errors ? "error" :
-    results.failed ? "failed" : results.skipped ? "skipped" : "passed";
-  if (results.errorPhase === "selection") results.status = "selection-error";
-  results.ok = results.status === "passed";
-  results.exitCode = results.ok ? 0 : results.status === "failed" ? 1 : 2;
-  writeFileSync(path, JSON.stringify(results, (_key, value) =>
-    typeof value === "string" ? maskTokens(value) : value, 2));
-  resultsWritten = true;
+  results.status = "running";
+  results.ok = false;
+  results.exitCode = null;
+  results.currentCheck = currentCheck && !results.checks.includes(currentCheck) ? currentCheck.file : null;
+  if (final) {
+    results.finishedAt = new Date().toISOString();
+    results.status = results.errorPhase !== undefined || results.errors ? "error" :
+      results.failed ? "failed" : results.skipped ? "skipped" :
+      results.passed > 0 && results.passed === results.selectedChecks.length ? "passed" : "error";
+    if (results.errorPhase === "selection") results.status = "selection-error";
+    results.ok = results.status === "passed";
+    results.exitCode = results.ok ? 0 : results.status === "failed" ? 1 : 2;
+  }
+  // A killed writer must leave the preceding complete snapshot readable.
+  writeFileSync(`${path}.tmp`, serialize(results));
+  renameSync(`${path}.tmp`, path);
   return path;
 }
 
 function finish() {
+  if (!outDir) process.exit(2);
   try {
-    console.log(`[smoke] results: ${writeResults()}`);
+    console.log(`[smoke] results: ${writeResults(true)}`);
   } catch (error) {
     console.error(`[smoke] ERROR (results): ${maskTokens(error?.stack ?? String(error))}`);
     process.exit(2);
   }
   const verdict = { passed: "ALL GREEN", failed: `${results.failed} FAILURE(S)`,
     skipped: "INCOMPLETE", error: "ERROR", "selection-error": "SELECTION ERROR" }[results.status];
-  console.log(`[smoke] ${verdict} (${results.checks.length - results.skipped} ran, ${results.skipped} skipped)`);
+  console.log(`[smoke] ${verdict} (${results.ran} ran; ${results.passed} passed, ${results.failed} failed, ${results.skipped} skipped, ${results.errors} errors)`);
+  finished = true;
   process.exit(results.exitCode);
 }
 
@@ -123,6 +145,14 @@ function recordCrash(kind, error) {
 
 process.on("unhandledRejection", (e) => recordCrash("unhandled rejection", e));
 process.on("uncaughtException", (e) => recordCrash("uncaught exception", e));
+process.on("exit", (code) => {
+  // A check can exit directly without producing a final verdict.
+  if (!finished && !process.argv.includes("--deps-only")) {
+    process.exitCode = code > 1 ? code : 2;
+    try { server?.child?.kill("SIGKILL"); } catch {}
+    try { browser?.process()?.kill("SIGKILL"); } catch {}
+  }
+});
 
 // The checks that start their own `chan devserver run` give it a throwaway
 // CHAN_HOME and CHAN_NO_DEVSERVER_HANDOFF, and it still binds a discovery
@@ -172,9 +202,6 @@ async function main() {
         "give the run a private 0700 runtime dir: XDG_RUNTIME_DIR=\"$(mktemp -d)\" node scripts/e2e/browser-smoke/run.mjs, or run it in an isolated guest",
       );
     }
-  }
-
-  if (!process.argv.includes("--deps-only")) {
     // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one of the
     // comma-separated prefixes; everything else still runs in order. Prefix
     // matching and ordinary run order are LEXICAL, not numeric. The destructive
@@ -188,6 +215,7 @@ async function main() {
       .filter((f) => !only || only.some((p) => f.startsWith(p)))
       .sort(compareCheckFiles);
     results.selectedChecks = checkFiles;
+    writeResults();
     if (missing.length || checkFiles.length === 0) {
       results.errorPhase = "selection";
       unrunnable(`SMOKE_ONLY=${process.env.SMOKE_ONLY} has unmatched prefixes: ${missing.join(", ") || "(empty selection)"}`);
@@ -473,12 +501,14 @@ async function main() {
         file,
         windowId,
         pagesClosed: 0,
+        ran: false,
         ok: false,
         skipped: false,
         screenshots: [],
         startedAt: new Date().toISOString(),
       };
       const t0 = Date.now();
+      writeResults();
       let checkBrowser = null;
       let phase = "setup";
       currentRecorder = new FailureRecord(file.replace(/\.mjs$/, ""), outDir);
@@ -532,7 +562,8 @@ async function main() {
         currentCheck.controlSocketAvailable = Boolean(findControlSocket(server.child.pid));
         if (currentCheck.controlSocketAvailable) await ctx.waitWindowLive(windowId);
         phase = "check";
-        currentCheck.details = (await mod.run(ctx)) ?? null;
+        currentCheck.ran = true;
+        currentCheck.details = snapshotDetails(await mod.run(ctx));
         currentCheck.ok = true;
         currentCheck.status = "passed";
       } catch (e) {
@@ -542,7 +573,10 @@ async function main() {
           currentCheck.reason = e.message;
         } else {
           checkError(e, phase);
-          if (e?.smokeDetails) currentCheck.details = e.smokeDetails;
+          if (e?.smokeDetails) {
+            try { currentCheck.details = snapshotDetails(e.smokeDetails); }
+            catch (error) { checkError(error, phase); }
+          }
           try {
             await ctx.shot("failure");
           } catch {}
@@ -573,9 +607,7 @@ async function main() {
             closeErrors.push(e);
           }
         }
-        if (closeErrors.length > 0) {
-          for (const error of closeErrors) checkError(error, "cleanup");
-        }
+        for (const error of closeErrors) checkError(error, "cleanup");
         ctx.page = null;
         ctx.browser = null;
         try {
@@ -589,6 +621,7 @@ async function main() {
       }
       currentCheck.durationMs = Date.now() - t0;
       results.checks.push(currentCheck);
+      writeResults();
       const label = { passed: "PASS", skipped: "SKIP", failed: "FAIL", error: "ERROR" }[currentCheck.status];
       console.log(`[smoke]   ${label}: ${maskTokens(currentCheck.error ?? currentCheck.reason ?? `(${currentCheck.durationMs}ms)`)}`);
       currentCheck = null;
@@ -599,9 +632,13 @@ async function main() {
     if (browser) {
       try { await browser.close(); } catch (error) { recordFatal(error, "browser cleanup"); }
     }
-    await teardownServer(chanBin, server.child, workspaceDir, server.chanHome, (l) =>
-      console.log(maskTokens(l)),
-    );
+    try {
+      await teardownServer(chanBin, server.child, workspaceDir, server.chanHome, (l) =>
+        console.log(maskTokens(l)),
+      );
+    } catch (error) {
+      recordFatal(error, "server cleanup");
+    }
   }
 }
 

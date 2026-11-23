@@ -33,6 +33,7 @@ vi.mock("../state/shortcuts", async (original) => ({
 
 import TerminalTab from "./TerminalTab.svelte";
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
@@ -178,9 +179,11 @@ describe("terminal input viewport", () => {
     const surface = host.querySelector<HTMLElement>("canvas")!;
     vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
     const position = { bubbles: true, cancelable: true, clientX: 1, clientY: 1 };
-    surface.dispatchEvent(wheel
-      ? new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 })
-      : new MouseEvent("mousedown", { ...position, button: 0 }));
+    if (wheel) surface.dispatchEvent(new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 }));
+    else {
+      modelPointerCapture(surface);
+      mousePointer(surface, "pointerdown", position);
+    }
     expect(inputFrames(socket)).toEqual([bytes]);
     const expectedHistory = 7;
     expect(inputHistory, "the viewport when the report reaches the socket").toEqual([expectedHistory]);

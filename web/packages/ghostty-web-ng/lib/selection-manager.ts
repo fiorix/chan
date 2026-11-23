@@ -11,7 +11,9 @@
  */
 
 import { EventEmitter } from './event-emitter';
-import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { copiedText } from '../vt/ghosttyCopy';
+import { drawnWrapAbove, scrollbackAcrossDrawnWraps, textAcrossDrawnWraps } from './drawn-wraps';
+import { VtCells, type VtCell, type VtTerminal, type VtTrackedCell } from '../vt/ghosttyVt';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
 
@@ -33,6 +35,23 @@ export interface SelectionCoordinates {
   endRow: number;
 }
 
+/** A cell in the active buffer; row zero is the oldest retained row. */
+export type SelectionAnchor = { col: number; absoluteRow: number };
+
+/** Inclusive endpoints, in either direction; returned ranges are snapshots. */
+export type SelectionRange = { start: SelectionAnchor; end: SelectionAnchor };
+
+// Keep the widget's path/URL word alphabet for double clicks.
+const WORD_CHAR = /[\w\-./~@+]/;
+
+function isWordCell(cell: VtCell | undefined): boolean {
+  return !!cell && cell.codepoint !== 0 && WORD_CHAR.test(String.fromCodePoint(cell.codepoint));
+}
+
+function isBlankCell(cell: VtCell | undefined): boolean {
+  return !cell || cell.codepoint === 0 || cell.codepoint === 32;
+}
+
 // ============================================================================
 // SelectionManager Class
 // ============================================================================
@@ -43,15 +62,44 @@ export class SelectionManager {
   private wasmTerm: VtTerminal;
   private textarea: HTMLTextAreaElement;
 
-  // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
-  // This ensures selection persists correctly when scrolling
-  private selectionStart: { col: number; absoluteRow: number } | null = null;
-  private selectionEnd: { col: number; absoluteRow: number } | null = null;
+  private startAnchor: SelectionAnchor | null = null;
+  private endAnchor: SelectionAnchor | null = null;
+  private startCell: VtTrackedCell | null = null;
+  private endCell: VtTrackedCell | null = null;
+  private selectionOnAlternateScreen = false;
+
+  // Find assigns these properties directly. Each assignment replaces that
+  // endpoint's reference; reads expose its current absolute coordinates.
+  private get selectionStart(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.startAnchor ? { ...this.startAnchor } : null;
+  }
+
+  private set selectionStart(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('start', anchor);
+  }
+
+  private get selectionEnd(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.endAnchor ? { ...this.endAnchor } : null;
+  }
+
+  private set selectionEnd(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('end', anchor);
+  }
   private isSelecting: boolean = false;
   private mouseDownX: number = 0;
   private mouseDownY: number = 0;
   private dragThresholdMet: boolean = false;
-  private mouseDownTarget: EventTarget | null = null; // Track where mousedown occurred
+  private activePointer: {
+    id: number;
+    type: string;
+    buttons: number;
+    lastEvent: PointerEvent;
+  } | null = null;
+  private clickSelects = true;
+  private contextMenuTimeout: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
 
   // Track rows that need redraw for clearing old selection
   // Using a Set prevents the overwrite bug where mousemove would clobber
@@ -61,11 +109,8 @@ export class SelectionManager {
   // Event emitter
   private selectionChangedEmitter = new EventEmitter<void>();
 
-  // Store bound event handlers for cleanup
-  private boundMouseUpHandler: ((e: MouseEvent) => void) | null = null;
-  private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
-  private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+  private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
 
   // The row a read of the selection's text or a click's word or line looks
   // at, one row at a time.
@@ -112,7 +157,14 @@ export class SelectionManager {
     terminal: Terminal,
     renderer: CanvasRenderer,
     wasmTerm: VtTerminal,
-    textarea: HTMLTextAreaElement
+    textarea: HTMLTextAreaElement,
+    private mouseInput?: {
+      claimScrollbarPress: (event: PointerEvent) => boolean;
+      press: (event: PointerEvent, reported: boolean) => void;
+      move: (event: MouseEvent, reportMotion: boolean) => void;
+      release: (event: MouseEvent) => void;
+      end: (event?: MouseEvent) => void;
+    }
   ) {
     this.terminal = terminal;
     this.renderer = renderer;
@@ -127,78 +179,129 @@ export class SelectionManager {
   // Public API
   // ==========================================================================
 
-  /**
-   * Get the selected text as a string
-   */
+  private replaceEndpoint(endpoint: 'start' | 'end', anchor: SelectionAnchor | null): void {
+    this.syncSelection();
+    const cell = anchor ? this.wasmTerm.trackCell(anchor.absoluteRow, anchor.col) : null;
+    if (endpoint === 'start') {
+      this.startCell?.free();
+      this.startCell = cell;
+      this.startAnchor = cell && anchor ? { ...anchor } : null;
+    } else {
+      this.endCell?.free();
+      this.endCell = cell;
+      this.endAnchor = cell && anchor ? { ...anchor } : null;
+    }
+    this.selectionOnAlternateScreen = this.wasmTerm.isAlternateScreen();
+  }
+
+  /** Resolve tracked endpoints before observers or paint read a changed grid. */
+  syncSelection(): void {
+    if (!this.startCell && !this.endCell) return;
+    if (this.selectionOnAlternateScreen !== this.wasmTerm.isAlternateScreen()) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    let start = this.startCell?.point() ?? null;
+    let end = this.endCell?.point() ?? null;
+    if (this.startAnchor && this.endAnchor) {
+      const forwards = this.startAnchor.absoluteRow < this.endAnchor.absoluteRow ||
+        (this.startAnchor.absoluteRow === this.endAnchor.absoluteRow && this.startAnchor.col <= this.endAnchor.col);
+      const first = forwards ? start : end;
+      const last = forwards ? end : start;
+      const firstCell = forwards ? this.startCell : this.endCell;
+      // Direction belongs to the gesture. Pruning belongs to text order:
+      // a backward drag loses its older endpoint just like a forward drag.
+      if (!last || (!first && !firstCell?.moveTo(0, 0))) {
+        this.invalidateSelectionRows();
+        this.releaseSelection();
+        return;
+      }
+      if (!first) {
+        if (forwards) start = { row: 0, col: 0 };
+        else end = { row: 0, col: 0 };
+      }
+    } else if ((this.startCell && !start) || (this.endCell && !end)) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    if (start?.row !== this.startAnchor?.absoluteRow || start?.col !== this.startAnchor?.col ||
+        end?.row !== this.endAnchor?.absoluteRow || end?.col !== this.endAnchor?.col) {
+      this.invalidateSelectionRows();
+    }
+    this.startAnchor = start ? { col: start.col, absoluteRow: start.row } : null;
+    this.endAnchor = end ? { col: end.col, absoluteRow: end.row } : null;
+  }
+
+  private invalidateSelectionRows(): void {
+    // A moved/pruned range can leave paint at its old viewport coordinates.
+    for (let row = 0; row < this.terminal.rows; row++) this.dirtySelectionRows.add(row);
+  }
+
+  private releaseSelection(): void {
+    this.startCell?.free();
+    this.endCell?.free();
+    this.startCell = this.endCell = null;
+    this.startAnchor = this.endAnchor = null;
+    this.isSelecting = false;
+    this.stopAutoScroll();
+  }
+
+  /** Read complete clusters, joining wraps and filtering undrawn controls. */
   getSelection(): string {
-    if (!this.selectionStart || !this.selectionEnd) return '';
+    const range = this.getSelectionRange();
+    if (!range) return '';
+    const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+    const textRange = {
+      startCol: range.start.col, startRow: range.start.absoluteRow,
+      endCol: range.end.col, endRow: range.end.absoluteRow,
+    };
+    const text = (drawn ? textAcrossDrawnWraps(this.wasmTerm, textRange) : null) ?? this.wasmTerm.plainText(textRange);
+    return copiedText(text ?? this.readOwnSelection(range, drawn));
+  }
 
-    // Get absolute row coordinates (not clamped to viewport)
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
+  /** Read history and screen without changing the selection or copying. */
+  getScrollbackText(): string {
+    const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+    const text = (drawn ? scrollbackAcrossDrawnWraps(this.wasmTerm) : null) ?? this.wasmTerm.plainText();
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    return copiedText(text ?? this.readOwnSelection({
+      start: { col: 0, absoluteRow: 0 },
+      end: { col: cols - 1, absoluteRow: this.wasmTerm.getScrollbackLength() + rows - 1 },
+    }, drawn));
+  }
 
-    // Swap if selection goes backwards
-    if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
-      [startCol, endCol] = [endCol, startCol];
-      [startAbsRow, endAbsRow] = [endAbsRow, startAbsRow];
+  /** A row read remains available when the core cannot format a selection. */
+  private readOwnSelection(range: SelectionRange, drawn: boolean): string {
+    let { start, end } = range;
+    if (start.absoluteRow > end.absoluteRow || (start.absoluteRow === end.absoluteRow && start.col > end.col)) {
+      [start, end] = [end, start];
     }
-
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const history = this.wasmTerm.getScrollbackLength();
     let text = '';
-
-    for (let absRow = startAbsRow; absRow <= endAbsRow; absRow++) {
-      // Fetch line based on absolute row position
-      // Absolute row < scrollbackLength means it's in scrollback
-      // Absolute row >= scrollbackLength means it's in the screen buffer
-      if (!this.readAbsoluteRow(absRow, scrollbackLength)) continue;
-      const line = this.cells;
-
-      // Track the last non-empty column for trimming trailing spaces
-      let lastNonEmpty = -1;
-
-      // Determine column range for this row
-      const colStart = absRow === startAbsRow ? startCol : 0;
-      const colEnd = absRow === endAbsRow ? endCol : line.length - 1;
-
-      // Build the line text
-      let lineText = '';
-      for (let col = colStart; col <= colEnd; col++) {
-        const cell = line.at(col);
-        if (cell && cell.codepoint !== 0) {
-          // A cell with several codepoints carries its whole cluster
-          const char = cell.cluster ?? String.fromCodePoint(cell.codepoint);
-          lineText += char;
-          if (char.trim()) {
-            lastNonEmpty = lineText.length;
-          }
-        } else {
-          lineText += ' ';
-        }
+    for (let row = start.absoluteRow; row <= end.absoluteRow; row++) {
+      if (!this.readAbsoluteRow(row, history)) continue;
+      const first = row === start.absoluteRow ? start.col : 0;
+      const last = row === end.absoluteRow ? end.col : this.cells.length - 1;
+      let line = '';
+      for (let col = first; col <= last; col++) {
+        const cell = this.cells.at(col);
+        if (cell?.width === 0) continue;
+        line += cell?.codepoint ? cell.cluster ?? String.fromCodePoint(cell.codepoint) : ' ';
       }
-
-      // Trim trailing spaces from each line
-      if (lastNonEmpty >= 0) {
-        lineText = lineText.substring(0, lastNonEmpty);
-      } else {
-        lineText = '';
-      }
-
-      text += lineText;
-
-      // Add newline between rows (but not after the last row)
-      if (absRow < endAbsRow) {
-        text += '\n';
-      }
+      if (row > start.absoluteRow && !this.continuesAbove(row, drawn)) text += '\n';
+      text += line.replace(/ +$/, '');
     }
-
-    return text;
+    return text.replace(/\n+$/, '');
   }
 
   /**
    * Check if there's an active selection
    */
   hasSelection(): boolean {
-    if (!this.selectionStart || !this.selectionEnd) return false;
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return false;
 
     // Don't report selection until drag threshold is met (prevents flash on click)
     if (this.isSelecting && !this.dragThresholdMet) return false;
@@ -225,7 +328,7 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.hasSelection()) return;
+    if (!this.startAnchor && !this.endAnchor) return;
 
     // Mark current selection rows as dirty for redraw
     const coords = this.normalizeSelection();
@@ -235,24 +338,86 @@ export class SelectionManager {
       }
     }
 
-    this.selectionStart = null;
-    this.selectionEnd = null;
-    this.isSelecting = false;
+    this.releaseSelection();
 
     // Force redraw of previously selected lines to clear the overlay
     this.requestRender();
   }
 
-  /**
-   * Select all text in the terminal
-   */
+  /** Select the entire retained history and active screen. */
   selectAll(): void {
-    const dims = this.wasmTerm.getDimensions();
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: 0, absoluteRow: viewportY };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: viewportY + dims.rows - 1 };
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    this.setSelection({
+      start: { col: 0, absoluteRow: 0 },
+      end: { col: cols - 1, absoluteRow: this.wasmTerm.getScrollbackLength() + rows - 1 },
+    });
+  }
+
+  /** Set inclusive absolute endpoints without copying; null clears. */
+  setSelection(range: SelectionRange | null): void {
+    if (range) {
+      for (const anchor of [range.start, range.end]) {
+        if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
+          throw new RangeError('Selection coordinates must be finite integers');
+        }
+      }
+      range = this.clampRange(range);
+    }
+    if (!range) {
+      this.clearSelection();
+      return;
+    }
+    this.markCurrentSelectionDirty();
+    this.selectionStart = range.start;
+    this.selectionEnd = range.end;
+    this.isSelecting = false;
     this.requestRender();
     this.selectionChangedEmitter.fire();
+  }
+
+  /** Current coordinates, copied and widened to whole glyphs. */
+  getSelectionRange(): SelectionRange | null {
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return null;
+    return this.clampRange({ start: this.startAnchor, end: this.endAnchor });
+  }
+
+  private clampRange(range: SelectionRange): SelectionRange | null {
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    const history = this.wasmTerm.getScrollbackLength();
+    const last = history + rows - 1;
+    const { start, end } = range;
+    if (Math.max(start.absoluteRow, end.absoluteRow) < 0 || Math.min(start.absoluteRow, end.absoluteRow) > last) return null;
+    const clamp = (anchor: SelectionAnchor): SelectionAnchor => ({
+      col: Math.max(0, Math.min(anchor.col, cols - 1)),
+      absoluteRow: Math.max(0, Math.min(anchor.absoluteRow, last)),
+    });
+    const a = clamp(start);
+    const b = clamp(end);
+    const forwards = a.absoluteRow < b.absoluteRow || (a.absoluteRow === b.absoluteRow && a.col <= b.col);
+    const first = forwards ? a : b;
+    const final = forwards ? b : a;
+    // The spacer after a wide glyph belongs to that glyph; an empty spacer
+    // at the right edge before a wrap belongs to neither endpoint glyph.
+    if (this.readAbsoluteRow(first.absoluteRow, history) && this.cells.at(first.col)?.width === 0 && this.cells.at(first.col - 1)?.width === 2) {
+      first.col--;
+    }
+    if (this.readAbsoluteRow(final.absoluteRow, history) && this.cells.at(final.col)?.width === 2) {
+      final.col = Math.min(final.col + 1, cols - 1);
+    }
+    return { start: a, end: b };
+  }
+
+  /** Client CSS pixels, clamped to a connected grid; null without geometry. */
+  cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
+    const canvas = this.renderer.getCanvas();
+    if (!canvas.isConnected || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const rect = canvas.getBoundingClientRect();
+    const { width, height } = this.renderer.getMetrics();
+    if (![rect.left, rect.top, rect.width, rect.height, width, height].every(Number.isFinite) ||
+        rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
+    const cell = this.pixelToCell(clientX - rect.left, clientY - rect.top);
+    return { ...cell, absoluteRow: this.viewportRowToAbsolute(cell.row) };
   }
 
   /**
@@ -340,273 +505,205 @@ export class SelectionManager {
    * Cleanup resources
    */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.endPointer(false);
+    this.releaseSelection();
+    this.resetTextarea();
     this.selectionChangedEmitter.dispose();
-
-    // Stop auto-scroll if active
-    this.stopAutoScroll();
-
-    // Clean up document event listener
-    if (this.boundMouseUpHandler) {
-      document.removeEventListener('mouseup', this.boundMouseUpHandler);
-      this.boundMouseUpHandler = null;
-    }
-
-    // Clean up document mousemove listener
-    if (this.boundDocumentMouseMoveHandler) {
-      document.removeEventListener('mousemove', this.boundDocumentMouseMoveHandler);
-      this.boundDocumentMouseMoveHandler = null;
-    }
-
-    // Clean up context menu event listener
-    if (this.boundContextMenuHandler) {
-      const canvas = this.renderer.getCanvas();
-      canvas.removeEventListener('contextmenu', this.boundContextMenuHandler);
-      this.boundContextMenuHandler = null;
-    }
-
-    // Clean up document click listener
-    if (this.boundClickHandler) {
-      document.removeEventListener('click', this.boundClickHandler);
-      this.boundClickHandler = null;
-    }
-
-    // Canvas event listeners will be cleaned up when canvas is removed from DOM
+    const canvas = this.renderer.getCanvas();
+    canvas.removeEventListener('pointerdown', this.handlePointerDown);
+    canvas.removeEventListener('pointermove', this.handlePointerMove);
+    canvas.removeEventListener('pointerup', this.handlePointerUp);
+    canvas.removeEventListener('pointercancel', this.handlePointerCancel);
+    canvas.removeEventListener('lostpointercapture', this.handleLostPointerCapture);
+    canvas.removeEventListener('mousedown', this.handleFocus);
+    if (this.boundClickHandler) canvas.removeEventListener('click', this.boundClickHandler);
+    if (this.boundContextMenuHandler) canvas.removeEventListener('contextmenu', this.boundContextMenuHandler);
   }
 
-  // ==========================================================================
-  // Private Methods
-  // ==========================================================================
+  private matchesPointer(event: PointerEvent): boolean {
+    const pointer = this.activePointer;
+    return !!pointer && event.pointerId === pointer.id && event.pointerType === pointer.type && event.isPrimary;
+  }
 
-  /**
-   * Attach mouse event listeners to canvas
-   */
+  private hasCapture(): boolean {
+    const canvas = this.renderer.getCanvas();
+    return !!this.activePointer && canvas.isConnected && canvas.hasPointerCapture(this.activePointer.id);
+  }
+
+  private handleFocus = (event: MouseEvent): void => {
+    if (event.button === 0) this.renderer.getCanvas().parentElement?.focus();
+  };
+
+  private handlePointerDown = (event: PointerEvent): void => {
+    if (event.defaultPrevented) this.clickSelects = false;
+    if (this.disposed || event.defaultPrevented || !event.isPrimary ||
+        (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
+        event.button < 0 || event.button > 2) return;
+    if (this.activePointer && !this.matchesPointer(event) && this.hasCapture()) return;
+    this.endPointer(false);
+    this.resetTextarea();
+    this.clickSelects = false;
+    if (this.mouseInput?.claimScrollbarPress(event)) return;
+    const canvas = this.renderer.getCanvas();
+    // No selection is changed until capture is known to have succeeded.
+    try {
+      canvas.setPointerCapture(event.pointerId);
+      if (!canvas.hasPointerCapture(event.pointerId)) return;
+    } catch {
+      return;
+    }
+    this.activePointer = { id: event.pointerId, type: event.pointerType, buttons: event.buttons, lastEvent: event };
+    const reported = this.wasmTerm.hasMouseTracking() && !event.shiftKey;
+    this.clickSelects = !reported;
+    this.mouseInput?.press(event, reported);
+    if (event.button !== 0 || !this.clickSelects) return;
+    const rect = canvas.getBoundingClientRect();
+    const cell = this.pixelToCell(event.clientX - rect.left, event.clientY - rect.top);
+    this.clearSelection();
+    const absoluteRow = this.viewportRowToAbsolute(cell.row);
+    this.selectionStart = { col: cell.col, absoluteRow };
+    this.selectionEnd = { col: cell.col, absoluteRow };
+    this.isSelecting = true;
+    this.mouseDownX = event.clientX;
+    this.mouseDownY = event.clientY;
+    this.dragThresholdMet = false;
+  };
+
+  private handlePointerMove = (event: PointerEvent): void => {
+    if (this.disposed || !event.isPrimary || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
+    if (!this.activePointer) {
+      if (event.buttons === 0) this.mouseInput?.move(event, true);
+      return;
+    }
+    if (!this.matchesPointer(event)) return;
+    if (!this.hasCapture()) {
+      this.endPointer(false);
+      return;
+    }
+    const pointer = this.activePointer;
+    pointer.lastEvent = event;
+    let buttonChanged = false;
+    // Pointer Events reports chorded button changes as moves, not downs/ups.
+    if (event.button >= 0 && event.button <= 2) {
+      const mask = [1, 4, 2][event.button];
+      if ((pointer.buttons & mask) !== (event.buttons & mask)) {
+        buttonChanged = true;
+        if (event.buttons & mask) this.mouseInput?.press(event, this.wasmTerm.hasMouseTracking() && !event.shiftKey);
+        else this.mouseInput?.release(event);
+      }
+    }
+    pointer.buttons = event.buttons;
+    this.mouseInput?.move(event, !buttonChanged);
+    if (!this.isSelecting) {
+      if (event.buttons === 0) this.endPointer(false);
+      return;
+    }
+    if (!this.dragThresholdMet) {
+      const dx = event.clientX - this.mouseDownX;
+      const dy = event.clientY - this.mouseDownY;
+      const threshold = this.renderer.getMetrics().width * DRAG_THRESHOLD_CELLS;
+      if (dx * dx + dy * dy < threshold * threshold) return;
+      this.dragThresholdMet = true;
+    }
+    const canvas = this.renderer.getCanvas();
+    const rect = canvas.getBoundingClientRect();
+    const y = event.clientY - rect.top;
+    const cell = this.pixelToCell(event.clientX - rect.left, y);
+    const col = y < 0 ? 0 : y >= rect.height ? this.terminal.cols - 1 : cell.col;
+    this.markCurrentSelectionDirty();
+    this.selectionEnd = { col, absoluteRow: this.viewportRowToAbsolute(cell.row) };
+    this.requestRender();
+    this.updateAutoScroll(y, rect.height);
+  };
+
+  private handlePointerUp = (event: PointerEvent): void => {
+    if (!this.matchesPointer(event)) return;
+    this.endPointer(this.renderer.getCanvas().isConnected, event);
+  };
+
+  private handlePointerCancel = (event: PointerEvent): void => {
+    if (this.matchesPointer(event)) this.endPointer(false);
+  };
+
+  private handleLostPointerCapture = (event: PointerEvent): void => {
+    if (!this.matchesPointer(event)) return;
+    this.endPointer(this.renderer.getCanvas().isConnected);
+  };
+
+  private endPointer(copy: boolean, release?: MouseEvent): void {
+    const pointer = this.activePointer;
+    if (!pointer) return;
+    this.activePointer = null;
+    this.stopAutoScroll();
+    const selecting = this.isSelecting;
+    this.isSelecting = false;
+    // Clear ownership before releasePointerCapture can deliver a loss event.
+    const canvas = this.renderer.getCanvas();
+    try {
+      if (canvas.hasPointerCapture(pointer.id)) canvas.releasePointerCapture(pointer.id);
+    } catch {
+      // A detached element can already have lost its capture.
+    }
+    this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
+    if (!selecting) return;
+    if (!this.dragThresholdMet) {
+      this.clearSelection();
+    } else if (copy && this.hasSelection()) {
+      const text = this.getSelection();
+      if (text) {
+        this.copyToClipboard(text);
+        this.selectionChangedEmitter.fire();
+      }
+    }
+  }
+
+  private resetTextarea = (): void => {
+    if (this.contextMenuTimeout !== null) {
+      clearTimeout(this.contextMenuTimeout);
+      this.contextMenuTimeout = null;
+    }
+    this.textarea.removeEventListener('blur', this.resetTextarea);
+    this.textarea.style.pointerEvents = 'none';
+    this.textarea.style.zIndex = '-10';
+    this.textarea.style.width = '0';
+    this.textarea.style.height = '0';
+    this.textarea.style.left = '0';
+    this.textarea.style.top = '0';
+    this.textarea.value = '';
+  };
+
   private attachEventListeners(): void {
     const canvas = this.renderer.getCanvas();
-
-    // Mouse down - start selection or clear existing
-    canvas.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 0) {
-        // Left click only
-
-        // CRITICAL: Focus the terminal so it can receive keyboard input
-        // The canvas doesn't have tabindex, but the parent container does
-        if (canvas.parentElement) {
-          canvas.parentElement.focus();
-        }
-
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-
-        // Always clear previous selection on new click
-        const hadSelection = this.hasSelection();
-        if (hadSelection) {
-          this.clearSelection();
-        }
-
-        // Start new selection (convert to absolute coordinates)
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
-        this.selectionStart = { col: cell.col, absoluteRow };
-        this.selectionEnd = { col: cell.col, absoluteRow };
-        this.isSelecting = true;
-        this.mouseDownX = e.offsetX;
-        this.mouseDownY = e.offsetY;
-        this.dragThresholdMet = false;
-      }
-    });
-
-    // Mouse move on canvas - update selection
-    canvas.addEventListener('mousemove', (e: MouseEvent) => {
-      if (this.isSelecting) {
-        // Check if drag threshold has been met
-        if (!this.dragThresholdMet) {
-          const dx = e.offsetX - this.mouseDownX;
-          const dy = e.offsetY - this.mouseDownY;
-          // Scaled by the cell width so it follows the font size
-          const threshold = this.renderer.getMetrics().width * DRAG_THRESHOLD_CELLS;
-          if (dx * dx + dy * dy < threshold * threshold) {
-            return; // Below threshold, ignore
-          }
-          this.dragThresholdMet = true;
-        }
-
-        // Mark current selection rows as dirty before updating
-        this.markCurrentSelectionDirty();
-
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
-        this.selectionEnd = { col: cell.col, absoluteRow };
-        this.requestRender();
-
-        // Check if near edges for auto-scroll
-        this.updateAutoScroll(e.offsetY, canvas.clientHeight);
-      }
-    });
-
-    // Mouse leave - check for auto-scroll when leaving canvas during drag
-    canvas.addEventListener('mouseleave', (e: MouseEvent) => {
-      if (this.isSelecting) {
-        // Determine scroll direction based on where mouse left
-        const rect = canvas.getBoundingClientRect();
-        if (e.clientY < rect.top) {
-          this.startAutoScroll(-1); // Scroll up
-        } else if (e.clientY > rect.bottom) {
-          this.startAutoScroll(1); // Scroll down
-        }
-      }
-    });
-
-    // Mouse enter - stop auto-scroll when mouse returns to canvas
-    canvas.addEventListener('mouseenter', () => {
-      if (this.isSelecting) {
-        this.stopAutoScroll();
-      }
-    });
-
-    // Document-level mousemove for tracking mouse position during drag outside canvas
-    this.boundDocumentMouseMoveHandler = (e: MouseEvent) => {
-      if (this.isSelecting) {
-        // Check drag threshold (same as canvas mousemove)
-        if (!this.dragThresholdMet) {
-          const dx = e.clientX - (canvas.getBoundingClientRect().left + this.mouseDownX);
-          const dy = e.clientY - (canvas.getBoundingClientRect().top + this.mouseDownY);
-          const threshold = this.renderer.getMetrics().width * DRAG_THRESHOLD_CELLS;
-          if (dx * dx + dy * dy < threshold * threshold) {
-            return;
-          }
-          this.dragThresholdMet = true;
-        }
-
-        const rect = canvas.getBoundingClientRect();
-
-        // Update selection based on clamped position
-        const clampedX = Math.max(rect.left, Math.min(e.clientX, rect.right));
-        const clampedY = Math.max(rect.top, Math.min(e.clientY, rect.bottom));
-
-        // Convert to canvas-relative coordinates
-        const offsetX = clampedX - rect.left;
-        const offsetY = clampedY - rect.top;
-
-        // Only update if mouse is outside the canvas
-        if (
-          e.clientX < rect.left ||
-          e.clientX > rect.right ||
-          e.clientY < rect.top ||
-          e.clientY > rect.bottom
-        ) {
-          // Update auto-scroll direction based on mouse position
-          if (e.clientY < rect.top) {
-            this.startAutoScroll(-1);
-          } else if (e.clientY > rect.bottom) {
-            this.startAutoScroll(1);
-          } else {
-            this.stopAutoScroll();
-          }
-
-          // Only update selection position if NOT auto-scrolling
-          // During auto-scroll, the scroll handler extends the selection
-          if (this.autoScrollDirection === 0) {
-            // Mark current selection rows as dirty before updating
-            this.markCurrentSelectionDirty();
-
-            const cell = this.pixelToCell(offsetX, offsetY);
-            const absoluteRow = this.viewportRowToAbsolute(cell.row);
-            this.selectionEnd = { col: cell.col, absoluteRow };
-            this.requestRender();
-          }
-        }
-      }
-    };
-    document.addEventListener('mousemove', this.boundDocumentMouseMoveHandler);
-
-    // Track mousedown on document to know if a click started inside the canvas
-    document.addEventListener('mousedown', (e: MouseEvent) => {
-      this.mouseDownTarget = e.target;
-    });
-
-    // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
-    // This catches mouseup events that happen outside the canvas (common during drag)
-    this.boundMouseUpHandler = (_e: MouseEvent) => {
-      if (this.isSelecting) {
-        this.isSelecting = false;
-        this.stopAutoScroll();
-
-        // Check if this was a click without drag (threshold never met).
-        if (!this.dragThresholdMet) {
-          this.clearSelection();
-          return;
-        }
-
-        if (this.hasSelection()) {
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
-        }
-      }
-    };
-    document.addEventListener('mouseup', this.boundMouseUpHandler);
+    canvas.addEventListener('pointerdown', this.handlePointerDown);
+    canvas.addEventListener('pointermove', this.handlePointerMove);
+    canvas.addEventListener('pointerup', this.handlePointerUp);
+    canvas.addEventListener('pointercancel', this.handlePointerCancel);
+    canvas.addEventListener('lostpointercapture', this.handleLostPointerCapture);
+    canvas.addEventListener('mousedown', this.handleFocus);
 
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
-    canvas.addEventListener('click', (e: MouseEvent) => {
-      // event.detail: 1 = single, 2 = double, 3 = triple click
-      if (e.detail === 2) {
-        // Double-click - select word
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-        const word = this.getWordAtCell(cell.col, cell.row);
-
-        if (word) {
-          const absoluteRow = this.viewportRowToAbsolute(cell.row);
-          this.selectionStart = { col: word.startCol, absoluteRow };
-          this.selectionEnd = { col: word.endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
-        }
-      } else if (e.detail >= 3) {
-        // Triple-click (or more) - select line content (like native Ghostty)
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
-
-        // Find actual line length (exclude trailing empty cells)
-        // Use scrollback-aware line retrieval (like getSelection does)
-        const scrollbackLength = this.wasmTerm.getScrollbackLength();
-        // Find last non-empty cell (-1 means empty line)
-        let endCol = -1;
-        if (this.readAbsoluteRow(absoluteRow, scrollbackLength)) {
-          const line = this.cells;
-          for (let i = line.length - 1; i >= 0; i--) {
-            const cell = line.at(i)!;
-            if (cell.codepoint !== 0 && cell.codepoint !== 32) {
-              endCol = i;
-              break;
-            }
-          }
-        }
-
-        // Only select if line has content (endCol >= 0)
-        if (endCol >= 0) {
-          // Select line content only (not trailing whitespace)
-          this.selectionStart = { col: 0, absoluteRow };
-          this.selectionEnd = { col: endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
-        }
-      }
-    });
+    this.boundClickHandler = (e: MouseEvent) => {
+      if (!this.clickSelects || e.button !== 0) return;
+      if (e.detail < 2) return;
+      const cell = this.cellAt(e.clientX, e.clientY);
+      if (!cell) return;
+      const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+      const extent = e.detail === 2
+        ? this.wordAcrossWraps(cell.col, cell.absoluteRow, drawn)
+        : this.lineAcrossWraps(cell.absoluteRow, drawn);
+      if (!extent) return;
+      this.setSelection(extent);
+      this.copySelection();
+    };
+    canvas.addEventListener('click', this.boundClickHandler);
 
     // Right-click (context menu) - position textarea to show browser's native menu
     // This allows Copy/Paste options to appear in the context menu
     this.boundContextMenuHandler = (e: MouseEvent) => {
+      this.resetTextarea();
       // Position textarea at mouse cursor
       this.textarea.style.position = 'fixed';
       this.textarea.style.left = `${e.clientX}px`;
@@ -635,27 +732,9 @@ export class SelectionManager {
 
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first
-      setTimeout(() => {
-        // Listen for when the context menu closes (user clicks away or selects an option)
-        const resetTextarea = () => {
-          this.textarea.style.pointerEvents = 'none';
-          this.textarea.style.zIndex = '-10';
-          this.textarea.style.width = '0';
-          this.textarea.style.height = '0';
-          this.textarea.style.left = '0';
-          this.textarea.style.top = '0';
-          this.textarea.value = '';
-
-          // Remove the one-time listeners
-          document.removeEventListener('click', resetTextarea);
-          document.removeEventListener('contextmenu', resetTextarea);
-          this.textarea.removeEventListener('blur', resetTextarea);
-        };
-
-        // Reset on any of these events (menu closed)
-        document.addEventListener('click', resetTextarea, { once: true });
-        document.addEventListener('contextmenu', resetTextarea, { once: true });
-        this.textarea.addEventListener('blur', resetTextarea, { once: true });
+      this.contextMenuTimeout = setTimeout(() => {
+        this.contextMenuTimeout = null;
+        this.textarea.addEventListener('blur', this.resetTextarea, { once: true });
       }, 10);
 
       // Don't prevent default - let browser show the context menu on the textarea
@@ -663,34 +742,6 @@ export class SelectionManager {
 
     canvas.addEventListener('contextmenu', this.boundContextMenuHandler);
 
-    // Click outside canvas - clear selection
-    // This allows users to deselect by clicking anywhere outside the terminal
-    this.boundClickHandler = (e: MouseEvent) => {
-      // Don't clear selection if we're actively selecting
-      if (this.isSelecting) {
-        return;
-      }
-
-      // A click is only valid for clearing selection if BOTH mousedown and mouseup
-      // happened outside the canvas. If mousedown was inside (drag selection),
-      // don't clear even if mouseup/click is outside.
-      const mouseDownWasInCanvas =
-        this.mouseDownTarget && canvas.contains(this.mouseDownTarget as Node);
-      if (mouseDownWasInCanvas) {
-        return;
-      }
-
-      // Check if the click is outside the canvas
-      const target = e.target as Node;
-      if (!canvas.contains(target)) {
-        // Clicked outside the canvas - clear selection
-        if (this.hasSelection()) {
-          this.clearSelection();
-        }
-      }
-    };
-
-    document.addEventListener('click', this.boundClickHandler);
   }
 
   /**
@@ -739,17 +790,15 @@ export class SelectionManager {
 
     // Start scrolling interval
     this.autoScrollInterval = setInterval(() => {
-      if (!this.isSelecting) {
+      if (!this.isSelecting || !this.hasCapture()) {
+        this.endPointer(false);
         this.stopAutoScroll();
         return;
       }
 
-      // Scroll the terminal to reveal more content in the direction user is dragging
-      // autoScrollDirection: -1 = dragging up (wants to see history), 1 = dragging down (wants to see newer)
-      // scrollLines convention: negative = scroll up into history, positive = scroll down to newer
-      // So direction maps directly to scrollLines sign
+      // Pointer Y grows toward newer output; viewport offsets grow into history.
       const scrollAmount = SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection;
-      (this.terminal as any).scrollLines(scrollAmount);
+      this.terminal.viewport.scrollBy(-scrollAmount);
 
       // Extend selection in the scroll direction
       // Key insight: we need to EXTEND the selection, not reset it to viewport edge
@@ -808,10 +857,11 @@ export class SelectionManager {
    * Returns coordinates in VIEWPORT space for rendering, clamped to visible area
    */
   private normalizeSelection(): SelectionCoordinates | null {
-    if (!this.selectionStart || !this.selectionEnd) return null;
+    const range = this.getSelectionRange();
+    if (!range) return null;
 
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
+    let { col: startCol, absoluteRow: startAbsRow } = range.start;
+    let { col: endCol, absoluteRow: endAbsRow } = range.end;
 
     // Swap if selection goes backwards
     if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
@@ -846,39 +896,80 @@ export class SelectionManager {
   }
 
   /**
-   * Get word boundaries at a cell position
+   * The word under a cell, carried across core wraps and enabled drawn
+   * wraps. Null when the cell holds no
+   * word character.
    */
-  private getWordAtCell(col: number, row: number): { startCol: number; endCol: number } | null {
-    const absoluteRow = this.viewportRowToAbsolute(row);
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (!this.readAbsoluteRow(absoluteRow, scrollbackLength)) return null;
-    const line = this.cells;
-
-    // Word characters: letters, numbers, and common path/URL characters
-    // Matches native Ghostty behavior where double-click selects entire paths
-    // Includes: / (path sep), . (extensions), ~ (home), @ (emails), + (encodings)
-    const isWordChar = (cell: VtCell | undefined) => {
-      if (!cell || cell.codepoint === 0) return false;
-      const char = String.fromCodePoint(cell.codepoint);
-      return /[\w\-./~@+]/.test(char);
-    };
-
-    // Only return if we're actually on a word character
-    if (!isWordChar(line.at(col))) return null;
-
-    // Find start of word
-    let startCol = col;
-    while (startCol > 0 && isWordChar(line.at(startCol - 1))) {
-      startCol--;
+  private wordAcrossWraps(col: number, absoluteRow: number, drawn: boolean): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    const cells = this.readCells(absoluteRow);
+    if (!cells || !isWordCell(cells.at(col))) return null;
+    let start = { col, absoluteRow };
+    let startCells = cells;
+    for (;;) {
+      while (start.col > 0 && isWordCell(startCells.at(start.col - 1))) start.col--;
+      if (start.col > 0 || !this.continuesAbove(start.absoluteRow, drawn)) break;
+      const above = this.readCells(start.absoluteRow - 1);
+      if (!above || !isWordCell(above.at(above.length - 1))) break;
+      start = { col: above.length - 1, absoluteRow: start.absoluteRow - 1 };
+      startCells = above;
     }
-
-    // Find end of word
-    let endCol = col;
-    while (endCol < line.length - 1 && isWordChar(line.at(endCol + 1))) {
-      endCol++;
+    let end = { col, absoluteRow };
+    let endCells = cells;
+    for (;;) {
+      while (end.col < endCells.length - 1 && isWordCell(endCells.at(end.col + 1))) end.col++;
+      if (end.col < endCells.length - 1 || !this.continuesAbove(end.absoluteRow + 1, drawn)) break;
+      const below = this.readCells(end.absoluteRow + 1);
+      if (!below || !isWordCell(below.at(0))) break;
+      end = { col: 0, absoluteRow: end.absoluteRow + 1 };
+      endCells = below;
     }
+    return { start, end };
+  }
 
-    return { startCol, endCol };
+  /**
+   * The whole line across core wraps and enabled drawn wraps, through
+   * its last nonblank cell. Null when the line is blank.
+   */
+  private lineAcrossWraps(absoluteRow: number, drawn: boolean): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    let first = absoluteRow;
+    while (first > 0 && this.continuesAbove(first, drawn)) first--;
+    let last = absoluteRow;
+    while (this.continuesAbove(last + 1, drawn)) last++;
+    for (let row = last; row >= first; row--) {
+      const cells = this.readCells(row);
+      if (!cells) continue;
+      for (let col = cells.length - 1; col >= 0; col--) {
+        if (!isBlankCell(cells.at(col))) {
+          return { start: { col: 0, absoluteRow: first }, end: { col, absoluteRow: row } };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether a row continues the preceding row under the current policy.
+   */
+  private continuesAbove(absoluteRow: number, drawn: boolean): boolean {
+    const history = this.wasmTerm.getScrollbackLength();
+    if (absoluteRow < 1 || absoluteRow >= history + this.terminal.rows) return false;
+    const wrapped = absoluteRow < history
+      ? this.wasmTerm.isScrollbackRowWrapped(absoluteRow)
+      : this.wasmTerm.isRowWrapped(absoluteRow - history);
+    return wrapped || (drawn && drawnWrapAbove(this.wasmTerm, absoluteRow));
+  }
+
+  /**
+   * Row `row` of the history and the screen, 0 the oldest history row, in
+   * a view of its own. Null when no such row exists.
+   */
+  private readCells(absoluteRow: number): VtCells | null {
+    const cells = new VtCells();
+    const history = this.wasmTerm.getScrollbackLength();
+    const read = absoluteRow < history
+      ? this.wasmTerm.readHistoryRow(absoluteRow, cells)
+      : this.wasmTerm.readRow(absoluteRow - history, cells);
+    return read ? cells : null;
   }
 
   /**
@@ -901,6 +992,10 @@ export class SelectionManager {
    * 3. Fall back to execCommand (legacy, for older browsers)
    */
   private copyToClipboard(text: string): void {
+    if (this.terminal.options.copy) {
+      this.terminal.options.copy(text);
+      return;
+    }
     // First try: ClipboardItem API (modern, Safari-compatible)
     // Safari allows this because we create the ClipboardItem synchronously
     // within the user gesture, even though the write is async

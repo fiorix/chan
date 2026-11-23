@@ -18,21 +18,29 @@
 
 import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig, type VtTrackedCell } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
+import { parseColor } from './color';
 import { EventEmitter } from './event-emitter';
+import { HighlightsManager } from './highlights';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
   IBufferNamespace,
   IEvent,
+  ITheme,
   ITerminalOptions,
   TerminalChange,
+  TerminalCore,
+  TerminalHighlights,
+  TerminalSearch,
   TerminalLinkActivation,
   TerminalViewport,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
-import { DRAG_THRESHOLD_CELLS, SelectionManager } from './selection-manager';
+import { CanvasRenderer, type FontMetrics, type PaintLayer } from './renderer';
+import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
+import { createTerminalCore } from './terminal-core';
+import { SearchOwner } from './search';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -56,21 +64,33 @@ export class Terminal {
   // Components (created on open())
   private ghostty?: GhosttyVt;
   public wasmTerm?: VtTerminal; // Made public for link providers
+  #coreAccess?: ReturnType<typeof createTerminalCore>;
+  /** Available from open to dispose; the widget retains ownership of the raw core. */
+  get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
   public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
+  private highlightsManager?: HighlightsManager;
+  #searchOwner?: SearchOwner;
+  public readonly search: TerminalSearch;
+  /** Stable facade; requests before open or after disposal do not retain state. */
+  public readonly highlights: TerminalHighlights = {
+    set: (name, ranges, style) => { this.highlightsManager?.set(name, ranges, style); },
+    get: (name) => this.highlightsManager?.get(name),
+    clear: (name) => this.highlightsManager?.clear(name) ?? false,
+  };
   private canvas?: HTMLCanvasElement;
 
   // Link detection system
   private linkDetector?: LinkDetector;
   // The row under the pointer, read for the link its cell carries.
-  private readonly hoverCells = new VtCells();
+  private hoverCells = new VtCells();
   private currentHoveredLink?: ILink;
   private mouseMoveThrottleTimeout?: number;
   private pendingMouseMove?: MouseEvent;
   // The primary press a click ends, read to tell a link click from the end of
   // a drag or a press the program was sent.
-  private linkPress?: { x: number; y: number; reported: boolean };
+  private linkPress?: { x: number; y: number; id: number; type: string; reported: boolean; released: boolean };
 
   // Event emitters
   private dataEmitter = new EventEmitter<string>();
@@ -93,7 +113,6 @@ export class Terminal {
   private isOpen = false;
   private isDisposed = false;
   private animationFrameId?: number;
-  private focusRetry?: ReturnType<typeof setTimeout>;
   private writeQueue: Uint8Array[] = [];
   private awaitingEcho = false;
 
@@ -108,14 +127,19 @@ export class Terminal {
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
 
   // Scrollbar interaction state
-  private isDraggingScrollbar: boolean = false;
-  private scrollbarDragStart: number | null = null;
-  private scrollbarDragStartViewportY: number = 0;
+  private scrollbarDrag?: {
+    id: number;
+    type: string;
+    lastY: number;
+    userSelect: string;
+    webkitUserSelect: string;
+  };
 
   // Scrollbar visibility/auto-hide state
   private scrollbarVisible: boolean = false;
   private scrollbarOpacity: number = 0;
   private scrollbarHideTimeout?: number;
+  private scrollbarAnimationFrame?: number;
   private readonly SCROLLBAR_HIDE_DELAY_MS = 1500; // Hide after 1.5 seconds
   private readonly SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
 
@@ -128,11 +152,18 @@ export class Terminal {
       rows: options.rows ?? 24,
       cursorBlink: options.cursorBlink ?? false,
       cursorStyle: options.cursorStyle ?? 'block',
-      theme: options.theme ?? {},
+      theme: { ...options.theme },
       scrollback: options.scrollback ?? 10000,
+      scrollbackBytes: options.scrollbackBytes,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
+      lineHeight: options.lineHeight ?? 1,
+      boxGlyphs: options.boxGlyphs ?? false,
+      scrollbar: options.scrollbar,
       disableStdin: options.disableStdin ?? false,
+      copy: options.copy,
+      joinDrawnWraps: options.joinDrawnWraps,
+      testHooks: options.testHooks,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -157,6 +188,14 @@ export class Terminal {
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
     const terminal = this;
+    const emptySearch = Object.freeze({ index: 0, total: 0, partial: false });
+    this.search = Object.freeze({
+      find: (query: string) => this.#searchOwner?.find(query),
+      step: (query: string, direction: 'older' | 'newer') => this.#searchOwner?.step(query, direction),
+      close: () => this.#searchOwner?.close(),
+      get state() { return terminal.#searchOwner?.state ?? emptySearch; },
+      onChange: (listener: Parameters<TerminalSearch['onChange']>[0]) => this.#searchOwner?.onChange(listener) ?? { dispose() {} },
+    });
     this.viewport = {
       get offset() { return terminal.viewportY; },
       followOutput: 'at-bottom',
@@ -193,9 +232,9 @@ export class Terminal {
         break;
 
       case 'theme':
-        if (this.renderer) {
-          console.warn('ghostty-web: theme changes after open() are not yet fully supported');
-        }
+        this.wasmTerm!.setColors(this.buildWasmConfig());
+        this.renderer!.setTheme(this.options.theme);
+        this.refresh();
         break;
 
       case 'fontSize':
@@ -235,44 +274,14 @@ export class Terminal {
     // Resize canvas to match new font metrics
     this.renderer.resize(this.cols, this.rows);
 
-    // Update canvas element dimensions to match renderer
-    const metrics = this.renderer.getMetrics();
-    this.canvas.width = metrics.width * this.cols;
-    this.canvas.height = metrics.height * this.rows;
-    this.canvas.style.width = `${metrics.width * this.cols}px`;
-    this.canvas.style.height = `${metrics.height * this.rows}px`;
-
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY);
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
   }
 
-  /**
-   * Parse a CSS color string to 0xRRGGBB format.
-   * Returns 0 if the color is undefined or invalid.
-   */
-  private parseColorToHex(color?: string): number {
-    if (!color) return 0;
-
-    // Handle hex colors (#RGB, #RRGGBB)
-    if (color.startsWith('#')) {
-      let hex = color.slice(1);
-      if (hex.length === 3) {
-        hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-      }
-      const value = Number.parseInt(hex, 16);
-      return Number.isNaN(value) ? 0 : value;
-    }
-
-    // Handle rgb(r, g, b) format
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (match) {
-      const r = Number.parseInt(match[1], 10);
-      const g = Number.parseInt(match[2], 10);
-      const b = Number.parseInt(match[3], 10);
-      return (r << 16) | (g << 8) | b;
-    }
-
-    return 0;
+  private parseColorToHex(color?: string): number | undefined {
+    const parsed = parseColor(color);
+    if (!parsed) return undefined;
+    return (Math.round(parsed[0]) << 16) | (Math.round(parsed[1]) << 8) | Math.round(parsed[2]);
   }
 
   /**
@@ -281,16 +290,19 @@ export class Terminal {
   private buildWasmConfig(): VtTerminalConfig | undefined {
     const theme = this.options.theme;
     const scrollback = this.options.scrollback;
+    // wasm32 SIZE_MAX means unlimited, so keep finite budgets below it.
+    const scrollbackMaxBytes = Number.isInteger(this.options.scrollbackBytes) && this.options.scrollbackBytes > 0
+      ? Math.min(this.options.scrollbackBytes, 0xffff_fffe) : undefined;
 
     // If no theme and default scrollback, use defaults
-    if (!theme && scrollback === 10000) {
+    if (!theme && scrollback === 10000 && scrollbackMaxBytes === undefined) {
       return undefined;
     }
 
     // Build palette array from theme colors
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
     //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
-    const palette: number[] = [
+    const palette = [
       this.parseColorToHex(theme?.black),
       this.parseColorToHex(theme?.red),
       this.parseColorToHex(theme?.green),
@@ -311,6 +323,7 @@ export class Terminal {
 
     return {
       scrollbackLimit: scrollback,
+      scrollbackMaxBytes,
       fgColor: this.parseColorToHex(theme?.foreground),
       bgColor: this.parseColorToHex(theme?.background),
       cursorColor: this.parseColorToHex(theme?.cursor),
@@ -350,11 +363,7 @@ export class Terminal {
       // this as an input element and don't intercept keyboard events.
       parent.setAttribute('contenteditable', 'true');
       // Prevent actual content editing - we handle input ourselves
-      parent.addEventListener('beforeinput', (e) => {
-        if (e.target === parent) {
-          e.preventDefault();
-        }
-      });
+      parent.addEventListener('beforeinput', this.handleBeforeInput);
 
       // Add accessibility attributes for screen readers and extensions
       parent.setAttribute('role', 'textbox');
@@ -364,6 +373,7 @@ export class Terminal {
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
       this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+      this.#coreAccess = createTerminalCore(this.wasmTerm);
 
       // Create canvas element
       this.canvas = document.createElement('canvas');
@@ -396,17 +406,8 @@ export class Terminal {
       parent.appendChild(this.textarea);
 
       // Focus textarea on interaction - preventDefault before focus
-      const textarea = this.textarea;
-      // Desktop: mousedown
-      this.canvas.addEventListener('mousedown', (ev) => {
-        ev.preventDefault();
-        textarea.focus();
-      });
-      // Mobile: touchend with preventDefault to suppress iOS caret
-      this.canvas.addEventListener('touchend', (ev) => {
-        ev.preventDefault();
-        textarea.focus();
-      });
+      this.canvas.addEventListener('mousedown', this.handleCanvasFocus);
+      this.canvas.addEventListener('touchend', this.handleCanvasFocus);
 
       // Create renderer
       this.renderer = new CanvasRenderer(this.canvas, {
@@ -415,6 +416,9 @@ export class Terminal {
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
+        lineHeight: this.options.lineHeight,
+        boxGlyphs: this.options.boxGlyphs,
+        scrollbar: this.options.scrollbar,
       });
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
@@ -431,6 +435,7 @@ export class Terminal {
           width: renderer.charWidth,
           height: renderer.charHeight,
         }),
+        getGridDimensions: () => ({ cols: this.cols, rows: this.rows }),
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
@@ -452,7 +457,7 @@ export class Terminal {
             this.awaitingEcho = true;
           }
           // Clear selection when user types
-          this.selectionManager?.clearSelection();
+          if (isUserInput) this.selectionManager?.clearSelection();
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
@@ -476,11 +481,32 @@ export class Terminal {
         this,
         this.renderer,
         this.wasmTerm,
-        this.textarea
+        this.textarea,
+        {
+          claimScrollbarPress: (event) => this.claimScrollbarPress(event),
+          press: (event, reported) => {
+            this.handleLinkPress(event, reported);
+            this.inputHandler?.handleMouseDown(event, reported);
+          },
+          move: (event, reportMotion) => {
+            if (this.scrollbarDrag) return;
+            this.checkLinkDrag(event);
+            this.inputHandler?.handleMouseMove(event, reportMotion);
+          },
+          release: (event) => this.inputHandler?.handleMouseUp(event),
+          end: (event) => {
+            this.finishLinkPress(event);
+            this.inputHandler?.endMouseGesture(event);
+          },
+        }
       );
 
       // Connect selection manager to renderer
       this.renderer.setSelectionManager(this.selectionManager);
+      this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
+      this.renderer.setHighlights(this.highlightsManager);
+      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlightsManager, this.viewport,
+        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch());
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
@@ -491,23 +517,22 @@ export class Terminal {
       // URL regex second (fallback for plain text URLs)
       this.linkDetector.registerProvider(new UrlRegexProvider(this));
 
-      // Setup mouse event handling for links and scrollbar
-      // Use capture phase to intercept scrollbar clicks before SelectionManager
-      parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
-      parent.addEventListener('mousedown', this.handleLinkPress, { capture: true });
+      // Clear an abandoned click before selection resolves the next press.
+      parent.addEventListener('pointerdown', this.handlePointerDown, { capture: true });
+      parent.addEventListener('pointermove', this.handlePointerMove);
+      parent.addEventListener('pointerup', this.handlePointerEnd);
+      parent.addEventListener('pointercancel', this.handlePointerEnd);
+      parent.addEventListener('lostpointercapture', this.handlePointerEnd);
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
       parent.addEventListener('click', this.handleClick);
-
-      // Setup document-level mouseup for scrollbar drag (so drag works even outside canvas)
-      document.addEventListener('mouseup', this.handleMouseUp);
 
       // Setup wheel event handling for scrolling (Phase 2)
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this.scrollbarOpacity);
+      this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
 
       // Start render loop
       this.startRenderLoop();
@@ -541,10 +566,6 @@ export class Terminal {
       if (callback) requestAnimationFrame(callback);
       return;
     }
-    // Note: We intentionally do NOT clear selection on write - most modern terminals
-    // preserve selection when new data arrives. Selection is cleared by user actions
-    // like clicking or typing, not by incoming data.
-
     const core = this.wasmTerm!;
     const viewportBefore = this.viewportY;
     const targetBefore = this.targetViewportY;
@@ -582,6 +603,9 @@ export class Terminal {
       targetAnchor?.free();
     }
 
+    this.selectionManager?.syncSelection();
+    this.highlightsManager?.observeScreen(core.isAlternateScreen());
+
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
@@ -591,6 +615,7 @@ export class Terminal {
 
     // Observers see the current links and view, with replies already sent,
     // before an echo or scrollbar animation can paint synchronously.
+    this.#searchOwner?.changed('write', core.isAlternateScreen());
     this.changeEmitter.fire({ kind: 'write' });
 
     if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
@@ -604,7 +629,7 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
     }
 
@@ -705,24 +730,20 @@ export class Terminal {
       this.wasmTerm!.resize(cols, rows);
       this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
       this.targetViewportY = Math.min(this.targetViewportY, this.getScrollbackLength());
+      this.selectionManager?.syncSelection();
+      this.highlightsManager?.observeScreen(this.wasmTerm!.isAlternateScreen());
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
 
-      // Update canvas dimensions
-      const metrics = this.renderer!.getMetrics();
-      this.canvas!.width = metrics.width * cols;
-      this.canvas!.height = metrics.height * rows;
-      this.canvas!.style.width = `${metrics.width * cols}px`;
-      this.canvas!.style.height = `${metrics.height * rows}px`;
-
+      this.#searchOwner?.changed('resize', this.wasmTerm!.isAlternateScreen());
       this.changeEmitter.fire({ kind: 'resize' });
 
       // The dimension event also serves PTY size publication.
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY);
+      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
@@ -733,37 +754,12 @@ export class Terminal {
   }
 
   /**
-   * Reset terminal state
-   */
-  reset(): void {
-    this.assertOpen();
-
-    // Free old WASM terminal and create new one
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-    }
-    const config = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
-
-    // Clear renderer
-    this.renderer!.clear();
-  }
-
-  /**
-   * Focus terminal input
+   * Focus terminal input synchronously without scrolling. Calls before open,
+   * while detached or after disposal are ignored; no later retry takes focus.
    */
   focus(): void {
-    if (this.isOpen && this.element) {
-      // Focus immediately for immediate keyboard/wheel event handling
-      this.element.focus();
-
-      // Also schedule a delayed focus as backup to ensure it sticks
-      // (some browsers may need this if DOM isn't fully settled)
-      clearTimeout(this.focusRetry);
-      this.focusRetry = setTimeout(() => {
-        this.focusRetry = undefined;
-        this.element?.focus();
-      }, 0);
+    if (this.isOpen && this.element?.isConnected) {
+      this.element.focus({ preventScroll: true });
     }
   }
 
@@ -772,10 +768,6 @@ export class Terminal {
    */
   blur(): void {
     if (this.isOpen && this.element) {
-      // A focus() still owes its delayed retry, which would take the
-      // keyboard back after this blur.
-      clearTimeout(this.focusRetry);
-      this.focusRetry = undefined;
       // A press on the canvas can leave the hidden textarea holding focus
       // rather than the element, and blur() acts only on the focused element,
       // so blur whichever of the two holds it. Focus outside stays put.
@@ -812,6 +804,26 @@ export class Terminal {
     this.selectionManager?.clearSelection();
   }
 
+  /** Inclusive absolute-row selection, in either direction; null clears. */
+  public setSelection(range: SelectionRange | null): void {
+    this.selectionManager?.setSelection(range);
+  }
+
+  /** A snapshot of the current selection, or null when unavailable. */
+  public getSelectionRange(): SelectionRange | null {
+    return this.selectionManager?.getSelectionRange() ?? null;
+  }
+
+  /** Client CSS pixels to viewport and absolute cells; null without geometry. */
+  public cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
+    return this.selectionManager?.cellAt(clientX, clientY) ?? null;
+  }
+
+  /** Copy-formatted retained history and screen; leaves selection untouched. */
+  public getScrollbackText(): string {
+    return this.selectionManager?.getScrollbackText() ?? '';
+  }
+
   /**
    * Copy the current selection to clipboard
    * @returns true if there was text to copy, false otherwise
@@ -842,6 +854,17 @@ export class Terminal {
   }
 
   /**
+   * Read a snapshot of the cursor's zero-based column and row on the active
+   * live screen, independent of viewport scrolling. Reflects writes and
+   * cursor moves synchronously; undefined before open and after disposal.
+   */
+  public getCursor(): Readonly<{ x: number; y: number }> | undefined {
+    if (!this.isOpen || !this.wasmTerm) return undefined;
+    const { x, y } = this.wasmTerm.getCursor();
+    return { x, y };
+  }
+
+  /**
    * Get the current viewport Y position.
    *
    * This is the number of lines scrolled back from the bottom of the
@@ -849,6 +872,41 @@ export class Terminal {
    */
   public getViewportY(): number {
     return this.viewportY;
+  }
+
+  /** Add a layer above the widget; an unopened terminal retains no registration. */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (!this.isOpen) return () => {};
+    return this.renderer!.addPaintLayer(layer);
+  }
+
+  /**
+   * Repaint synchronously at the current scrollbar opacity. During a paint
+   * callback, request a full next frame instead of recursively rendering.
+   */
+  public refresh(): void {
+    if (!this.isOpen) return;
+    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+  }
+
+  /**
+   * Replace the theme with a copy and repaint the complete widget synchronously.
+   * Before open, only the held theme changes; after disposal, nothing changes.
+   * A paint callback requesting a theme change gets a full next frame.
+   */
+  public setTheme(theme: ITheme): void {
+    if (this.isDisposed) return;
+    this.options.theme = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
+  }
+
+  /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */
+  public getMetrics(): Readonly<FontMetrics> | undefined {
+    return this.isOpen ? this.renderer!.getMetrics() : undefined;
+  }
+
+  private paintScrollbarOpacity(): number {
+    const fixed = this.options.testHooks?.scrollbarOpacity;
+    return fixed !== undefined ? Math.max(0, Math.min(1, fixed)) : this.scrollbarOpacity;
   }
 
   // ==========================================================================
@@ -1060,8 +1118,6 @@ export class Terminal {
 
     this.isDisposed = true;
     this.isOpen = false;
-    clearTimeout(this.focusRetry);
-    this.focusRetry = undefined;
 
     // Stop render loop and clear write queue
     this.cancelRenderLoop();
@@ -1127,9 +1183,11 @@ export class Terminal {
         //    render state up to date and lists the rows that changed
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
-        this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.scrollbarOpacity);
-
-        this.animationFrameId = requestAnimationFrame(loop);
+        try {
+          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
+        } finally {
+          if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);
+        }
       }
     };
     loop();
@@ -1147,6 +1205,21 @@ export class Terminal {
    * Clean up components (called on dispose or error)
    */
   private cleanupComponents(): void {
+    this.#searchOwner?.dispose();
+    this.#searchOwner = undefined;
+    this.#coreAccess?.dispose();
+    this.#coreAccess = undefined;
+    this.endScrollbarDrag();
+    this.cancelRenderLoop();
+    if (this.scrollbarAnimationFrame !== undefined) cancelAnimationFrame(this.scrollbarAnimationFrame);
+    this.scrollbarAnimationFrame = undefined;
+    this.linkPress = undefined;
+    this.currentHoveredLink = undefined;
+    this.hoverCells = new VtCells();
+
+    this.highlightsManager?.dispose();
+    this.highlightsManager = undefined;
+
     // Dispose selection manager
     if (this.selectionManager) {
       this.selectionManager.dispose();
@@ -1165,9 +1238,10 @@ export class Terminal {
       this.renderer = undefined;
     }
 
-    // Remove canvas from DOM
-    if (this.canvas && this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
+    if (this.canvas) {
+      this.canvas.removeEventListener('mousedown', this.handleCanvasFocus);
+      this.canvas.removeEventListener('touchend', this.handleCanvasFocus);
+      this.canvas.remove();
       this.canvas = undefined;
     }
 
@@ -1179,9 +1253,13 @@ export class Terminal {
 
     // Remove event listeners
     if (this.element) {
-      this.element.removeEventListener('wheel', this.handleWheel);
-      this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
-      this.element.removeEventListener('mousedown', this.handleLinkPress, { capture: true });
+      this.element.removeEventListener('beforeinput', this.handleBeforeInput);
+      this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
+      this.element.removeEventListener('pointerdown', this.handlePointerDown, { capture: true });
+      this.element.removeEventListener('pointermove', this.handlePointerMove);
+      this.element.removeEventListener('pointerup', this.handlePointerEnd);
+      this.element.removeEventListener('pointercancel', this.handlePointerEnd);
+      this.element.removeEventListener('lostpointercapture', this.handlePointerEnd);
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
       this.element.removeEventListener('click', this.handleClick);
@@ -1191,11 +1269,6 @@ export class Terminal {
       this.element.removeAttribute('role');
       this.element.removeAttribute('aria-label');
       this.element.removeAttribute('aria-multiline');
-    }
-
-    // Remove document-level listeners (only if opened)
-    if (this.isOpen && typeof document !== 'undefined') {
-      document.removeEventListener('mouseup', this.handleMouseUp);
     }
 
     // Clean up scrollbar timers
@@ -1235,17 +1308,12 @@ export class Terminal {
   }
 
   /**
-   * Handle mouse move for link hover detection and scrollbar dragging
-   * Throttled to avoid blocking scroll events (except when dragging scrollbar)
+   * Throttle link hover detection while leaving captured moves synchronous.
    */
   private handleMouseMove = (e: MouseEvent): void => {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
 
-    // If dragging scrollbar, handle immediately without throttling
-    if (this.isDraggingScrollbar) {
-      this.processScrollbarDrag(e);
-      return;
-    }
+    if (this.scrollbarDrag) return;
 
     if (!this.linkDetector) return;
 
@@ -1429,17 +1497,58 @@ export class Terminal {
     }
   };
 
-  /**
-   * Note the primary press a click may end. The input handler reports the
-   * same press to a program tracking the mouse unless Shift is held.
-   */
-  private handleLinkPress = (e: MouseEvent): void => {
+  private handleBeforeInput = (event: Event): void => {
+    if (event.target === this.element) event.preventDefault();
+  };
+
+  private handleCanvasFocus = (event: Event): void => {
+    event.preventDefault();
+    this.textarea?.focus();
+  };
+
+  private handlePointerDown = (event: PointerEvent): void => {
+    if (!event.isPrimary || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
+    const press = this.linkPress;
+    if (press && (press.released || (press.id === event.pointerId && press.type === event.pointerType))) {
+      this.linkPress = undefined;
+    }
+  };
+
+  private checkLinkDrag(event: MouseEvent): void {
+    const press = this.linkPress;
+    if (!press || !this.renderer) return;
+    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
+    const dx = event.clientX - press.x;
+    const dy = event.clientY - press.y;
+    if (dx * dx + dy * dy >= threshold * threshold) this.linkPress = undefined;
+  }
+
+  private finishLinkPress(event?: MouseEvent): void {
+    if (event?.type !== 'pointerup' || !this.canvas?.isConnected) {
+      this.linkPress = undefined;
+      return;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX >= rect.right ||
+        event.clientY < rect.top || event.clientY >= rect.bottom) {
+      this.linkPress = undefined;
+      return;
+    }
+    this.checkLinkDrag(event);
+    if (this.linkPress) this.linkPress.released = true;
+  }
+
+  // Record disposition before synchronous input listeners can change tracking.
+  private handleLinkPress = (e: PointerEvent, reported: boolean): void => {
     this.linkPress =
       e.button === 0
         ? {
             x: e.clientX,
             y: e.clientY,
-            reported: !e.shiftKey && (this.wasmTerm?.hasMouseTracking() ?? false),
+            id: e.pointerId,
+            type: e.pointerType,
+            released: false,
+            reported,
           }
         : undefined;
   };
@@ -1456,13 +1565,7 @@ export class Terminal {
     this.linkPress = undefined;
     // The second click of a double click selects a word, and a click whose
     // press went to the program is the program's.
-    if (e.button !== 0 || e.detail > 1 || !press || press.reported) return;
-    // A press that moved as far as the selection manager's drag threshold
-    // made a selection, not a link click.
-    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
-    const dx = e.clientX - press.x;
-    const dy = e.clientY - press.y;
-    if (dx * dx + dy * dy >= threshold * threshold) return;
+    if (e.button !== 0 || e.detail > 1 || !press?.released || press.reported) return;
 
     // Get click position
     const rect = this.canvas.getBoundingClientRect();
@@ -1562,127 +1665,114 @@ export class Terminal {
     }
   };
 
-  /**
-   * Handle mouse down for scrollbar interaction
-   */
-  private handleMouseDown = (e: MouseEvent): void => {
-    if (!this.canvas || !this.renderer || !this.wasmTerm) return;
+  private scrollbarGeometry() {
+    const canvas = this.canvas;
+    const history = this.getScrollbackLength();
+    if (!canvas || history === 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const track = Math.max(0, rect.height - 8);
+    const thumb = Math.min(track, Math.max(20, this.rows / (history + this.rows) * track));
+    const travel = track - thumb;
+    return { rect, track, thumb, travel, history, top: 4 + travel * (1 - this.viewportY / history) };
+  }
 
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (scrollbackLength === 0) return; // No scrollbar if no scrollback
+  private matchesScrollbarPointer(event: PointerEvent): boolean {
+    const drag = this.scrollbarDrag;
+    return !!drag && event.isPrimary && event.pointerId === drag.id && event.pointerType === drag.type;
+  }
 
-    const rect = this.canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    // Calculate scrollbar dimensions (match renderer's logic)
-    // Use rect dimensions which are already in CSS pixels
-    const canvasWidth = rect.width;
-    const canvasHeight = rect.height;
-    const scrollbarWidth = 8;
-    const scrollbarX = canvasWidth - scrollbarWidth - 4;
-    const scrollbarPadding = 4;
-
-    // Check if click is in scrollbar area
-    if (mouseX >= scrollbarX && mouseX <= scrollbarX + scrollbarWidth) {
-      // Prevent default and stop propagation to prevent text selection
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation(); // Stop SelectionManager from seeing this event
-
-      // Calculate scrollbar thumb position and size
-      const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
-      const visibleRows = this.rows;
-      const totalLines = scrollbackLength + visibleRows;
-      const thumbHeight = Math.max(20, (visibleRows / totalLines) * scrollbarTrackHeight);
-      const scrollPosition = this.viewportY / scrollbackLength;
-      const thumbY = scrollbarPadding + (scrollbarTrackHeight - thumbHeight) * (1 - scrollPosition);
-
-      // Check if click is on thumb
-      if (mouseY >= thumbY && mouseY <= thumbY + thumbHeight) {
-        // Start dragging thumb
-        this.isDraggingScrollbar = true;
-        this.scrollbarDragStart = mouseY;
-        this.scrollbarDragStartViewportY = this.viewportY;
-
-        // Prevent text selection during drag
-        if (this.canvas) {
-          this.canvas.style.userSelect = 'none';
-          this.canvas.style.webkitUserSelect = 'none';
-        }
-      } else {
-        // Click on track - jump to position
-        const relativeY = mouseY - scrollbarPadding;
-        const scrollFraction = 1 - relativeY / scrollbarTrackHeight; // Inverted: top = 1, bottom = 0
-        const targetViewportY = Math.round(scrollFraction * scrollbackLength);
-        this.viewport.scrollTo(targetViewportY);
-      }
+  private claimScrollbarPress(event: PointerEvent): boolean {
+    if (this.scrollbarDrag) {
+      const captured = this.canvas?.isConnected && this.canvas.hasPointerCapture(this.scrollbarDrag.id);
+      if (captured && !this.matchesScrollbarPointer(event)) return true;
+      this.endScrollbarDrag();
     }
-  };
+    if (event.button !== 0 || !event.isPrimary ||
+        (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
+        this.paintScrollbarOpacity() <= 0 || !this.canvas?.isConnected) return false;
+    const geometry = this.scrollbarGeometry();
+    if (!geometry) return false;
+    const { rect, track, thumb, history, top } = geometry;
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    if (x < rect.width - 12 || x > rect.width - 4 || y < 0 || y >= rect.height) return false;
 
-  /**
-   * Handle mouse up for scrollbar drag
-   */
-  private handleMouseUp = (): void => {
-    if (this.isDraggingScrollbar) {
-      this.isDraggingScrollbar = false;
-      this.scrollbarDragStart = null;
-
-      // Restore text selection
-      if (this.canvas) {
-        this.canvas.style.userSelect = '';
-        this.canvas.style.webkitUserSelect = '';
+    // Selection sees the claim, while the page still receives menu-closing presses.
+    event.preventDefault();
+    if (y >= top && y <= top + thumb) {
+      const canvas = this.canvas;
+      try {
+        canvas.setPointerCapture(event.pointerId);
+        if (!canvas.hasPointerCapture(event.pointerId)) return true;
+      } catch {
+        return true;
       }
-
-      // Schedule auto-hide after drag ends
-      if (this.scrollbarVisible && this.getScrollbackLength() > 0) {
-        this.showScrollbar(); // Reset the hide timer
-      }
+      this.scrollbarDrag = {
+        id: event.pointerId, type: event.pointerType, lastY: event.clientY,
+        userSelect: canvas.style.userSelect, webkitUserSelect: canvas.style.webkitUserSelect,
+      };
+      canvas.style.userSelect = 'none';
+      canvas.style.webkitUserSelect = 'none';
+      // Cancel smooth motion before it can change the position under the held thumb.
+      this.viewport.scrollTo(this.viewportY);
+      this.showScrollbar();
+    } else if (track > 0) {
+      this.viewport.scrollTo(Math.round((1 - (y - 4) / track) * history));
     }
-  };
+    return true;
+  }
 
-  /**
-   * Process scrollbar drag movement
-   */
-  private processScrollbarDrag(e: MouseEvent): void {
-    if (!this.canvas || !this.renderer || !this.wasmTerm || this.scrollbarDragStart === null)
+  private handlePointerMove = (event: PointerEvent): void => {
+    if (!this.matchesScrollbarPointer(event)) return;
+    const drag = this.scrollbarDrag!;
+    if (event.buttons === 0 || !this.canvas?.isConnected || !this.canvas.hasPointerCapture(drag.id)) {
+      this.endScrollbarDrag();
       return;
+    }
+    const geometry = this.scrollbarGeometry();
+    const delta = event.clientY - drag.lastY;
+    // Every move rebases at the actual clamped viewport. Writes can re-anchor
+    // that viewport between moves, so neither output nor overshoot is replayed.
+    drag.lastY = event.clientY;
+    if (!geometry || geometry.travel <= 0) return;
+    this.viewport.scrollTo(this.viewportY - delta * geometry.history / geometry.travel);
+  };
 
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (scrollbackLength === 0) return;
+  private handlePointerEnd = (event: PointerEvent): void => {
+    if (this.matchesScrollbarPointer(event)) this.endScrollbarDrag();
+  };
 
-    const rect = this.canvas.getBoundingClientRect();
-    const mouseY = e.clientY - rect.top;
-
-    // Calculate how much the mouse moved
-    const deltaY = mouseY - this.scrollbarDragStart;
-
-    // Convert mouse delta to viewport delta
-    // Use rect height which is already in CSS pixels
-    const canvasHeight = rect.height;
-    const scrollbarPadding = 4;
-    const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
-    const visibleRows = this.rows;
-    const totalLines = scrollbackLength + visibleRows;
-    const thumbHeight = Math.max(20, (visibleRows / totalLines) * scrollbarTrackHeight);
-
-    // Calculate scroll fraction from thumb movement
-    // Note: thumb moves in opposite direction to viewport (thumb down = scroll down = viewportY decreases)
-    const scrollFraction = -deltaY / (scrollbarTrackHeight - thumbHeight);
-    const viewportDelta = Math.round(scrollFraction * scrollbackLength);
-
-    const newViewportY = this.scrollbarDragStartViewportY + viewportDelta;
-    this.viewport.scrollTo(newViewportY);
+  private endScrollbarDrag(): void {
+    const drag = this.scrollbarDrag;
+    if (!drag) return;
+    this.scrollbarDrag = undefined;
+    const canvas = this.canvas;
+    if (canvas) {
+      canvas.style.userSelect = drag.userSelect;
+      canvas.style.webkitUserSelect = drag.webkitUserSelect;
+      try {
+        if (canvas.hasPointerCapture(drag.id)) canvas.releasePointerCapture(drag.id);
+      } catch {
+        // Removing a host can already have released its capture.
+      }
+    }
+    if (this.isOpen && this.getScrollbackLength() > 0) this.showScrollbar();
   }
 
   /**
    * Show scrollbar with fade-in and schedule auto-hide
    */
   private showScrollbar(): void {
+    if (this.options.testHooks?.scrollbarOpacity !== undefined) return;
     // Clear any existing hide timeout
     if (this.scrollbarHideTimeout) {
       window.clearTimeout(this.scrollbarHideTimeout);
       this.scrollbarHideTimeout = undefined;
+    }
+
+    if (this.scrollbarAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollbarAnimationFrame);
+      this.scrollbarAnimationFrame = undefined;
     }
 
     // If not visible, start fade-in
@@ -1696,7 +1786,7 @@ export class Terminal {
     }
 
     // Schedule auto-hide (unless dragging)
-    if (!this.isDraggingScrollbar) {
+    if (!this.scrollbarDrag) {
       this.scrollbarHideTimeout = window.setTimeout(() => {
         this.hideScrollbar();
       }, this.SCROLLBAR_HIDE_DELAY_MS);
@@ -1723,17 +1813,19 @@ export class Terminal {
   private fadeInScrollbar(): void {
     const startTime = Date.now();
     const animate = () => {
+      this.scrollbarAnimationFrame = undefined;
+      if (!this.isOpen) return;
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = progress;
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        this.scrollbarAnimationFrame = requestAnimationFrame(animate);
       }
     };
     animate();
@@ -1746,23 +1838,25 @@ export class Terminal {
     const startTime = Date.now();
     const startOpacity = this.scrollbarOpacity;
     const animate = () => {
+      this.scrollbarAnimationFrame = undefined;
+      if (!this.isOpen) return;
       const elapsed = Date.now() - startTime;
       const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
       this.scrollbarOpacity = startOpacity * (1 - progress);
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.scrollbarOpacity);
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
 
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        this.scrollbarAnimationFrame = requestAnimationFrame(animate);
       } else {
         this.scrollbarVisible = false;
         this.scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
         if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, 0);
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
         }
       }
     };
