@@ -1,6 +1,6 @@
-// These reparent probes target engines that can lose canvas capture silently.
-// Exclude check 342 from the Chrome suite selection; an unavailable native
-// trigger is a skip, with its event trace retained for engine-specific runs.
+// Chrome reparent probes: a reported mouse gesture loses capture after
+// reattachment; a pen releases while detached before a second pointer starts.
+// An unavailable native trigger is a skip with its event trace retained.
 
 import assert from "node:assert/strict";
 import { drainPointerInput, penPointer, pointerEvents, pointerGrid, pointerReports, pointerWrites, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
@@ -93,6 +93,7 @@ export default {
         const grid = result.grid = await terminal.prepare(TEXT);
         const x = grid.x + grid.w * 0.2, y = grid.y + grid.h * 0.5;
         await seedPointerClipboard(page, "SMOKE342_REPARENT_SENTINEL");
+        const writes = (await pointerWrites(page)).length;
         let penHeld = false;
         let detached;
         try {
@@ -133,7 +134,8 @@ export default {
               && event.pointerId === pen.pointerId && ["lostpointercapture", "pointerup", "pointercancel"].includes(event.type))) {
             throw unavailable("the engine did not produce silent canvas capture loss after detached pen release; native event trace retained");
           }
-          const writes = (await pointerWrites(page)).length;
+          result.writesBeforeSecondPress = (await pointerWrites(page)).slice(writes);
+          assert.deepEqual(result.writesBeforeSecondPress, [], "detached pen release and reattachment never attempt a copy");
           const mouse = result.secondPress = await begin(page, terminal, await pointerGrid(terminal.term));
           assert.notEqual(mouse.pointerId, pen.pointerId, "recovery uses another pointer id");
           await page.mouse.up();
