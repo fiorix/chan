@@ -544,6 +544,7 @@ export class SelectionManager {
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
+    if (this.activePointer?.ending) return;
     if (event.defaultPrevented) this.clickSelects = false;
     if (this.disposed || event.defaultPrevented || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
@@ -651,25 +652,29 @@ export class SelectionManager {
     // Release reports still belong to this gesture. Keep its disposition
     // through emission, but reject a synchronous attempt to end it again.
     pointer.ending = true;
-    this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
-    this.activePointer = null;
-    this.stopAutoScroll();
-    const selecting = this.isSelecting;
-    this.isSelecting = false;
-    // Clear ownership before releasePointerCapture can deliver a loss event.
     try {
-      if (canvas.hasPointerCapture(pointer.id)) canvas.releasePointerCapture(pointer.id);
-    } catch {
-      // A detached element can already have lost its capture.
-    }
-    if (!selecting) return;
-    if (!this.dragThresholdMet) {
-      this.clearSelection();
-    } else if (copy && this.hasSelection()) {
-      const text = this.getSelection();
-      if (text) {
-        this.copyToClipboard(text);
-        this.selectionChangedEmitter.fire();
+      this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
+    } finally {
+      this.activePointer = null;
+      this.stopAutoScroll();
+      const selecting = this.isSelecting;
+      this.isSelecting = false;
+      // Clear ownership before releasePointerCapture can deliver a loss event.
+      try {
+        if (canvas.hasPointerCapture(pointer.id)) canvas.releasePointerCapture(pointer.id);
+      } catch {
+        // A detached element can already have lost its capture.
+      }
+      if (selecting) {
+        if (!this.dragThresholdMet) {
+          this.clearSelection();
+        } else if (copy && this.hasSelection()) {
+          const text = this.getSelection();
+          if (text) {
+            this.copyToClipboard(text);
+            this.selectionChangedEmitter.fire();
+          }
+        }
       }
     }
   }

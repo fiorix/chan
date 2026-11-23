@@ -575,6 +575,27 @@ describe('report and bypass completion', () => {
     expect(release).toHaveBeenCalledExactlyOnceWith(7);
   });
 
+  test('a throwing release observer cannot keep capture or prevent copying a local drag', async () => {
+    const { term, canvas, write, release } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    drag(canvas, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 3 });
+    const failure = new Error('release observer failed');
+    const errors: unknown[] = [];
+    const onError = (event: ErrorEvent) => { errors.push(event.error); event.preventDefault(); };
+    window.addEventListener('error', onError);
+    const subscription = term.onData(() => { throw failure; });
+    try {
+      pointer(canvas, 'pointerup', 33, 1, { button: 2 });
+      expect(errors).toEqual([failure]);
+      expect(release).toHaveBeenCalledExactlyOnceWith(7);
+      expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+    } finally {
+      window.removeEventListener('error', onError);
+      subscription.dispose();
+    }
+  });
+
   test('a held move while tracking is off preserves the press when tracking resumes', async () => {
     const { term, canvas, reports } = await open();
     term.write('\x1b[?1002h\x1b[?1006h');
