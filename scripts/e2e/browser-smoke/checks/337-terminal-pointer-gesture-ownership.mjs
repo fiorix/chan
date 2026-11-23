@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, POINTER_RESET_MODES, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
+import { copyPointerSelection, drainPointerInput, pointerEvents, pointerGrid, pointerReports, POINTER_RESET_MODES, runPointerCheck, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 
 const TEXT = "SELECTION337";
 const FIND = "FIND337TARGET";
@@ -185,6 +185,29 @@ export default {
           assert.equal(await page.evaluate(() => navigator.clipboard.readText()), sentinel, "a reported outside release copies nothing");
         });
 
+        await leg("buttonless-hover", async (result) => {
+          const grid = await prepare(result);
+          // The first move precedes tracking so the measured move changes cell.
+          await page.mouse.move(grid.x + grid.w * 1.5, grid.y + grid.h * 1.5);
+          result.mode = await drainPointerInput(fixture, "\x1b[?1003h\x1b[?1006h");
+          assert.equal(result.mode.input, "", "hover setup sends no input");
+          assert.deepEqual(await term.evaluate((t) => [t.getMode(1003), t.getMode(1006)]), [true, true],
+            "any-motion tracking and SGR are enabled");
+          const eventIndex = (await pointerEvents(resource.trace)).length;
+          const index = fixture.records.length;
+          await page.mouse.move(grid.x + grid.w * 4.5, grid.y + grid.h * 2.5);
+          await settlePointer(page);
+          result.events = (await pointerEvents(resource.trace)).slice(eventIndex);
+          const moves = result.events.filter((event) => event.type === "pointermove" && event.onCanvas);
+          assert.ok(moves.length > 0 && moves.every((event) => event.isTrusted && event.pointerType === "mouse" && event.buttons === 0),
+            "the engine delivered buttonless mouse motion over the canvas");
+          result.after = await drainPointerInput(fixture, "", index);
+          result.reports = pointerReports(result.after.input);
+          result.buttonCodes = result.reports.map((report) => report.button);
+          assert.deepEqual(result.reports, [{ button: 35, col: 5, row: 3, end: "M" }],
+            "1003 hover reports motion plus no button: 32 + 3 = 35");
+        });
+
         await leg("tracking-enabled-mid-drag", async (result) => {
           const grid = await prepare(result);
           const sentinel = "SMOKE337_MID_DRAG_SENTINEL";
@@ -237,7 +260,7 @@ export default {
           assert.equal(result.selection, "", "the reported press never becomes a local selection");
           assert.equal(result.clipboard, sentinel, "turning tracking off does not copy the reported press");
         });
-        assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
+        assert.deepEqual(Object.keys(details.legs), ["selection-outside-click", "find-outside-click", "reported-outside-release", "buttonless-hover", "tracking-enabled-mid-drag", "tracking-disabled-mid-press"], "all required pointer legs ran");
       } finally {
         if (held) await page.mouse.up().catch((error) => details.failures.push(`mouse cleanup: ${error.message}`));
         await resource.close().catch((error) => details.failures.push(`terminal cleanup: ${error.message}`));
