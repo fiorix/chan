@@ -6,6 +6,7 @@ export default defineConfig({
     include: [
       "vt/**/*.test.ts",
       "lib/input-handler.test.ts",
+      "lib/terminal.focus.test.ts",
       "lib/terminal.links.test.ts",
       "lib/terminal.pointer.test.ts",
       "lib/terminal.viewport.test.ts",
