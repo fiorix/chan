@@ -1,11 +1,13 @@
 // Terminal appearance end to end. One live PTY survives renderer reloads while
-// the check proves font size is captured (not live-refit), xterm and ghostty
-// align their cell metrics at one size, and custom colours update the renderer
-// plus surface chrome before Standard restores the exact prior surface.
+// Ghostty captures font sizes measured independently through the browser's font
+// API. Custom colours update the canvas and surface chrome live; Standard
+// restores the exact prior surface and keeps the custom payload dormant.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { assertTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
 const TAB = "SmokeAppearance105";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,7 +95,7 @@ export default {
   name: "terminal-appearance",
   async run(ctx) {
     const socket = ctx.controlSocket;
-    if (!socket) ctx.skip("control socket not found for the server pid");
+    if (!socket) throw new Error("terminal appearance setup: control socket not found for the server pid");
     const { page } = ctx;
     await page.bringToFront();
     const windowId = await page.evaluate(
@@ -119,8 +121,24 @@ export default {
 
     const cdp = await page.createCDPSession();
     await cdp.send("Network.enable");
+    const sockets = new Map();
     const resizeFrames = [];
-    cdp.on("Network.webSocketFrameSent", ({ response }) => {
+    let terminalSession = null;
+    let terminalSelector = null;
+    cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith("/api/terminal/ws")) sockets.set(requestId, parsed.searchParams.get("session"));
+    });
+    cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+      if (!sockets.has(requestId)) return;
+      try {
+        const frame = JSON.parse(response.payloadData);
+        if (frame?.type === "session" && typeof frame.id === "string") sockets.set(requestId, frame.id);
+      } catch {
+        // Binary output is not a session identity frame.
+      }
+    });
+    cdp.on("Network.webSocketFrameSent", ({ requestId, response }) => {
       try {
         const frame = JSON.parse(response.payloadData);
         if (
@@ -128,7 +146,7 @@ export default {
           Number.isInteger(frame.cols) &&
           Number.isInteger(frame.rows)
         ) {
-          resizeFrames.push({ cols: frame.cols, rows: frame.rows });
+          resizeFrames.push({ requestId, cols: frame.cols, rows: frame.rows });
         }
       } catch {
         // PTY input is binary and is not resize evidence.
@@ -160,34 +178,7 @@ export default {
       );
     }
 
-    async function patchTerminal(changes) {
-      const terminal = await page.evaluate(async (token) => {
-        const headers = {};
-        if (token) headers.authorization = `Bearer ${token}`;
-        const response = await fetch("/api/config", { headers });
-        if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
-        return (await response.json()).preferences.terminal;
-      }, authToken);
-      return patchOwner({ terminal: { ...terminal, ...changes } });
-    }
-
-    async function assertServerToml(pattern, description) {
-      const path = join(ctx.chanHome, "server.toml");
-      const deadline = Date.now() + 15_000;
-      let content = "";
-      for (;;) {
-        try {
-          content = readFileSync(path, "utf8");
-          if (pattern.test(content)) return;
-        } catch {
-          // The first config write creates the file.
-        }
-        if (Date.now() > deadline) {
-          throw new Error(`${description} was not persisted in ${path}:\n${content}`);
-        }
-        await sleep(200);
-      }
-    }
+    const patchTerminal = (changes) => writeTerminalPrefs(page, authToken, changes);
 
     async function session() {
       const { stdout } = await cs(["list", "--json"]);
@@ -197,18 +188,9 @@ export default {
 
     async function openTerminal() {
       const frameStart = resizeFrames.length;
-      await cs(["new", "--tab-name", TAB]);
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        const current = await session();
-        if (current) break;
-        if (Date.now() > deadline) throw new Error(`${TAB} never registered`);
-        await sleep(250);
-      }
-      await page.waitForSelector(`.terminal-tab ${TERMINAL_SURFACES.xterm}`, {
-        visible: true,
-        timeout: 30_000,
-      });
+      terminalSession = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+      terminalSelector = `.pane[data-pane-id="${terminalSession.pane}"] .terminal-tab.active[data-terminal-tab-id="${terminalSession.tab}"]`;
+      await waitSaved(ctx, page, windowId, TAB);
       return frameStart;
     }
 
@@ -217,7 +199,8 @@ export default {
       let candidate = null;
       let stableSince = 0;
       for (;;) {
-        const latest = resizeFrames.slice(frameStart).at(-1) ?? null;
+        const frame = resizeFrames.slice(frameStart).filter((item) => sockets.get(item.requestId) === terminalSession?.session_id).at(-1);
+        const latest = frame ? { cols: frame.cols, rows: frame.rows } : null;
         if (latest) {
           if (
             !candidate ||
@@ -237,25 +220,66 @@ export default {
       }
     }
 
-    async function rendererSnapshot(backend, frameStart) {
-      const grid = await waitStableGrid(frameStart, backend);
-      const dom = await page.evaluate(({ backend, grid, surfaces }) => {
-        const tab = document.querySelector(".terminal-tab");
+    // Independent oracle for chan's 1.2 line spacing: measure W on a separate
+    // canvas, floor its device-pixel advance, ceil its device-pixel font box,
+    // then floor that height times 1.2. Divide both by DPR for CSS pixels.
+    // No widget metric, option or production measurement helper is read.
+    async function expectedCells(size) {
+      return page.evaluate(async (size) => {
+        const font = `400 ${size}px "Source Code Pro"`;
+        const faces = await document.fonts.load(font, "W");
+        if (!faces.length || !document.fonts.check(font, "W")) throw new Error(`font oracle unavailable: ${font}`);
+        const context = document.createElement("canvas").getContext("2d");
+        if (!context) throw new Error("font oracle has no 2D context");
+        context.font = font;
+        const metrics = context.measureText("W");
+        const fontHeight = metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent;
+        const dpr = window.devicePixelRatio;
+        if (!(metrics.width > 0 && fontHeight > 0 && dpr > 0)) throw new Error(`font oracle metrics unavailable: ${font}`);
+        return {
+          font, size, dpr, advance: metrics.width, fontHeight,
+          width: Math.floor(metrics.width * dpr) / dpr,
+          height: Math.floor(Math.ceil(fontHeight * dpr) * 1.2) / dpr,
+        };
+      }, size);
+    }
+
+    function assertCells(snapshot, expected) {
+      if (!(expected.width > 0 && expected.height > 0) ||
+          !closeEnough(snapshot.cellWidth, expected.width, 0.02) ||
+          !closeEnough(snapshot.cellHeight, expected.height, 0.02)) {
+        throw new Error(`Ghostty cells disagree with independent font measurement: ${JSON.stringify({ snapshot, expected })}`);
+      }
+    }
+
+    async function rendererSnapshot(label, frameStart) {
+      const grid = await waitStableGrid(frameStart, label);
+      const dom = await page.evaluate(({ label, grid, selector, surface }) => {
+        const tab = document.querySelector(selector);
         const host = tab?.querySelector(".terminal-host");
-        const canvas = tab?.querySelector(surfaces.ghostty)
-          ?? tab?.querySelector(`${surfaces.xterm} canvas`);
+        const canvas = tab?.querySelector(surface);
         if (!(tab instanceof HTMLElement) || !(host instanceof HTMLElement)) {
-          throw new Error(`${backend}: terminal surface missing`);
+          throw new Error(`${label}: terminal surface missing`);
         }
-        if (!(canvas instanceof HTMLCanvasElement)) {
-          throw new Error(`${backend}: terminal canvas missing`);
+        if (!(canvas instanceof HTMLCanvasElement) || !canvas.width || !canvas.height || grid.cols < 1 || grid.rows < 1) {
+          throw new Error(`${label}: terminal canvas/grid missing`);
         }
         const canvasRect = canvas.getBoundingClientRect();
         const hostStyle = getComputedStyle(host);
         const tabStyle = getComputedStyle(tab);
-        const xtermViewport = host.querySelector(".xterm-scrollable-element");
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error(`${label}: canvas pixels unavailable`);
+        const pixel = (x, y) => {
+          const [r, g, b, a] = context.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+          if (a !== 255) throw new Error(`${label}: expected an opaque terminal canvas`);
+          return `rgb(${r}, ${g}, ${b})`;
+        };
+        // The fixture clears scrollback and paints only the top rows. Its
+        // empty body and scrollbar strip must share the terminal background.
+        const bodyBackground = pixel(canvas.width / 2, canvas.height / 2);
+        const trackBackground = pixel(canvas.width - 8 * canvas.width / canvasRect.width, canvas.height / 2);
         return {
-          backend,
+          backend: "ghostty", label,
           grid,
           cellWidth: canvasRect.width / grid.cols,
           cellHeight: canvasRect.height / grid.rows,
@@ -268,24 +292,48 @@ export default {
             left: Number.parseFloat(hostStyle.paddingLeft) || 0,
           },
           dataTheme: tab.getAttribute("data-theme"),
-          rendererBackground:
-            xtermViewport instanceof HTMLElement
-              ? getComputedStyle(xtermViewport).backgroundColor
-              : null,
+          rendererBackground: bodyBackground,
+          trackBackground,
+          tabBackground: tabStyle.backgroundColor,
+          hostBackground: hostStyle.backgroundColor,
           colors: {
             background: tabStyle.getPropertyValue("--bg").trim(),
             foreground: tabStyle.getPropertyValue("--text").trim(),
             cursor: tabStyle.getPropertyValue("--link").trim(),
           },
         };
-      }, { backend, grid, surfaces: TERMINAL_SURFACES });
+      }, { label, grid, selector: terminalSelector, surface: TERMINAL_SURFACES.ghostty });
       return dom;
     }
 
+    async function proveOutput(label) {
+      const marker = `APPEARANCE105_${label}`;
+      await cs(["write", "--tab-name", TAB,
+        `printf '\\033[3J\\033[2J\\033[HAPPEARANCE105_%s\\n\\033[48;2;37;181;123m  \\033[0m\\n' '${label}'\n`]);
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        const output = (await cs(["scrollback", "--tab-name", TAB])).stdout;
+        if (output.includes(marker)) break;
+        if (Date.now() >= deadline) throw new Error(`PTY output missing after ${label}`);
+        await sleep(100);
+      }
+      await page.waitForFunction((selector) => {
+        const canvas = document.querySelector(selector);
+        if (!(canvas instanceof HTMLCanvasElement) || !canvas.width || !canvas.height) return false;
+        const pixels = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (!pixels) return false;
+        let markerPixels = 0;
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (pixels[i] === 37 && pixels[i + 1] === 181 && pixels[i + 2] === 123 && pixels[i + 3] === 255) markerPixels++;
+        }
+        return markerPixels >= 10;
+      }, { timeout: 20_000 }, `${terminalSelector} ${TERMINAL_SURFACES.ghostty}`);
+    }
+
     async function renderedCustomColorCounts() {
-      await page.click(".terminal-tab .terminal-host");
+      await page.click(`${terminalSelector} ${TERMINAL_SURFACES.ghostty}`);
       await sleep(250);
-      const host = await page.$(".terminal-tab .terminal-host");
+      const host = await page.$(`${terminalSelector} .terminal-host`);
       if (!host) throw new Error("terminal host missing for colour screenshot");
       const screenshot = await host.screenshot({ encoding: "base64" });
       return page.evaluate(async (encoded) => {
@@ -310,13 +358,25 @@ export default {
       }, screenshot);
     }
 
-    async function reloadBackend(selector, label) {
+    async function reloadTerminal(label) {
       const frameStart = resizeFrames.length;
+      await waitSaved(ctx, page, windowId, TAB);
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane", { timeout: 30_000 });
       // Settings writes update terminal colours through this page's watcher.
       await ctx.waitWindowLive(windowId);
-      await page.waitForSelector(selector, { visible: true, timeout: 60_000 });
+      const restored = await waitRestoredTerminal(page, cs, windowId, terminalSession, "ghostty");
+      terminalSelector = restored.selector;
+      if ((await session())?.session_id !== terminalSession.session_id) {
+        throw new Error(`${label}: reload replaced the PTY`);
+      }
+      // A fresh document records the load even if an earlier check cleared
+      // resource timing while the old document's module stayed cached.
+      await page.waitForFunction(
+        () => performance.getEntriesByType("resource").some((entry) => entry.name.includes("ghostty-vt")),
+        { timeout: 60_000 },
+      );
+      await proveOutput(label);
       return rendererSnapshot(label, frameStart);
     }
 
@@ -368,10 +428,10 @@ export default {
       await openSettingsSection("Terminal");
       await editAndBlur('input[aria-label="Terminal font size"]', size);
       await closeSettings();
-      await assertServerToml(
-        new RegExp(`font_size\\s*=\\s*${size}`),
-        `terminal font_size = ${size}`,
-      );
+      await assertTerminalPrefs(ctx, { font_size: size });
+      if ((await readConfig()).preferences.terminal.font_size !== size) {
+        throw new Error(`font size ${size} did not reach the config API`);
+      }
       await sleep(1_000);
     }
 
@@ -502,16 +562,17 @@ export default {
       );
       await closeSettings();
       await page.waitForFunction(
-        () => {
-          const tab = document.querySelector(".terminal-tab");
-          const viewport = tab?.querySelector(".xterm-scrollable-element");
+        (selector) => {
+          const tab = document.querySelector(selector);
+          const host = tab?.querySelector(".terminal-host");
           return (
             tab?.getAttribute("data-theme") === "light" &&
-            viewport instanceof HTMLElement &&
-            getComputedStyle(viewport).backgroundColor === "rgb(18, 52, 86)"
+            host instanceof HTMLElement &&
+            getComputedStyle(host).backgroundColor === "rgb(18, 52, 86)"
           );
         },
         { timeout: 15_000 },
+        terminalSelector,
       );
     }
 
@@ -556,67 +617,70 @@ export default {
       return (await response.json()).preferences;
     }, authToken);
     let opened = false;
-    const details = {};
+    const details = { backend: "ghostty" };
     let runError = null;
     try {
-      await patchTerminal({ ghostty: false, font_size: 14 });
+      await ctx.waitWindowLive(windowId);
+      await patchTerminal({ font: "source-code-pro", font_size: 14 });
       await patchOwner({ terminal_colors: { mode: "standard" } });
-      await assertServerToml(/ghostty\s*=\s*false/, "terminal ghostty = false");
+      await assertTerminalPrefs(ctx, { font: "source-code-pro", font_size: 14 });
       await sleep(1_500);
 
-      const initialFrame = await openTerminal();
+      // A known face makes the independent 14px/20px/18px oracle reproducible.
+      const expected14 = await expectedCells(14);
       opened = true;
-      await cs(["write", "--tab-name", TAB, "printf 'APPEARANCE105\\n'\n"]);
-      await sleep(500);
+      const initialFrame = await openTerminal();
+      await proveOutput("initial");
       const sessionBefore = await session();
-      const xterm14 = await rendererSnapshot("xterm-14", initialFrame);
-      if (!(xterm14.cellWidth > 0 && xterm14.cellHeight > 0)) {
-        throw new Error(`xterm initial cell geometry is invalid: ${JSON.stringify(xterm14)}`);
-      }
+      const ghostty14 = await rendererSnapshot("ghostty-14", initialFrame);
+      assertCells(ghostty14, expected14);
 
+      // Saving 20px keeps the mounted 14px grid and cells until reload.
       await setFontSize(20);
-      const mountedXterm = await rendererSnapshot("xterm-mounted", initialFrame);
+      const mounted14 = await rendererSnapshot("ghostty-mounted-14", initialFrame);
       if (
-        JSON.stringify(mountedXterm.grid) !== JSON.stringify(xterm14.grid) ||
-        !closeEnough(mountedXterm.cellWidth, xterm14.cellWidth, 0.02) ||
-        !closeEnough(mountedXterm.cellHeight, xterm14.cellHeight, 0.02)
+        JSON.stringify(mounted14.grid) !== JSON.stringify(ghostty14.grid) ||
+        !closeEnough(mounted14.cellWidth, ghostty14.cellWidth, 0.02) ||
+        !closeEnough(mounted14.cellHeight, ghostty14.cellHeight, 0.02)
       ) {
         throw new Error(
-          `mounted xterm refit after font preference changed: ${JSON.stringify({ xterm14, mountedXterm })}`,
+          `mounted Ghostty refit before reload: ${JSON.stringify({ ghostty14, mounted14 })}`,
         );
       }
 
-      const xterm20 = await reloadBackend(
-        `.terminal-tab ${TERMINAL_SURFACES.xterm}`,
-        "xterm-20",
-      );
-      const sessionAfterXtermReload = await session();
+      // Reload preserves the PTY and captures independently measured 20px cells.
+      const ghostty20 = await reloadTerminal("ghostty-20");
+      const expected20 = await expectedCells(20);
+      assertCells(ghostty20, expected20);
       if (
-        !sessionBefore?.session_id ||
-        sessionBefore.session_id !== sessionAfterXtermReload?.session_id
-      ) {
-        throw new Error("xterm reload replaced the PTY instead of reconstructing its renderer");
-      }
-      if (
-        xterm20.cellWidth <= xterm14.cellWidth ||
-        xterm20.cellHeight <= xterm14.cellHeight ||
-        xterm20.grid.cols >= xterm14.grid.cols ||
-        xterm20.grid.rows >= xterm14.grid.rows
+        ghostty20.cellWidth <= ghostty14.cellWidth ||
+        ghostty20.cellHeight <= ghostty14.cellHeight ||
+        ghostty20.grid.cols >= ghostty14.grid.cols ||
+        ghostty20.grid.rows >= ghostty14.grid.rows
       ) {
         throw new Error(
-          `reconstructed xterm did not capture 20px: ${JSON.stringify({ xterm14, xterm20 })}`,
+          `reconstructed Ghostty did not capture 20px: ${JSON.stringify({ ghostty14, ghostty20 })}`,
         );
       }
-      details.xterm = { before: xterm14, mounted: mountedXterm, reconstructed: xterm20 };
+      details.fontIncrease = { before: ghostty14, mounted: mounted14, reconstructed: ghostty20, expected14, expected20 };
 
-      const standard = await rendererSnapshot("standard", resizeFrames.length - 1);
+      // Custom colours update pixels, terminal body and track without a reload.
+      const standard = await rendererSnapshot("standard", 0);
+      if (standard.rendererBackground !== standard.trackBackground ||
+          standard.rendererBackground !== standard.tabBackground ||
+          standard.rendererBackground !== standard.hostBackground) {
+        throw new Error(`standard terminal body/track backgrounds differ: ${JSON.stringify(standard)}`);
+      }
       await enableCustomColors();
-      const custom = await rendererSnapshot("custom", resizeFrames.length - 1);
+      const custom = await rendererSnapshot("custom", 0);
       const persistedCustom = await configColors();
       const renderedColors = await renderedCustomColorCounts();
       if (
         custom.dataTheme !== "light" ||
         custom.rendererBackground !== "rgb(18, 52, 86)" ||
+        custom.trackBackground !== "rgb(18, 52, 86)" ||
+        custom.tabBackground !== "rgb(18, 52, 86)" ||
+        custom.hostBackground !== "rgb(18, 52, 86)" ||
         renderedColors.counts["#123456"] < 1_000 ||
         renderedColors.counts["#fedcba"] < 1 ||
         renderedColors.counts["#abcdef"] < 1 ||
@@ -637,16 +701,22 @@ export default {
       }
       await ctx.shot("custom-live");
       await disableCustomColors();
-      const restored = await rendererSnapshot("restored-standard", resizeFrames.length - 1);
+      const restored = await rendererSnapshot("restored-standard", 0);
       const restoredComparable = {
         dataTheme: restored.dataTheme,
         colors: restored.colors,
         rendererBackground: restored.rendererBackground,
+        trackBackground: restored.trackBackground,
+        tabBackground: restored.tabBackground,
+        hostBackground: restored.hostBackground,
       };
       const standardComparable = {
         dataTheme: standard.dataTheme,
         colors: standard.colors,
         rendererBackground: standard.rendererBackground,
+        trackBackground: standard.trackBackground,
+        tabBackground: standard.tabBackground,
+        hostBackground: standard.hostBackground,
       };
       if (JSON.stringify(restoredComparable) !== JSON.stringify(standardComparable)) {
         throw new Error(
@@ -664,42 +734,11 @@ export default {
         restored: restoredComparable,
       };
 
-      await patchTerminal({ ghostty: true });
-      await assertServerToml(/ghostty\s*=\s*true/, "terminal ghostty = true");
-      await sleep(1_500);
-      await page.evaluate(() => performance.clearResourceTimings());
-      const ghostty20 = await reloadBackend(
-        `.terminal-tab ${TERMINAL_SURFACES.ghostty}`,
-        "ghostty-20",
-      );
-      await page.waitForFunction(
-        () =>
-          performance
-            .getEntriesByType("resource")
-            .some((entry) => entry.name.includes("ghostty-vt")),
-        { timeout: 60_000 },
-      );
-      if (await page.$(`.terminal-tab ${TERMINAL_SURFACES.xterm}`)) {
-        throw new Error("ghostty preference reconstructed an xterm renderer");
-      }
-      const sessionAfterGhosttyReload = await session();
-      if (sessionBefore.session_id !== sessionAfterGhosttyReload?.session_id) {
-        throw new Error("ghostty reload replaced the PTY instead of reconstructing its renderer");
-      }
-      if (
-        ghostty20.grid.rows !== xterm20.grid.rows ||
-        !closeEnough(ghostty20.cellWidth, xterm20.cellWidth) ||
-        !closeEnough(ghostty20.cellHeight, xterm20.cellHeight)
-      ) {
-        throw new Error(
-          `xterm/ghostty lost cell alignment at 20px: ${JSON.stringify({ xterm20, ghostty20 })}`,
-        );
-      }
-
+      // The smaller-font leg also stays mounted at 20px until its reload.
       await setFontSize(18);
       const mountedGhostty = await rendererSnapshot(
         "ghostty-mounted",
-        resizeFrames.length - 1,
+        0,
       );
       if (
         JSON.stringify(mountedGhostty.grid) !== JSON.stringify(ghostty20.grid) ||
@@ -710,10 +749,9 @@ export default {
           `mounted ghostty refit after font preference changed: ${JSON.stringify({ ghostty20, mountedGhostty })}`,
         );
       }
-      const ghostty18 = await reloadBackend(
-        `.terminal-tab ${TERMINAL_SURFACES.ghostty}`,
-        "ghostty-18",
-      );
+      const ghostty18 = await reloadTerminal("ghostty-18");
+      const expected18 = await expectedCells(18);
+      assertCells(ghostty18, expected18);
       if (
         ghostty18.cellWidth >= ghostty20.cellWidth ||
         ghostty18.cellHeight >= ghostty20.cellHeight
@@ -722,11 +760,17 @@ export default {
           `reconstructed ghostty did not capture the smaller 18px font: ${JSON.stringify({ ghostty20, ghostty18 })}`,
         );
       }
-      details.ghostty = {
+      details.fontDecrease = {
         reconstructed20: ghostty20,
         mounted: mountedGhostty,
         reconstructed18: ghostty18,
+        expected18,
       };
+      details.session = { before: sessionBefore.session_id, after: (await session())?.session_id };
+      if (details.session.before !== details.session.after) throw new Error("appearance checks replaced the PTY");
+      for (const leg of ["fontIncrease", "colors", "fontDecrease", "session"]) {
+        if (!details[leg]) throw new Error(`terminal appearance leg did not run: ${leg}`);
+      }
       await ctx.shot("ghostty-reconstructed");
       return details;
     } catch (error) {
@@ -753,24 +797,11 @@ export default {
         restoreError = error;
       }
       try {
-        await patchOwner({ terminal: {
-          ...initialPrefs.terminal,
-          secret_masking: initialPrefs.terminal.secret_masking ?? null,
-        } });
-        const saved = readFileSync(join(ctx.chanHome, "server.toml"), "utf8");
-        for (const [field, value] of [
-          ["ghostty", initialPrefs.terminal.ghostty],
-          ["font_size", initialPrefs.terminal.font_size],
-        ]) {
-          if (!new RegExp(`^${field}\\s*=\\s*${value}$`, "m").test(saved)) {
-            throw new Error(`${field} did not restore to ${value} in server.toml`);
-          }
-        }
-        const mask = /^secret_masking\s*=\s*(true|false)\s*$/m.exec(saved)?.[1] ?? null;
-        if (mask !== (initialPrefs.terminal.secret_masking == null
-          ? null : String(initialPrefs.terminal.secret_masking))) {
-          throw new Error("secret_masking did not restore in server.toml");
-        }
+        await restoreTerminalPrefs(ctx, page, authToken, initialPrefs.terminal);
+        await assertTerminalPrefs(ctx, {
+          font: initialPrefs.terminal.font,
+          font_size: initialPrefs.terminal.font_size,
+        });
       } catch (error) {
         restoreError ??= error;
       }
