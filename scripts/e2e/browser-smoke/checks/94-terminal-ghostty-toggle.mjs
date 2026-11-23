@@ -5,7 +5,7 @@
 // host chords, OSC 52, paste bytes and mouse capture/selection stay required.
 // PTY output and cat -v witness the byte contracts independently of paint;
 // trusted CDP gestures and the copy chord witness selection.
-// A raw fixture pins press-only tracking, double clicks and Shift release;
+// A raw fixture pins press-only tracking, wrapped multi-clicks and Shift release;
 // every drag seeds its sentinel before pressing, including reporting drags.
 
 import assert from "node:assert/strict";
@@ -445,16 +445,30 @@ export default {
         result.fixture = await fixture.ready();
         assert.ok(result.fixture.tty && result.fixture.raw, "1000: fixture is a raw PTY");
         term = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
-        result.setup = await drainPointerInput(fixture, `\x1b[2J\x1b[H${word}\r\n${selected}\r\n\x1b[?1000;1006h`);
-        assert.deepEqual(result.setup, { input: "", reply: "\x1b[3;1R" }, "1000: output and mode setup reached the parser");
+        await settlePointer(page);
+        const box = await pointerGrid(term);
+        const prefix = "PREFIX94 ".padEnd(box.cols - 3, " ");
+        const logicalLine = `${prefix}${word} TAIL94`;
+        result.setup = await drainPointerInput(fixture, `\x1b[2J\x1b[H${logicalLine}\r\n${selected}\r\n\x1b[?1000;1006h`);
+        assert.deepEqual(result.setup, { input: "", reply: "\x1b[4;1R" }, "1000: output and mode setup reached the parser");
+        result.rows = await term.evaluate((t) => [0, 1, 2].map((row) => {
+          const line = t.buffer.active.getLine(t.buffer.active.baseY + row);
+          return { text: line?.translateToString(true), wrapped: line?.isWrapped };
+        }));
+        assert.deepEqual(result.rows, [
+          { text: prefix + word.slice(0, 3), wrapped: false },
+          { text: word.slice(3) + " TAIL94", wrapped: true },
+          { text: selected, wrapped: false },
+        ], "the clicked word crosses a soft wrap inside a longer logical line");
         assert.deepEqual(await term.evaluate((t) => [t.getMode(1000), t.getMode(1002), t.getMode(1003), t.getMode(1006)]),
           [true, false, false, true], "1000: press-only tracking with SGR, no motion modes");
         await settlePointer(page);
-        const box = await pointerGrid(term);
-        const from = { x: box.x + box.w * 0.25, y: box.y + box.h * 1.5 };
+        const from = { x: box.x + box.w * 0.25, y: box.y + box.h * 2.5 };
         const to = { x: box.x + box.w * (selected.length - 0.25), y: from.y };
-        for (const kind of ["drag", "double-click", "shift-double-click", "shift-released-drag"]) {
+        const kinds = ["drag", "double-click", "shift-double-click", "triple-click", "shift-triple-click", "shift-released-drag"];
+        for (const kind of kinds) {
           const gesture = result.gestures[kind] = {};
+          const clicks = kind.includes("double") ? 2 : kind.includes("triple") ? 3 : 0;
           let held = false;
           try {
             await term.evaluate((t) => t.clearSelection());
@@ -462,12 +476,12 @@ export default {
             await seedPointerClipboard(page, sentinel);
             assert.equal((await drainPointerInput(fixture)).input, "", `${kind}: PTY starts drained`);
             const index = fixture.records.length;
-            if (kind.includes("double-click")) {
-              const x = box.x + box.w * 2.5;
-              const y = box.y + box.h * 0.5;
+            if (clicks) {
+              const x = box.x + box.w * 0.5;
+              const y = box.y + box.h * 1.5;
               await page.mouse.move(x, y);
               if (kind.startsWith("shift")) await page.keyboard.down("Shift");
-              await page.mouse.click(x, y, { count: 2 });
+              await page.mouse.click(x, y, { count: clicks });
               await page.keyboard.up("Shift");
             } else {
               await page.mouse.move(from.x, from.y);
@@ -479,6 +493,9 @@ export default {
               // again so both the motion and release see Shift up.
               await page.keyboard.up("Shift");
               await page.mouse.move(to.x - box.w * 0.1, to.y);
+              gesture.heldSelection = await term.evaluate((t) => t.getSelection());
+              assert.equal(gesture.heldSelection, kind === "drag" ? "" : selected,
+                `${kind}: selection while the button is held`);
               await page.mouse.up();
               held = false;
             }
@@ -490,16 +507,17 @@ export default {
             gesture.copyClipboard = await copyPointerSelection(page, term);
             if (kind === "drag") {
               assert.deepEqual(gesture.reports, [
-                { button: 0, col: 1, row: 2, end: "M" },
-                { button: 0, col: selected.length, row: 2, end: "m" },
+                { button: 0, col: 1, row: 3, end: "M" },
+                { button: 0, col: selected.length, row: 3, end: "m" },
               ], "1000 drag: only a press and release, no motion reports");
-            } else if (kind === "double-click") {
-              assert.deepEqual(gesture.reports, ["M", "m", "M", "m"].map((end) => ({ button: 0, col: 3, row: 1, end })),
-                "1000 double click: exactly four reports");
+            } else if (clicks && !kind.startsWith("shift")) {
+              assert.deepEqual(gesture.reports, Array.from({ length: clicks }, () => ["M", "m"]).flat()
+                .map((end) => ({ button: 0, col: 1, row: 2, end })),
+                `1000 ${kind}: exactly ${clicks} press/release pairs`);
             } else {
               assert.equal(gesture.after.input, "", `${kind}: bypass sends no bytes`);
             }
-            const expected = kind.startsWith("shift") ? (kind.includes("double") ? word : selected) : "";
+            const expected = kind.startsWith("shift") ? (clicks === 2 ? word : clicks === 3 ? logicalLine : selected) : "";
             assert.equal(gesture.selection, expected, `${kind}: selection`);
             assert.equal(gesture.releaseClipboard, expected || sentinel, `${kind}: release clipboard`);
             assert.equal(gesture.copyClipboard, expected || sentinel, `${kind}: copy chord clipboard`);
@@ -512,7 +530,7 @@ export default {
             await page.keyboard.up("Shift").catch(() => {});
           }
         }
-        assert.equal(Object.keys(result.gestures).length, 4, "all press-only gesture legs ran");
+        assert.deepEqual(Object.keys(result.gestures), kinds, "all press-only gesture legs ran");
         return result;
       } finally {
         result.records = fixture.records;
