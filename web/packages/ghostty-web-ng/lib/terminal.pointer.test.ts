@@ -2,8 +2,9 @@
 // Dispatching on the captured canvas checks lifecycle logic, not native retargeting.
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { GhosttyVt } from '../vt/ghosttyVt';
+import { GhosttyVt, VtTerminal } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
+import { CanvasRenderer } from './renderer';
 
 let module: WebAssembly.Module;
 const opened: Terminal[] = [];
@@ -50,8 +51,8 @@ async function open(input = 'hello world\r\nsecond row') {
   const term = new Terminal({ ghostty, cols: COLS, rows: ROWS, cursorBlink: false, smoothScrollDuration: 0 });
   const host = document.createElement('div');
   document.body.append(host);
-  term.open(host);
   opened.push(term);
+  term.open(host);
   const canvas = host.querySelector('canvas')!;
   const textarea = host.querySelector('textarea')!;
   const captured = new Set<number>();
@@ -356,24 +357,60 @@ describe('report and bypass completion', () => {
 });
 
 describe('scoped context menu and click selection', () => {
-  test('only the existing scrollbar mouseup listener remains global', async () => {
+  test('open, context-menu delay and dispose leave no document or window listeners', async () => {
     // Warm jsdom selectors before recording widget listeners.
     document.querySelector('canvas');
     const doc = vi.spyOn(document, 'addEventListener');
     const win = vi.spyOn(window, 'addEventListener');
-    const { canvas, textarea } = await open();
+    const docRemove = vi.spyOn(document, 'removeEventListener');
+    const winRemove = vi.spyOn(window, 'removeEventListener');
+    const { term, canvas, textarea } = await open();
     const eventNames = () => doc.mock.calls.map(([name]) => name);
-    expect(eventNames()).toEqual(['mouseup']);
+    expect(eventNames()).toEqual([]);
     vi.useFakeTimers();
     canvas.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 40, clientY: 30 }));
     expect(textarea.style.pointerEvents).toBe('auto');
     vi.advanceTimersByTime(10);
-    expect(eventNames()).toEqual(['mouseup']);
+    expect(eventNames()).toEqual([]);
     expect(win).not.toHaveBeenCalled();
     textarea.blur();
     expect(textarea.style.pointerEvents).toBe('none');
     expect(textarea.style.width).toBe('0px');
     expect(textarea.value).toBe('');
+    term.dispose();
+    expect(doc.mock.calls.length - docRemove.mock.calls.length).toBe(0);
+    expect(win.mock.calls.length - winRemove.mock.calls.length).toBe(0);
+  });
+
+  test('a failed open balances document/window listeners and releases its core and host', async () => {
+    document.querySelector('canvas');
+    const doc = vi.spyOn(document, 'addEventListener');
+    const win = vi.spyOn(window, 'addEventListener');
+    const docRemove = vi.spyOn(document, 'removeEventListener');
+    const winRemove = vi.spyOn(window, 'removeEventListener');
+    const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+    const term = new Terminal({ ghostty });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const remove = vi.spyOn(host, 'removeEventListener');
+    const add = vi.spyOn(host, 'addEventListener');
+    const create = vi.spyOn(ghostty, 'createTerminal');
+    const free = vi.spyOn(VtTerminal.prototype, 'free');
+    vi.spyOn(CanvasRenderer.prototype, 'render').mockImplementation(() => { throw new Error('paint failed'); });
+    expect(() => term.open(host)).toThrow('paint failed');
+    expect(doc.mock.calls.length - docRemove.mock.calls.length).toBe(0);
+    expect(win.mock.calls.length - winRemove.mock.calls.length).toBe(0);
+    for (const [name, handler, options] of add.mock.calls) {
+      const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
+      expect(remove.mock.calls.some(([type, listener, opts]) => type === name && listener === handler &&
+        (typeof opts === 'boolean' ? opts : opts?.capture ?? false) === capture), name).toBe(true);
+    }
+    expect(create).toHaveBeenCalledOnce();
+    expect(free).toHaveBeenCalledOnce();
+    expect(term.wasmTerm).toBeUndefined();
+    expect(term.element).toBeUndefined();
+    expect(term.renderer).toBeUndefined();
+    expect(host.childElementCount).toBe(0);
   });
 
   test.each(['pointerdown', 'dispose'])('context menu reset on %s cancels pending cleanup', async (end) => {
@@ -438,4 +475,255 @@ describe('scoped context menu and click selection', () => {
     expect(activated).toEqual([]);
   });
 
+});
+
+// No compatibility mouse events: canceling a pointerdown suppresses them.
+function rawPointer(target: Element, type: string, x: number, y: number, extra: PointerEventInit = {}) {
+  const event = new PointerEvent(type, {
+    bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true,
+    button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1,
+    clientX: x, clientY: y, ...extra,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
+async function scrollbar(offset = 12.25) {
+  const fixture = await open(history());
+  // A second position shows the overlay synchronously; no private animation hook.
+  fixture.term.viewport.scrollTo(1);
+  fixture.term.viewport.scrollTo(offset);
+  const geometry = () => {
+    const rect = fixture.canvas.getBoundingClientRect();
+    const track = rect.height - 8;
+    const thumb = Math.max(20, fixture.term.rows / (fixture.term.rows + fixture.term.getScrollbackLength()) * track);
+    return {
+      x: rect.right - 8,
+      y: rect.top + 4 + (track - thumb) * (1 - fixture.term.viewport.offset / fixture.term.getScrollbackLength()) + thumb / 2,
+      rowsPerPixel: fixture.term.getScrollbackLength() / (track - thumb),
+    };
+  };
+  return { ...fixture, geometry };
+}
+
+describe('captured scrollbar lifecycle', () => {
+  test('dispose cancels the pending scrollbar animation as well as the render loop', async () => {
+    let id = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++id, callback); return id; });
+    vi.stubGlobal('cancelAnimationFrame', (frame: number) => frames.delete(frame));
+    const { term } = await open(history());
+    term.viewport.scrollTo(2);
+    expect(frames.size).toBe(2);
+    term.dispose();
+    expect(frames.size).toBe(0);
+  });
+
+  test('a new pointer can start a thumb after the previous capture silently disappears', async () => {
+    const { term, canvas, captured, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    captured.clear();
+    const before = term.viewport.offset;
+    rawPointer(canvas, 'pointerdown', x, y, { pointerId: 8 });
+    rawPointer(canvas, 'pointermove', x, y - 5, { pointerId: 8 });
+    expect(term.viewport.offset).toBeGreaterThan(before);
+    expect(canvas.hasPointerCapture(8)).toBe(true);
+  });
+
+  test.each(['mouse', 'pen'])('%s thumb uses pointer moves, keeps fractional offsets and restores styles', async (pointerType) => {
+    const { term, canvas, capture, release, write, geometry } = await scrollbar();
+    canvas.style.userSelect = 'text';
+    canvas.style.webkitUserSelect = 'text';
+    const { x, y, rowsPerPixel } = geometry();
+    const before = term.viewport.offset;
+    const press = rawPointer(canvas, 'pointerdown', x, y, { pointerType });
+    expect(press.defaultPrevented).toBe(true);
+    expect(capture).toHaveBeenCalledExactlyOnceWith(7);
+    expect(canvas.style.userSelect).toBe('none');
+    rawPointer(canvas, 'pointermove', x, y - 2.5, { pointerType });
+    expect(term.viewport.offset).toBeCloseTo(before + 2.5 * rowsPerPixel);
+    rawPointer(canvas, 'pointerup', x, y - 2.5, { pointerType });
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+    expect(canvas.style.userSelect).toBe('text');
+    expect(canvas.style.webkitUserSelect).toBe('text');
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test.each(['pointerup', 'pointercancel', 'lostpointercapture', 'dispose'])('%s ends the thumb once and ignores later movement', async (end) => {
+    const { term, canvas, release, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    rawPointer(canvas, 'pointermove', x, y - 5);
+    expect(canvas.style.userSelect).toBe('none');
+    if (end === 'dispose') term.dispose(); else rawPointer(canvas, end, x, y - 5);
+    const offset = term.viewport.offset;
+    rawPointer(canvas, 'lostpointercapture', x, y - 5);
+    rawPointer(canvas, 'pointermove', x, y - 10);
+    rawPointer(canvas, 'pointerup', x, y - 10);
+    expect(term.viewport.offset).toBe(offset);
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+    expect(canvas.style.userSelect).toBe('');
+    expect(canvas.style.webkitUserSelect).toBe('');
+  });
+
+  test.each(['detached', 'reattached', 'uncaptured'])('%s host cannot continue a stale thumb', async (state) => {
+    const { term, host, canvas, captured, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    expect(canvas.style.userSelect).toBe('none');
+    if (state !== 'uncaptured') host.remove();
+    if (state === 'reattached') document.body.append(host);
+    if (state !== 'detached') captured.clear();
+    const before = term.viewport.offset;
+    rawPointer(canvas, 'pointermove', x, y - 10);
+    expect(term.viewport.offset).toBe(before);
+    expect(canvas.style.userSelect).toBe('');
+    document.body.append(host);
+    rawPointer(canvas, 'pointerup', x, y);
+    const fresh = geometry();
+    rawPointer(canvas, 'pointerdown', fresh.x, fresh.y);
+    rawPointer(canvas, 'pointermove', fresh.x, fresh.y - 3);
+    expect(term.viewport.offset).toBeGreaterThan(before);
+  });
+
+  test.each([{ pointerId: 8 }, { pointerType: 'pen' }, { pointerType: 'touch' }, { isPrimary: false }])('unrelated %j cannot replace, move or end a thumb', async (extra) => {
+    const { term, canvas, release, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    expect(canvas.style.userSelect).toBe('none');
+    const before = term.viewport.offset;
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) {
+      rawPointer(canvas, type, x, y - 10, extra);
+    }
+    expect(term.viewport.offset).toBe(before);
+    expect(release).not.toHaveBeenCalled();
+    rawPointer(canvas, 'pointermove', x, y - 5, { buttons: 0 });
+    expect(term.viewport.offset).toBeGreaterThan(before);
+    rawPointer(canvas, 'pointerup', x, y - 5);
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  test.each([{ pointerType: 'touch' }, { isPrimary: false }, { button: 1, buttons: 4 }, { button: 2, buttons: 2 }])('non-thumb press %j leaves the strip unclaimed', async (extra) => {
+    const { term, canvas, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    const before = term.viewport.offset;
+    const event = rawPointer(canvas, 'pointerdown', x, y, extra);
+    rawPointer(canvas, 'pointermove', x, y - 10, { ...extra, button: -1 });
+    expect(event.defaultPrevented).toBe(false);
+    expect(canvas.style.userSelect).not.toBe('none');
+    expect(term.viewport.offset).toBe(before);
+  });
+
+  test.each(['throw', 'false'])('capture failure (%s) abandons the thumb without losing selection', async (failure) => {
+    const { term, canvas, captured, capture, release, geometry, write } = await scrollbar();
+    term.select(0, 0, 4);
+    const selected = term.getSelection();
+    const { x, y } = geometry();
+    const before = term.viewport.offset;
+    capture.mockImplementation(() => { if (failure === 'throw') throw new Error('unavailable'); return captured; });
+    rawPointer(canvas, 'pointerdown', x, y);
+    expect(capture).toHaveBeenCalledExactlyOnceWith(7);
+    rawPointer(canvas, 'pointermove', x, y - 10);
+    rawPointer(canvas, 'pointerup', x, y - 10);
+    expect(term.viewport.offset).toBe(before);
+    expect(term.getSelection()).toBe(selected);
+    expect(canvas.style.userSelect).not.toBe('none');
+    expect(release).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test.each(['hidden', 'no history'])('%s strip remains selectable content', async (state) => {
+    const line = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    const { term, canvas, width, height, write } = await open(state === 'hidden' ? `${history()}\r\n${line}` : line);
+    if (state === 'hidden') expect(term.getScrollbackLength()).toBeGreaterThan(0);
+    const y = state === 'hidden' ? (ROWS - 1) * height + 1 : 1;
+    const x = COLS * width - 8;
+    expect(rawPointer(canvas, 'pointerdown', x, y).defaultPrevented).toBe(false);
+    rawPointer(canvas, 'pointermove', x - 24, y);
+    rawPointer(canvas, 'pointerup', x - 24, y);
+    expect(term.getSelection()).toBe('ABCD');
+    expect(write).toHaveBeenCalledExactlyOnceWith('ABCD');
+  });
+
+  test('a visible track press prevents selection and bubbles to page closers', async () => {
+    const { term, host, canvas, capture, write, geometry } = await scrollbar();
+    const pagePress = vi.fn();
+    host.addEventListener('pointerdown', pagePress);
+    const { x } = geometry();
+    const press = rawPointer(canvas, 'pointerdown', x, 5);
+    rawPointer(canvas, 'pointerup', x, 5);
+    expect(press.defaultPrevented).toBe(true);
+    expect(pagePress).toHaveBeenCalledOnce();
+    expect(term.viewport.offset).toBeGreaterThan(30);
+    expect(term.hasSelection()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  test.each(['top', 'bottom'])('the %s clamp rebases overshoot and reverses immediately', async (end) => {
+    const { term, canvas, geometry } = await scrollbar();
+    const { x, y, rowsPerPixel } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    const overshoot = end === 'top' ? -500 : 500;
+    rawPointer(canvas, 'pointermove', x, overshoot);
+    const bound = end === 'top' ? term.getScrollbackLength() : 0;
+    expect(term.viewport.offset).toBe(bound);
+    rawPointer(canvas, 'pointermove', x, overshoot + (end === 'top' ? 2 : -2));
+    expect(term.viewport.offset).toBeCloseTo(bound + (end === 'top' ? -2 : 2) * rowsPerPixel);
+  });
+
+  test.each(['top', 'bottom'])('output after %s overshoot rebases before a zero-delta move and reversal', async (end) => {
+    const { term, canvas, geometry } = await scrollbar();
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    const overshoot = end === 'top' ? -500 : 500;
+    rawPointer(canvas, 'pointermove', x, overshoot);
+    const before = term.viewport.offset;
+    term.write('\r\nstreamed row');
+    const anchored = end === 'top' ? before + 1 : 0;
+    expect(term.viewport.offset).toBe(anchored);
+    rawPointer(canvas, 'pointermove', x, overshoot);
+    expect(term.viewport.offset).toBe(anchored);
+    rawPointer(canvas, 'pointermove', x, overshoot + (end === 'top' ? 2 : -2));
+    expect(term.viewport.offset).toBeCloseTo(anchored + (end === 'top' ? -2 : 2) * geometry().rowsPerPixel);
+  });
+
+  test.each([0, 12.25, 34])('output at offset %s stays anchored on a zero-delta thumb move', async (offset) => {
+    const { term, canvas, geometry } = await scrollbar(offset);
+    const { x, y } = geometry();
+    rawPointer(canvas, 'pointerdown', x, y);
+    expect(canvas.style.userSelect).toBe('none');
+    term.write('\r\nstreamed row');
+    const anchored = term.viewport.offset;
+    expect(anchored).toBe(offset < 1 ? offset : offset + 1);
+    rawPointer(canvas, 'pointermove', x, y);
+    expect(term.viewport.offset).toBe(anchored);
+    const { rowsPerPixel } = geometry();
+    rawPointer(canvas, 'pointermove', x, y + 1);
+    expect(term.viewport.offset).toBeCloseTo(Math.max(0, anchored - rowsPerPixel));
+  });
+
+  test('a track with no travel never produces an infinite or reversed offset', async () => {
+    const { term, canvas, capture } = await scrollbar();
+    term.resize(COLS, 1);
+    term.viewport.scrollTo(8.25);
+    const before = term.viewport.offset;
+    rawPointer(canvas, 'pointerdown', COLS * 8 - 8, 8);
+    expect(capture).toHaveBeenCalledExactlyOnceWith(7);
+    rawPointer(canvas, 'pointermove', COLS * 8 - 8, 12);
+    expect(term.viewport.offset).toBe(before);
+  });
+
+  test('a thumb owns buttonless captured moves even in all-motion reporting mode', async () => {
+    const { term, canvas, reports, geometry } = await scrollbar();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    const { x, y } = geometry();
+    const before = term.viewport.offset;
+    rawPointer(canvas, 'pointerdown', x, y);
+    rawPointer(canvas, 'pointermove', x, y - 4, { buttons: 0 });
+    rawPointer(canvas, 'pointerup', x, y - 4);
+    expect(term.viewport.offset).toBeGreaterThan(before);
+    expect(reports).toEqual([]);
+  });
 });

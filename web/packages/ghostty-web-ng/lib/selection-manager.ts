@@ -120,7 +120,7 @@ export class SelectionManager {
     textarea: HTMLTextAreaElement,
     private mouseInput?: {
       accepts: (event: PointerEvent) => boolean;
-      press: (event: MouseEvent) => void;
+      press: (event: PointerEvent) => void;
       move: (event: MouseEvent) => void;
       release: (event: MouseEvent) => void;
       end: (event?: MouseEvent) => void;

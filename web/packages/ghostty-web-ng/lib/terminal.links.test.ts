@@ -2,9 +2,6 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
 import type { TerminalLinkActivation } from './interfaces';
-import { LinkDetector } from './link-detector';
-import { OSC8LinkProvider } from './providers/osc8-link-provider';
-import { UrlRegexProvider } from './providers/url-regex-provider';
 import { DRAG_THRESHOLD_CELLS } from './selection-manager';
 import { Terminal } from './terminal';
 
@@ -19,64 +16,73 @@ beforeEach(() => {
   let next = 1;
   vi.stubGlobal('requestAnimationFrame', () => next++);
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({}, {
+    get: (_, key) => key === 'measureText'
+      ? () => ({ width: 8, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 })
+      : () => undefined,
+    set: () => true,
+  })) as never);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn(async () => {}) } });
 });
 
 afterEach(() => {
   for (const term of terminals.splice(0)) term.dispose();
+  document.body.replaceChildren();
+  delete (navigator as { clipboard?: unknown }).clipboard;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 const CELL = { width: 8, height: 16 };
 
-// The real core and both providers; the canvas sits at the page's origin
-// (jsdom lays out nothing), so a cell's pixels are its column and row times
-// the cell size.
+// Canvas pixels are modelled; capture delivery is explicitly targeted at the canvas.
 async function terminal() {
   const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
   const term = new Terminal({ ghostty, cols: 40, rows: 6, smoothScrollDuration: 0 });
-  const renderer = {
-    render: vi.fn(),
-    resize: vi.fn(),
-    getMetrics: () => ({ ...CELL, baseline: 12 }),
-    charWidth: CELL.width,
-    charHeight: CELL.height,
-    dispose: vi.fn(),
-  };
-  Object.assign(term, {
-    wasmTerm: ghostty.createTerminal(40, 6, { scrollbackLimit: 1000 }),
-    renderer,
-    canvas: document.createElement('canvas'),
-    isOpen: true,
-  });
-  const links = new LinkDetector(term);
-  links.registerProvider(new OSC8LinkProvider(term));
-  links.registerProvider(new UrlRegexProvider(term));
-  Object.assign(term, { linkDetector: links });
+  const host = document.createElement('div');
+  document.body.append(host);
   terminals.push(term);
+  term.open(host);
+  const canvas = host.querySelector('canvas')!;
+  const captured = new Set<number>();
+  Object.assign(canvas, {
+    setPointerCapture: (id: number) => captured.add(id),
+    hasPointerCapture: (id: number) => captured.has(id),
+    releasePointerCapture: (id: number) => captured.delete(id),
+  });
+  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 40 * CELL.width, 6 * CELL.height));
   const seen: TerminalLinkActivation[] = [];
   term.onLinkActivate((link) => seen.push(link));
-  return { term, seen };
+  return { term, seen, host, canvas, captured };
 }
 
-type Pointer = { x: number; y: number; shiftKey?: boolean; ctrlKey?: boolean; detail?: number };
+type Pointer = { x: number; y: number; shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; detail?: number };
 
-// A press at one point and the click its release makes at another, through
-// the widget's own press and click listeners.
+function pointer(term: Terminal, type: string, p: Pointer, extra: PointerEventInit = {}) {
+  term.element!.querySelector('canvas')!.dispatchEvent(new PointerEvent(type, {
+    bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true,
+    button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1,
+    clientX: p.x, clientY: p.y, shiftKey: p.shiftKey, ctrlKey: p.ctrlKey, ...extra,
+  }));
+}
+
+async function dispatchClick(term: Terminal, p: Pointer) {
+  term.element!.querySelector('canvas')!.dispatchEvent(new MouseEvent('click', {
+    bubbles: true, cancelable: true, button: 0, detail: p.detail ?? 1,
+    clientX: p.x, clientY: p.y, shiftKey: p.shiftKey, ctrlKey: p.ctrlKey,
+    metaKey: p.metaKey, altKey: p.altKey,
+  }));
+  // The providers resolve asynchronously, even for a click which must be suppressed.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function click(term: Terminal, press: Pointer, release: Pointer = press) {
-  const at = (p: Pointer) => ({
-    clientX: p.x,
-    clientY: p.y,
-    button: 0,
-    shiftKey: p.shiftKey ?? false,
-    ctrlKey: p.ctrlKey ?? false,
-  });
-  const widget = term as unknown as {
-    handleLinkPress(e: MouseEvent): void;
-    handleClick(e: MouseEvent): Promise<void>;
-  };
-  widget.handleLinkPress(new MouseEvent('mousedown', at(press)));
-  await widget.handleClick(new MouseEvent('click', { ...at(release), detail: release.detail ?? 1 }));
+  pointer(term, 'pointerdown', press);
+  pointer(term, 'pointermove', release);
+  pointer(term, 'pointerup', release);
+  // Native implicit capture loss follows up, before click, and must preserve it.
+  pointer(term, 'lostpointercapture', release);
+  await dispatchClick(term, release);
 }
 
 const cell = (col: number, row: number) => ({ x: col * CELL.width + 2, y: row * CELL.height + 2 });
@@ -123,5 +129,117 @@ describe('link activation', () => {
     expect(seen).toEqual([]);
     await click(term, { ...cell(2, 0), shiftKey: true });
     expect(seen.map((link) => link.target)).toEqual(['https://example.com/tracked']);
+  });
+});
+
+describe('link gesture completion through registered listeners', () => {
+  test.each(['pointercancel', 'lostpointercapture', 'uncaptured', 'detached', 'prevented'])('%s abandons a pending link press', async (end) => {
+    const { term, seen, host, canvas, captured } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    if (end === 'uncaptured') {
+      captured.clear();
+      pointer(term, 'pointermove', at);
+    } else if (end === 'detached') {
+      host.remove();
+      pointer(term, 'pointerup', at);
+      document.body.append(host);
+    } else if (end === 'prevented') {
+      pointer(term, 'pointerup', at);
+      host.addEventListener('pointerdown', (e) => e.preventDefault(), { capture: true });
+      pointer(term, 'pointerdown', at);
+      pointer(term, 'pointerup', at);
+    } else {
+      pointer(term, end, at);
+    }
+    await dispatchClick(term, at);
+    expect(seen).toEqual([]);
+    expect(canvas.hasPointerCapture(7)).toBe(false);
+  });
+
+  test('a drag returning to its start cannot become a link click', async () => {
+    const { term, seen } = await terminal();
+    term.write('https://example.com');
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointermove', cell(10, 0));
+    pointer(term, 'pointermove', at);
+    pointer(term, 'pointerup', at);
+    await dispatchClick(term, at);
+    expect(seen).toEqual([]);
+  });
+
+  test.each(['thumb', 'track'])('%s press consumes a stale link click while bubbling', async (where) => {
+    const { term, seen, host } = await terminal();
+    const url = 'https://example.com';
+    term.write(Array.from({ length: 40 }, () => url).join('\r\n'));
+    term.viewport.scrollTo(1);
+    term.viewport.scrollTo(10);
+    const at = cell(3, 0);
+    pointer(term, 'pointerdown', at);
+    pointer(term, 'pointerup', at);
+    const pagePress = vi.fn();
+    host.addEventListener('pointerdown', pagePress);
+    const track = 6 * CELL.height - 8;
+    const thumb = Math.max(20, 6 / (term.getScrollbackLength() + 6) * track);
+    const y = where === 'track' ? 5 : 4 + (track - thumb) * (1 - 10 / term.getScrollbackLength()) + thumb / 2;
+    pointer(term, 'pointerdown', { x: 312, y });
+    pointer(term, 'pointerup', { x: 312, y });
+    await dispatchClick(term, at);
+    expect(pagePress).toHaveBeenCalledOnce();
+    expect(seen).toEqual([]);
+  });
+
+  test('a program-owned press releases outside and never activates a link', async () => {
+    const { term, seen } = await terminal();
+    term.write('\x1b[?1002h\x1b[?1006hhttps://example.com');
+    const reports: string[] = [];
+    term.onData((data) => reports.push(data));
+    pointer(term, 'pointerdown', cell(3, 0));
+    pointer(term, 'pointerup', { x: 500, y: 500 });
+    term.write('\x1b[?1002l');
+    await dispatchClick(term, cell(3, 0));
+    expect(reports).toEqual(['\x1b[<0;4;1M', '\x1b[<0;40;6m']);
+    expect(seen).toEqual([]);
+  });
+
+  test('an outside release clears even a local link press', async () => {
+    const { term, seen } = await terminal();
+    term.write('https://example.com');
+    pointer(term, 'pointerdown', cell(3, 0));
+    pointer(term, 'pointerup', { x: -1, y: 1 });
+    await dispatchClick(term, cell(3, 0));
+    expect(seen).toEqual([]);
+  });
+
+  test('modifiers survive a first click and the second click selects a word', async () => {
+    const { term, seen } = await terminal();
+    term.write('\x1b]8;;../raw%20target#part\x07word\x1b]8;;\x07');
+    const at = cell(1, 0);
+    await click(term, at, { ...at, ctrlKey: true, metaKey: true, altKey: true });
+    expect(seen.map((link) => link.target)).toEqual(['../raw%20target#part']);
+    expect(seen[0].event).toMatchObject({ ctrlKey: true, metaKey: true, altKey: true });
+    await click(term, at, { ...at, detail: 2 });
+    expect(term.getSelection()).toBe('word');
+    expect(seen).toHaveLength(1);
+  });
+
+  test('dispose removes every registered pointer and click listener by identity and phase', async () => {
+    const add = vi.spyOn(EventTarget.prototype, 'addEventListener');
+    const remove = vi.spyOn(EventTarget.prototype, 'removeEventListener');
+    const { term, host, canvas } = await terminal();
+    term.write('https://example.com');
+    pointer(term, 'pointerdown', cell(3, 0));
+    pointer(term, 'pointerup', cell(3, 0));
+    const registrations = add.mock.calls.map((args, i) => ({ args, target: add.mock.contexts[i] }))
+      .filter(({ args: [type], target }) => (target === host || target === canvas) && /^(pointer|lostpointer|click|mouse)/.test(type));
+    expect(registrations.length).toBeGreaterThan(5);
+    term.dispose();
+    for (const { args: [name, handler, options], target } of registrations) {
+      const capture = typeof options === 'boolean' ? options : options?.capture ?? false;
+      expect(remove.mock.calls.some(([type, listener, opts], i) => remove.mock.contexts[i] === target &&
+        type === name && listener === handler && (typeof opts === 'boolean' ? opts : opts?.capture ?? false) === capture), name).toBe(true);
+    }
   });
 });
