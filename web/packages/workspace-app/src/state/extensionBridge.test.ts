@@ -4,11 +4,11 @@ import { describe, expect, test } from "vitest";
 
 import { allCommands } from "./commands";
 import {
+  EXTENSION_CAPTURE_REQUEST,
   EXTENSION_KEYDOWN_MESSAGE,
   EXTENSION_KEYMAP_MESSAGE,
-  EXTENSION_MICROPHONE_REQUEST,
   EXTENSION_PRESENTATION_REQUEST,
-  extensionMicrophoneRequest,
+  extensionCaptureRequest,
   extensionPresentationAction,
   extensionHostKeys,
   hostKeyId,
@@ -136,23 +136,53 @@ describe("extension host keyboard bridge", () => {
     ).toBeNull();
   });
 
-  test("accepts only bounded microphone requests", () => {
-    for (const action of ["start", "stop", "cancel"]) {
+  test("accepts only bounded capture requests", () => {
+    expect(
+      extensionCaptureRequest({
+        type: EXTENSION_CAPTURE_REQUEST,
+        request_id: "request-1",
+        action: "open",
+        source: "microphone",
+      }),
+    ).toMatchObject({ request_id: "request-1", action: "open" });
+    expect(
+      extensionCaptureRequest({
+        type: EXTENSION_CAPTURE_REQUEST,
+        request_id: "request-1",
+        action: "open",
+        source: "microphone",
+        max_ms: 5000,
+        processing: "raw",
+      }),
+    ).toMatchObject({ max_ms: 5000, processing: "raw" });
+    for (const action of ["stop", "cancel"]) {
       expect(
-        extensionMicrophoneRequest({
-          type: EXTENSION_MICROPHONE_REQUEST,
+        extensionCaptureRequest({
+          type: EXTENSION_CAPTURE_REQUEST,
           request_id: "request-1",
           action,
         }),
       ).toMatchObject({ request_id: "request-1", action });
     }
+    expect(
+      extensionCaptureRequest({
+        type: EXTENSION_CAPTURE_REQUEST,
+        action: "ack",
+        take_id: "a".repeat(32),
+      }),
+    ).toMatchObject({ action: "ack", take_id: "a".repeat(32) });
     for (const request of [
-      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "", action: "start" },
-      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "x".repeat(129), action: "start" },
-      { type: EXTENSION_MICROPHONE_REQUEST, request_id: "request-1", action: "record" },
-      { type: EXTENSION_MICROPHONE_REQUEST, action: "start" },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "", action: "open", source: "microphone" },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "x".repeat(129), action: "open", source: "microphone" },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "request-1", action: "open", source: "camera" },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "request-1", action: "open", source: "microphone", max_ms: 999 },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "request-1", action: "open", source: "microphone", max_ms: 600001 },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "request-1", action: "open", source: "microphone", processing: "studio" },
+      { type: EXTENSION_CAPTURE_REQUEST, request_id: "request-1", action: "start" },
+      { type: EXTENSION_CAPTURE_REQUEST, action: "ack", take_id: "not-hex" },
+      { type: "chan:extension-microphone-request:v1", request_id: "request-1", action: "open", source: "microphone" },
     ]) {
-      expect(extensionMicrophoneRequest(request)).toBeNull();
+      expect(extensionCaptureRequest(request)).toBeNull();
     }
   });
 });

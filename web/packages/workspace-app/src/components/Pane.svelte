@@ -76,6 +76,7 @@
     Command as CommandIcon,
     LayoutGrid,
     KeyRound,
+    Mic,
     Network,
     Palette,
     Pause,
@@ -156,6 +157,7 @@
   import "../state/commands/install";
   import { windowModeAllowsCommand } from "../state/windowMode";
   import { programSummary, programVisual } from "../state/programStatus";
+  import { isCaptureRecording } from "../state/extensionCapture.svelte";
   import { windowTabBar, windowTabBarTitleSlot } from "../state/windowTabBar.svelte";
   import { portalTo } from "./portal";
   import { TAB_STRIP_END_FADE_PX, TabStripScroll } from "./tabStripScroll.svelte";
@@ -1736,9 +1738,20 @@
               <Folder size={14} strokeWidth={1.75} />
             </span>
           {:else if t.kind === "extension"}
-            <span class="tab-icon" aria-hidden="true">
-              <Blocks size={14} strokeWidth={1.75} />
-            </span>
+            {#if isCaptureRecording(t.id)}
+              <span
+                class="tab-icon recording-indicator"
+                role="img"
+                title={`${label}: recording`}
+                aria-label={`${label}: recording`}
+              >
+                <Mic size={14} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+            {:else}
+              <span class="tab-icon" aria-hidden="true">
+                <Blocks size={14} strokeWidth={1.75} />
+              </span>
+            {/if}
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <span
@@ -2813,6 +2826,7 @@
     flex-shrink: 0;
   }
   .tab.active .tab-icon { color: var(--text); }
+  .recording-indicator { color: #e5484d; }
   .broadcast-marker {
     display: inline-flex;
     align-items: center;

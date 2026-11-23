@@ -13,10 +13,14 @@
   // The menu names its rows through the catalog, which this fills.
   import "../state/commands/install";
   import {
+    EXTENSION_CAPTURE_EVENT,
+    EXTENSION_CAPTURE_REQUEST,
+    EXTENSION_CAPTURE_SOURCES_MESSAGE,
     EXTENSION_KEYMAP_MESSAGE,
     EXTENSION_SESSION_CONTEXT_MESSAGE,
     EXTENSION_VIEW_STATE_MESSAGE,
-    extensionMicrophoneRequest,
+    extensionCaptureRequest,
+    extensionCaptureSourceStatus,
     extensionPresentationAction,
     extensionHostKeys,
     hostKeyId,
@@ -24,7 +28,17 @@
     isExtensionKeydownMessage,
     keyboardEventFromExtension,
   } from "../state/extensionBridge";
-  import { ExtensionMicrophone } from "../state/extensionMicrophone";
+  import {
+    cancelCaptureRecording,
+    captureViewFor,
+    discardCaptureOutbox,
+    disposeCaptureTab,
+    handleCaptureRequest,
+    redeliverCapture,
+    registerCapturePoster,
+    startCaptureRecording,
+    stopCaptureRecording,
+  } from "../state/extensionCapture.svelte";
   import {
     EXTENSION_COMMAND_MESSAGE,
     EXTENSION_READY_MESSAGE,
@@ -46,8 +60,10 @@
   import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { openCommandLauncherFromMenu } from "../state/store.svelte";
   import {
+    allPaneTabs,
     closeTab,
     flipHybrid,
+    layout,
     panesHaveSides,
     type ExtensionTab,
   } from "../state/tabs.svelte";
@@ -78,9 +94,12 @@
   // Fail-closed until the first postHostKeys: only a relayed chord whose
   // identity matches an advertised host key is dispatched locally.
   let advertisedKeys = new Set<string>();
-  const microphone = new ExtensionMicrophone((event) => {
-    frame?.contentWindow?.postMessage(event, "*");
-  });
+  // Capture belongs to the tab id in the module store, not to this
+  // component, so a remount keeps the session and its takes.
+  const captureView = $derived(captureViewFor(tab.id));
+  const captureName = $derived(extension?.name ?? tab.title);
+  let unregisterCapture: (() => void) | undefined;
+  let nowMs = $state(Date.now());
 
   // The command context as it reads with this tab focused: a row's check is
   // the catalog's state for the tab the menu belongs to.
@@ -126,10 +145,29 @@
 
   function closeOwnTab(): void {
     menu?.close();
-    microphone.cancel();
+    disposeCaptureTab(tab.id);
     setExtensionPresenting(tab.id, false);
     void closeTab(paneId, tab.id);
   }
+
+  function tabStillExists(): boolean {
+    return Object.values(layout.nodes).some(
+      (node) =>
+        node.kind === "leaf" &&
+        allPaneTabs(node).some((candidate) => candidate.id === tab.id),
+    );
+  }
+
+  function formatClock(ms: number): string {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  const captureElapsedMs = $derived(
+    captureView?.phase === "recording" && captureView.startedAt !== null
+      ? nowMs - (captureView.startedAt ?? nowMs)
+      : 0,
+  );
 
   function openCommands(event: MouseEvent): void {
     const row = event.currentTarget as Element;
@@ -149,6 +187,20 @@
       {
         type: EXTENSION_KEYMAP_MESSAGE,
         keys,
+      },
+      "*",
+    );
+  }
+
+  function postCaptureSources(): void {
+    frame?.contentWindow?.postMessage(
+      {
+        type: EXTENSION_CAPTURE_SOURCES_MESSAGE,
+        sources: {
+          microphone: extensionCaptureSourceStatus(
+            extensionHasCapability(extension, "microphone"),
+          ),
+        },
       },
       "*",
     );
@@ -193,9 +245,11 @@
   }
 
   function onFrameLoad(): void {
-    microphone.cancel();
+    // A frame load or reload leaves the tab's capture session and takes
+    // alone; only the frame registry starts over.
     resetExtensionFrame(tab.id);
     postHostKeys();
+    postCaptureSources();
     postSessionContext();
     postViewState();
   }
@@ -205,8 +259,10 @@
     if (event.data?.type === EXTENSION_READY_MESSAGE) {
       markExtensionFrameReady(tab.id);
       postHostKeys();
+      postCaptureSources();
       postSessionContext();
       postViewState();
+      redeliverCapture(tab.id);
       return;
     }
     if (isExtensionKeydownMessage(event.data)) {
@@ -219,9 +275,33 @@
       else if (!event.data.ok) notify(`${tab.title} refused the command`);
       return;
     }
-    const microphoneRequest = extensionMicrophoneRequest(event.data);
-    if (microphoneRequest) {
-      if (extensionHasCapability(extension, "microphone")) microphone.handle(microphoneRequest);
+    const captureRequest = extensionCaptureRequest(event.data);
+    if (captureRequest) {
+      handleCaptureRequest(tab.id, {
+        extensionId: tab.extensionId,
+        extensionName: captureName,
+        granted: extensionHasCapability(extension, "microphone"),
+      }, captureRequest);
+      return;
+    }
+    if ((event.data as { type?: unknown } | null)?.type === EXTENSION_CAPTURE_REQUEST) {
+      const raw = event.data as Record<string, unknown>;
+      if (
+        typeof raw.request_id === "string" &&
+        raw.request_id.length >= 1 &&
+        raw.request_id.length <= 128
+      ) {
+        frame?.contentWindow?.postMessage(
+          {
+            type: EXTENSION_CAPTURE_EVENT,
+            request_id: raw.request_id,
+            state: "error",
+            code: "invalid_request",
+            message: "The capture request is not valid.",
+          },
+          "*",
+        );
+      }
       return;
     }
     const presentation = extensionPresentationAction(event.data);
@@ -232,14 +312,20 @@
 
   onMount(() => {
     unregisterFrame = registerExtensionFrame(tab.id, postCommand, reloadFrame);
+    unregisterCapture = registerCapturePoster(tab.id, (event) => {
+      frame?.contentWindow?.postMessage(event, "*");
+    });
     window.addEventListener("message", onFrameMessage);
     document.addEventListener("visibilitychange", postViewState);
   });
   onDestroy(() => {
-    microphone.cancel();
+    unregisterCapture?.();
     unregisterFrame?.();
     window.removeEventListener("message", onFrameMessage);
     document.removeEventListener("visibilitychange", postViewState);
+    // A pane move recreates this component under the same tab id; only a
+    // tab that is gone from the layout ends its capture here.
+    if (!tabStillExists()) disposeCaptureTab(tab.id);
   });
 
   // Refresh the child-side claimed-key set when preferences replace a chord.
@@ -247,6 +333,36 @@
   // while the iframe document is still loading has no durable recipient.
   $effect(() => {
     postHostKeys();
+    postCaptureSources();
+  });
+
+  // Losing the grant or the extension ends capture; a stopped process
+  // (running === false) does not.
+  $effect(() => {
+    if (!catalogReady) return;
+    if (!captureViewFor(tab.id)) return;
+    if (!extension || !extensionHasCapability(extension, "microphone")) {
+      disposeCaptureTab(tab.id);
+    }
+  });
+
+  $effect(() => {
+    if (captureView?.phase !== "recording") return;
+    nowMs = Date.now();
+    const timer = setInterval(() => {
+      nowMs = Date.now();
+    }, 500);
+    return () => clearInterval(timer);
+  });
+
+  let hadSession = false;
+  $effect(() => {
+    if (captureView?.phase) {
+      hadSession = true;
+    } else if (hadSession) {
+      hadSession = false;
+      frame?.focus();
+    }
   });
 
   $effect(() => {
@@ -354,6 +470,33 @@
     </div>
   {/if}
 
+  {#if captureView}
+    <div class="capture-bar" role="status">
+      {#if captureView.phase === "armed"}
+        <span>{captureName} wants to record your microphone</span>
+        <div>
+          <button type="button" onclick={() => void startCaptureRecording(tab.id)}>Record</button>
+          <button type="button" onclick={() => cancelCaptureRecording(tab.id, "viewer")}>Dismiss</button>
+        </div>
+      {:else if captureView.phase === "starting"}
+        <span>Starting the microphone for {captureName}...</span>
+      {:else if captureView.phase === "recording"}
+        <span>Recording for {captureName}: {formatClock(captureElapsedMs)} of {formatClock(captureView.maxMs)}</span>
+        <div>
+          <button type="button" onclick={() => stopCaptureRecording(tab.id)}>Stop</button>
+          <button type="button" onclick={() => cancelCaptureRecording(tab.id, "viewer")}>Cancel</button>
+        </div>
+      {:else if captureView.phase === "finishing"}
+        <span>Finishing the recording for {captureName}...</span>
+      {:else}
+        <span>{captureView.outboxCount} {captureView.outboxCount === 1 ? "recording" : "recordings"} waiting for {captureName}</span>
+        <div>
+          <button type="button" onclick={() => discardCaptureOutbox(tab.id)}>Discard</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   {#if frameSrc}
     <!-- The capability path shares Chan's network origin so one forwarded port
          is sufficient. Omitting allow-same-origin keeps extension scripts in
@@ -386,6 +529,8 @@
   .extension-tab {
     position: absolute;
     inset: 0;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
     min-height: 0;
     visibility: hidden;
@@ -402,8 +547,8 @@
     position: fixed;
     inset: 0;
     z-index: 26000;
-    display: grid;
-    grid-template-rows: 42px minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
     visibility: visible;
     pointer-events: auto;
     background: var(--bg, #0b0f14);
@@ -450,17 +595,49 @@
     cursor: pointer;
   }
 
+  .capture-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-width: 0;
+    padding: 6px 10px 6px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev, #151b23);
+    color: var(--text, #eef2f7);
+  }
+
+  .capture-bar > div {
+    display: flex;
+    gap: 6px;
+  }
+
+  .capture-bar button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface, #202936);
+    color: inherit;
+    cursor: pointer;
+  }
+
   iframe {
     display: block;
+    flex: 1;
     width: 100%;
-    height: 100%;
+    min-height: 0;
     border: 0;
     background: #11151b;
   }
 
   .extension-status {
+    flex: 1;
     width: 100%;
-    height: 100%;
+    min-height: 0;
     display: grid;
     place-content: center;
     gap: 0.5rem;

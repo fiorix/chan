@@ -47,6 +47,16 @@
       <label for="echo-input">Type something</label>
       <input id="echo-input" type="text" autocomplete="off" autofocus>
       <output id="echo-output" for="echo-input" aria-live="polite"></output>
+      <section aria-label="Capture exercise">
+        <p id="capture-sources">Microphone: unknown</p>
+        <p>
+          <button id="capture-open" type="button">Open capture</button>
+          <button id="capture-stop" type="button">Stop</button>
+          <button id="capture-cancel" type="button">Cancel</button>
+        </p>
+        <output id="capture-state" aria-live="polite"></output>
+        <ul id="capture-takes"></ul>
+      </section>
     </main>
     <script>
       const input = document.querySelector("#echo-input");
@@ -118,9 +128,65 @@
         );
       }
 
+      // The capture exercise. Open only arms the host bar; the viewer
+      // starts the take there. Takes are listed by id and acked from the
+      // list, and a redelivered take replaces its row instead of adding one.
+      const captureSources = document.querySelector("#capture-sources");
+      const captureState = document.querySelector("#capture-state");
+      const captureTakes = document.querySelector("#capture-takes");
+      const takes = new Map();
+      let captureRequest = 0;
+      let activeRequest = null;
+      function postCapture(message) {
+        window.parent.postMessage({ type: "chan:extension-capture-request:v1", ...message }, "*");
+      }
+      document.querySelector("#capture-open").addEventListener("click", () => {
+        captureRequest += 1;
+        activeRequest = `echo-${captureRequest}`;
+        postCapture({ action: "open", request_id: activeRequest, source: "microphone" });
+      });
+      document.querySelector("#capture-stop").addEventListener("click", () => {
+        if (activeRequest) postCapture({ action: "stop", request_id: activeRequest });
+      });
+      document.querySelector("#capture-cancel").addEventListener("click", () => {
+        if (activeRequest) postCapture({ action: "cancel", request_id: activeRequest });
+      });
+      function showTake(take) {
+        takes.set(take.take_id, take);
+        captureTakes.replaceChildren(...[...takes.values()].map((item) => {
+          const row = document.createElement("li");
+          row.textContent = `${item.take_id} ${item.mime || "unknown type"} ${item.bytes} bytes `;
+          const ack = document.createElement("button");
+          ack.type = "button";
+          ack.textContent = "Ack";
+          ack.addEventListener("click", () => {
+            postCapture({ action: "ack", take_id: item.take_id });
+            takes.delete(item.take_id);
+            row.remove();
+          });
+          row.append(ack);
+          return row;
+        }));
+      }
+      window.parent.postMessage({ type: "chan:extension-ready:v1" }, "*");
+
       let hostKeys = [];
       window.addEventListener("message", (event) => {
         if (event.source !== window.parent) return;
+        if (event.data?.type === "chan:extension-capture-sources:v1") {
+          captureSources.textContent = `Microphone: ${event.data.sources?.microphone ?? "unknown"}`;
+          return;
+        }
+        if (event.data?.type === "chan:extension-capture-event:v1") {
+          const state = event.data;
+          captureState.textContent = state.state === "error"
+            ? `error: ${state.code}`
+            : state.state === "cancelled"
+              ? `cancelled by ${state.by}`
+              : state.state;
+          if (state.state === "take") showTake(state);
+          return;
+        }
         if (event.data?.type !== "chan:extension-host-keymap:v2") return;
         if (!Array.isArray(event.data.keys)) return;
         hostKeys = event.data.keys;

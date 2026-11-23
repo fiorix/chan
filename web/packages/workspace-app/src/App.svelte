@@ -177,6 +177,7 @@
   import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
+  import { hasCaptureActivity } from "./state/extensionCapture.svelte";
   import {
     currentOS,
     resolvedEventKey,
@@ -1845,7 +1846,10 @@
   // avoid a double prompt). The XHR dies on unload, so a standard-cancellable
   // beforeunload gives the user the chance to keep the page.
   function onBeforeUnloadTransfers(e: BeforeUnloadEvent): void {
-    if (!isTauriDesktop() && activeTransferCount() > 0) {
+    if (
+      !isTauriDesktop() &&
+      (activeTransferCount() > 0 || hasCaptureActivity())
+    ) {
       e.preventDefault();
       e.returnValue = "";
     }

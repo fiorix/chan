@@ -14,16 +14,90 @@ export const EXTENSION_KEYDOWN_MESSAGE = "chan:extension-keydown:v2";
 export const EXTENSION_SESSION_CONTEXT_MESSAGE = "chan:extension-session-context:v1";
 export const EXTENSION_VIEW_STATE_MESSAGE = "chan:extension-view-state:v1";
 export const EXTENSION_PRESENTATION_REQUEST = "chan:extension-presentation:v1";
-export const EXTENSION_MICROPHONE_REQUEST = "chan:extension-microphone-request:v1";
-export const EXTENSION_MICROPHONE_EVENT = "chan:extension-microphone-event:v1";
+export const EXTENSION_CAPTURE_SOURCES_MESSAGE =
+  "chan:extension-capture-sources:v1";
+export const EXTENSION_CAPTURE_REQUEST = "chan:extension-capture-request:v1";
+export const EXTENSION_CAPTURE_EVENT = "chan:extension-capture-event:v1";
 
 export type ExtensionPresentationAction = "enter" | "exit" | "toggle";
-export type ExtensionMicrophoneAction = "start" | "stop" | "cancel";
-export type ExtensionMicrophoneRequest = {
-  type: typeof EXTENSION_MICROPHONE_REQUEST;
-  request_id: string;
-  action: ExtensionMicrophoneAction;
-};
+export type ExtensionCaptureSource = "microphone";
+export type ExtensionCaptureSourceStatus =
+  | "available"
+  | "not_granted"
+  | "insecure_context"
+  | "unsupported";
+export type ExtensionCaptureProcessing = "voice" | "raw";
+export type ExtensionCaptureErrorCode =
+  | ExtensionCaptureSourceStatus
+  | "busy"
+  | "outbox_full"
+  | "permission_denied"
+  | "no_device"
+  | "device_error"
+  | "empty"
+  | "too_large"
+  | "invalid_request"
+  | "failed";
+
+export type ExtensionCaptureRequest =
+  | {
+      type: typeof EXTENSION_CAPTURE_REQUEST;
+      action: "open";
+      request_id: string;
+      source: ExtensionCaptureSource;
+      max_ms?: number;
+      processing?: ExtensionCaptureProcessing;
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_REQUEST;
+      action: "stop" | "cancel";
+      request_id: string;
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_REQUEST;
+      action: "ack";
+      take_id: string;
+    };
+
+export type ExtensionCaptureEvent =
+  | {
+      type: typeof EXTENSION_CAPTURE_EVENT;
+      request_id: string;
+      state: "armed" | "starting" | "finishing";
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_EVENT;
+      request_id: string;
+      state: "recording";
+      started_at: number;
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_EVENT;
+      request_id: string;
+      state: "take";
+      take_id: string;
+      source: ExtensionCaptureSource;
+      audio: Blob;
+      mime: string;
+      bytes: number;
+      duration_ms: number;
+      started_at: number;
+      end: "stopped" | "limit" | "interrupted";
+      redelivered: boolean;
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_EVENT;
+      request_id: string;
+      state: "cancelled";
+      by: "viewer" | "extension" | "host";
+    }
+  | {
+      type: typeof EXTENSION_CAPTURE_EVENT;
+      request_id: string;
+      state: "error";
+      code: Exclude<ExtensionCaptureErrorCode, "available">;
+      message: string;
+    };
 
 /// One chord the host claims while an extension has focus: the key token the
 /// shared keyboard contract names (`T`, `/`, `1`, `Enter`) and the exact
@@ -105,21 +179,87 @@ export function extensionPresentationAction(
     : null;
 }
 
-export function extensionMicrophoneRequest(
+export function extensionCaptureRequest(
   value: unknown,
-): ExtensionMicrophoneRequest | null {
+): ExtensionCaptureRequest | null {
   if (!value || typeof value !== "object") return null;
   const message = value as Record<string, unknown>;
+  if (message.type !== EXTENSION_CAPTURE_REQUEST) return null;
+  if (message.action === "ack") {
+    if (
+      typeof message.take_id !== "string" ||
+      !/^[0-9a-f]{32}$/.test(message.take_id)
+    ) {
+      return null;
+    }
+    return {
+      type: EXTENSION_CAPTURE_REQUEST,
+      action: "ack",
+      take_id: message.take_id,
+    };
+  }
   if (
-    message.type !== EXTENSION_MICROPHONE_REQUEST ||
     typeof message.request_id !== "string" ||
     message.request_id.length === 0 ||
-    message.request_id.length > 128 ||
-    (message.action !== "start" && message.action !== "stop" && message.action !== "cancel")
+    message.request_id.length > 128
   ) {
     return null;
   }
-  return message as ExtensionMicrophoneRequest;
+  if (message.action === "stop" || message.action === "cancel") {
+    return {
+      type: EXTENSION_CAPTURE_REQUEST,
+      action: message.action,
+      request_id: message.request_id,
+    };
+  }
+  if (message.action !== "open" || message.source !== "microphone") return null;
+  if (
+    message.max_ms !== undefined &&
+    (typeof message.max_ms !== "number" ||
+      !Number.isInteger(message.max_ms) ||
+      message.max_ms < 1000 ||
+      message.max_ms > 600000)
+  ) {
+    return null;
+  }
+  if (
+    message.processing !== undefined &&
+    message.processing !== "voice" &&
+    message.processing !== "raw"
+  ) {
+    return null;
+  }
+  return {
+    type: EXTENSION_CAPTURE_REQUEST,
+    action: "open",
+    request_id: message.request_id,
+    source: "microphone",
+    ...(message.max_ms !== undefined ? { max_ms: message.max_ms } : {}),
+    ...(message.processing !== undefined
+      ? { processing: message.processing }
+      : {}),
+  };
+}
+
+/// Whether this tab's frame may use the microphone now. The grant is checked
+/// first so a frame without it learns that before any platform limit.
+export function extensionCaptureSourceStatus(
+  granted: boolean,
+): ExtensionCaptureSourceStatus {
+  if (!granted) return "not_granted";
+  if (
+    typeof window !== "undefined" &&
+    window.isSecureContext === false
+  ) {
+    return "insecure_context";
+  }
+  if (
+    !navigator.mediaDevices?.getUserMedia ||
+    typeof MediaRecorder === "undefined"
+  ) {
+    return "unsupported";
+  }
+  return "available";
 }
 
 export function keyboardEventFromExtension(message: ExtensionKeydownMessage): KeyboardEvent {
