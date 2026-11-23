@@ -1,77 +1,33 @@
 // @vitest-environment jsdom
 //
-// A key typed while PTY output is still being parsed reaches the broadcast
-// group; a reply the parser writes in the meantime reaches this PTY alone.
-// TerminalTab is mounted over the stand-in xterm with a real xterm.js behind
-// it: every write is parsed by the real terminal, and the stand-in exposes
-// the real terminal's internals, so its own mark on user input, fired before
-// each `onData` it hands over, is what the component reads.
+// A key typed into a terminal of a broadcast group reaches the group while
+// the terminal's output keeps arriving; a reply the terminal makes to its
+// program reaches this PTY alone. TerminalTab is mounted on the shared
+// fixture's widget. The widget marks no data as the user's, so every chunk
+// takes the unmarked route, which reads only whether a write is in flight:
+// a chunk the terminal emits inside a live write is a reply and stays here,
+// any other chunk goes to the group. The core parses a write before write()
+// returns and answers its queries from inside it, so a key, which a later
+// event makes, always finds the write over.
 
-import type { Terminal } from "@xterm/xterm";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => {
-  HTMLCanvasElement.prototype.getContext = (() => ({
-    createLinearGradient: () => ({ addColorStop() {} }),
-  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
-  const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-  const { FakeTerminal } = await import("../__tests__/xterm");
-  return {
-    Terminal: class extends FakeTerminal {
-      model: Terminal;
-      /// A key the user types while the next write is still being parsed.
-      keyDuringWrite: string | null = null;
-      /// Whether that write was still unparsed when the key was typed.
-      keyTypedWhileParsing: boolean | null = null;
-      /// How many writes were unparsed when that key was typed, its own included.
-      writesPendingAtKey: number | null = null;
-      unparsed = 0;
-      constructor(options: Record<string, unknown>) {
-        super(options);
-        this.model = new Terminal({ allowProposedApi: true, cols: 80, rows: 24 });
-        this.model.onData((data) => this.type(data));
-      }
-      get _core(): unknown {
-        return (this.model as unknown as { _core: unknown })._core;
-      }
-      write(data: string | Uint8Array, done?: () => void): void {
-        this.writtenRaw.push(data);
-        this.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
-        let parsing = true;
-        this.unparsed += 1;
-        this.model.write(data, () => {
-          parsing = false;
-          this.unparsed -= 1;
-          done?.();
-        });
-        const key = this.keyDuringWrite;
-        this.keyDuringWrite = null;
-        if (key !== null) {
-          this.keyTypedWhileParsing = parsing;
-          this.writesPendingAtKey = this.unparsed;
-          this.model.input(key);
-        }
-      }
-      dispose(): void {
-        this.model.dispose();
-        super.dispose();
-      }
-    },
-  };
-});
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { ghosttyLineText, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   output,
   receive,
   resetTerminals,
@@ -83,29 +39,22 @@ import {
 
 installTerminalDom();
 
-type RealBacked = { model: Terminal; keyDuringWrite: string | null; keyTypedWhileParsing: boolean | null; writesPendingAtKey: number | null };
-
 afterEach(() => {
   resetTerminals();
 });
 
 async function attached() {
   const [tab] = seatTerminals([terminalTab({ broadcastEnabled: true })]);
-  const { term } = await mountTerminal(TerminalTab, tab!);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket, { id: "sess-1" });
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   // The session prelude writes a reset of the program's input modes as a
-  // replay. Parse it first, so the output a test sends is the one write
-  // pending, and a live one.
-  await parsed(term as unknown as RealBacked);
+  // replay. Let a frame pass, so a write completion held to one has run and
+  // the output a test sends is the one write that can be pending, a live one.
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   socket.sent.splice(0);
-  return { term: term as unknown as RealBacked, socket };
-}
-
-/// Wait until the real terminal has parsed everything written to it.
-function parsed(term: RealBacked): Promise<void> {
-  return new Promise((resolve) => term.model.write("", resolve));
+  return { term, socket };
 }
 
 function frames(socket: TerminalSocket, type: string): unknown[] {
@@ -114,23 +63,22 @@ function frames(socket: TerminalSocket, type: string): unknown[] {
     .map((f) => f.data);
 }
 
-describe("a terminal in a broadcast group, while its output is being parsed", () => {
+describe("a terminal in a broadcast group, while its output arrives", () => {
   test("sends a key the user types to the group", async () => {
     const { term, socket } = await attached();
-    term.keyDuringWrite = "k";
     await output(socket, "steady output\r\n");
-    await parsed(term);
+    // Parsed inside the write: the output is on the screen by the time the
+    // next event, the key, can come.
+    expect(ghosttyLineText(term, 0)).toBe("steady output");
+    pressInGhostty(term, { key: "k", code: "KeyK", keyCode: 75 });
 
-    expect(term.keyTypedWhileParsing).toBe(true);
-    expect(term.writesPendingAtKey).toBe(1);
     expect(frames(socket, "input")).toEqual(["k"]);
     expect(frames(socket, "broadcast-input")).toEqual(["k"]);
   });
 
   test("sends the parser's reply to this PTY alone", async () => {
-    const { term, socket } = await attached();
+    const { socket } = await attached();
     await output(socket, "\x1b[6n");
-    await parsed(term);
 
     const sent = frames(socket, "input");
     expect(sent).toHaveLength(1);

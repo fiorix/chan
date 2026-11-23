@@ -23,6 +23,7 @@ import {
   sendCancelToTerminal,
   sendPromptToTerminal,
 } from "../state/tabs.svelte";
+import { mountGhosttyTerminal, openedGhostty, pressInGhostty, typeInGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
@@ -30,11 +31,11 @@ import {
   output,
   receive,
   resetTerminals,
+  resizeObservers,
   seatTerminals,
   sentFrames,
   TerminalSocket,
   terminalTab,
-  xterm,
 } from "../__tests__/terminalTab";
 
 const connections = vi.hoisted(() => ({ all: [] as unknown[] }));
@@ -56,7 +57,9 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 installTerminalDom();
 
@@ -65,7 +68,6 @@ beforeEach(() => {
   vi.setSystemTime(0);
   TerminalSocket.connecting = false;
   ui.terminalControl = false;
-  xterm.textareaFocus = true;
 });
 
 afterEach(() => {
@@ -90,12 +92,12 @@ function lastConnection(): TerminalConnectionHealth {
 
 describe("terminal connection in the tab", () => {
   test("a mouse report in flight when its socket closes owes no note", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
     const before = pings(first);
-    term.type("\x1b[<0;10;5M");
+    typeInGhostty(term, "\x1b[<0;10;5M");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 1_000);
     expect(pings(first)).toBe(before);
     first.close();
@@ -105,14 +107,14 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
   test("a mouse report after a key leaves the key answered by the next pong", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS);
     expect(pings(first), "the key's ping left").toBe(2);
-    term.type("\x1b[<0;10;5M");
+    typeInGhostty(term, "\x1b[<0;10;5M");
     await receive(first, { type: "pong" });
     first.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
@@ -122,11 +124,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test.each(["server close", "read deadline"])("warns after unanswered input retires by %s", async (path) => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     if (path === "server close") first.close();
     else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS + WS_PROBE_DEADLINE_MS);
     await tick();
@@ -142,7 +144,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     expect(target.querySelector('[role="status"]')?.textContent).toBe(sentence);
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MIN_MS);
-    term.type("y");
+    typeInGhostty(term, "y");
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
@@ -168,11 +170,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an answered input and an idle socket retire without a warning", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
     await receive(first, { type: "pong" });
     first.close();
@@ -188,11 +190,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an echoed key answered by a pong leaves no notice across a wake recycle", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     await output(first, "x");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
     await receive(first, { type: "pong" });
@@ -208,11 +210,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an echoed key answered by a pong leaves no notice across an unexpected close", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     await output(first, "x");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
     await receive(first, { type: "pong" });
@@ -241,13 +243,13 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a key typed during a wake's probe goes once to the replacement, with no note", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100);
-    term.type("x");
+    typeInGhostty(term, "x");
     const typed = (socket: TerminalSocket) => sentFrames(socket).filter((frame) => frame.type === "input" && frame.data === "x");
     expect(typed(first), "held off the suspect socket").toEqual([]);
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
@@ -262,11 +264,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a key sent before the wake was noticed still shows the note when the socket is replaced", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100 + WS_PROBE_DEADLINE_MS);
@@ -280,7 +282,7 @@ describe("terminal connection in the tab", () => {
   /// Mount a terminal, attach it and wake it into a running probe.
   async function wokenTerminal() {
     const tab = terminalTab();
-    const { target, term } = await mountTerminal(TerminalTab, tab, { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, tab, { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
@@ -293,7 +295,7 @@ describe("terminal connection in the tab", () => {
 
   test("a key held across a redial onto another session is dropped and owes the note", async () => {
     const { target, term, first } = await wokenTerminal();
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     const replacement = TerminalSocket.all.at(-1)!;
     expect(replacement).not.toBe(first);
@@ -341,24 +343,26 @@ describe("terminal connection in the tab", () => {
     }
   });
 
-  test("an interrupt key goes at once whatever bytes it encodes to", async () => {
-    const { target, term, first } = await wokenTerminal();
-    term.type("k");
+  // The hold knows an interrupt by its key press, so each key's own bytes go
+  // through, whatever the terminal encodes it to.
+  test.each([
+    ["Ctrl+C", { key: "c", code: "KeyC", keyCode: 67 }, "\x03"],
+    ["Ctrl+Z", { key: "z", code: "KeyZ", keyCode: 90 }, "\x1a"],
+    ["Ctrl+\\", { key: "\\", code: "Backslash", keyCode: 220 }, "\x1c"],
+  ])("an interrupt key goes at once whatever bytes it encodes to: %s", async (_name, key, bytes) => {
+    const { term, first } = await wokenTerminal();
+    typeInGhostty(term, "k");
     expect(framesOfType(first, "input")).toEqual([]);
-    // Under the kitty keyboard protocol Ctrl+C need not be byte 0x03.
-    target.querySelector(".terminal-host")!.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
-    );
-    term.type("\x1b[99;5u");
-    expect(framesOfType(first, "input").map((frame) => frame.data)).toEqual(["k", "\x1b[99;5u"]);
+    pressInGhostty(term, { ...key, ctrlKey: true });
+    expect(framesOfType(first, "input").map((frame) => frame.data)).toEqual(["k", bytes]);
     await vi.advanceTimersByTimeAsync(0);
-    term.type("after");
+    typeInGhostty(term, "after");
     expect(framesOfType(first, "input"), "the key press covers its own bytes only").toHaveLength(2);
   });
 
   test("keys held through an outage of fast-failing redials are dropped, not typed later", async () => {
     const { target, term, first } = await wokenTerminal();
-    term.type("late");
+    typeInGhostty(term, "late");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     let socket = TerminalSocket.all.at(-1)!;
     expect(socket).not.toBe(first);
@@ -376,14 +380,11 @@ describe("terminal connection in the tab", () => {
 
   test("an interrupt before the replacement's session frame cannot reach another session", async () => {
     const { target, term } = await wokenTerminal();
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     const replacement = TerminalSocket.all.at(-1)!;
     replacement.onopen?.();
-    target.querySelector(".terminal-host")!.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
-    );
-    term.type("\x03");
+    pressInGhostty(term, { key: "c", code: "KeyC", keyCode: 67, ctrlKey: true });
     expect(framesOfType(replacement, "input"), "nothing before the session frame").toEqual([]);
     await receive(replacement, { type: "session", id: "sess-reaped", seq: 0, generation: 9, missed_bytes: 0, bytes_since_focus: 0 });
     await tick();
@@ -392,15 +393,12 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an interrupt before the replacement's session frame goes in order once it matches", async () => {
-    const { target, term } = await wokenTerminal();
-    term.type("x");
+    const { term } = await wokenTerminal();
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     const replacement = TerminalSocket.all.at(-1)!;
     replacement.onopen?.();
-    target.querySelector(".terminal-host")!.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true }),
-    );
-    term.type("\x03");
+    pressInGhostty(term, { key: "c", code: "KeyC", keyCode: 67, ctrlKey: true });
     expect(framesOfType(replacement, "input")).toEqual([]);
     await receive(replacement, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
     expect(framesOfType(replacement, "input").map((frame) => frame.data)).toEqual(["x", "\x03"]);
@@ -408,7 +406,7 @@ describe("terminal connection in the tab", () => {
 
   test("a pong before the replacement's session frame releases nothing", async () => {
     const { term } = await wokenTerminal();
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     const replacement = TerminalSocket.all.at(-1)!;
     replacement.onopen?.();
@@ -424,7 +422,7 @@ describe("terminal connection in the tab", () => {
   });
 
   test("on a slow link the hold waits for the probe's verdict past its own cap", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     // A 3 s round trip: the probe's deadline is its 10 s maximum.
@@ -432,7 +430,7 @@ describe("terminal connection in the tab", () => {
     await receive(first, { type: "pong" });
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2_100);
-    term.type("x");
+    typeInGhostty(term, "x");
     // A last frame late in the probe puts its verdict past the hold's cap.
     await vi.advanceTimersByTimeAsync(7_000);
     await output(first, "y");
@@ -450,7 +448,7 @@ describe("terminal connection in the tab", () => {
     const { term, first } = await wokenTerminal();
     first.holdClose = true;
     first.close();
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS);
     await receive(first, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
     expect(framesOfType(first, "input")).toEqual([]);
@@ -463,13 +461,12 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a socket's first session frame during a probe does not prove it", async () => {
-    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
-    const term = xterm.terminals.at(-1)!;
     socket.onopen?.();
     vi.setSystemTime(Date.now() + 30_000);
     await vi.advanceTimersByTimeAsync(2100);
-    term.type("x");
+    typeInGhostty(term, "x");
     await receive(socket, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
     expect(framesOfType(socket, "input"), "the session frame may predate the wake").toEqual([]);
     for (let answered = 0; answered < pings(socket); answered += 1) await receive(socket, { type: "pong" });
@@ -483,7 +480,7 @@ describe("terminal connection in the tab", () => {
     });
     const { term, first } = await wokenTerminal();
     expect(pings(first), "no ping beyond the one at open").toBe(1);
-    term.type("x");
+    typeInGhostty(term, "x");
     expect(framesOfType(first, "input").map((frame) => frame.data), "nothing is held").toEqual(["x"]);
     await vi.advanceTimersByTimeAsync(WS_PROBE_DEADLINE_MS * 4);
     expect(TerminalSocket.all.at(-1)).toBe(first);
@@ -508,10 +505,10 @@ describe("terminal connection in the tab", () => {
   });
 
   test("holds the reconnect warning under the cover then announces it once", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("x");
+    typeInGhostty(term, "x");
     first.close();
     ui.disconnectBlocking = true;
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
@@ -535,7 +532,7 @@ describe("terminal connection in the tab", () => {
     onTestFinished(() => {
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     });
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     first.holdClose = true;
     await attach(first);
@@ -544,7 +541,7 @@ describe("terminal connection in the tab", () => {
     await tick();
     expect(first.readyState).toBe(2);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
-    term.type("lost");
+    typeInGhostty(term, "lost");
     expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "lost")).toBe(false);
     first.finishClose();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
@@ -554,9 +551,9 @@ describe("terminal connection in the tab", () => {
   });
   test("input refused before the first socket opens creates no reconnection warning", async () => {
     TerminalSocket.connecting = true;
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
-    term.type("lost");
+    typeInGhostty(term, "lost");
     expect(sentFrames(socket).some((frame) => frame.type === "input")).toBe(false);
     socket.open();
     await receive(socket, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
@@ -638,12 +635,12 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an exited terminal carries no refused keys into Restart", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: true });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: true });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "exit", code: 0 });
     first.close();
-    term.type("x");
+    typeInGhostty(term, "x");
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
@@ -680,34 +677,34 @@ describe("terminal connection in the tab", () => {
   });
 
   test("continued typing leaves a new lost-input warning visible for four seconds", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("lost");
+    typeInGhostty(term, "lost");
     first.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     const sentence = "Reconnected. Input typed while disconnected may not have been sent.";
-    term.type("early");
+    typeInGhostty(term, "early");
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     await vi.advanceTimersByTimeAsync(3_999);
-    term.type("still early");
+    typeInGhostty(term, "still early");
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     await vi.advanceTimersByTimeAsync(1);
-    term.type("next");
+    typeInGhostty(term, "next");
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a refused mouse report creates no lost-input notice", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     first.holdClose = true;
     first.close();
-    term.type("\x1b[<0;10;5M");
+    typeInGhostty(term, "\x1b[<0;10;5M");
     first.finishClose();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
@@ -716,11 +713,11 @@ describe("terminal connection in the tab", () => {
   });
 
   test("an inactive tab holds its reconnect notice until it is shown", async () => {
-    const { target, term, component } = await mountTerminal(TerminalTabTestHarness, terminalTab(), { focused: false });
+    const { target, term, component } = await mountGhosttyTerminal(TerminalTabTestHarness, terminalTab(), { focused: false });
     const harness = component as { hide: () => void; show: () => void };
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("x");
+    typeInGhostty(term, "x");
     first.close();
     harness.hide();
     await tick();
@@ -738,10 +735,10 @@ describe("terminal connection in the tab", () => {
 
   test("the tab passes its find and inspector geometry to the pill", async () => {
     const tab = terminalTab({ inspectorOpen: true, inspectorWidth: 220 });
-    const { target, term } = await mountTerminal(TerminalTab, tab);
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, tab);
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("x");
+    typeInGhostty(term, "x");
     first.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
@@ -754,10 +751,10 @@ describe("terminal connection in the tab", () => {
     expect(pill.style.top).toBe("50px");
   });
   test("a connected notice expires at twelve seconds and refused input owes the next one", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("x");
+    typeInGhostty(term, "x");
     first.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const second = TerminalSocket.all.at(-1)!;
@@ -781,13 +778,13 @@ describe("terminal connection in the tab", () => {
   });
 
   test("pings at open and again 1 s after a key", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
     expect(pings(socket)).toBe(1);
     await receive(socket, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.data === "x")).toBe(true);
     await vi.advanceTimersByTimeAsync(999);
     expect(pings(socket)).toBe(1);
@@ -799,10 +796,10 @@ describe("terminal connection in the tab", () => {
   });
 
   test("the note moves no row: it neither fits the terminal nor sends a grid", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("x");
+    typeInGhostty(term, "x");
     first.close();
     ui.disconnectBlocking = true;
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
@@ -810,21 +807,32 @@ describe("terminal connection in the tab", () => {
     await attach(second);
     await tick();
     expect(target.querySelector("[data-terminal-connection-pill]"), "held under the cover").toBeNull();
-    const fitCalls = xterm.fit.calls;
-    const resizeFrames = sentFrames(second).filter((frame) => frame.type === "resize");
+    // The host now measures to another grid, so a fit from here on resizes
+    // the terminal and sends its grid.
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    Object.defineProperty(host, "clientWidth", { configurable: true, value: 640 });
+    Object.defineProperty(host, "clientHeight", { configurable: true, value: 320 });
+    const grid = { cols: term.cols, rows: term.rows };
+    const resizes = () => sentFrames(second).filter((frame) => frame.type === "resize");
+    const resizeFrames = resizes();
     ui.disconnectBlocking = false;
     await tick();
+    await vi.advanceTimersByTimeAsync(1_000);
     const pill = target.querySelector<HTMLElement>("[data-terminal-connection-pill]")!;
     expect(pill.parentElement?.classList.contains("terminal-main")).toBe(true);
-    expect(xterm.fit.calls).toBe(fitCalls);
-    expect(sentFrames(second).filter((frame) => frame.type === "resize")).toEqual(resizeFrames);
+    expect({ cols: term.cols, rows: term.rows }).toEqual(grid);
+    expect(resizes()).toEqual(resizeFrames);
+    for (const observer of resizeObservers) observer.callback();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect({ cols: term.cols, rows: term.rows }, "a fit of this host moves the grid").not.toEqual(grid);
+    expect(resizes().length, "and sends it").toBeGreaterThan(resizeFrames.length);
   });
   test("binary PTY output does not cancel a pending input probe", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    term.type("x");
+    typeInGhostty(term, "x");
     await vi.advanceTimersByTimeAsync(500);
     await output(socket, "answer");
     await vi.advanceTimersByTimeAsync(500);
@@ -833,12 +841,12 @@ describe("terminal connection in the tab", () => {
 
   test("the control terminal sends neither an opening ping nor an input probe", async () => {
     ui.terminalControl = true;
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     const opened = vi.spyOn(lastConnection(), "opened");
     await attach(socket);
     expect(opened).not.toHaveBeenCalled();
-    term.type("password");
+    typeInGhostty(term, "password");
     await vi.advanceTimersByTimeAsync(WS_PING_MS + TERMINAL_INPUT_PROBE_MS);
     await tick();
     expect(pings(socket)).toBe(0);
@@ -859,10 +867,10 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a generated terminal reply does not arm the input probe", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    term.replyDuringWrite = "\x1b[1;1R";
+    // The terminal answers the cursor position query as it writes it.
     await output(socket, "\x1b[6n");
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.data === "\x1b[1;1R")).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -870,30 +878,33 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a focus report does not arm the input probe", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    term.type("\x1b[I");
+    await output(socket, "\x1b[?1004h");
+    term.focus();
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.data === "\x1b[I")).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(pings(socket)).toBe(1);
   });
 
+  // The terminal hands mouse reports over as data: an X10 report goes out
+  // as binary input.
   test("a mouse report does not arm the input probe", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    term.binary("\x1b[M !!");
+    typeInGhostty(term, "\x1b[M !!");
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.binary === true)).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(pings(socket)).toBe(1);
   });
 
-  test("an SGR mouse report delivered through xterm data does not arm the input probe", async () => {
-    const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+  test("an SGR mouse report in the terminal's data does not arm the input probe", async () => {
+    const { term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    term.type("\x1b[<0;10;5M");
+    typeInGhostty(term, "\x1b[<0;10;5M");
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.data === "\x1b[<0;10;5M")).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(pings(socket)).toBe(1);
@@ -1001,7 +1012,7 @@ describe("terminal connection in the tab", () => {
     resolveConfirm(true);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     const second = TerminalSocket.all.at(-1)!;
-    xterm.terminals.at(-1)!.type("before open");
+    typeInGhostty(await openedGhostty(target), "before open");
     expect(sentFrames(second).some((frame) => frame.type === "input")).toBe(false);
     await attach(second);
     await tick();
@@ -1009,10 +1020,10 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a requested restart discards a pending lost-input warning", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: true });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: true });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("unanswered");
+    typeInGhostty(term, "unanswered");
     first.close();
     TerminalSocket.connecting = true;
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
@@ -1025,10 +1036,10 @@ describe("terminal connection in the tab", () => {
   });
 
   test("a requested restart drops unanswered input from the old shell's notice accounting", async () => {
-    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: true });
+    const { target, term } = await mountGhosttyTerminal(TerminalTab, terminalTab(), { focused: true });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
-    term.type("unanswered");
+    typeInGhostty(term, "unanswered");
     TerminalSocket.connecting = true;
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     expect(confirmState.open).toBe(true);

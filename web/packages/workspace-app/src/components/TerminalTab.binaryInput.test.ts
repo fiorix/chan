@@ -1,149 +1,44 @@
 // @vitest-environment jsdom
 //
 // A mouse report in the X10 encoding reaches the PTY byte for byte and, as
-// the user's input, the broadcast group. TerminalTab is mounted over the
-// stand-in xterm with a real xterm.js behind it: the program's output, mouse
-// mode 1000 among it, is parsed by the real terminal, and a click is reported
-// by the real terminal's mouse service, which encodes it as X10 and hands it
-// to `onBinary` with no user-input mark.
+// the user's input, the broadcast group. TerminalTab is mounted on the shared
+// fixture's widget: the program's output, mouse mode 1000 among it, is parsed
+// by its core, a press on its canvas is reported by its own mouse encoder,
+// which hands X10 and SGR reports to `onData` like any other input, and a
+// wheel over it is reported by chan's wheel handler, which the widget asks
+// before it scrolls. The grid is 220 columns wide, so a column's X10
+// character can be above 127.
 
-import type { Terminal } from "@xterm/xterm";
+import { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
 
-/// What xterm.js's mouse service takes: a zero-based cell, a button and an action.
-type Click = { col: number; row: number; x: number; y: number; button: number; action: number };
-
-vi.mock("@xterm/xterm", async () => {
-  HTMLCanvasElement.prototype.getContext = (() => ({
-    createLinearGradient: () => ({ addColorStop() {} }),
-  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
-  const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-  const { FakeTerminal } = await import("../__tests__/xterm");
-  return {
-    Terminal: class extends FakeTerminal {
-      model: Terminal;
-      /// A click the real terminal reports while the next write is still being parsed.
-      clickDuringWrite: Click | null = null;
-      /// Whether that write was still unparsed when the click was reported.
-      clickedWhileParsing: boolean | null = null;
-      constructor(options: Record<string, unknown>) {
-        super(options);
-        // Wide enough for a column whose X10 character is above 127.
-        this.model = new Terminal({ allowProposedApi: true, cols: 220, rows: 24 });
-        this.model.onData((data) => this.type(data));
-        this.model.onBinary((data) => this.binary(data));
-      }
-      get _core(): unknown {
-        return (this.model as unknown as { _core: unknown })._core;
-      }
-      /// Report a click through the real terminal's mouse service; whether it
-      /// made a report.
-      click(e: Click): boolean {
-        const core = this._core as { coreMouseService: { triggerMouseEvent(e: Click): boolean } };
-        return core.coreMouseService.triggerMouseEvent(e);
-      }
-      write(data: string | Uint8Array, done?: () => void): void {
-        this.writtenRaw.push(data);
-        this.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
-        let parsing = true;
-        this.model.write(data, () => {
-          parsing = false;
-          done?.();
-        });
-        const click = this.clickDuringWrite;
-        this.clickDuringWrite = null;
-        if (click !== null) {
-          this.clickedWhileParsing = parsing;
-          if (!this.click(click)) throw new Error("the mouse service made no report");
-        }
-      }
-      dispose(): void {
-        this.model.dispose();
-        super.dispose();
-      }
-    },
-  };
-});
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-
-vi.mock("../terminal/backend", async (importOriginal) => {
-  const { FakeTerminal } = await import("../__tests__/xterm");
-  class GhosttyTerminal extends FakeTerminal {
-    cols = 220;
-    sgr = false;
-    wheelHandler: ((e: WheelEvent) => boolean) | null = null;
-    renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
-    buffer = { active: {}, alternate: {} };
-    attachCustomWheelEventHandler(handler?: (e: WheelEvent) => boolean): void {
-      this.wheelHandler = handler ?? null;
-    }
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() {
-      return true;
-    }
-    hasFocusEvents() {
-      return false;
-    }
-    getMode(mode: number, fallback: boolean) {
-      return mode === 1006 ? this.sgr : fallback;
-    }
-  }
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({
-    ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  });
-});
-vi.mock("../terminal/ghosttyCompat", () => ({
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-}));
-vi.mock("../terminal/ghosttyViewport", () => ({
-  GhosttyViewportController: class {
-    constructor(private term: { write(bytes: Uint8Array): void }) {}
-    // ghostty-web parses synchronously; a report emitted inside write sees
-    // the component's live-write origin until write returns.
-    write(bytes: Uint8Array) {
-      this.term.write(bytes);
-    }
-    handleWheel() {
-      return false;
-    }
-    dispose() {}
-  },
-}));
-vi.mock("../terminal/osc52Bridge", () => ({
-  Osc52Bridge: class {
-    push() {}
-  },
-}));
-vi.mock("../terminal/resize", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/resize")>()),
-  proposeGhosttyDimensions: () => ({ cols: 220, rows: 24 }),
-}));
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import type { FakeTerminal } from "../__tests__/xterm";
 import TerminalTab from "./TerminalTab.svelte";
 import {
   broadcastTerminalInput,
   registerTerminalInputSink,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
+import { ghosttyCellMetrics, mountGhosttyTerminal, typeInGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   output,
   receive,
   resetTerminals,
+  resizeObservers,
   seatTerminals,
   sentFrames,
   terminalTab,
@@ -152,62 +47,113 @@ import {
 
 installTerminalDom();
 
-type RealBacked = {
-  model: Terminal;
-  clickDuringWrite: Click | null;
-  clickedWhileParsing: boolean | null;
-  click(e: Click): boolean;
-  type(data: string): void;
-};
-
-/// A left-button press in the zero-based cell (150, 3). The mouse service
-/// moves the event's cell to one-based in place, so each report takes a fresh
-/// event.
-const click = (): Click => ({ col: 150, row: 3, x: 0, y: 0, button: 0, action: 1 });
-/// Its X10 report: CSI M, then the button, the one-based column and the
-/// one-based row, each one character whose code is the value plus 32.
+/// A left-button press in the one-based cell (151, 4), as its X10 report:
+/// CSI M, then the button, the column and the row, each one character whose
+/// code is the value plus 32.
 const REPORT = `\x1b[M${String.fromCharCode(32 + 0, 32 + 151, 32 + 4)}`;
 
 const cleanups: Array<() => void> = [];
+/// What chan's wheel handler answered the widget for each wheel event:
+/// true when chan took the event and the widget must not scroll.
+const wheelClaims: boolean[] = [];
 
-// Every case runs on the xterm stand-in unless it names ghostty.
-beforeEach(() => useXtermStandIn());
+beforeEach(() => {
+  // Records the answers of the handler TerminalTab attaches, through the
+  // widget's own hook.
+  const attachWheel = Terminal.prototype.attachCustomWheelEventHandler;
+  vi.spyOn(Terminal.prototype, "attachCustomWheelEventHandler").mockImplementation(function (
+    this: Terminal,
+    handler?: (event: WheelEvent) => boolean,
+  ) {
+    return attachWheel.call(
+      this,
+      handler &&
+        ((event: WheelEvent) => {
+          const claimed = handler(event);
+          wheelClaims.push(claimed);
+          return claimed;
+        }),
+    );
+  });
+});
 
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
+  vi.useRealTimers();
   resetTerminals();
+  vi.restoreAllMocks();
+  wheelClaims.splice(0);
   __testSetStandalonePreferences(null);
 });
 
-/// A mounted terminal in a broadcast group with an unmounted member, whose
-/// sink records what reaches it, after the program turned on mouse tracking.
+/// A mounted terminal of 220 by 24 cells in a broadcast group with an
+/// unmounted member, whose sink records what reaches it, after the program
+/// turned on mouse tracking.
 async function attached() {
+  __testSetStandalonePreferences(terminalPreferences());
   const [tab, member] = seatTerminals([
     terminalTab({ broadcastEnabled: true }),
     terminalTab({ id: "term-2", broadcastEnabled: true }),
   ]);
   const received: Array<[string, boolean | undefined]> = [];
   cleanups.push(registerTerminalInputSink(member!.id, (data, binary) => received.push([data, binary])));
-  const { term } = await mountTerminal(TerminalTab, tab!);
+  const { target, term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket, { id: "sess-1" });
-  await receive(socket, { type: "ready", cols: 80, rows: 24 });
-  const real = term as unknown as RealBacked;
-  await parsed(real);
+  await receive(socket, { type: "ready", cols: 220, rows: 24 });
+  // A host that holds 220 by 24 of the terminal's cells, fitted.
+  const host = target.querySelector<HTMLElement>(".terminal-host")!;
+  const cell = ghosttyCellMetrics(term);
+  Object.defineProperty(host, "clientWidth", { configurable: true, value: 220 * cell.width });
+  Object.defineProperty(host, "clientHeight", { configurable: true, value: 24 * cell.height });
+  for (const observer of resizeObservers) observer.callback();
+  await vi.waitFor(() => expect({ cols: term.cols, rows: term.rows }).toEqual({ cols: 220, rows: 24 }));
   // VT200 tracking with the default encoding, which is X10's.
   await output(socket, "\x1b[?1000h");
-  await parsed(real);
   socket.sent.splice(0);
-  return { term: real, socket, member: member as TerminalTabState, received };
-}
-
-/// Wait until the real terminal has parsed everything written to it.
-function parsed(term: RealBacked): Promise<void> {
-  return new Promise((resolve) => term.model.write("", resolve));
+  return { term, socket, member: member as TerminalTabState, received };
 }
 
 function inputFrames(socket: TerminalSocket): Array<Record<string, unknown>> {
   return sentFrames(socket).filter((f) => f.type === "input" || f.type === "broadcast-input");
+}
+
+function pings(socket: TerminalSocket): number {
+  return sentFrames(socket).filter((frame) => frame.type === "ping").length;
+}
+
+/// The terminal's canvas, laid out at the window's origin.
+function canvasOf(term: Terminal): HTMLCanvasElement {
+  const canvas = term.element?.querySelector("canvas");
+  if (!canvas) throw new Error("the terminal has no canvas");
+  canvas.getBoundingClientRect = () => new DOMRect(0, 0, 1760, 384);
+  return canvas;
+}
+
+/// A left-button press in the middle of the one-based cell (151, 4).
+function press(term: Terminal): void {
+  const cell = ghosttyCellMetrics(term);
+  canvasOf(term).dispatchEvent(
+    new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 150.5 * cell.width,
+      clientY: 3.5 * cell.height,
+    }),
+  );
+}
+
+/// A wheel over the canvas laid out as 8 by 16 pixel cells: the one-based
+/// cell (151, 4), down one line unless `delta` says otherwise. Returns
+/// whether chan's handler took it.
+function wheel(term: Terminal, delta: WheelEventInit = { deltaY: 1, deltaMode: 1 }): boolean {
+  const asked = wheelClaims.length;
+  canvasOf(term).dispatchEvent(
+    new WheelEvent("wheel", { bubbles: true, cancelable: true, clientX: 1204, clientY: 56, ...delta }),
+  );
+  expect(wheelClaims.length, "the widget asked chan's wheel handler once").toBe(asked + 1);
+  return wheelClaims.at(-1)!;
 }
 
 describe("an X10 mouse report", () => {
@@ -217,22 +163,8 @@ describe("an X10 mouse report", () => {
 
   test("reaches this PTY as bytes and the group as the user's input", async () => {
     const { term, socket, received } = await attached();
-    expect(term.click(click())).toBe(true);
+    press(term);
 
-    expect(inputFrames(socket)).toEqual([
-      { type: "input", data: REPORT, binary: true },
-      { type: "broadcast-input", data: REPORT, binary: true },
-    ]);
-    expect(received).toEqual([[REPORT, true]]);
-  });
-
-  test("reaches the group when made while the terminal's output is parsed", async () => {
-    const { term, socket, received } = await attached();
-    term.clickDuringWrite = click();
-    await output(socket, "steady output\r\n");
-    await parsed(term);
-
-    expect(term.clickedWhileParsing).toBe(true);
     expect(inputFrames(socket)).toEqual([
       { type: "input", data: REPORT, binary: true },
       { type: "broadcast-input", data: REPORT, binary: true },
@@ -251,7 +183,7 @@ describe("an X10 mouse report", () => {
 describe("text input", () => {
   test("goes out in frames without the binary field", async () => {
     const { term, socket, member, received } = await attached();
-    term.type("k");
+    typeInGhostty(term, "k");
     broadcastTerminalInput(member, "m");
 
     const raw = socket.sent.filter((s) => /^\{"type":"(input|broadcast-input)"/.test(s));
@@ -265,84 +197,36 @@ describe("text input", () => {
   });
 });
 
-type GhosttyStandIn = FakeTerminal & {
-  sgr: boolean;
-  wheelHandler: ((e: WheelEvent) => boolean) | null;
-};
-
-async function attachedGhostty() {
-  useXtermStandIn(false);
-  __testSetStandalonePreferences(terminalPreferences());
-  const [tab, member] = seatTerminals([
-    terminalTab({ broadcastEnabled: true }),
-    terminalTab({ id: "term-2", broadcastEnabled: true }),
-  ]);
-  const received: Array<[string, boolean | undefined]> = [];
-  cleanups.push(registerTerminalInputSink(member!.id, (data, binary) => received.push([data, binary])));
-  const { term } = await mountTerminal(TerminalTab, tab!);
-  const socket = TerminalSocket.all.at(-1)!;
-  await attach(socket, { id: "sess-1" });
-  await receive(socket, { type: "ready", cols: 220, rows: 24 });
-  const ghostty = term as GhosttyStandIn;
-  expect(ghostty.wheelHandler).toBeTypeOf("function");
-  socket.sent.splice(0);
-  return { term: ghostty, socket, received };
-}
-
-/// An 8x16 cell grid: one-based column 151, row 4, down one line unless
-/// `delta` says otherwise.
-function wheel(term: GhosttyStandIn, delta: WheelEventInit = { deltaY: 1, deltaMode: 1 }): void {
-  const canvas = document.createElement("canvas");
-  canvas.getBoundingClientRect = () => new DOMRect(0, 0, 1760, 384);
-  let claimed = false;
-  canvas.addEventListener("wheel", (event) => {
-    claimed = term.wheelHandler!(event);
-  });
-  canvas.dispatchEvent(new WheelEvent("wheel", { clientX: 1204, clientY: 56, ...delta }));
-  expect(claimed).toBe(true);
-}
-
 describe("a ghostty mouse report", () => {
   test("an X10 mouse report from onData does not arm a connection probe", async () => {
-    const { term, socket } = await attachedGhostty();
+    const { term, socket } = await attached();
     vi.useFakeTimers();
-    try {
-      term.type(REPORT);
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    typeInGhostty(term, REPORT);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pings(socket)).toBe(0);
   });
 
   test("an X10 wheel report does not arm a connection probe", async () => {
-    const { term, socket } = await attachedGhostty();
+    const { term, socket } = await attached();
     vi.useFakeTimers();
-    try {
-      wheel(term);
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(wheel(term)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(inputFrames(socket), "the wheel was reported").toHaveLength(2);
+    expect(pings(socket)).toBe(0);
   });
 
   test("typed ghostty data arms a connection probe", async () => {
-    const { term, socket } = await attachedGhostty();
+    const { term, socket } = await attached();
     vi.useFakeTimers();
-    try {
-      term.type("x");
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    typeInGhostty(term, "x");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pings(socket)).toBe(1);
   });
 
   test("sends a wide X10 wheel report as bytes to the PTY and group", async () => {
-    const { term, socket, received } = await attachedGhostty();
+    const { term, socket, received } = await attached();
     const report = `\x1b[M${String.fromCharCode(32 + 65, 32 + 151, 32 + 4)}`;
-    wheel(term);
+    expect(wheel(term)).toBe(true);
     expect.soft(inputFrames(socket)).toEqual([
       { type: "input", data: report, binary: true },
       { type: "broadcast-input", data: report, binary: true },
@@ -351,16 +235,16 @@ describe("a ghostty mouse report", () => {
   });
 
   test("a trackpad delta under a row is claimed and sends no report", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    wheel(term, { deltaY: 1 });
+    const { term, socket, received } = await attached();
+    expect(wheel(term, { deltaY: 1 })).toBe(true);
     expect.soft(inputFrames(socket)).toEqual([]);
     expect.soft(received).toEqual([]);
   });
 
   test("sends an SGR wheel report as text to the PTY and group", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    term.sgr = true;
-    wheel(term);
+    const { term, socket, received } = await attached();
+    await output(socket, "\x1b[?1006h");
+    expect(wheel(term)).toBe(true);
     const report = "\x1b[<65;151;4M";
     expect.soft(inputFrames(socket)).toEqual([
       { type: "input", data: report },
@@ -370,8 +254,8 @@ describe("a ghostty mouse report", () => {
   });
 
   test("sends a wide X10 press from onData as bytes to the PTY and group", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    term.type(REPORT);
+    const { term, socket, received } = await attached();
+    typeInGhostty(term, REPORT);
     expect.soft(inputFrames(socket)).toEqual([
       { type: "input", data: REPORT, binary: true },
       { type: "broadcast-input", data: REPORT, binary: true },
@@ -379,57 +263,41 @@ describe("a ghostty mouse report", () => {
     expect.soft(received).toEqual([[REPORT, true]]);
   });
 
-  test("sends an X10 press during a live write to the PTY and group", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    term.replyDuringWrite = REPORT;
-    await output(socket, "steady output\r\n");
+  // A chunk shaped like a report with more bytes after it is typed input,
+  // whatever its shape: text to the PTY and group, and an input the
+  // connection probe waits on.
+  test.each(["z", "\n"])("keeps a four-character X10 payload ending %j as typed text", async (extra) => {
+    const { term, socket, received } = await attached();
+    vi.useFakeTimers();
+    const chunk = REPORT + extra;
+    typeInGhostty(term, chunk);
     expect.soft(inputFrames(socket)).toEqual([
-      { type: "input", data: REPORT, binary: true },
-      { type: "broadcast-input", data: REPORT, binary: true },
+      { type: "input", data: chunk },
+      { type: "broadcast-input", data: chunk },
     ]);
-    expect.soft(received).toEqual([[REPORT, true]]);
+    expect.soft(received).toEqual([[chunk, false]]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pings(socket)).toBe(1);
   });
 
-  test("sends an SGR press during a live write as text to the PTY and group", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    const report = "\x1b[<0;151;4M";
-    term.replyDuringWrite = report;
-    await output(socket, "steady output\r\n");
+  test.each(["z", "\n"])("keeps an SGR report with more bytes, ending %j, as typed text", async (extra) => {
+    const { term, socket, received } = await attached();
+    vi.useFakeTimers();
+    const chunk = "\x1b[<0;151;4M" + extra;
+    typeInGhostty(term, chunk);
     expect.soft(inputFrames(socket)).toEqual([
-      { type: "input", data: report },
-      { type: "broadcast-input", data: report },
+      { type: "input", data: chunk },
+      { type: "broadcast-input", data: chunk },
     ]);
-    expect.soft(received).toEqual([[report, false]]);
-  });
-
-  test("keeps a four-character X10 payload as text at this PTY during a live write", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    for (const extra of ["z", "\n"]) {
-      const chunk = REPORT + extra;
-      term.replyDuringWrite = chunk;
-      await output(socket, "steady output\r\n");
-      expect.soft(inputFrames(socket)).toEqual([{ type: "input", data: chunk }]);
-      expect.soft(received).toEqual([]);
-      socket.sent.splice(0);
-    }
-  });
-
-  test("keeps an SGR report with more bytes as text at this PTY during a live write", async () => {
-    const { term, socket, received } = await attachedGhostty();
-    for (const extra of ["z", "\n"]) {
-      const chunk = "\x1b[<0;151;4M" + extra;
-      term.replyDuringWrite = chunk;
-      await output(socket, "steady output\r\n");
-      expect.soft(inputFrames(socket)).toEqual([{ type: "input", data: chunk }]);
-      expect.soft(received).toEqual([]);
-      socket.sent.splice(0);
-    }
+    expect.soft(received).toEqual([[chunk, false]]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pings(socket)).toBe(1);
   });
 
   test("keeps an X10-shaped chunk above U+00FF as text", async () => {
-    const { term, socket, received } = await attachedGhostty();
+    const { term, socket, received } = await attached();
     const chunk = "\x1b[M \u0100$";
-    term.type(chunk);
+    typeInGhostty(term, chunk);
     expect.soft(inputFrames(socket)).toEqual([
       { type: "input", data: chunk },
       { type: "broadcast-input", data: chunk },
