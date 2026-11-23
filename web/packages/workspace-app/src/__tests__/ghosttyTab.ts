@@ -271,6 +271,10 @@ export function pressInGhostty(term: Terminal, init: KeyboardEventInit): Keyboar
 
 function resetGhosttyFixture(): void {
   ghosttyFixture.terminals.splice(0);
+  // A terminal the test never disposed would keep every later 2D context of
+  // the file on the software canvas.
+  servedTerminals.clear();
+  giveCanvasesBack();
 }
 
 /// Data the terminal emits as typed input, as a key or a paste does.
@@ -288,33 +292,24 @@ export function ghosttyHasFocus(term: Terminal): boolean {
 function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
   if (!ghosttyFixture.module) throw new Error("the vendored core did not compile");
   class FixtureTerminal extends Terminal {
-    #open = false;
-
     constructor(...args: ConstructorParameters<typeof Terminal>) {
       super(...args);
       ghosttyFixture.terminals.push(this);
     }
 
     override open(parent: HTMLElement): void {
-      serveCanvases();
-      this.#open = true;
+      serveCanvases(this);
       try {
         super.open(parent);
       } catch (error) {
-        this.#close();
+        releaseCanvases(this);
         throw error;
       }
     }
 
     override dispose(): void {
       super.dispose();
-      this.#close();
-    }
-
-    #close(): void {
-      if (!this.#open) return;
-      this.#open = false;
-      releaseCanvases();
+      releaseCanvases(this);
     }
   }
   return kitFrom(ghosttyFixture.module, { Terminal: FixtureTerminal });
@@ -325,14 +320,16 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
 // context gets a software one, since the widget also measures its font on a
 // detached canvas; any other context id gets the environment's own answer,
 // and so does every canvas once the last terminal closes. A test that
-// installed its own context (`installSoftwareCanvas`) keeps it.
+// installed its own context (`installSoftwareCanvas`) keeps it. A reset
+// ends the serving whatever is still open, and a terminal disposed after it
+// takes nothing back.
 const softwareContexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
-let openTerminals = 0;
+const servedTerminals = new Set<Terminal>();
 let environmentGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 let servedGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 
-function serveCanvases(): void {
-  openTerminals += 1;
+function serveCanvases(term: Terminal): void {
+  servedTerminals.add(term);
   const current = HTMLCanvasElement.prototype.getContext;
   if (current === servedGetContext || vi.isMockFunction(current)) return;
   environmentGetContext = current;
@@ -340,9 +337,13 @@ function serveCanvases(): void {
   HTMLCanvasElement.prototype.getContext = servedGetContext;
 }
 
-function releaseCanvases(): void {
-  openTerminals -= 1;
-  if (openTerminals > 0 || !environmentGetContext) return;
+function releaseCanvases(term: Terminal): void {
+  if (!servedTerminals.delete(term) || servedTerminals.size > 0) return;
+  giveCanvasesBack();
+}
+
+function giveCanvasesBack(): void {
+  if (!environmentGetContext) return;
   if (HTMLCanvasElement.prototype.getContext === servedGetContext) {
     HTMLCanvasElement.prototype.getContext = environmentGetContext;
   }

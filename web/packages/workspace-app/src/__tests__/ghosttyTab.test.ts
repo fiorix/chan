@@ -114,6 +114,27 @@ test("while a terminal is open only a 2D context is the fixture's, and the last 
   expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
 });
 
+test("a reset gives canvases back even when a terminal was never disposed", async () => {
+  const environment = HTMLCanvasElement.prototype.getContext;
+  const { term } = await opened();
+  const dispose = vi.spyOn(term, "dispose").mockImplementation(() => {});
+  try {
+    resetTerminals();
+    expect(dispose, "the unmount asked the terminal to dispose").toHaveBeenCalled();
+    expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
+  } finally {
+    dispose.mockRestore();
+    term.dispose();
+  }
+  expect(HTMLCanvasElement.prototype.getContext, "a late dispose takes nothing back").toBe(environment);
+
+  // The next terminal is served and gives canvases back on its own close.
+  await opened();
+  expect(document.createElement("canvas").getContext("2d")).toBeInstanceOf(SoftwareCanvasContext);
+  resetTerminals();
+  expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
+});
+
 test("focus inside the terminal follows focus() and blur()", async () => {
   const { term } = await opened();
   term.focus();
