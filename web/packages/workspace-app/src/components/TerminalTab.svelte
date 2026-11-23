@@ -282,6 +282,40 @@
     term?.focus();
   }
 
+  /// Whether nothing outside `within` holds the keyboard: it is on the body,
+  /// or on an element inside `within`.
+  function keyboardFreeOrIn(within: Element | null | undefined): boolean {
+    const holder = document.activeElement;
+    return (
+      holder === null ||
+      holder === document.body ||
+      holder === document.documentElement ||
+      !!within?.contains(holder)
+    );
+  }
+
+  // The focused pane's active terminal takes the keyboard as the pane gains
+  // focus and again once start() has wired it, since the focus effect found
+  // no terminal while the core and font loaded. Both run later than the
+  // change that asked for them, so they ask again when they run: a tab or
+  // pane the user left meanwhile takes nothing, and neither does a terminal
+  // whose Rich Prompt is shown, because the composer takes the keyboard
+  // itself as it mounts and on each pulse.
+  function focusActiveTerminal(): void {
+    if (!active || !focused) return;
+    if (isRichPromptVisible(tab.id)) return;
+    focusTerminal();
+  }
+
+  // An action on this terminal that waited before handing it the keyboard
+  // (a clipboard round trip, the shell's first output for a seeded prompt)
+  // hands it over only while this is still the focused pane's active tab
+  // and nothing outside the terminal took the keyboard during the wait.
+  function focusTerminalAfterWait(): void {
+    if (!active || !focused || !keyboardFreeOrIn(host)) return;
+    focusTerminal();
+  }
+
   function dismissReloadNotice(): void {
     dismissCliReloadNotice(tab);
     focusTerminal();
@@ -759,13 +793,7 @@
     setTerminalActivity(tab, false);
     untrack(() => markProgramCompletionsSeen(tab.programStatus));
     sendFocusState();
-    queueMicrotask(() => {
-      // The Rich Prompt bubble owns the keyboard when it is open over this
-      // (active) terminal; don't yank focus back to xterm or it would steal the
-      // caret from the bubble's editor.
-      if (active && isRichPromptVisible(tab.id)) return;
-      focusTerminal();
-    });
+    queueMicrotask(focusActiveTerminal);
   });
 
   // Hiding the Rich Prompt bubble hands keyboard focus + cursor back to this
@@ -850,16 +878,7 @@
   // took it and is still open.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
-      if (!active || !focused) return;
-      const holder = document.activeElement;
-      if (
-        holder !== null &&
-        holder !== document.body &&
-        holder !== document.documentElement &&
-        !tabEl?.contains(holder)
-      ) {
-        return;
-      }
+      if (!active || !focused || !keyboardFreeOrIn(tabEl)) return;
       if (owner() !== null) {
         handKeyboardToOwner();
         return;
@@ -1062,15 +1081,8 @@
       if (!active || !focused) return;
       if (findOpen || menuOpen || isRichPromptVisible(tab.id)) return;
       if (launcherShownOverWindow()) return;
-      const owner = document.activeElement;
-      if (
-        owner !== null &&
-        owner !== document.body &&
-        owner !== document.documentElement &&
-        !host?.contains(owner)
-      ) {
-        return;
-      }
+      if (!keyboardFreeOrIn(host)) return;
+      const holder = document.activeElement;
       // ghostty-web focuses the host element it opened in, and focus() on
       // the element that is already document.activeElement is a DOM no-op,
       // so the refocus below re-arms nothing when WKWebView kept the
@@ -1080,10 +1092,10 @@
       // terminal's wake.
       if (
         backend === "ghostty" &&
-        owner instanceof HTMLElement &&
-        host?.contains(owner)
+        holder instanceof HTMLElement &&
+        host?.contains(holder)
       ) {
-        owner.blur();
+        holder.blur();
       }
       // focusTerminal carries the remaining dialog and survey ownership guards.
       focusTerminal();
@@ -1631,7 +1643,7 @@
     // carried-over cursor would make the server skip everything the
     // PREVIOUS xterm had seen, and that buffer died with term.dispose().
     void connect();
-    if (focused) queueMicrotask(focusTerminal);
+    queueMicrotask(focusActiveTerminal);
   }
 
   function clearLiveness(): void {
@@ -2230,7 +2242,7 @@
       // Sent directly, the seed arms no input ping, owes no note and
       // reaches no broadcast group.
       sendInput(seed);
-      focusTerminal();
+      focusTerminalAfterWait();
       scheduleTerminalSessionSave();
     }, 150);
   }
@@ -2451,27 +2463,22 @@
     toggleRichPromptToolbar(tab.id);
   }
 
+  // Closing the inspector hands the keyboard back: to its owner when
+  // something owns it (a survey over this terminal, which the floating
+  // inspector does not cover), as the owner's surface takes it, else to the
+  // terminal.
+  function closeInspector(): void {
+    tab.inspectorOpen = false;
+    if (owner() !== null) handKeyboardToOwner();
+    else focusTerminal();
+  }
+
   // The launcher opens from this terminal, as its chord does from a focused
   // terminal, so it hands the keyboard back here when it closes.
   function openCommandsFromMenu(e: MouseEvent): void {
     const row = e.currentTarget as Element;
     closeTabMenu();
-    openCommandLauncherFromMenu(row, focusTerminalOnce);
-  }
-
-  // ghostty-web's focus() focuses its element and then again on a zero-delay
-  // timer, which takes the keyboard back from an input that took it in
-  // between: the launcher's, opened from the body menu, or the find bar's,
-  // reopened at once after Escape. On ghostty the host it opened in, the
-  // element it reads keys from, is focused once instead; xterm.js focuses at
-  // once.
-  function focusTerminalOnce(): void {
-    if (backend !== "ghostty") {
-      focusTerminal();
-      return;
-    }
-    if (keyboardHeld()) return;
-    host?.focus({ preventScroll: true });
+    openCommandLauncherFromMenu(row, focusTerminal);
   }
 
   function attachPtyWriteOrigin(): PtyWriteOrigin {
@@ -2994,7 +3001,7 @@
       console.warn("terminal copy failed", err);
       return;
     }
-    focusTerminal();
+    focusTerminalAfterWait();
   }
 
   async function copyScrollback(): Promise<void> {
@@ -3034,7 +3041,7 @@
       if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);
       else pasteIntoXterm(term as Terminal, text);
     }
-    focusTerminal();
+    focusTerminalAfterWait();
   }
 
   // Keyboard copy (Cmd+C / Ctrl+Shift+C, and a chord the user assigned to
@@ -3273,7 +3280,7 @@
       e.preventDefault();
       findOpen = false;
       clearFind();
-      focusTerminalOnce();
+      focusTerminal();
       return;
     }
     if (e.key === "Enter") {
@@ -3936,7 +3943,7 @@
         floating
         reserveSpace
         bind:width={() => tab.inspectorWidth ?? 280, (width) => (tab.inspectorWidth = width)}
-        onClose={() => { tab.inspectorOpen = false; term?.focus(); }}
+        onClose={closeInspector}
       >
         {#if currentPreferences()?.terminal.program_status !== false && tab.programStatus?.records.length}
         <div class="program-inspector" aria-label={`Program status for ${terminalTabName(tab)}`}>

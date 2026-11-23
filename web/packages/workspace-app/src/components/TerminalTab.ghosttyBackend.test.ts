@@ -35,9 +35,8 @@ const ghostty = vi.hoisted(() => {
     // The forceAll flag of every render pass asked of the renderer.
     renders: [] as boolean[],
     // When set, focus does what ghostty-web's does: open() makes its element
-    // focusable, focus() focuses that element, and again on a zero-delay
-    // timer that blur() cancels; blur() blurs whichever element inside holds
-    // focus.
+    // focusable, focus() focuses that element once, synchronously, and
+    // blur() blurs whichever element inside holds focus.
     realFocus: false,
     // Every theme the component handed the live-switch hook, with the
     // terminal it named.
@@ -70,7 +69,6 @@ const ghostty = vi.hoisted(() => {
     };
     applicationCursorKeys = false;
     element: HTMLElement | null = null;
-    focusRetry: ReturnType<typeof setTimeout> | undefined = undefined;
     constructor(options: Record<string, unknown>) {
       this.options = options;
       record.terminals.push(this);
@@ -128,14 +126,11 @@ const ghostty = vi.hoisted(() => {
       record.events.push("focus");
       const element = this.element;
       if (!record.realFocus || !element) return;
-      element.focus();
-      clearTimeout(this.focusRetry);
-      this.focusRetry = setTimeout(() => element.focus(), 0);
+      element.focus({ preventScroll: true });
     }
     blur() {
       record.events.push("blur");
       if (!record.realFocus) return;
-      clearTimeout(this.focusRetry);
       const held = document.activeElement;
       if (held instanceof HTMLElement && this.element?.contains(held)) held.blur();
     }
@@ -830,8 +825,7 @@ describe("a ghostty terminal under the Team dialog", () => {
 // component reports focus at the element ghostty-web focuses.
 // A launcher opened from the body menu's Commands records what holds the
 // keyboard as it opens and focuses its own input a tick later, as the
-// command deck does. ghostty-web's focus() focuses its element again on a
-// zero-delay timer, after that.
+// command deck does; nothing focuses the terminal after that.
 describe("the body menu's Commands", () => {
   test("hands the launcher the terminal's host, and leaves the keyboard in the launcher", async () => {
     ghostty.record.realFocus = true;
