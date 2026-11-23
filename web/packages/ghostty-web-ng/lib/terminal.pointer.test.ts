@@ -666,6 +666,23 @@ async function scrollbar(offset = 12.25) {
 }
 
 describe('captured scrollbar lifecycle', () => {
+  test('strip presses reset a prior local click before double-click selection', async () => {
+    const { term, canvas, width, write } = await open(Array.from({ length: 40 }, () => 'w'.repeat(COLS)).join('\r\n'));
+    term.viewport.scrollTo(1);
+    term.viewport.scrollTo(10);
+    rawPointer(canvas, 'pointerdown', 1, 1);
+    rawPointer(canvas, 'pointerup', 1, 1);
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1, clientX: 1, clientY: 1 }));
+    const x = COLS * width - 8;
+    for (let i = 0; i < 2; i++) {
+      expect(rawPointer(canvas, 'pointerdown', x, 5).defaultPrevented).toBe(true);
+      rawPointer(canvas, 'pointerup', x, 5);
+    }
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2, clientX: x, clientY: 5 }));
+    expect(term.hasSelection()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   test('dispose cancels the pending scrollbar animation as well as the render loop', async () => {
     let id = 0;
     const frames = new Map<number, FrameRequestCallback>();
