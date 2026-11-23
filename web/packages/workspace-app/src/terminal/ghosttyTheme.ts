@@ -14,7 +14,7 @@ import type { ITheme, Terminal } from "@chan/ghostty-web-ng";
 import { VtTerminal, type VtTerminalConfig } from "@chan/ghostty-web-ng/vt";
 
 /// The widget's private builder of the core's config from
-/// `options.theme`, the one `open()` and `reset()` call, so a switch
+/// `options.theme`, the one `open()` calls, so a switch
 /// converts each color exactly as a newly opened terminal would.
 type ConfigBuilder = { buildWasmConfig?: () => VtTerminalConfig | undefined };
 
@@ -35,7 +35,7 @@ export function applyGhosttyTheme(term: Terminal, theme: ITheme): boolean {
 /// Makes the theme object the widget holds equal to `theme`. Assigning
 /// `options.theme` goes through the widget's option proxy, which only
 /// warns once the terminal is open; rewriting the object it holds keeps
-/// what `reset()` rebuilds the core from current without that warning.
+/// the theme the widget reports current without that warning.
 function holdTheme(options: { theme: ITheme }, theme: ITheme): void {
   const held = options.theme as Record<string, unknown> | undefined;
   if (!held) {

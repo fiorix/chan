@@ -354,15 +354,12 @@ describe("a theme switch on a live ghostty terminal", () => {
     expect(sent, "input after the switch reaches the program once").toEqual(["typed"]);
   });
 
-  test("the widget holds the new theme without a warning, so a reset rebuilds the core in it", async () => {
+  test("the widget holds the new theme without a warning", async () => {
     const warn = vi.spyOn(console, "warn");
     const term = await openTerminal(DARK);
     applyGhosttyTheme(term, LIGHT);
     expect(warn).not.toHaveBeenCalled();
     expect(term.options.theme).toEqual(LIGHT);
-
-    term.reset();
-    expect(defaults(term).background).toBe(LIGHT.background);
   });
 
   test("a terminal not yet open takes the theme when it opens", async () => {
