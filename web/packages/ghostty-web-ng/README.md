@@ -20,6 +20,8 @@ The widget exposes the subset chan uses rather than an xterm.js compatibility AP
 
 ## Viewport and content changes
 
+`term.getCursor()` synchronously returns a fresh `Readonly<{ x: number; y: number }>` snapshot of the cursor's zero-based column and row on the active live screen, including the alternate screen. It reflects parsed writes and cursor moves immediately, independent of viewport scrolling or retained history. It returns `undefined` before `open()` and after `dispose()`.
+
 `term.viewport.offset` is the fractional number of rows back from the bottom. `scrollTo(offset)` sets that distance, `scrollBy(rows)` adds to it (positive moves toward older output), and `scrollToBottom()` returns to live output. Explicit positioning cancels a pending smooth scroll and clamps to retained history. `reveal(row, align)` takes an absolute row, with row zero at the oldest retained history row; it leaves a visible row in place and positions an off-screen row at `"start"`, `"center"` (the default) or `"end"`, subject to the same clamp.
 
 The viewport's `followOutput` policy is `"at-bottom"`. Writes keep a view anchored to its retained row, including when the core prunes older history. The visible row and an active smooth-scroll target are tracked independently; if either row is discarded, that position falls back to the oldest retained row. Their fractional distances are preserved within the retained-history bounds. An offset below one row follows the live screen while retaining its fractional distance, so successive pixel-wheel events can move into history while output streams. User input that emits bytes returns the view to the bottom before those bytes are emitted.
