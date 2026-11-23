@@ -442,7 +442,10 @@ export class SelectionManager {
     }
     pointer.buttons = event.buttons;
     this.mouseInput?.move(event, !buttonChanged);
-    if (!this.isSelecting) return;
+    if (!this.isSelecting) {
+      if (event.buttons === 0) this.endPointer(false);
+      return;
+    }
     if (!this.dragThresholdMet) {
       const dx = event.clientX - this.mouseDownX;
       const dy = event.clientY - this.mouseDownY;
