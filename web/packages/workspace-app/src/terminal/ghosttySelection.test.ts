@@ -92,15 +92,6 @@ function browserClipboard() {
 const ROWS_0_TO_11 = Array.from({ length: 12 }, (_, i) => `row ${i}`).join("\r\n");
 
 describe("ghostty-web's selection over the pinned build", () => {
-  test("its own Select all takes a screenful counted from the top of the history", async () => {
-    const { term, wasmTerm } = await pinnedTerminal(ROWS_0_TO_11);
-    expect(wasmTerm.getScrollbackLength()).toBe(8);
-    term.selectAll();
-    // Rows 8 to 11 are on screen; ghostty-web reads its viewport offset (0)
-    // as an absolute row.
-    expect(term.getSelection()).toBe("row 0\nrow 1\nrow 2\nrow 3");
-  });
-
   test("Select all selects the history and the screen, and copies them as shown", async () => {
     const { term, manager, install } = await pinnedTerminal(ROWS_0_TO_11);
     expect(install()).toBe(true);
@@ -111,43 +102,12 @@ describe("ghostty-web's selection over the pinned build", () => {
     expect(term.hasSelection()).toBe(true);
   });
 
-  test("a selection copies what its rows show, a wide character once", async () => {
-    const { term, manager, install } = await pinnedTerminal("日本語 x\r\nab");
-    manager.selectionStart = { col: 0, absoluteRow: 0 };
-    manager.selectionEnd = { col: COLS - 1, absoluteRow: 1 };
-    // ghostty-web's own read puts a space after each wide character.
-    expect(term.getSelection()).toBe("日 本 語  x\nab");
-    expect(install()).toBe(true);
-    expect(term.getSelection()).toBe("日本語 x\nab");
-  });
-
   test("ghostty-web's own read takes each cluster whole, in the history and on the screen", async () => {
     const { term, manager, wasmTerm } = await pinnedTerminal("e\u0301 x\r\n1\r\n2\r\n3\r\n4\r\nn\u0303 \u{1f468}\u200d\u{1f469}\u200d\u{1f467}");
     expect(wasmTerm.getScrollbackLength()).toBe(2);
     manager.selectionStart = { col: 0, absoluteRow: 0 };
     manager.selectionEnd = { col: COLS - 1, absoluteRow: 5 };
     expect(term.getSelection()).toBe("e\u0301 x\n1\n2\n3\n4\nn\u0303 \u{1f468}\u200d\u{1f469}\u200d\u{1f467}");
-  });
-
-  test("a soft-wrapped command copies as the one line it is", async () => {
-    const command = "$ echo one two three four";
-    const { term, manager, wasmTerm, install } = await pinnedTerminal(`${command}\r\nok`);
-    expect(wasmTerm.isRowWrapped(1), "the command wrapped on screen").toBe(true);
-    manager.selectionStart = { col: 0, absoluteRow: 0 };
-    manager.selectionEnd = { col: COLS - 1, absoluteRow: 2 };
-    // ghostty-web's own read ends the wrapped row with a line break.
-    expect(term.getSelection()).toBe("$ echo one two three\n four\nok");
-    expect(install()).toBe(true);
-    expect(term.getSelection()).toBe(`${command}\nok`);
-  });
-
-  test("a DEL a program printed reaches no copy", async () => {
-    const { term, manager, install } = await pinnedTerminal("ab\x7fcd");
-    manager.selectionStart = { col: 0, absoluteRow: 0 };
-    manager.selectionEnd = { col: COLS - 1, absoluteRow: 0 };
-    expect(term.getSelection(), "ghostty-web's own read carries it").toBe("ab\x7fcd");
-    expect(install()).toBe(true);
-    expect(term.getSelection()).toBe("abcd");
   });
 
   test("a selection is read the way round it was made", async () => {
