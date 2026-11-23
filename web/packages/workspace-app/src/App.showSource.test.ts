@@ -21,6 +21,7 @@ vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
   (await import("./__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, readTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { renderedCaretForSourceCaret, sourceCaretForRenderedCaret } from "./editor/caret_mapping";
 import { SHORTCUTS, shouldEscapeTerminal } from "./state/shortcuts";
@@ -100,6 +101,7 @@ describe("Show Source Code", () => {
     press(CTRL_E);
 
     expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([{ id: "term", kind: "terminal" }]);
+    await seatedGhostty();
   });
 });
 

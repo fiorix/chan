@@ -61,7 +61,6 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const frame = (command) => page.evaluate((windowId, command) => {
       window.__watch303.dispatchEvent(new MessageEvent("message", {
         data: JSON.stringify({ type: "window_command", window_id: windowId, command }),
@@ -89,7 +88,7 @@ export default {
       if (!read.cover) throw new Error(`${label}: the cover went when the prompt showed: ${JSON.stringify(read)}`);
       return read;
     };
-    const result = { backend, legs: {}, cleanupErrors: [] };
+    const result = { backend: "ghostty", legs: {}, cleanupErrors: [] };
     const failures = [];
     const check = (name, ok, detail) => {
       result.legs[name] = { ok, detail };

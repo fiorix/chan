@@ -841,6 +841,16 @@ mod tests {
     }
 
     #[test]
+    fn count_warnings_counts_the_warnings_given_inside_its_closure() {
+        tracing::warn!("given before the count");
+        let (warnings, ()) = count_warnings(|| {
+            tracing::info!("not a warning");
+            tracing::warn!("given inside the count");
+        });
+        assert_eq!(warnings, 1);
+    }
+
+    #[test]
     fn the_preferences_view_omits_a_stored_terminal_ghostty() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("server.toml");
@@ -870,13 +880,14 @@ mod tests {
             let mut older = terminal_as_read(&state);
             older["ghostty"] = json!(ghostty);
             older["mcp_env"] = json!(true);
-            let body = serde_json::from_value::<PatchConfigBody>(json!({
-                "expected_revision": revision,
-                "preferences": { "terminal": older },
-            }))
-            .expect("a boolean terminal.ghostty is accepted");
 
+            // The body is decoded inside the count: the key is dropped there.
             let (warnings, written) = count_warnings(|| {
+                let body = serde_json::from_value::<PatchConfigBody>(json!({
+                    "expected_revision": revision,
+                    "preferences": { "terminal": older },
+                }))
+                .expect("a boolean terminal.ghostty is accepted");
                 patch_config_with_saves(&state, body, noop_save_editor, |config| {
                     config.save_to(&path)
                 })

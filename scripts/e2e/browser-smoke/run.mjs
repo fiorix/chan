@@ -354,6 +354,7 @@ async function main() {
       // checks that exercise settings writes assert against the toml files
       // in here, never the host's real global config.
       chanHome: server.chanHome,
+      stderrLines: server.stderrLines,
       repoRoot: REPO,
       serverPid: server.child.pid,
       get controlSocket() {
@@ -571,6 +572,10 @@ async function main() {
           currentCheck.status = "skipped";
           currentCheck.skipped = true;
           currentCheck.reason = e.message;
+          if (e.smokeDetails) {
+            try { currentCheck.details = snapshotDetails(e.smokeDetails); }
+            catch (error) { checkError(error, phase); }
+          }
         } else {
           checkError(e, phase);
           if (e?.smokeDetails) {

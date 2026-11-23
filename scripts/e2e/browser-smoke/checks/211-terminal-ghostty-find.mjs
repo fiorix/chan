@@ -45,6 +45,7 @@
 // host. A heap walk for the instance (Runtime.queryObjects) outruns the
 // protocol timeout on this page.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 
 const TAB = "SmokeGhosttyFind211";
@@ -95,22 +96,7 @@ export default {
     let resized = false;
     const readings = {};
     try {
-      const chunk = await page.evaluate(async () => {
-        for (const script of document.querySelectorAll('script[type="module"][src]')) {
-          const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-          if (!name) continue;
-          const url = new URL(name, script.src).href;
-          const { Terminal } = await import(url);
-          const open = Terminal.prototype.open;
-          window.__ghosttyTerminals211 = [];
-          Terminal.prototype.open = function (...args) {
-            window.__ghosttyTerminals211.push(this);
-            return open.apply(this, args);
-          };
-          return url;
-        }
-        return null;
-      });
+      const chunk = await captureGhosttyTerminals(page, "__ghostty211");
       if (!chunk) throw new Error("no entry module of the page names a ghostty-web chunk");
       const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
       const tabQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
@@ -124,7 +110,7 @@ export default {
 
       const term = await page.evaluateHandle((query) => {
         const host = document.querySelector(query);
-        return window.__ghosttyTerminals211.find((t) => !t.isDisposed && host && t.element === host) ?? null;
+        return window.__ghostty211.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
       }, hostQuery);
       if (!(await term.evaluate((t) => t !== null))) {
         throw new Error(`no ghostty-web Terminal from ${chunk} holds this tab's terminal host`);
@@ -375,6 +361,7 @@ export default {
     } finally {
       if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
+      await page.evaluate(() => window.__ghostty211?.restore());
     }
   },
 };

@@ -43,63 +43,61 @@ function fixture(t, backend, rows, visible = restored, box = { width: 800, heigh
   };
 }
 
-for (const backend of ["ghostty"]) {
-  test(`${backend}: resolve the original session under regenerated coordinates`, async (t) => {
-    const f = fixture(t, backend, [restored]);
-    const result = await waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0);
-    assert.equal(result.session_id, original.session_id);
-    assert.equal(result.pane, restored.pane);
-    assert.equal(result.tab, restored.tab);
-    assert.equal(result.selector, selector(restored));
-    assert.deepEqual(f.commands, [["list", "--json"]]);
-  });
+test(`ghostty: resolve the original session under regenerated coordinates`, async (t) => {
+  const f = fixture(t, "ghostty", [restored]);
+  const result = await waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0);
+  assert.equal(result.session_id, original.session_id);
+  assert.equal(result.pane, restored.pane);
+  assert.equal(result.tab, restored.tab);
+  assert.equal(result.selector, selector(restored));
+  assert.deepEqual(f.commands, [["list", "--json"]]);
+});
 
-  test(`${backend}: stale coordinates cannot satisfy attachment`, async (t) => {
-    const f = fixture(t, backend, [original]);
-    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-  });
+test(`ghostty: stale coordinates cannot satisfy attachment`, async (t) => {
+  const f = fixture(t, "ghostty", [original]);
+  await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
+});
 
-  test(`${backend}: retry a stale roster until the current coordinates are visible`, async (t) => {
-    let reads = 0;
-    const f = fixture(t, backend, () => [reads++ === 0 ? original : restored]);
-    const result = await waitRestoredTerminal(f.page, f.cs, original.window, original, backend);
-    assert.equal(result.selector, selector(restored));
-    assert.equal(reads, 2);
-    assert.equal(f.queries.length, 2);
-  });
+test(`ghostty: retry a stale roster until the current coordinates are visible`, async (t) => {
+  let reads = 0;
+  const f = fixture(t, "ghostty", () => [reads++ === 0 ? original : restored]);
+  const result = await waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty");
+  assert.equal(result.selector, selector(restored));
+  assert.equal(reads, 2);
+  assert.equal(f.queries.length, 2);
+});
 
-  test(`${backend}: another session reusing the old coordinates cannot satisfy attachment`, async (t) => {
-    const impostor = { ...original, session_id: "different-session" };
-    const f = fixture(t, backend, [impostor], impostor);
-    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-  });
+test(`ghostty: another session reusing the old coordinates cannot satisfy attachment`, async (t) => {
+  const impostor = { ...original, session_id: "different-session" };
+  const f = fixture(t, "ghostty", [impostor], impostor);
+  await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
+});
 
-  test(`${backend}: the original session in another window cannot satisfy attachment`, async (t) => {
-    const elsewhere = { ...restored, window: "another-window" };
-    const f = fixture(t, backend, [elsewhere]);
-    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-  });
+test(`ghostty: the original session in another window cannot satisfy attachment`, async (t) => {
+  const elsewhere = { ...restored, window: "another-window" };
+  const f = fixture(t, "ghostty", [elsewhere]);
+  await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
+});
 
-  test(`${backend}: an unassigned pane or tab cannot satisfy attachment`, async (t) => {
-    for (const field of ["pane", "tab"]) {
-      const incomplete = { ...restored, [field]: "" };
-      const f = fixture(t, backend, [incomplete], incomplete);
-      await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-    }
-  });
-
-  test(`${backend}: another backend cannot satisfy attachment`, async (t) => {
-    const other = "xterm";
-    const f = fixture(t, other, [restored]);
-    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-  });
-
-  for (const dimension of ["width", "height"]) {
-    test(`${backend}: a backend with zero ${dimension} cannot satisfy attachment`, async (t) => {
-      const f = fixture(t, backend, [restored], restored, { width: 800, height: 600, [dimension]: 0 });
-      await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, backend, 0), /not attached/);
-    });
+test(`ghostty: an unassigned pane or tab cannot satisfy attachment`, async (t) => {
+  for (const field of ["pane", "tab"]) {
+    const incomplete = { ...restored, [field]: "" };
+    const f = fixture(t, "ghostty", [incomplete], incomplete);
+    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
   }
+});
+
+test(`ghostty: another backend cannot satisfy attachment`, async (t) => {
+  const other = "xterm";
+  const f = fixture(t, other, [restored]);
+  await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
+});
+
+for (const dimension of ["width", "height"]) {
+  test(`ghostty: a backend with zero ${dimension} cannot satisfy attachment`, async (t) => {
+    const f = fixture(t, "ghostty", [restored], restored, { width: 800, height: 600, [dimension]: 0 });
+    await assert.rejects(waitRestoredTerminal(f.page, f.cs, original.window, original, "ghostty", 0), /not attached/);
+  });
 }
 
 function openingFixture(t, backend, row, requestedBackend = backend) {

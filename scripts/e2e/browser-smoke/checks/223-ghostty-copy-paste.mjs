@@ -35,6 +35,7 @@
 // each of those control bytes a space and each line end a CR, and ESC[201~,
 // once.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { mkdtempSync, readFileSync, rmSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,32 +62,12 @@ function hostile(how) {
   return { text, want: OPEN + cleaned + CLOSE };
 }
 
-/// Every ghostty-web Terminal the page opens from now on, kept in the page.
-async function trackGhosttyTerminals(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const url = new URL(name, script.src).href;
-      const { Terminal } = await import(url);
-      const open = Terminal.prototype.open;
-      window.__ghosttyTerminals223 = [];
-      Terminal.prototype.open = function (...args) {
-        window.__ghosttyTerminals223.push(this);
-        return open.apply(this, args);
-      };
-      return url;
-    }
-    return null;
-  });
-}
-
 /// The ghostty-web Terminal whose element is the host of the tab `row` names.
 async function terminalOf(page, row) {
   const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
   const term = await page.evaluateHandle((query) => {
     const host = document.querySelector(query);
-    return window.__ghosttyTerminals223.find((t) => !t.isDisposed && host && t.element === host) ?? null;
+    return window.__ghostty223.terminals.find((t) => !t.isDisposed && host && t.element === host) ?? null;
   }, hostQuery);
   if (!(await term.evaluate((t) => t !== null))) throw new Error(`no ghostty-web Terminal holds the host ${hostQuery}`);
   return { term, hostQuery };
@@ -213,7 +194,7 @@ export default {
     const failures = [];
     const result = { backend: "ghostty", browser: await ctx.browser.browser().version(), copies: {}, runs: [], pastes: [] };
     try {
-      if (!(await trackGhosttyTerminals(page))) throw new Error("no entry module of the page names a ghostty-web chunk");
+      if (!(await captureGhosttyTerminals(page, "__ghostty223"))) throw new Error("no entry module of the page names a ghostty-web chunk");
 
       // Terminal A: the long command at the prompt.
       const a = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, SOURCE, "ghostty"));
@@ -318,6 +299,7 @@ export default {
     } finally {
       await cs(["close", "--tab-name", TARGET]).catch(() => {});
       await cs(["close", "--tab-name", SOURCE]).catch(() => {});
+      await page.evaluate(() => window.__ghostty223?.restore());
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }

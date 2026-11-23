@@ -5,52 +5,30 @@
 // and a drained PTY record boundary. The capture-on reports are positive
 // controls for the capture-off absence checks.
 
+import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { copyPointerSelection, drainPointerInput } from "../lib/terminal-pointer.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const frame = (page) => page.evaluate(() => new Promise(requestAnimationFrame));
-const inputSince = (fixture, index) => Buffer.concat(fixture.records.slice(index)
-  .filter((record) => record.type === "keys")
-  .map((record) => Buffer.from(record.base64, "base64"))).toString("utf8");
-const CPR = /\x1b\[[1-9]\d*;[1-9]\d*R$/;
-
-async function outputAndDrain(fixture, bytes = "", index = fixture.records.length) {
-  await fixture.send("bytes", { base64: Buffer.from(bytes + "\x1b[6n").toString("base64") });
-  await fixture.waitFor(() => CPR.test(inputSince(fixture, index)));
-  const input = inputSince(fixture, index);
-  return { input: input.replace(CPR, ""), reply: input.match(CPR)[0] };
-}
-
 async function captureGhostty(page) {
-  return page.evaluate(async () => {
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-      const name = /ghostty-web-[\w-]+\.js/.exec(await (await fetch(script.src)).text())?.[0];
-      if (!name) continue;
-      const { Terminal } = await import(new URL(name, script.src).href);
-      const open = Terminal.prototype.open;
-      const terminals = [];
-      Terminal.prototype.open = function (...args) {
-        terminals.push(this);
-        return open.apply(this, args);
-      };
-      window.__mouse97 = {
-        term(query) {
-          const host = document.querySelector(query);
-          const term = host && terminals.find((candidate) => candidate.element === host);
-          if (!term) throw new Error("the attached Ghostty terminal was not captured");
-          return term;
-        },
-        restore() { Terminal.prototype.open = open; },
-      };
-      return true;
-    }
-    return false;
+  const chunk = await captureGhosttyTerminals(page, "__mouse97");
+  if (!chunk) return null;
+  await page.evaluate(() => {
+    const state = window.__mouse97;
+    state.term = (query) => {
+      const host = document.querySelector(query);
+      const term = host && state.terminals.find((candidate) => candidate.element === host);
+      if (!term) throw new Error("the attached Ghostty terminal was not captured");
+      return term;
+    };
   });
+  return chunk;
 }
 
 async function selection(page, hostQuery) {
@@ -58,22 +36,6 @@ async function selection(page, hostQuery) {
     const term = window.__mouse97.term(query);
     return { active: term.hasSelection(), text: term.getSelection() };
   }, hostQuery);
-}
-
-async function copySelection(page, hostQuery) {
-  await page.$eval(`${hostQuery} textarea`, (input) => {
-    input.focus();
-    if (document.activeElement !== input) throw new Error("terminal input did not take focus");
-  });
-  await page.keyboard.down("Control");
-  await page.keyboard.down("Shift");
-  try { await page.keyboard.press("KeyC"); }
-  finally {
-    await page.keyboard.up("Shift");
-    await page.keyboard.up("Control");
-  }
-  await sleep(300);
-  return page.evaluate(() => navigator.clipboard.readText());
 }
 
 export default {
@@ -111,7 +73,7 @@ export default {
         const fixture = await startTerminalFixture({
           logPath: join(ctx.outDir, `97-${leg}-output.bin`), deadlineMs: 20_000,
         });
-        let opened = false;
+        let opened = false, term;
         try {
           await writeTerminalPrefs(page, token, { mouse_capture: capture });
           await assertTerminalPrefs(ctx, { mouse_capture: capture });
@@ -127,9 +89,10 @@ export default {
           result.fixture = await fixture.ready();
           assert.ok(result.fixture.tty && result.fixture.raw, `${leg}: fixture is a raw PTY`);
           const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
+          term = await page.evaluateHandle((query) => window.__mouse97.term(query), hostQuery);
           // The cursor reply follows the marker and DECSET in the real PTY
           // stream, proving the page parsed both before any gesture.
-          result.setup = await outputAndDrain(fixture,
+          result.setup = await drainPointerInput(fixture,
             `\x1b[2J\x1b[H97_${leg}_ROW_ONE\r\n${marker}\r\n97_${leg}_ROW_THREE\r\n\x1b[?1002;1006h`);
           assert.deepEqual(result.setup, { input: "", reply: "\x1b[4;1R" }, `${leg}: fixture text was parsed`);
           result.modes = await page.evaluate((query) => {
@@ -163,7 +126,7 @@ export default {
               if (await navigator.clipboard.readText() !== sentinel) throw new Error("clipboard sentinel was not seeded");
             }, { query: hostQuery, sentinel });
             assert.deepEqual(await selection(page, hostQuery), { active: false, text: "" }, `${leg}/${kind}: selection starts empty`);
-            gesture.before = await outputAndDrain(fixture);
+            gesture.before = await drainPointerInput(fixture);
             assert.equal(gesture.before.input, "", `${leg}/${kind}: PTY is drained before the gesture`);
             const index = fixture.records.length;
             await page.mouse.move(box.x + box.cellWidth / 2, box.y + box.cellHeight / 2);
@@ -181,9 +144,9 @@ export default {
             await sleep(300);
             // The following DSR reply is a live round trip after the gesture;
             // a disconnected recorder cannot satisfy the no-report arm.
-            gesture.after = await outputAndDrain(fixture, "", index);
+            gesture.after = await drainPointerInput(fixture, "", index);
             gesture.selection = await selection(page, hostQuery);
-            gesture.clipboard = await copySelection(page, hostQuery);
+            gesture.clipboard = await copyPointerSelection(page, term);
             if (capture) {
               const reports = kind === "drag"
                 ? /^\x1b\[<0;[1-9]\d*;[1-9]\d*M(?:\x1b\[<32;[1-9]\d*;[1-9]\d*M)+\x1b\[<0;[1-9]\d*;[1-9]\d*m$/
@@ -216,6 +179,7 @@ export default {
           await cs(["close", "--tab-name", name]).catch((error) => {
             if (opened) failures.push(`${leg}: could not close owned terminal: ${error.message}`);
           });
+          await term?.dispose();
           await fixture.close();
           writeFileSync(join(ctx.outDir, `97-${leg}.json`), JSON.stringify(result, null, 2) + "\n");
         }

@@ -9,7 +9,7 @@
 // the shell first writes in its $HOME. The printf's format string holds the
 // escapes and its arguments the targets, so the echoed command line holds no
 // link and no marker. A cell's pixels come from the surface's box and the
-// grid `stty` reported; nothing reads the page's terminal objects.
+// grid `stty` reported. The public history count guards the row-zero drag.
 // `window.open` is stubbed in the page and records what the browser would
 // have opened.
 //
@@ -58,7 +58,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
-import { seedPointerClipboard } from "../lib/terminal-pointer.mjs";
+import { capturePointerTerminals, pointerTerminal, seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const DIR = "linkcheck316";
@@ -124,6 +124,7 @@ export default {
     const failures = [];
     const tabs = [];
     const homeFiles = new Set();
+    let terminal;
 
     async function waitScrollback(tab, needle, timeoutMs = 30_000) {
       const deadline = Date.now() + timeoutMs;
@@ -228,23 +229,24 @@ export default {
     }
 
     async function runGhostty() {
-      const backend = "ghostty";
       const name = "SmokeLink316G";
-      const at = (leg) => `${backend}.${leg}`;
+      const at = (leg) => `ghostty.${leg}`;
       await writeTerminalPrefs(page, authToken, { mouse_capture: true });
       await assertTerminalPrefs(ctx, { mouse_capture: true });
+      await capturePointerTerminals(page);
       const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
       tabs.push(name);
+      terminal = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
       const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
-      const sizeFile = join(dir, `size316-${backend}`);
+      const sizeFile = join(dir, `size316-ghostty`);
       rmSync(sizeFile, { force: true });
 
       const format = String.raw`\033[H\033[2Jhttp%s\n\033]8;;%s\033\\NOTES-REL\033]8;;\033\\\n\033]8;;%s\033\\NOTES-ABS\033]8;;\033\\\n\033]8;;%s\033\\MISSING\033]8;;\033\\\n\033]8;;%s\033\\FOREIGN\033]8;;\033\\\n\033]8;;%s\033\\HOME\033]8;;\033\\\nL316_%s\n`;
-      const homeRecord = join(dir, `home316-${backend}`);
-      const print = `cd ${DIR} && stty size > size316-${backend} && printf '%s' "$HOME" > home316-${backend} && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
+      const homeRecord = join(dir, `home316-ghostty`);
+      const print = `cd ${DIR} && stty size > size316-ghostty && printf '%s' "$HOME" > home316-ghostty && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
       await cs(["write", "--tab-name", name, print]);
       await waitScrollback(name, "L316_READY");
-      if (!existsSync(sizeFile)) throw new Error(`${backend}: the shell wrote no ${sizeFile}`);
+      if (!existsSync(sizeFile)) throw new Error(`ghostty: the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
       assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
         "the PTY grid fits the link fixtures without wrapping");
@@ -460,6 +462,11 @@ export default {
         return { edge, release, historyUrls };
       });
 
+      // A row-zero drag enters the auto-scroll edge. Clear history after
+      // the padding verdict so later gestures cannot select its link rows.
+      await cs(["write", "--tab-name", name, "printf '\\033[H\\033[2J\\033[3JP316_%s\\n' RESET\n"]);
+      await waitScrollback(name, "P316_RESET");
+
       // ghostty looks a link up at the click, so one printed into the row
       // under a resting pointer is clickable with no move off the row.
       await leg(at("resting-click"), async () => {
@@ -476,7 +483,7 @@ export default {
 
       // The shell prints a URL, turns on mouse tracking and becomes a raw
       // recorder of what the PTY receives.
-      const record = join(ctx.outDir, `pty316-${backend}`);
+      const record = join(ctx.outDir, `pty316-ghostty`);
       rmSync(record, { force: true });
       const trackFormat = String.raw`\033[H\033[2Jhttp%s\n\033[?1000h\033[?1006hT316_%s\n`;
       await cs(["write", "--tab-name", name,
@@ -484,7 +491,7 @@ export default {
       await waitScrollback(name, "T316_READY");
       const deadline = Date.now() + 15_000;
       while (!existsSync(record) && Date.now() < deadline) await sleep(100);
-      if (!existsSync(record)) throw new Error(`${backend}: the recorder never started`);
+      if (!existsSync(record)) throw new Error(`ghostty: the recorder never started`);
       await sleep(500);
       const recorded = () => readFileSync(record).toString("latin1");
 
@@ -519,6 +526,10 @@ export default {
       });
 
       await leg(at("shift-drag"), async () => {
+        // Keep the edge gesture, but refuse leftover history before a timer
+        // can scroll it into the selection and make the result timing-dependent.
+        assert.equal(await terminal.evaluate((t) => t.getScrollbackLength()), 0,
+          `shift-drag starts without retained padding history (${EDGE_URL})`);
         const before = recorded().length;
         const from = await cell(0, 0);
         const to = await cell(14, 0);
@@ -565,6 +576,8 @@ export default {
     } finally {
       let restoreError = null;
       try {
+        await terminal?.dispose();
+        await page.evaluate(() => window.__pointerSmoke?.restore());
         await restoreTerminalPrefs(ctx, page, authToken, originalPrefs);
       } catch (error) {
         restoreError = error;

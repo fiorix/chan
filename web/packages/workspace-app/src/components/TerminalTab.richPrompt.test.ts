@@ -3,7 +3,8 @@
 // How a terminal carries its Rich Prompt: the prompt sink that sends `prompt`
 // frames (a team lead's identity prompt among them), the queue and delivery
 // frames that drive the tab's badge and the pending card, the draft's cleanup
-// on close, and the doors that open the composer. A TerminalTab is mounted over the stand-in xterm and socket; the
+// on close, and the doors that open the composer. A TerminalTab is mounted on
+// the real widget through the shared fixture, over the stand-in socket; the
 // window's drafts capability is stubbed so a test can take it away.
 
 import { mount, tick, unmount } from "svelte";

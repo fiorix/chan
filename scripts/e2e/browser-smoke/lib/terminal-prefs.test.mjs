@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openAttachedTerminal } from "./terminal-attach.mjs";
-import { assertTerminalPrefs, openLegacyConfiguredTerminal, writeTerminalPrefs } from "./terminal-prefs.mjs";
+import { assertTerminalPrefs, openLegacyConfiguredTerminal, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
 
 for (const ghostty of [true, false, undefined, null]) {
   test(`ordinary writes refuse an explicit retired key ${ghostty} before reads`, () => {
@@ -84,8 +84,7 @@ test("legacy acceptance without a visible Ghostty canvas is not a pass", async (
   await assert.rejects(openLegacyConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy", false), /terminal not attached/);
 });
 
-test("ordinary PATCH drops an inherited retired key and preserves unrelated preferences", async (t) => {
-  let terminal = { ghostty: false, mouse_capture: true, program_status: false };
+function patchFixture(t, terminal) {
   let requestListener, acceptResponse, finishRefresh, patchBody;
   const page = {
     on: (_event, listener) => { requestListener = listener; }, off: () => {},
@@ -110,11 +109,28 @@ test("ordinary PATCH drops an inherited retired key and preserves unrelated pref
     }
     return Response.json({ revision: 7, preferences: { terminal } });
   });
-  await writeTerminalPrefs(page, "", { program_status: true });
-  assert.deepEqual(patchBody, {
+  return { page, body: () => patchBody };
+}
+
+test("ordinary PATCH drops an inherited retired key and preserves unrelated preferences", async (t) => {
+  const f = patchFixture(t, { ghostty: false, mouse_capture: true, program_status: false });
+  await writeTerminalPrefs(f.page, "", { program_status: true });
+  assert.deepEqual(f.body(), {
     expected_revision: 7,
     preferences: { terminal: { mouse_capture: true, program_status: true } },
   });
+});
+
+test("restoring preferences strips an inherited retired key without losing original values", async (t) => {
+  const original = { ghostty: false, mouse_capture: false, secret_masking: true, program_status: false };
+  const f = patchFixture(t, { ghostty: true, mouse_capture: true, secret_masking: false, program_status: true });
+  const ctx = prefsFixture(t, "[terminal]\nmouse_capture = false\nsecret_masking = true\n");
+  await restoreTerminalPrefs(ctx, f.page, "", original);
+  assert.deepEqual(f.body(), {
+    expected_revision: 7,
+    preferences: { terminal: { mouse_capture: false, secret_masking: true, program_status: false } },
+  });
+  assert.deepEqual(original, { ghostty: false, mouse_capture: false, secret_masking: true, program_status: false });
 });
 
 function prefsFixture(t, source) {

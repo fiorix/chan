@@ -29,6 +29,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
+import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -39,16 +40,16 @@ const { values } = parseArgs({
     inspector: { type: "string" },
     xid: { type: "string" },
     output: { type: "string" },
-    backend: { type: "string" },
+    backend: { type: "string", default: "ghostty" },
     "keep-going": { type: "boolean" },
   },
 });
 if (!values.inspector || !values.xid || !values.output) {
-  console.error("usage: keyboard-focus-native.mjs --inspector HOST:PORT --xid XID --output DIR [--backend xterm|ghostty] [--keep-going]");
+  console.error("usage: keyboard-focus-native.mjs --inspector HOST:PORT --xid XID --output DIR [--backend ghostty] [--keep-going]");
   process.exit(2);
 }
-if (values.backend && !["xterm", "ghostty"].includes(values.backend)) {
-  console.error("backend is xterm or ghostty");
+if (values.backend !== "ghostty") {
+  console.error(`retired or unsupported terminal backend ${JSON.stringify(values.backend)}; expected "ghostty"`);
   process.exit(2);
 }
 const out = resolve(values.output);
@@ -56,7 +57,9 @@ const xid = values.xid;
 const verdictPath = join(out, "keyboard-focus.json");
 const verdict = {
   engine: "webkitgtk",
-  backend: values.backend ?? null,
+  requestedBackend: values.backend,
+  backend: null,
+  surfaces: {},
   sha: process.env.OBS_SHA ?? null,
   steps: {},
   faults: [],
@@ -421,51 +424,72 @@ async function readTerminalId(selector) {
   );
 }
 
+async function requireGhosttySurface(selector, name) {
+  let observed = null;
+  try {
+    return await until(`the Ghostty surface in ${name}`, async () => {
+      observed = await page.evaluate((selector, surface) => {
+        const tab = document.querySelector(selector);
+        const canvas = tab?.querySelector(surface);
+        const box = canvas?.getBoundingClientRect();
+        return {
+          backend: canvas ? "ghostty" : tab?.querySelector(".terminal.xterm") ? "xterm" : "missing",
+          shown: Boolean(box && box.width > 0 && box.height > 0 && getComputedStyle(canvas).visibility === "visible"),
+        };
+      }, selector, TERMINAL_SURFACES.ghostty);
+      return observed;
+    }, (surface) => surface?.backend === "ghostty" && surface.shown, 60_000);
+  } finally {
+    verdict.surfaces[name] = observed;
+    if (name === "KbdA") verdict.backend = observed?.backend ?? null;
+    save();
+  }
+}
+
 async function main() {
   page = await WebKitPage.open(values.inspector);
-  if (values.backend) {
-    const ghostty = values.backend === "ghostty";
-    await page.evaluate(async (selected) => {
-      const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\/+$/, "") ?? "";
-      const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
-      if (!token) throw new Error("workspace page has no auth token");
-      const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-      const got = await fetch(`${prefix}/api/config`, { headers });
-      if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
-      const config = await got.json();
-      const response = await fetch(`${prefix}/api/config`, {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({
-          expected_revision: config.revision,
-          preferences: { terminal: { ...config.preferences.terminal, ghostty: selected, secret_masking: false } },
-        }),
-      });
-      if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
-    }, ghostty);
-    await page.evaluate(() => {
-      setTimeout(() => location.reload(), 0);
-      return true;
+  await page.evaluate(async () => {
+    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\/+$/, "") ?? "";
+    const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
+    if (!token) throw new Error("workspace page has no auth token");
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const got = await fetch(`${prefix}/api/config`, { headers });
+    if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
+    const config = await got.json();
+    const { ghostty: _retired, ...terminal } = config.preferences.terminal;
+    const response = await fetch(`${prefix}/api/config`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expected_revision: config.revision,
+        preferences: { terminal: { ...terminal, secret_masking: false } },
+      }),
     });
-    await delay(3000);
-    page.close();
-    page = await WebKitPage.open(values.inspector);
-  }
-  verdict.backend = values.backend ?? "default";
+    if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
+  });
+  await page.evaluate(() => {
+    setTimeout(() => location.reload(), 0);
+    return true;
+  });
+  await delay(3000);
+  page.close();
+  page = await WebKitPage.open(values.inspector);
   await calibrate();
 
   // One terminal, one composer, one real press.
   await cs("terminal", "new", "--window", windowId, "--tab-name", "KbdA").catch((error) => {
     throw new Error(`open terminal A: ${error.message}`);
   });
-  const cardA = await until("terminal A attached", () => readTerminalId(".terminal-tab"), Boolean, 60_000).then(
+  const terminalA = await until("terminal A attached", () => readTerminalId(".terminal-tab"), Boolean, 60_000).then(
     async () => {
       const id = await readTerminalId(".terminal-tab.active");
       if (!id) throw new Error("no active terminal tab");
-      return `.terminal-tab[data-terminal-tab-id="${id}"] .rich-prompt`;
+      return `.terminal-tab[data-terminal-tab-id="${id}"]`;
     },
   );
-  await openComposer(".terminal-tab.active");
+  const cardA = `${terminalA} .rich-prompt`;
+  await requireGhosttySurface(terminalA, "KbdA");
+  await openComposer(terminalA);
   await x([], "type", "--delay", "12", TEXT);
   const typed = await until("the draft is editable", () => focusState(cardA), (s) => (s.text === TEXT ? s : false));
   if (typed.where !== "composer") throw new Error(`composer did not take the keyboard: ${typed.where}`);
@@ -518,6 +542,7 @@ async function main() {
     60_000,
   ).then((ids) => ids.find((id) => id && id !== tabA));
   const cardB = `.terminal-tab[data-terminal-tab-id="${otherId}"] .rich-prompt`;
+  await requireGhosttySurface(`.terminal-tab[data-terminal-tab-id="${otherId}"]`, "KbdB");
   await openComposer(`.terminal-tab[data-terminal-tab-id="${otherId}"]`);
   await x([], "type", "--delay", "12", "KbdFocusB");
   await until("B's draft is editable", () => focusState(cardB), (s) => (s.text === "KbdFocusB" && s.editable ? s : false));

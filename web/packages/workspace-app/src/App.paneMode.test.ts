@@ -49,6 +49,7 @@ import { setSocketFactory } from "./api/transport";
 import { demoSocketFactory } from "./demo/socket";
 import { availableCommands, commandContext } from "./state/commands";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { uiCloseConfirm } from "./state/closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./state/confirm.svelte";
@@ -353,6 +354,7 @@ describe("staging tabs", () => {
 
       await keys("Enter");
       expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["terminal"]);
+      await seatedGhostty();
     });
   });
 

@@ -1261,7 +1261,7 @@ describe('InputHandler', () => {
       // Motion with no button held is reported again under any-motion tracking.
       dispatchMouse({ ...mouseEvent('mousemove', 0), buttons: 0 });
       handler.dispose();
-      expect(dataReceived).toEqual(['\x1b[<32;1;1M']);
+      expect(dataReceived).toEqual(['\x1b[<35;1;1M']);
     });
   });
 

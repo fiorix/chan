@@ -18,6 +18,7 @@ vi.mock("../components/canvasAnimation", async (importOriginal) =>
 );
 
 import { demoData, hostCommand, mountApp, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { mouseDown, mouseUp } from "../__tests__/pointer";
 import { settle } from "../__tests__/wysiwyg";
@@ -118,6 +119,7 @@ describe.each<Overlay>(["URL", "date pill", "caret calendar", "file preview"])("
     } finally {
       document.removeEventListener("mousedown", mouse);
     }
+    await seatedGhostty();
   });
 
   test("closes when its pane flips to the other side", async () => {

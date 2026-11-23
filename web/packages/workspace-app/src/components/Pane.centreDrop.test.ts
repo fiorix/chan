@@ -23,6 +23,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab, readTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { clearRecentlyClosedTabsForTest, layout, type LeafNode, type Tab } from "../state/tabs.svelte";
 import { showRichPromptForTab } from "../state/richPrompt.svelte";
@@ -188,6 +189,7 @@ describe.each([false, true])("with pane_strip_auto_hide %s, the centre of a pane
     expect(tabIds("pane-left")).toEqual(["l1"]);
     expect(leafCount(), "a centre drop splits nothing").toBe(2);
     expect(zones(target)).toEqual([]);
+    await seatedGhostty();
   });
 
   test("rebuilds a tab from another window of this scope, and refuses one from another scope", async () => {

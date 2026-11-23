@@ -17,13 +17,13 @@ const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({ options: {
   inspector: { type: "string" }, xid: { type: "string" }, output: { type: "string" },
-  backend: { type: "string" },
+  backend: { type: "string", default: "ghostty" },
   cycles: { type: "string", default: "3" }, "full-screen": { type: "boolean", default: false },
   verbose: { type: "boolean", short: "v", default: false },
 } });
 if (!values.inspector || !values.xid || !values.output || !/^[1-9]$/.test(values.cycles) ||
-    (values.backend && !["xterm", "ghostty"].includes(values.backend))) {
-  throw new Error("usage: terminal-size-native.mjs --inspector HOST:PORT --xid XID --output DIRECTORY [--backend xterm|ghostty] [--cycles 1..9] [--full-screen] [-v]");
+    values.backend !== "ghostty") {
+  throw new Error("usage: terminal-size-native.mjs --inspector HOST:PORT --xid XID --output DIRECTORY [--backend ghostty] [--cycles 1..9] [--full-screen] [-v]");
 }
 const out = resolve(values.output);
 if (!existsSync(join(out, "window-before.png"))) throw new Error("the native window has no screenshot proof");
@@ -111,7 +111,7 @@ async function until(read, predicate, label, bound = 20_000) {
 }
 
 save("reader-preflight.json", preflight());
-const run = { completed: false, backend: null, requestedBackend: values.backend ?? null,
+const run = { completed: false, backend: null, requestedBackend: values.backend,
   cycles: Number(values.cycles), coView: false,
   observer: true, fullScreen: values["full-screen"], native: true, pageClockStepMs: 1, name: "size-probe",
   engine: readFileSync(join(out, "engine-package.txt"), "utf8").trim(), tabMoveInput: "DOM DragEvent",
@@ -197,10 +197,8 @@ async function move(target) {
   await until(views, (rows) => rows.some((row) => row.pane === target), "tab move");
 }
 
-async function writeBackend(backend) {
-  if (!backend) return;
-  const ghostty = backend === "ghostty";
-  await page.evaluate(async (selected) => {
+async function prepareTerminal() {
+  await page.evaluate(async () => {
     const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\/+$/, "") ?? "";
     const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
     if (!token) throw new Error("workspace page has no auth token");
@@ -208,31 +206,30 @@ async function writeBackend(backend) {
     const got = await fetch(`${prefix}/api/config`, { headers });
     if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
     const config = await got.json();
+    const { ghostty: _retired, ...terminal } = config.preferences.terminal;
     const response = await fetch(`${prefix}/api/config`, { method: "PATCH", headers,
       body: JSON.stringify({ expected_revision: config.revision,
-        preferences: { terminal: { ...config.preferences.terminal, ghostty: selected, secret_masking: false } } }) });
+        preferences: { terminal: { ...terminal, secret_masking: false } } }) });
     if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
-  }, ghostty);
-  await until(() => page.evaluate(async (selected) => {
+  });
+  await until(() => page.evaluate(async () => {
     const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\/+$/, "") ?? "";
     const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
     if (!token) throw new Error("workspace page has no auth token");
     const response = await fetch(`${prefix}/api/workspace`, { headers: { authorization: `Bearer ${token}` } });
     if (!response.ok) throw new Error(`GET /api/workspace -> ${response.status}`);
-    return (await response.json()).preferences?.terminal?.ghostty === selected;
-  }, ghostty), Boolean, "page terminal preference", 20_000);
+    return (await response.json()).preferences?.terminal?.secret_masking === false;
+  }), Boolean, "terminal secret masking disabled", 20_000);
 }
 
 try {
   page = await WebKitPage.open(values.inspector);
-  await writeBackend(values.backend);
-  if (values.backend) {
-    await page.evaluate(() => { setTimeout(() => location.reload(), 0); return true; });
-    page.close();
-    await delay(500);
-    page = await WebKitPage.open(values.inspector);
-    await until(() => page.evaluate(() => document.readyState), (state) => state === "complete", "reloaded workspace page", 30_000);
-  }
+  await prepareTerminal();
+  await page.evaluate(() => { setTimeout(() => location.reload(), 0); return true; });
+  page.close();
+  await delay(500);
+  page = await WebKitPage.open(values.inspector);
+  await until(() => page.evaluate(() => document.readyState), (state) => state === "complete", "reloaded workspace page", 30_000);
   await page.evaluate(installSizeObserver, TERMINAL_SURFACES);
   await calibrate();
   const initial = await layout();
@@ -252,9 +249,8 @@ try {
   await observe("initial");
   const reference = run.steps[0].views.find((row) => row.visible && row.grid);
   if (!reference) throw new Error("missing visible reference cells");
-  if (!["xterm", "ghostty"].includes(reference.backend)) throw new Error("unknown native renderer");
+  if (reference.backend !== "ghostty") throw new Error(`expected Ghostty native renderer, got ${reference.backend}`);
   run.backend = reference.backend;
-  if (values.backend && run.backend !== values.backend) throw new Error("mounted renderer disagrees with requested backend");
   run.cellPitch = { cellWidth: reference.screenBox.width / reference.grid.cols,
     cellHeight: reference.screenBox.height / reference.grid.rows };
   async function act(label, action) {

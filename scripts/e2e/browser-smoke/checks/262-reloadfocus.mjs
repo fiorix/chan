@@ -488,12 +488,10 @@ export default {
     const folder = seedFolder(ctx);
     const reports = [];
     try {
-      for (const engine of ["ghostty"]) {
-        for (const mode of ["control", "sequence"]) {
-          const report = await trial(ctx, directory, engine, mode);
-          reports.push(report);
-          if (report.cleanupFailures.length) throw new Error("reload focus cleanup failed; later trials refused");
-        }
+      for (const mode of ["control", "sequence"]) {
+        const report = await trial(ctx, directory, "ghostty", mode);
+        reports.push(report);
+        if (report.cleanupFailures.length) throw new Error("reload focus cleanup failed; later trials refused");
       }
       assert.deepEqual(reports.map(({ engine, mode }) => `${engine}/${mode}`),
         ["ghostty/control", "ghostty/sequence"], "every Ghostty trial ran exactly once");

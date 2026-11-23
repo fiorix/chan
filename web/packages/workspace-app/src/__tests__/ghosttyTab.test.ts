@@ -18,7 +18,14 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("./ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import TerminalTab from "../components/TerminalTab.svelte";
-import { ghosttyFixture, ghosttyHasFocus, mountGhosttyTerminal, pressInGhostty, typeInGhostty } from "./ghosttyTab";
+import {
+  ghosttyFixture,
+  ghosttyHasFocus,
+  holdGhosttyLoads,
+  mountGhosttyTerminal,
+  pressInGhostty,
+  typeInGhostty,
+} from "./ghosttyTab";
 import { SoftwareCanvasContext } from "./softwareCanvas";
 import {
   attach,
@@ -59,10 +66,30 @@ test("the checked mount returns the fixture's widget, open in the tab, and no st
 });
 
 test("the product's glyph painter and overlay scrollbar install on the fixture's widget", async () => {
+  const compat = await import("../terminal/ghosttyCompat");
+  const actual = await vi.importActual<typeof import("../terminal/ghosttyCompat")>("../terminal/ghosttyCompat");
+  expect(compat.installGhosttyCustomGlyphs, "the product's glyph painter").toBe(actual.installGhosttyCustomGlyphs);
+  expect(compat.installGhosttyOverlayScrollbar, "the product's overlay scrollbar").toBe(actual.installGhosttyOverlayScrollbar);
+
   const warn = vi.spyOn(console, "warn");
   await opened();
   const hooks = warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web"));
   expect(hooks, "no compat hook failed open").toEqual([]);
+});
+
+// The widget dials once it has loaded and opened, so the mount waits for the
+// widget before it looks for the socket; a socket wait first would give up at
+// its own bound, a second, on a load slower than that.
+test("mountTerminal outlasts a load slower than a second", async () => {
+  const release = holdGhosttyLoads();
+  const [tab] = seatTerminals([terminalTab()]);
+  const mounting = mountTerminal(TerminalTab, tab!);
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  expect(TerminalSocket.all, "nothing dials before the widget opens").toHaveLength(0);
+  release();
+  await mounting;
+  expect(ghosttyFixture.terminals).toHaveLength(1);
+  expect(TerminalSocket.all).toHaveLength(1);
 });
 
 test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {
@@ -110,6 +137,27 @@ test("while a terminal is open only a 2D context is the fixture's, and the last 
   const canvas = document.createElement("canvas");
   expect(canvas.getContext("2d")).toBeInstanceOf(SoftwareCanvasContext);
   expect(canvas.getContext("webgl2"), "another id gets the environment's answer").not.toBeInstanceOf(SoftwareCanvasContext);
+  resetTerminals();
+  expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
+});
+
+test("a reset gives canvases back even when a terminal was never disposed", async () => {
+  const environment = HTMLCanvasElement.prototype.getContext;
+  const { term } = await opened();
+  const dispose = vi.spyOn(term, "dispose").mockImplementation(() => {});
+  try {
+    resetTerminals();
+    expect(dispose, "the unmount asked the terminal to dispose").toHaveBeenCalled();
+    expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
+  } finally {
+    dispose.mockRestore();
+    term.dispose();
+  }
+  expect(HTMLCanvasElement.prototype.getContext, "a late dispose takes nothing back").toBe(environment);
+
+  // The next terminal is served and gives canvases back on its own close.
+  await opened();
+  expect(document.createElement("canvas").getContext("2d")).toBeInstanceOf(SoftwareCanvasContext);
   resetTerminals();
   expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
 });

@@ -208,71 +208,69 @@ export default {
     const details = { arms: [] };
     const opened = [];
     try {
-      for (const engine of ["ghostty"]) {
-        // The tab's name doubles as its group's.
-        const name = `LauncherFocus203${engine}`;
-        await openAttachedTerminal(ctx, page, cs, windowId, name, engine, ["--tab-group", name]);
-        opened.push(name);
-        await waitSoleMember(page, token, name, name, `${engine}: before Group broadcast`);
-        // The keyboard starts in the terminal the way a user's does: by a click.
-        await page.click(`.terminal-tab.active ${TERMINAL_SURFACES[engine]}`);
-        await waitForTerminalKeyboard(page, `${engine}: after the click`);
-        await typeLine(page, `printf 'BEFORE_%s_OK\\n' ${engine}`);
-        await waitForScrollback(cs, name, `BEFORE_${engine}_OK`, `${engine}: typed before the launcher`);
-        const arm = { engine };
+      // The tab's name doubles as its group's.
+      const name = `LauncherFocus203ghostty`;
+      await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--tab-group", name]);
+      opened.push(name);
+      await waitSoleMember(page, token, name, name, `ghostty: before Group broadcast`);
+      // The keyboard starts in the terminal the way a user's does: by a click.
+      await page.click(`.terminal-tab.active ${TERMINAL_SURFACES.ghostty}`);
+      await waitForTerminalKeyboard(page, `ghostty: after the click`);
+      await typeLine(page, `printf 'BEFORE_%s_OK\\n' ghostty`);
+      await waitForScrollback(cs, name, `BEFORE_ghostty_OK`, `ghostty: typed before the launcher`);
+      const arm = { engine: "ghostty" };
 
-        // A command that opens no surface and moves nothing: the launcher
-        // closes as it runs and the keyboard comes back by itself.
-        const panes = await page.$$eval(".pane", (all) => all.length);
-        check(panes === 1, `${engine}: Next pane moves nothing only in a window of one pane; this one has ${panes}`);
-        await runLauncherCommand(page, "Next pane", `${engine}: next pane`);
-        await waitForTerminalKeyboard(page, `${engine}: after Next pane`);
-        arm.afterAction = await keyboardOwner(page);
-        await typeLine(page, `printf 'FOCUS_%s_OK\\n' ${engine}`);
-        await waitForScrollback(cs, name, `FOCUS_${engine}_OK`, `${engine}: typed after the launcher closed`);
-        await ctx.shot(`203-${engine}-after-action`);
+      // A command that opens no surface and moves nothing: the launcher
+      // closes as it runs and the keyboard comes back by itself.
+      const panes = await page.$$eval(".pane", (all) => all.length);
+      check(panes === 1, `ghostty: Next pane moves nothing only in a window of one pane; this one has ${panes}`);
+      await runLauncherCommand(page, "Next pane", `ghostty: next pane`);
+      await waitForTerminalKeyboard(page, `ghostty: after Next pane`);
+      arm.afterAction = await keyboardOwner(page);
+      await typeLine(page, `printf 'FOCUS_%s_OK\\n' ghostty`);
+      await waitForScrollback(cs, name, `FOCUS_ghostty_OK`, `ghostty: typed after the launcher closed`);
+      await ctx.shot(`203-ghostty-after-action`);
 
-        // A toggle flips in place: the launcher stays open on its row, and
-        // Escape hands the keyboard back.
-        await flipLauncherToggle(page, "Group broadcast", "on", `${engine}: broadcast`);
-        await page.waitForSelector(BROADCAST_MARKER, { timeout: 10_000 });
-        await waitForTerminalKeyboard(page, `${engine}: after Group broadcast`);
-        arm.afterBroadcast = await keyboardOwner(page);
-        await typeLine(page, `printf 'TOGGLE_%s_OK\\n' ${engine}`);
-        await waitForScrollback(cs, name, `TOGGLE_${engine}_OK`, `${engine}: typed after the toggle`);
-        await ctx.shot(`203-${engine}-after-broadcast`);
+      // A toggle flips in place: the launcher stays open on its row, and
+      // Escape hands the keyboard back.
+      await flipLauncherToggle(page, "Group broadcast", "on", `ghostty: broadcast`);
+      await page.waitForSelector(BROADCAST_MARKER, { timeout: 10_000 });
+      await waitForTerminalKeyboard(page, `ghostty: after Group broadcast`);
+      arm.afterBroadcast = await keyboardOwner(page);
+      await typeLine(page, `printf 'TOGGLE_%s_OK\\n' ghostty`);
+      await waitForScrollback(cs, name, `TOGGLE_ghostty_OK`, `ghostty: typed after the toggle`);
+      await ctx.shot(`203-ghostty-after-broadcast`);
 
-        // A command that opens a prompt: the prompt keeps the keyboard while
-        // it shows, and the terminal gets it back when the prompt closes.
-        await runLauncherCommand(page, "Rename terminal", `${engine}: rename`);
-        await page.waitForSelector(`${PROMPT} input`, { timeout: 10_000 });
-        await page.waitForFunction(
-          (selector) => document.activeElement === document.querySelector(selector),
-          { timeout: 5_000 },
-          `${PROMPT} input`,
-        );
-        await pause(500);
-        const promptHolds = await page.evaluate(
-          (selector) => document.activeElement === document.querySelector(selector),
-          `${PROMPT} input`,
-        );
-        check(promptHolds, `${engine}: the prompt lost the keyboard after the launcher settled: ${JSON.stringify(await keyboardOwner(page))}`);
-        await page.keyboard.press("Escape");
-        await page.waitForSelector(PROMPT, { hidden: true, timeout: 10_000 });
-        await waitForTerminalKeyboard(page, `${engine}: after the prompt closed`);
-        arm.afterPrompt = await keyboardOwner(page);
-        await typeLine(page, `printf 'PROMPT_%s_OK\\n' ${engine}`);
-        await waitForScrollback(cs, name, `PROMPT_${engine}_OK`, `${engine}: typed after the prompt closed`);
-        await ctx.shot(`203-${engine}-after-prompt`);
+      // A command that opens a prompt: the prompt keeps the keyboard while
+      // it shows, and the terminal gets it back when the prompt closes.
+      await runLauncherCommand(page, "Rename terminal", `ghostty: rename`);
+      await page.waitForSelector(`${PROMPT} input`, { timeout: 10_000 });
+      await page.waitForFunction(
+        (selector) => document.activeElement === document.querySelector(selector),
+        { timeout: 5_000 },
+        `${PROMPT} input`,
+      );
+      await pause(500);
+      const promptHolds = await page.evaluate(
+        (selector) => document.activeElement === document.querySelector(selector),
+        `${PROMPT} input`,
+      );
+      check(promptHolds, `ghostty: the prompt lost the keyboard after the launcher settled: ${JSON.stringify(await keyboardOwner(page))}`);
+      await page.keyboard.press("Escape");
+      await page.waitForSelector(PROMPT, { hidden: true, timeout: 10_000 });
+      await waitForTerminalKeyboard(page, `ghostty: after the prompt closed`);
+      arm.afterPrompt = await keyboardOwner(page);
+      await typeLine(page, `printf 'PROMPT_%s_OK\\n' ghostty`);
+      await waitForScrollback(cs, name, `PROMPT_ghostty_OK`, `ghostty: typed after the prompt closed`);
+      await ctx.shot(`203-ghostty-after-prompt`);
 
-        await broadcastOff(page, token, name);
-        details.arms.push(arm);
-        console.log(`[smoke]   arm ${JSON.stringify(arm)}`);
-        // Wait for the tab to leave the saved layout before returning.
-        await cs(["close", "--tab-name", name]);
-        opened.pop();
-        await tabGone(page, name);
-      }
+      await broadcastOff(page, token, name);
+      details.arms.push(arm);
+      console.log(`[smoke]   arm ${JSON.stringify(arm)}`);
+      // Wait for the tab to leave the saved layout before returning.
+      await cs(["close", "--tab-name", name]);
+      opened.pop();
+      await tabGone(page, name);
       check(JSON.stringify(details.arms.map((arm) => arm.engine)) === JSON.stringify(["ghostty"]), "Ghostty launcher arm incomplete");
       details.engine = await page.browser().version();
       return details;
