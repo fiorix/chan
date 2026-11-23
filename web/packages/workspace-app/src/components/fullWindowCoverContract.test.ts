@@ -11,7 +11,11 @@
 // (`onWindowKey` and the Ctrl+D capture) and nothing smaller installs them.
 // jsdom inserts no text on a keydown, so a typed character is read as the
 // event not being cancelled; what the field then holds is set through an
-// `input` event and read at the verify call.
+// `input` event and read at the verify call. A terminal the app opens runs on
+// the real widget (the shared fixture), whose render loop asks for its next
+// frame from inside each one, so frames run one task later, as in a browser;
+// CodeMirror measures text ranges on those frames, which jsdom does not lay
+// out, so a range answers with empty geometry.
 //
 // Not covered here, deliberately: the desktop close button's fast path is a
 // separate acceptance.
@@ -47,7 +51,9 @@ import {
 } from "../state/store.svelte";
 import { capsForMode } from "../state/windowCaps";
 import { windowLifecycle } from "../state/windowLifecycle.svelte";
+import { openedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
+import { taskFrames } from "../__tests__/terminalTab";
 
 class TestResizeObserver {
   observe() {}
@@ -89,13 +95,16 @@ vi.mock("@xterm/addon-serialize", () => ({
 }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 globalThis.ResizeObserver = TestResizeObserver as any;
-globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
-  cb(0);
-  return 0;
-}) as any;
+const frames = taskFrames();
+globalThis.requestAnimationFrame = frames.request;
+globalThis.cancelAnimationFrame = frames.cancel;
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect();
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 Object.defineProperty(document, "fonts", {
   configurable: true,
@@ -359,6 +368,7 @@ describe("a chord behind a full-window cover", () => {
     await settle();
 
     expect(terminalCount()).toBe(1);
+    await openedGhostty();
   });
 
   test("the preflight cover blocks it", async () => {
