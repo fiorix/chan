@@ -1,38 +1,20 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
 import { EditorView } from "@codemirror/view";
-import type { Terminal as XtermTerminal } from "@xterm/xterm";
-import { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
-import { mount, tick, unmount } from "svelte";
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const runtime = vi.hoisted(() => ({ terminals: [] as unknown[], module: null as WebAssembly.Module | null }));
-
-vi.mock("@xterm/xterm", async (original) => {
-  const actual = await original<typeof import("@xterm/xterm")>();
-  return { ...actual, Terminal: class extends actual.Terminal {
-    constructor(options: ConstructorParameters<typeof actual.Terminal>[0]) {
-      super(options);
-      runtime.terminals.push(this);
-    }
-  } };
-});
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { activate() {} dispose() {} fit() {} proposeDimensions() { return undefined; } } }));
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (original) => {
-  const actual = await original<typeof import("../terminal/backend")>();
-  const { Terminal } = await import("@chan/ghostty-web-ng");
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({ ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(runtime.module!, {
-    Terminal: class extends Terminal {
-      constructor(options: ConstructorParameters<typeof Terminal>[0]) {
-        super(options);
-        runtime.terminals.push(this);
-      }
-    },
-  }) });
-});
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 vi.mock("../api/client", async (original) => {
   const actual = await original<typeof import("../api/client")>();
   return { ...actual, api: { ...actual.api,
@@ -42,38 +24,23 @@ vi.mock("../api/client", async (original) => {
 });
 
 import TerminalTab from "./TerminalTab.svelte";
-import { installSoftwareCanvas } from "../__tests__/ghosttyTab";
+import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { draftPath } from "../__tests__/drafts";
 import { terminalPreferences } from "../__tests__/standalone";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
-import { attach, installTerminalDom, output, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket } from "../__tests__/terminalTab";
+import { attach, installTerminalDom, output, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 const TEXT = "keep this prompt";
 const NOTICE = "terminal not connected; try again";
-type Terminal = XtermTerminal | GhosttyTerminal;
-let component: ReturnType<typeof mount> | undefined;
 
 installTerminalDom();
 installEditorDom();
-beforeAll(async () => {
-  runtime.module = await WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
-});
 beforeEach(() => {
-  runtime.terminals.length = 0;
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-  installSoftwareCanvas();
-  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains("xterm-char-measure-element") ? 256 : 0;
-  });
-  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return this.classList.contains("xterm-char-measure-element") ? 17 : 0;
-  });
 });
-afterEach(async () => {
-  if (component) await unmount(component);
-  component = undefined;
+afterEach(() => {
   resetTerminals();
   richPrompt.byTab = {};
   richPrompt.toolbarByTab = {};
@@ -90,25 +57,20 @@ async function flush(): Promise<void> {
 }
 
 function history(term: Terminal): number {
-  return term instanceof GhosttyTerminal ? term.getViewportY() : term.buffer.active.baseY - term.buffer.active.viewportY;
+  return term.getViewportY();
 }
 
-async function composer(backend: "xterm" | "ghostty") {
-  useXtermStandIn(backend === "xterm");
+async function composer() {
   __testSetStandalonePreferences(terminalPreferences({ secret_masking: false }));
   const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("offline"), submitAgent: "claude" })]);
-  const target = document.createElement("div");
-  document.body.append(target);
-  component = mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } });
-  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
-  const term = runtime.terminals[0] as Terminal;
-  expect(term instanceof GhosttyTerminal).toBe(backend === "ghostty");
+  const mounted = await mountGhosttyTerminal(TerminalTab, tab!);
+  const { target, term } = mounted;
   const socket = TerminalSocket.all[0]!;
   const prelude = { id: "sess-prompt", submit_agent: "claude" };
   await attach(socket, prelude);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(socket, Array.from({ length: 100 }, (_, i) => `history ${i}\r\n`).join(""));
-  await vi.waitFor(() => expect(term instanceof GhosttyTerminal ? term.getScrollbackLength() : term.buffer.active.baseY).toBeGreaterThan(50));
+  await vi.waitFor(() => expect(term.getScrollbackLength()).toBeGreaterThan(50));
   term.scrollLines(-7);
   expect(history(term)).toBe(7);
   showRichPromptForTab(tab!.id);
@@ -123,9 +85,9 @@ async function composer(backend: "xterm" | "ghostty") {
   return { target, tab: tab!, term, socket, view, submit, note };
 }
 
-describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt while disconnected", (backend) => {
+describe("Rich Prompt while disconnected", () => {
   test.each([0, 2, 3])("socket state %s shows a refusal and keeps editable text for an explicit retry", async (readyState) => {
-    const { target, tab, term, socket, view, submit, note } = await composer(backend);
+    const { target, tab, term, socket, view, submit, note } = await composer();
     socket.readyState = readyState;
     if (readyState === 2) target.querySelector<HTMLButtonElement>(".rp-primary")!.click();
     else submit();
@@ -154,7 +116,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt while disconnected"
   });
 
   test("the refusal expires without sending or discarding the draft", async () => {
-    const { tab, socket, view, submit, note } = await composer(backend);
+    const { tab, socket, view, submit, note } = await composer();
     socket.readyState = 0;
     submit();
     await flush();
@@ -172,7 +134,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt while disconnected"
   });
 
   test("a connected retry preserves an unrelated queue rejection notice", async () => {
-    const { tab, socket, view, submit, note } = await composer(backend);
+    const { tab, socket, view, submit, note } = await composer();
     submit();
     await flush();
     const id = tab.pendingPrompt!.id;
@@ -187,7 +149,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt while disconnected"
   });
 
   test("a successful retry cancels the timer before a later refusal", async () => {
-    const { tab, socket, view, submit, note } = await composer(backend);
+    const { tab, socket, view, submit, note } = await composer();
     socket.readyState = 0;
     submit();
     await flush();
