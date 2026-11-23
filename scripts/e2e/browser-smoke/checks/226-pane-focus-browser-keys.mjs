@@ -23,7 +23,6 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
@@ -113,11 +112,11 @@ async function suiteWindow(ctx, name) {
   return page;
 }
 
-async function openTerminal(page, engine) {
+async function openTerminal(page) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
   await sleep(1_000);
 }
 
@@ -195,7 +194,7 @@ async function markerSince(page, file, offset, label) {
 
 async function moveArm(page, file, engine, press, move) {
   const arm = `${engine}-${press}-${move}`;
-  const holder = await pressTerminal(page, press, expectedHolder(engine, press));
+  const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const before = await browserState(page);
   await MOVES[move](page);
@@ -204,7 +203,7 @@ async function moveArm(page, file, engine, press, move) {
   await page.keyboard.press("ArrowDown");
   const stepped = await selectionSettled(page, before.selected);
   const pty = await markerSince(page, file, offset, arm);
-  return { arm, holder, expected: expectedHolder(engine, press), focus, before, after, stepped, pty };
+  return { arm, holder, expected: expectedHolder(press), focus, before, after, stepped, pty };
 }
 
 /// The browser's state once its selection differs from `from`, or after the
@@ -221,9 +220,9 @@ async function selectionSettled(page, from, timeout = 3_000) {
 
 /// The keyboard holder a press leaves in the terminal: the host after a left
 /// press on ghostty, the textarea after a right one (the case the blur has to
-/// reach) and always on xterm.js.
-function expectedHolder(engine, press) {
-  return engine === "ghostty" && press === "left" ? "terminal" : "terminal-textarea";
+/// reach).
+function expectedHolder(press) {
+  return press === "left" ? "terminal" : "terminal-textarea";
 }
 
 function checkMove(result, failures) {
@@ -240,13 +239,13 @@ function checkMove(result, failures) {
 
 async function stayArm(page, file, engine, press) {
   const arm = `${engine}-${press}-hybrid-stay`;
-  const holder = await pressTerminal(page, press, expectedHolder(engine, press));
+  const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const committed = await hybridNav(page, []);
   const focus = await focusSettled(page, (held) => held.startsWith("terminal"));
   await page.keyboard.type("x");
   const pty = await ptySince(arm, file, offset);
-  return { arm, holder, expected: expectedHolder(engine, press), committed, focus, pty };
+  return { arm, holder, expected: expectedHolder(press), committed, focus, pty };
 }
 
 /// A press on the browser's own chrome, at a point whose element has no
@@ -317,7 +316,7 @@ async function restoreArm(ctx, page, engine, adopt) {
   await page.setViewport({ width: 1280, height: 900 });
   await page.bringToFront();
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
   await page.waitForFunction((selector) => document.querySelectorAll(selector).length > 0, { timeout: 15_000 }, FILE_ROW);
   // Past the terminal's open and ghostty-web's zero-delay focus retry,
   // sampled so a reading shows what took the keyboard and when.
@@ -339,19 +338,17 @@ async function restoreArm(ctx, page, engine, adopt) {
   return result;
 }
 
-async function engineWindow(ctx, dir, engine, failures) {
+async function ghosttyWindow(ctx, dir, failures) {
+  const engine = "ghostty";
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   let page = await suiteWindow(ctx, engine);
   const results = [];
-  let originalPrefs = null;
   let originalStrip = null;
   let primary = null;
   try {
-    originalPrefs = await readTerminalPrefs(page, token);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
-    await openTerminal(page, engine);
+    await openTerminal(page);
     const file = join(dir, `${engine}.bytes`);
     await startRecorder(page, file);
     await dispatchCommand(page, "app.pane.splitDown");
@@ -406,17 +403,13 @@ async function engineWindow(ctx, dir, engine, failures) {
     console.log(`[smoke]   pane focus ${JSON.stringify(results)}`);
     const failedBeforeCleanup = primary !== null;
     try {
-      if (originalPrefs) {
-        const host = await centreOf(page, `${TERMINAL} .terminal-host`).catch(() => null);
-        if (host) await page.mouse.click(host.x, host.y);
-        await closeEveryTerminal(page, "cleanup", token);
-      }
+      const host = await centreOf(page, `${TERMINAL} .terminal-host`).catch(() => null);
+      if (host) await page.mouse.click(host.x, host.y);
+      await closeEveryTerminal(page, "cleanup", token);
     } catch (error) {
       if (primary) console.log(`[smoke]   terminal cleanup also failed: ${error?.message ?? error}`);
       else primary = error;
     }
-    try { if (originalPrefs) await writeTerminalPrefs(page, token, { ghostty: originalPrefs.ghostty }); }
-    catch (error) { if (primary) console.log(`[smoke]   terminal preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
     try { if (originalStrip?.on) await writePaneStripPreference(page, token, true); }
     catch (error) { if (primary) console.log(`[smoke]   strip preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
     const windowId = new URL(page.url()).searchParams.get("w");
@@ -440,8 +433,7 @@ export default {
     const failures = [];
     try {
       const details = {
-        xterm: await engineWindow(ctx, dir, "xterm", failures),
-        ghostty: await engineWindow(ctx, dir, "ghostty", failures),
+        ghostty: await ghosttyWindow(ctx, dir, failures),
       };
       if (failures.length) throw new Error(`${failures.length} arm(s) failed:\n  ${failures.join("\n  ")}`);
       return details;

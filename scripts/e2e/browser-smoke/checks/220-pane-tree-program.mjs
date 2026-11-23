@@ -1,6 +1,6 @@
 // The pane tree shows what runs in each terminal, beside the tab's name.
 //
-// One plain window, one terminal per backend (xterm.js, then ghostty), each
+// One plain window, two distinct Ghostty terminals, each
 // running bash with no startup files and a bare prompt, so no prompt hook
 // sets a title. The tree stays open while each leg drives the shell through
 // `cs terminal write`, which reaches the PTY without the page's keyboard (the
@@ -15,7 +15,7 @@
 //              reads its command, and waits again. Released, it exits with no
 //              further title and the row falls back to `bash`, not to `build`.
 //
-// Then, with the two terminals titled `secret-220-<backend>`:
+// Then, with the two terminals titled `secret-220-<identity>`:
 //
 //   SECOND  -- a second page on the same window attaches the same sessions
 //              and its tree reads the same text for both rows; the frames it
@@ -27,16 +27,15 @@
 //
 // Each reading is the `.program` element beside the row's `.title` in the
 // open tree. A leg waits for its reading and fails with what the row showed
-// and every reading it passed through. Skips without vim on PATH.
+// and every reading it passed through. Requires vim on PATH.
 
 import { execFileSync } from "node:child_process";
 
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
-const BACKENDS = ["xterm", "ghostty"];
-const tabName = (backend) => `SmokePaneTree220${backend}`;
-const secretTitle = (backend) => `secret-220-${backend}`;
+const TERMINALS = ["first", "second"];
+const tabName = (identity) => `SmokePaneTree220${identity}`;
+const secretTitle = (identity) => `secret-220-${identity}`;
 // `exec` keeps one process from the login shell's `-lc` to the PTY's shell,
 // so the foreground group's name is bash's.
 const SHELL = "exec env -u PROMPT_COMMAND PS1='$ ' bash --noprofile --norc -i";
@@ -45,12 +44,13 @@ const PRIVACY_KEY = "chan.privacy.v1";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function vimInstalled() {
+function requireVim() {
   try {
-    execFileSync("vim", ["--version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+    execFileSync("vim", ["--version"], { stdio: "ignore", timeout: 10_000 });
+  } catch (cause) {
+    const error = new Error("vim --version must succeed for the foreground-program leg", { cause });
+    error.smokeEnvironment = true;
+    throw error;
   }
 }
 
@@ -119,7 +119,7 @@ export default {
   async run(ctx) {
     const socket = ctx.controlSocket;
     if (!socket) ctx.skip("control socket not found for the server pid");
-    if (!vimInstalled()) ctx.skip("vim is not installed; the VIM leg runs it as the foreground program");
+    requireVim();
     const { page } = ctx;
     await page.bringToFront();
     const windowId = await page.evaluate(
@@ -132,60 +132,58 @@ export default {
     const env = { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
     const cs = (args, opts = {}) =>
       ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], { cwd: ctx.workspaceDir, env, timeout: 90_000, ...opts });
-    const write = (backend, text) => cs(["write", "--tab-name", tabName(backend), text]);
+    const write = (identity, text) => cs(["write", "--tab-name", tabName(identity), text]);
 
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     const engine = await ctx.browser.browser().version();
-    const readings = { engine, backends: {} };
+    const readings = { engine, backend: "ghostty", terminals: {} };
     let second = null;
     const opened = [];
+    const sessions = new Set();
     try {
-      for (const backend of BACKENDS) {
-        const name = tabName(backend);
+      for (const identity of TERMINALS) {
+        const name = tabName(identity);
         await closeTree(page);
-        const ghostty = backend === "ghostty";
-        // An unchanged value refreshes nothing for the write to wait on.
-        if (((await readTerminalPrefs(page, token)).ghostty === true) !== ghostty) await writeTerminalPrefs(page, token, { ghostty });
-        await openAttachedTerminal(ctx, page, cs, windowId, name, backend, ["--command", SHELL]);
+        const attached = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", SHELL]);
         opened.push(name);
+        if (!attached.session_id || sessions.has(attached.session_id)) throw new Error(`${name}: expected a distinct terminal session`);
+        sessions.add(attached.session_id);
         await openTree(page);
         const legs = {};
 
         // SHELL
-        legs.shell = await waitReading(ctx, page, name, "bash", `${backend}-shell`);
+        legs.shell = await waitReading(ctx, page, name, "bash", `${identity}-shell`);
 
         // VIM, QUIT
-        await write(backend, VIM);
-        legs.vim = await waitReading(ctx, page, name, "vim", `${backend}-vim`);
-        await ctx.shot(`220-${backend}-vim`);
-        await write(backend, ":q\r");
-        legs.quit = await waitReading(ctx, page, name, "bash", `${backend}-quit`);
+        await write(identity, VIM);
+        legs.vim = await waitReading(ctx, page, name, "vim", `${identity}-vim`);
+        await ctx.shot(`220-${identity}-vim`);
+        await write(identity, ":q\r");
+        legs.quit = await waitReading(ctx, page, name, "bash", `${identity}-quit`);
 
         // TITLE
-        await write(backend, "printf '\\033]2;build\\007'\n");
-        legs.title = await waitReading(ctx, page, name, "build", `${backend}-title`);
+        await write(identity, "printf '\\033]2;build\\007'\n");
+        legs.title = await waitReading(ctx, page, name, "build", `${identity}-title`);
         if (legs.title.tooltip.includes("build")) {
-          throw new Error(`${backend}-title: the row's tooltip carries the reading: ${JSON.stringify(legs.title.tooltip)}`);
+          throw new Error(`${identity}-title: the row's tooltip carries the reading: ${JSON.stringify(legs.title.tooltip)}`);
         }
-        await ctx.shot(`220-${backend}-title`);
+        await ctx.shot(`220-${identity}-title`);
 
         // JOB
-        await write(backend, "sh -c 'read a; printf \"\\033]2;held\\007\"; read b'\n");
-        legs.job = await waitReading(ctx, page, name, "sh", `${backend}-job`);
-        await write(backend, "\n");
-        legs.held = await waitReading(ctx, page, name, "held", `${backend}-held`);
-        await write(backend, "\n");
-        legs.exited = await waitReading(ctx, page, name, "bash", `${backend}-exited`);
+        await write(identity, "sh -c 'read a; printf \"\\033]2;held\\007\"; read b'\n");
+        legs.job = await waitReading(ctx, page, name, "sh", `${identity}-job`);
+        await write(identity, "\n");
+        legs.held = await waitReading(ctx, page, name, "held", `${identity}-held`);
+        await write(identity, "\n");
+        legs.exited = await waitReading(ctx, page, name, "bash", `${identity}-exited`);
         if (legs.held.seen.includes("build") || legs.exited.seen.includes("build")) {
-          throw new Error(`${backend}-exited: the shell's earlier title came back: ${JSON.stringify([legs.held.seen, legs.exited.seen])}`);
+          throw new Error(`${identity}-exited: the shell's earlier title came back: ${JSON.stringify([legs.held.seen, legs.exited.seen])}`);
         }
-        readings.backends[backend] = legs;
+        readings.terminals[identity] = { session: attached.session_id, ...legs };
       }
 
-      for (const backend of BACKENDS) await write(backend, `printf '\\033]2;${secretTitle(backend)}\\007'\n`);
+      for (const identity of TERMINALS) await write(identity, `printf '\\033]2;${secretTitle(identity)}\\007'\n`);
       await openTree(page);
-      for (const backend of BACKENDS) await waitReading(ctx, page, tabName(backend), secretTitle(backend), `${backend}-secret`);
+      for (const identity of TERMINALS) await waitReading(ctx, page, tabName(identity), secretTitle(identity), `${identity}-secret`);
 
       // SECOND
       second = await ctx.browser.newPage();
@@ -203,14 +201,14 @@ export default {
       await second.waitForSelector(".pane", { timeout: 30_000 });
       await openTree(second);
       readings.second = {};
-      for (const backend of BACKENDS) {
-        readings.second[backend] = await waitReading(ctx, second, tabName(backend), secretTitle(backend), `second-${backend}`);
+      for (const identity of TERMINALS) {
+        readings.second[identity] = await waitReading(ctx, second, tabName(identity), secretTitle(identity), `second-${identity}`);
       }
       await ctx.shot("220-second-page", second);
       readings.second.frames = frames;
-      for (const backend of BACKENDS) {
-        const title = secretTitle(backend);
-        if (!frames.some((frame) => frame.type === "session" && frame.program?.title === title)) {
+      for (const identity of TERMINALS) {
+        const title = secretTitle(identity);
+        if (!frames.some((frame) => frame.type === "session" && frame.id === readings.terminals[identity].session && frame.program?.title === title)) {
           throw new Error(`second: no session prelude carried ${title}: ${JSON.stringify(frames)}`);
         }
       }
@@ -218,8 +216,8 @@ export default {
       // PRIVACY
       await setPrivacy(second, true);
       readings.privacy = {};
-      for (const backend of BACKENDS) {
-        readings.privacy[backend] = await waitReading(ctx, page, tabName(backend), "Hidden", `privacy-on-${backend}`);
+      for (const identity of TERMINALS) {
+        readings.privacy[identity] = await waitReading(ctx, page, tabName(identity), "Hidden", `privacy-on-${identity}`);
       }
       const html = await page.evaluate(() => document.querySelector(".pane-tree")?.outerHTML ?? "");
       if (!html) throw new Error("privacy-on: the first page's tree closed");
@@ -228,8 +226,8 @@ export default {
       }
       await ctx.shot("220-privacy-on");
       await setPrivacy(second, false);
-      for (const backend of BACKENDS) {
-        readings.privacy[`${backend}-off`] = await waitReading(ctx, page, tabName(backend), secretTitle(backend), `privacy-off-${backend}`);
+      for (const identity of TERMINALS) {
+        readings.privacy[`${identity}-off`] = await waitReading(ctx, page, tabName(identity), secretTitle(identity), `privacy-off-${identity}`);
       }
       await ctx.shot("220-privacy-off");
       return readings;
@@ -237,10 +235,6 @@ export default {
       await second?.close().catch(() => {});
       await closeTree(page).catch(() => {});
       for (const name of opened) await cs(["close", "--tab-name", name]).catch(() => {});
-      const now = await readTerminalPrefs(page, token).catch(() => null);
-      if (now && (now.ghostty === true) !== (original.ghostty === true)) {
-        await writeTerminalPrefs(page, token, { ghostty: original.ghostty === true }).catch(() => {});
-      }
     }
   },
 };
