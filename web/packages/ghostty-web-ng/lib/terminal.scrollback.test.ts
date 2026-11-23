@@ -4,6 +4,11 @@ import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
 import type { ITerminalOptions } from './interfaces';
 import { Terminal } from './terminal';
 
+declare module 'node:fs' {
+  export function writeFileSync(path: string, data: string): void;
+}
+declare const process: { env: { GHOSTTY_SCROLLBACK_MEASUREMENTS?: string } };
+
 type Options = Partial<ITerminalOptions> & { scrollbackBytes?: number };
 type Exports = {
   memory: WebAssembly.Memory;
@@ -210,7 +215,8 @@ describe('real core byte pruning', () => {
       const rows = new VtCells();
       expect(core.readHistoryRow(history - 1, rows)).toBe(true);
       expect(core.readHistoryRow(history, rows)).toBe(false);
-      const text = core.plainText();
+      const text = core.plainText()!;
+      expect(text).not.toBeNull();
       const first = Number(/row-(\d+):/.exec(text)![1]);
       expect(first).toBeGreaterThan(0);
       expect(first).toBeGreaterThanOrEqual(previousFirst);
