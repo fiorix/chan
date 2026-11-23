@@ -158,6 +158,38 @@ describe('captured selection lifecycle', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test('a pen drag replaces a silently uncaptured mouse after the host moves', async () => {
+    const { host, canvas, captured, write } = await open();
+    drag(canvas);
+    host.remove();
+    document.body.append(host);
+    captured.clear();
+    pointer(canvas, 'pointerdown', 1, 1, { pointerType: 'pen', pointerId: 9 });
+    pointer(canvas, 'pointermove', 49, 1, { pointerType: 'pen', pointerId: 9 });
+    pointer(canvas, 'pointerup', 49, 1, { pointerType: 'pen', pointerId: 9 });
+    expect(write.mock.calls).toEqual([['hello w']]);
+  });
+
+  test('mouse and new pen contacts recover from a silently uncaptured pen', async () => {
+    const { term, host, canvas, captured, write, reports } = await open();
+    drag(canvas, { pointerType: 'pen', pointerId: 9 });
+    host.remove();
+    document.body.append(host);
+    captured.clear();
+    for (const extra of [{}, { pointerType: 'pen', pointerId: 10 }]) {
+      pointer(canvas, 'pointerdown', 1, 1, extra);
+      pointer(canvas, 'pointermove', 49, 1, extra);
+      pointer(canvas, 'pointerup', 49, 1, extra);
+    }
+    term.write('\x1b[?1000h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointerup');
+    expect({ writes: write.mock.calls, reports }).toEqual({
+      writes: [['hello w'], ['hello w']],
+      reports: ['\x1b[<0;1;1M', '\x1b[<0;1;1m'],
+    });
+  });
+
   test('a primary pen selects and copies', async () => {
     const { canvas, write } = await open();
     drag(canvas, { pointerType: 'pen' });

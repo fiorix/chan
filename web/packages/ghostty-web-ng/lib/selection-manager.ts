@@ -386,7 +386,7 @@ export class SelectionManager {
     if (this.disposed || event.defaultPrevented || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
         event.button < 0 || event.button > 2) return;
-    if (this.activePointer && !this.matchesPointer(event)) return;
+    if (this.activePointer && !this.matchesPointer(event) && this.hasCapture()) return;
     this.endPointer(false);
     this.resetTextarea();
     this.clickSelects = false;
