@@ -39,6 +39,7 @@ mod upload;
 #[cfg(any(target_os = "macos", test))]
 mod wake_repaint;
 mod watcher;
+mod webview_permission;
 mod window_ops;
 mod window_watcher;
 mod window_watcher_wiring;
@@ -7337,6 +7338,12 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     .min_inner_size(420.0, 380.0)
     .resizable(false)
     .initialization_script(&init)
+    .on_permission_request(|_, kind| {
+        crate::webview_permission::permission_response(
+            kind,
+            crate::webview_permission::PermissionSurface::NonCapturing,
+        )
+    })
     .build()
     .map_err(|e| format!("building about window: {e}"))?;
     // Off macOS the About window is born menu-less like every window but
