@@ -7,14 +7,12 @@ import { captureGhosttyTerminals } from "../lib/ghostty-capture.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { drainPointerInput, pointerInputSince } from "../lib/terminal-pointer.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const PROMPT = "PROMPT229> ";
 const frame = (page) => page.evaluate(() => new Promise(requestAnimationFrame));
-const inputSince = (fixture, index) => Buffer.concat(fixture.records.slice(index)
-  .filter((record) => record.type === "keys")
-  .map((record) => Buffer.from(record.base64, "base64"))).toString("utf8");
 
 async function waitFor(page, label, read, accept) {
   const deadline = Date.now() + 20_000;
@@ -50,15 +48,6 @@ async function readViewport(page, hostQuery) {
       cursorX: cursor.x,
     };
   }, hostQuery);
-}
-
-async function outputAndDrain(fixture, bytes) {
-  const index = fixture.records.length;
-  await fixture.send("bytes", { base64: Buffer.from(bytes + "\x1b[6n").toString("base64") });
-  // The reply proves that the page parsed the preceding output, including
-  // output outside its viewport. Received WebSocket bytes alone do not.
-  await fixture.waitFor(() => /\x1b\[\d+;\d+R/.test(inputSince(fixture, index)));
-  return inputSince(fixture, index);
 }
 
 export default {
@@ -107,7 +96,7 @@ export default {
         const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
         const read = () => readViewport(page, hostQuery);
         await fixture.send("rows", { prefix: "HISTORY229", count: 400 });
-        result.initialReply = await outputAndDrain(fixture, "BEFORE229> ");
+        result.initialReply = await drainPointerInput(fixture, "BEFORE229> ");
         await waitFor(page, `${backend}: prompt at bottom`, read,
           (state) => state.bottom && state.rows.some((line) => line.trimEnd() === "BEFORE229>"));
         const box = await page.$eval(hostQuery, (host) => {
@@ -120,7 +109,7 @@ export default {
           (state) => !state.bottom && state.rows.every((line) => !line.includes("BEFORE229>")));
         await ctx.shot(`229-${backend}-history`);
 
-        result.outputReply = await outputAndDrain(fixture, `\r${PROMPT}`);
+        result.outputReply = await drainPointerInput(fixture, `\r${PROMPT}`);
         await frame(page);
         await frame(page);
         result.afterOutput = await read();
@@ -131,14 +120,14 @@ export default {
 
         const keyIndex = fixture.records.length;
         await page.keyboard.type("q");
-        await fixture.waitFor(() => inputSince(fixture, keyIndex).includes("q"));
-        result.key = inputSince(fixture, keyIndex);
+        await fixture.waitFor(() => pointerInputSince(fixture, keyIndex).includes("q"));
+        result.key = pointerInputSince(fixture, keyIndex);
         await frame(page);
         await frame(page);
         result.beforeEcho = await read();
         // Read before echo: it is the input that must move the viewport.
         if (!result.beforeEcho.bottom) failures.push(`${backend}: typed q reached the PTY but left the view in history`);
-        result.echoReply = await outputAndDrain(fixture, "q");
+        result.echoReply = await drainPointerInput(fixture, "q");
         await frame(page);
         await frame(page);
         result.afterEcho = await read();
@@ -155,7 +144,7 @@ export default {
             result.reports.push(report);
             // Scroll with tracking disabled, then enable it through real
             // program output. The DSR reply proves the mode was parsed.
-            await outputAndDrain(fixture, "\x1b[?1000l\x1b[?1006l");
+            await drainPointerInput(fixture, "\x1b[?1000l\x1b[?1006l");
             await page.mouse.move(box.x, box.y);
             await page.mouse.wheel({ deltaY: -300 });
             await waitFor(page, `${backend}/${encoding}/${kind}: wheel enters history`, read,
@@ -163,7 +152,7 @@ export default {
             await frame(page);
             await frame(page);
             const beforeMode = await read();
-            report.modeReply = await outputAndDrain(fixture,
+            report.modeReply = await drainPointerInput(fixture,
               `\x1b[?1000h\x1b[?1006${encoding === "sgr" ? "h" : "l"}`);
             await frame(page);
             await frame(page);
@@ -185,10 +174,10 @@ export default {
             try {
               if (kind === "mouse") await page.mouse.down();
               else await page.mouse.wheel({ deltaY: -120 });
-              await fixture.waitFor(() => pattern.test(inputSince(fixture, inputIndex))).catch((error) => {
+              await fixture.waitFor(() => pattern.test(pointerInputSince(fixture, inputIndex))).catch((error) => {
                 throw new Error(`${backend}/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
               });
-              report.input = inputSince(fixture, inputIndex);
+              report.input = pointerInputSince(fixture, inputIndex);
               await frame(page);
               await frame(page);
               report.after = await read();

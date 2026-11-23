@@ -19,6 +19,17 @@ test("raw reports survive fragmented records without accepting old input or cont
   ]);
 });
 
+test("raw X10 coordinates above 95 retain their byte values across a drain", async () => {
+  const report = "\x1b[M \x80\xff";
+  const fixture = {
+    records: [keys("old"), keys(report.slice(0, 4)), keys(report.slice(4))],
+    async send() { this.records.push(keys("\x1b[4;1R")); },
+    async waitFor(predicate) { assert.equal(predicate(), true); },
+  };
+  assert.equal(pointerInputSince(fixture, 1), report);
+  assert.deepEqual(await drainPointerInput(fixture, "", 1), { input: report, reply: "\x1b[4;1R" });
+});
+
 test("the SGR reader rejects junk, truncated reports, and invalid coordinates", () => {
   for (const input of ["x\x1b[<0;2;3M", "\x1b[<0;2;3Mx", "\x1b[<0;2;", "\x1b[<0;0;1M", "\x1b[<0;1;0m", "\x1b[2;3R"]) {
     assert.throws(() => pointerReports(input), /only complete SGR reports/, JSON.stringify(input));
