@@ -383,6 +383,7 @@ export class SelectionManager {
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
+    if (event.defaultPrevented) this.clickSelects = false;
     if (this.disposed || event.defaultPrevented || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
         event.button < 0 || event.button > 2) return;

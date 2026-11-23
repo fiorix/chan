@@ -304,6 +304,19 @@ describe('report and bypass completion', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('a click after an embedder-prevented press selects nothing (tracking %s)', async (tracking) => {
+    const { term, host, canvas, write, capture, reports } = await open();
+    if (tracking) term.write('\x1b[?1000h\x1b[?1006h');
+    host.addEventListener('pointerdown', (event) => event.preventDefault(), { capture: true });
+    rawPointer(canvas, 'pointerdown', 57, 1);
+    rawPointer(canvas, 'pointerup', 57, 1);
+    canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2, clientX: 57, clientY: 1 }));
+    expect(term.hasSelection()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    expect(reports).toEqual([]);
+  });
+
   test.each([0, 1, 2])('default-prevented button %i under DECSET 1000 belongs to the embedder', async (button) => {
     const { term, host, canvas, capture, reports, write } = await open('https://example.com');
     const activated: string[] = [];
