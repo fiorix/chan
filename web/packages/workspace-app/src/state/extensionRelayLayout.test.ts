@@ -64,6 +64,9 @@ function loadRelay(mac: boolean) {
     { querySelector: () => element },
     { userAgent: mac ? MAC_UA : LINUX_UA },
   );
+  // The page announces ready on load for its capture exercise; that post is
+  // not a keydown relay, so the relay counts below start after it.
+  posted.length = 0;
   return {
     posted,
     hostMessage(data: unknown, source: unknown = parent) {

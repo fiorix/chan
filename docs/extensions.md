@@ -91,8 +91,9 @@ All host communication is `postMessage` between the iframe and its parent. Messa
 | `chan:extension-session-context:v1` | host->ext | Participant snapshots (`session-context` only) |
 | `chan:extension-view-state:v1`      | host->ext | The tab's visibility state                     |
 | `chan:extension-presentation:v1`    | ext->host | Enter, exit or toggle full-surface mode        |
-| `chan:extension-microphone-request:v1` | ext->host | Start, stop or cancel recording (`microphone` only) |
-| `chan:extension-microphone-event:v1` | host->ext | Recording state, errors, or completed audio    |
+| `chan:extension-capture-sources:v1` | host->ext | Sources this frame may use (`microphone` only) |
+| `chan:extension-capture-request:v1` | ext->host | Open, stop or cancel a take; ack a take        |
+| `chan:extension-capture-event:v1` | host->ext | Session state, a take, or a terminal outcome   |
 
 Declared commands register as `extension.<id>.<command-id>` beside the base `extension.<id>` Open command, and the launcher lists them under the extension's name while one of its tabs is focused. They have no default chords and are assignable through the shortcut settings. A `singleton` extension's commands focus or create its one tab and queue delivery until that exact iframe posts `chan:extension-ready:v1`; the queue is bounded, and an overflow is reported rather than dropped silently.
 
@@ -102,7 +103,13 @@ Keyboard events inside an iframe never bubble to the parent document, which is w
 
 ### The grants
 
-The three grants are deliberately narrow. `session-context` streams participant snapshots with opaque ids, display names, chan roles, statuses and the receiving window id; the labels are informational, not authenticated identities. `presentation` lets the extension ask for its iframe wrapper to be promoted into the browser top layer (a popover) without reparenting, so the browsing context, and any WebGL or WASM state in it, survives entering and leaving full-surface mode; chan supplies the Restore and Close controls and leaves Escape to the extension. `microphone` lets the exact extension frame ask the parent to start, stop, or cancel one `MediaRecorder` take. The parent owns `getUserMedia` and all tracks, enforces a 10-minute and 64 MiB limit, returns the completed audio blob, and stops capture on cancellation, reload, or close; the iframe keeps its opaque origin and receives no device object. No grant exposes workspace files, chan APIs or a general host message bus.
+The three grants are deliberately narrow. `session-context` streams participant snapshots with opaque ids, display names, chan roles, statuses and the receiving window id; the labels are informational, not authenticated identities. `presentation` lets the extension ask for its iframe wrapper to be promoted into the browser top layer (a popover) without reparenting, so the browsing context, and any WebGL or WASM state in it, survives entering and leaving full-surface mode; chan supplies the Restore and Close controls and leaves Escape to the extension. `microphone` lets the exact extension frame ask chan to record one take at a time. The viewer starts each take from chan's own capture bar; chan owns `getUserMedia`, the recorder and all tracks, and holds each finished take until the extension acknowledges it. Capture survives a frame reload and ends when the tab closes, the grant goes away or the extension leaves the catalog; the iframe keeps its opaque origin and receives no device object. No grant exposes workspace files, chan APIs or a general host message bus.
+
+### Capture
+
+The host posts `chan:extension-capture-sources:v1` to every extension frame on load and on `chan:extension-ready:v1`, naming each source `available`, `not_granted`, `insecure_context` or `unsupported`. A frame with the `microphone` grant posts `chan:extension-capture-request:v1` with `open` (`request_id`, `source: "microphone"`, optional `max_ms` from 1000 to 600000, optional `processing: "voice" | "raw"`), `stop` or `cancel` for that request, or `ack` with a `take_id` once a take is saved or deliberately dropped. `open` only shows the capture bar; the device starts when the viewer presses Record there.
+
+The host answers on `chan:extension-capture-event:v1` with the session states `armed`, `starting`, `recording` and `finishing`, then exactly one terminal event per `open`: a `take` (host-minted `take_id`, the audio `Blob`, its real `mime` or the empty string, `bytes`, `duration_ms`, `started_at` and `end` as `stopped`, `limit` or `interrupted`), `cancelled` (who ended it), or `error` with a stable `code` such as `busy`, `outbox_full`, `permission_denied`, `empty` or `too_large`. One session runs at a time in a chan page. A take stays in the host outbox (at most 4 takes and 128 MiB per tab) until acked, and is posted again with `redelivered: true` after every `ready`, so an extension that uses capture posts `chan:extension-ready:v1` and dedupes by `take_id`. Recording stops normally at the requested duration or at 56 MiB and fails as `too_large` past 64 MiB; the audio is never clipped.
 
 ## Creating an extension
 
