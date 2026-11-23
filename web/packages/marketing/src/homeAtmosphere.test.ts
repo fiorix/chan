@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { buildBeadedTorusBeads } from "../../workspace-app/src/components/beadedTorus";
 import { buildHomeAtmosphereFrame, HOME_POINT_COUNT, sectionScrollProgress } from "./homeAtmosphere";
 
-test("scroll progress reaches the wave as the first section enters, and reverses", () => {
+test("scroll progress reaches the wave as the target section enters, and reverses", () => {
   expect(sectionScrollProgress(0, 1000, 1000)).toBe(0);
   expect(sectionScrollProgress(300, 1000, 1000)).toBe(0);
   expect(sectionScrollProgress(600, 1000, 1000)).toBe(0.5);

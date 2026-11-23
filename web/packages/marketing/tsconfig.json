@@ -15,6 +15,7 @@
     "src/animation-credits.test.ts",
     "src/AnimationGallery.test.ts",
     "src/HomeAtmosphere.svelte",
+    "src/HomeAtmosphere.scroll.test.ts",
     "src/homeAtmosphere.ts",
     "src/homeAtmosphere.test.ts",
     "src/site-motion.ts"
