@@ -124,19 +124,47 @@ export default {
     }
 
     await arm("e-patch-invalid", async (row) => {
-      const config = await readConfig(ctx.serverUrl);
-      row.before = configHashes(ctx.chanHome);
-      const response = await api(ctx.serverUrl, "/api/config", {
-        method: "PATCH",
-        body: JSON.stringify({ expected_revision: config.revision,
-          preferences: { terminal: { ...config.preferences.terminal, ghostty: "yes" } } }),
+      const workspaceDir = seedWorkspace();
+      const server = launchServer(ctx.chanBin, workspaceDir, undefined, {
+        env: { RUST_LOG: "warn,chan_server::extract=debug" },
       });
-      row.httpStatus = response.status;
-      row.body = await response.text();
-      row.after = configHashes(ctx.chanHome);
-      assert.ok(response.status >= 400 && response.status < 500, `invalid PATCH must be 4xx, got ${response.status}`);
-      assert.match(row.body, /terminal\.ghostty/, "refusal names the invalid key");
-      assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
+      row.chanHome = server.chanHome;
+      row.serverPid = server.child.pid;
+      const rejections = () => server.stderrLines.filter((line) => line.includes("request rejected")
+        && line.includes("chan_server::extract") && line.includes("terminal.ghostty"));
+      try {
+        const serverUrl = await server.url;
+        const config = await readConfig(serverUrl);
+        const patch = (ghostty) => api(serverUrl, "/api/config", {
+          method: "PATCH",
+          body: JSON.stringify({ expected_revision: config.revision,
+            preferences: { terminal: { ...config.preferences.terminal, ghostty } } }),
+        });
+        row.before = configHashes(server.chanHome);
+        const response = await patch("yes");
+        row.httpStatus = response.status;
+        row.body = await response.text();
+        row.after = configHashes(server.chanHome);
+        assert.equal(row.httpStatus, 422, "a non-boolean terminal.ghostty PATCH is rejected as an invalid body");
+        assert.deepEqual(JSON.parse(row.body), { error: "the request body does not match what this route accepts" });
+        assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
+        const deadline = Date.now() + 5_000;
+        while (rejections().length === 0) {
+          assert.ok(Date.now() < deadline, "extractor rejection log did not arrive within 5s");
+          await sleep(25);
+        }
+        row.rejections = rejections().map(maskTokens);
+        assert.equal(row.rejections.length, 1, "exactly one logged rejection names terminal.ghostty");
+        const control = await patch(true);
+        row.controlStatus = control.status;
+        assert.equal(row.controlStatus, 200, "the same PATCH accepts a boolean terminal.ghostty");
+        row.controlReadback = (await readConfig(serverUrl)).preferences.terminal;
+        assert.equal(Object.hasOwn(row.controlReadback, "ghostty"), false, "the accepted retired key is absent on readback");
+        assert.equal(rejections().length, 1, "the boolean control adds no rejection");
+      } finally {
+        row.stderrLines = server.stderrLines.map(maskTokens);
+        await teardownServer(ctx.chanBin, server.child, workspaceDir, server.chanHome);
+      }
     });
 
     await arm("f-stored-false-warning", async (row) => {
