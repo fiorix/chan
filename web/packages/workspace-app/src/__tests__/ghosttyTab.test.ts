@@ -66,6 +66,11 @@ test("the checked mount returns the fixture's widget, open in the tab, and no st
 });
 
 test("the product's glyph painter and overlay scrollbar install on the fixture's widget", async () => {
+  const compat = await import("../terminal/ghosttyCompat");
+  const actual = await vi.importActual<typeof import("../terminal/ghosttyCompat")>("../terminal/ghosttyCompat");
+  expect(compat.installGhosttyCustomGlyphs, "the product's glyph painter").toBe(actual.installGhosttyCustomGlyphs);
+  expect(compat.installGhosttyOverlayScrollbar, "the product's overlay scrollbar").toBe(actual.installGhosttyOverlayScrollbar);
+
   const warn = vi.spyOn(console, "warn");
   await opened();
   const hooks = warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web"));
