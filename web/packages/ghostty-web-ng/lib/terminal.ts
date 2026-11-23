@@ -431,6 +431,7 @@ export class Terminal {
           width: renderer.charWidth,
           height: renderer.charHeight,
         }),
+        getGridDimensions: () => ({ cols: this.cols, rows: this.rows }),
         getCanvasOffset: () => {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
@@ -476,7 +477,24 @@ export class Terminal {
         this,
         this.renderer,
         this.wasmTerm,
-        this.textarea
+        this.textarea,
+        {
+          // The scrollbar keeps its mouse gesture; selection must not also claim it.
+          accepts: (event) => {
+            this.linkPress = undefined;
+            return !this.isScrollbarPress(event);
+          },
+          press: (event) => {
+            this.handleLinkPress(event);
+            this.inputHandler?.handleMouseDown(event);
+          },
+          move: (event) => this.inputHandler?.handleMouseMove(event),
+          release: (event) => this.inputHandler?.handleMouseUp(event),
+          end: (event) => {
+            if (!event) this.linkPress = undefined;
+            this.inputHandler?.endMouseGesture(event);
+          },
+        }
       );
 
       // Connect selection manager to renderer
@@ -494,7 +512,6 @@ export class Terminal {
       // Setup mouse event handling for links and scrollbar
       // Use capture phase to intercept scrollbar clicks before SelectionManager
       parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
-      parent.addEventListener('mousedown', this.handleLinkPress, { capture: true });
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
       parent.addEventListener('click', this.handleClick);
@@ -1181,7 +1198,6 @@ export class Terminal {
     if (this.element) {
       this.element.removeEventListener('wheel', this.handleWheel);
       this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
-      this.element.removeEventListener('mousedown', this.handleLinkPress, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
       this.element.removeEventListener('click', this.handleClick);
@@ -1561,6 +1577,13 @@ export class Terminal {
       }
     }
   };
+
+  private isScrollbarPress(event: MouseEvent): boolean {
+    if (!this.canvas || !this.wasmTerm || this.wasmTerm.getScrollbackLength() === 0) return false;
+    const rect = this.canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    return x >= rect.width - 12 && x <= rect.width - 4;
+  }
 
   /**
    * Handle mouse down for scrollbar interaction
