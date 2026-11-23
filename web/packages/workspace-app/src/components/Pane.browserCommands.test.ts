@@ -13,13 +13,15 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { api } from "../api/client";
 import { updateGlobalConfigSerial } from "../api/preferenceWrite";
+import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab, terminalTab } from "../__tests__/tabs";
-import { xterm } from "../__tests__/xterm";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
 import {
@@ -411,6 +413,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
   // Characterization: pins the no-fallback shape with a terminal active.
   test("terminal active in the focused pane: the target is empty", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
+    await openedGhostty(pane(LEFT));
     await showDock();
     await click(row(dock(), LEFT_PATH));
     expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
@@ -436,20 +439,15 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
   });
 
   test("the keyboard returns to the terminal's input", async () => {
-    xterm.textareaFocus = true;
-    try {
-      await layOut([terminalTab({ id: "term-1" })]);
-      await showDock();
-      await click(row(dock(), LEFT_PATH));
-      expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
-      await closeDockFromMenu();
-      expect(commandSurfaceId()).toBeNull();
-      const textarea = xterm.terminals.at(-1)?.textarea;
-      expect(textarea, "the terminal opened a textarea").toBeTruthy();
-      await vi.waitFor(() => expect(document.activeElement).toBe(textarea));
-    } finally {
-      xterm.textareaFocus = false;
-    }
+    await layOut([terminalTab({ id: "term-1" })]);
+    const term = await openedGhostty(pane(LEFT));
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+    expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+    expect(ghosttyHasFocus(term), "the dock holds the keyboard").toBe(false);
+    await closeDockFromMenu();
+    expect(commandSurfaceId()).toBeNull();
+    await vi.waitFor(() => expect(ghosttyHasFocus(term)).toBe(true));
   });
 
   test("a dock closing while another surface is the target changes nothing (characterization)", async () => {
@@ -493,20 +491,15 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
   });
 
   test("launcher toggle returns the keyboard to the terminal's input", async () => {
-    xterm.textareaFocus = true;
-    try {
-      await layOut([terminalTab({ id: "term-1" })]);
-      await showDock();
-      await click(row(dock(), LEFT_PATH));
-      expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
-      await closeDockFromLauncher();
-      expect(commandSurfaceId()).toBeNull();
-      const textarea = xterm.terminals.at(-1)?.textarea;
-      expect(textarea, "the terminal opened a textarea").toBeTruthy();
-      await vi.waitFor(() => expect(document.activeElement).toBe(textarea));
-    } finally {
-      xterm.textareaFocus = false;
-    }
+    await layOut([terminalTab({ id: "term-1" })]);
+    const term = await openedGhostty(pane(LEFT));
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+    expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+    expect(ghosttyHasFocus(term), "the dock holds the keyboard").toBe(false);
+    await closeDockFromLauncher();
+    expect(commandSurfaceId()).toBeNull();
+    await vi.waitFor(() => expect(ghosttyHasFocus(term)).toBe(true));
   });
 
   test("a close with Settings focused moves no keyboard and empties the target", async () => {
