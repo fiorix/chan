@@ -19,6 +19,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 
 import TerminalTab from "../components/TerminalTab.svelte";
 import { ghosttyFixture, ghosttyHasFocus, mountGhosttyTerminal, pressInGhostty, typeInGhostty } from "./ghosttyTab";
+import { SoftwareCanvasContext } from "./softwareCanvas";
 import {
   attach,
   installTerminalDom,
@@ -93,6 +94,16 @@ test("chan's copy chord sends the program nothing", async () => {
   pressInGhostty(term, { key: "a", code: "KeyA", keyCode: 65 });
   await vi.waitFor(() => expect(inputs(socket)).toEqual(["a"]));
   expect(event.defaultPrevented).toBe(true);
+});
+
+test("while a terminal is open only a 2D context is the fixture's, and the last one to close gives canvases back", async () => {
+  const environment = HTMLCanvasElement.prototype.getContext;
+  await opened();
+  const canvas = document.createElement("canvas");
+  expect(canvas.getContext("2d")).toBeInstanceOf(SoftwareCanvasContext);
+  expect(canvas.getContext("webgl2"), "another id gets the environment's answer").not.toBeInstanceOf(SoftwareCanvasContext);
+  resetTerminals();
+  expect(HTMLCanvasElement.prototype.getContext).toBe(environment);
 });
 
 test("focus inside the terminal follows focus() and blur()", async () => {

@@ -20,7 +20,7 @@ import { mount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import type { GhosttyKit, ghosttyKitFrom } from "../terminal/backend";
-import { SoftwareCanvasContext } from "./softwareCanvas";
+import { SoftwareCanvasContext, softwareGetContext } from "./softwareCanvas";
 import {
   attach,
   ghosttyFixtureDeclared,
@@ -67,11 +67,8 @@ export function installSoftwareCanvas() {
   const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    let context = contexts.get(this);
-    if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
-    return context as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  const environment = HTMLCanvasElement.prototype.getContext;
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(softwareGetContext(contexts, environment));
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     const id = ++nextFrame;
     frames.set(id, callback);
@@ -302,33 +299,31 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
 }
 
 // jsdom implements no 2D context, and a test environment may answer with
-// none at all. While a fixture terminal is open every canvas gets a software
-// one, since the widget also measures its font on a detached canvas; the
-// environment's own answer comes back with the last terminal. A test that
+// none at all. While a fixture terminal is open every canvas asked for a 2D
+// context gets a software one, since the widget also measures its font on a
+// detached canvas; any other context id gets the environment's own answer,
+// and so does every canvas once the last terminal closes. A test that
 // installed its own context (`installSoftwareCanvas`) keeps it.
 const softwareContexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
 let openTerminals = 0;
 let environmentGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
-
-const softwareGetContext = function (this: HTMLCanvasElement) {
-  let context = softwareContexts.get(this);
-  if (!context) softwareContexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
-  return context as unknown as CanvasRenderingContext2D;
-} as unknown as typeof HTMLCanvasElement.prototype.getContext;
+let servedGetContext: typeof HTMLCanvasElement.prototype.getContext | null = null;
 
 function serveCanvases(): void {
   openTerminals += 1;
   const current = HTMLCanvasElement.prototype.getContext;
-  if (current === softwareGetContext || vi.isMockFunction(current)) return;
+  if (current === servedGetContext || vi.isMockFunction(current)) return;
   environmentGetContext = current;
-  HTMLCanvasElement.prototype.getContext = softwareGetContext;
+  servedGetContext = softwareGetContext(softwareContexts, current);
+  HTMLCanvasElement.prototype.getContext = servedGetContext;
 }
 
 function releaseCanvases(): void {
   openTerminals -= 1;
   if (openTerminals > 0 || !environmentGetContext) return;
-  if (HTMLCanvasElement.prototype.getContext === softwareGetContext) {
+  if (HTMLCanvasElement.prototype.getContext === servedGetContext) {
     HTMLCanvasElement.prototype.getContext = environmentGetContext;
   }
   environmentGetContext = null;
+  servedGetContext = null;
 }
