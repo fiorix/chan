@@ -18,7 +18,6 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { WINDOW_CARD, answerOpenSurveys, keyboardAt, raiseSurvey, surveyOutcome, waitForCard } from "../lib/keyboard-owners.mjs";
 import {
   DECK, DECK_INPUT, PATH_PROMPT, SEARCH, SETTINGS, TEAM, checkWindowId, closeDeck, inputValue,
@@ -43,7 +42,7 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = (await readTerminalPrefs(page, token)).ghostty ? "ghostty" : "xterm";
+    const backend = "ghostty";
     const result = { backend, legs: {}, cleanupErrors: [] };
     const failures = [];
     const calls = [];
@@ -70,7 +69,7 @@ export default {
       }
     };
     try {
-      await openAttachedTerminal(ctx, page, cs, windowId, "Paint302", backend);
+      await openAttachedTerminal(ctx, page, cs, windowId, "Paint302", "ghostty");
 
       await leg("deckAlone", async (r) => {
         await openDeck(page);

@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const reader = join(import.meta.dirname, "../lib/ftrip-reader.mjs");
@@ -71,7 +70,6 @@ export default {
     );
     if (!windowId) throw new Error("no window id");
     await ctx.waitWindowLive(windowId);
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
     const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
       cwd: ctx.workspaceDir, env, timeout: 30_000,
@@ -109,11 +107,9 @@ export default {
     });
 
     const capture = { engine: await page.browser().version(), readings: [] };
-    const originalPrefs = await readTerminalPrefs(page, token);
     let opened = [];
     try {
-      for (const backend of ["xterm", "ghostty"]) {
-        await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
+      for (const backend of ["ghostty"]) {
         const source = `Ftrip${backend}Source`;
         const control = `Ftrip${backend}Control`;
         const path = join(ctx.outDir, `${backend}-input.jsonl`);
@@ -187,11 +183,13 @@ export default {
         for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
         opened = [];
       }
+      const required = ["click-subject", "click-active", "click-away", "keyboard-jump", "click-away-again", "command-jump", "click-away-before-drag", "drag-subject"];
+      if (JSON.stringify(capture.readings.map(({ backend, action }) => `${backend}/${action}`)) !==
+          JSON.stringify(required.map((action) => `ghostty/${action}`))) throw new Error("Ghostty focus arms incomplete");
       console.log(`FTRIP_RESULT ${JSON.stringify(capture)}`);
     } finally {
       writeFileSync(join(ctx.outDir, "ftrip-cause.json"), JSON.stringify(capture, null, 2));
       for (const name of opened.reverse()) await cs(["close", "--tab-name", name]).catch(() => {});
-      await restoreTerminalPrefs(ctx, page, token, originalPrefs);
       await cdp.detach().catch(() => {});
     }
   },

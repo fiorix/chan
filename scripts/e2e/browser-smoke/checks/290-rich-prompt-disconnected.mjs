@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { startTerminalCutProxy } from "../lib/terminal-cut-proxy.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const NOTICE = "terminal not connected; try again";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,148 +123,134 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
+    const backend = "ghostty";
     const failures = [];
+    const name = `Prompt290-${backend}`;
+    const text = `PROMPT290-${backend}`;
+    const revised = `${text} revised`;
+    const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
+    const onError = (error) => result.pageErrors.push(String(error));
+    const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, `290-${backend}-output.bin`), deadlineMs: 20_000 });
+    let proxy, script, card = null, opened = false;
+    page.on("pageerror", onError);
     try {
-      for (const backend of ["xterm", "ghostty"]) {
-        const name = `Prompt290-${backend}`;
-        const text = `PROMPT290-${backend}`;
-        const revised = `${text} revised`;
-        const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
-        const onError = (error) => result.pageErrors.push(String(error));
-        const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, `290-${backend}-output.bin`), deadlineMs: 20_000 });
-        let proxy, script, card = null, opened = false;
-        page.on("pageerror", onError);
-        try {
-          await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
-          const spawnArgs = ["--command", "stty -opost -echo && " + fixture.command,
-            ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
-          const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend, spawnArgs);
-          opened = true;
-          result.fixture = await fixture.ready();
-          assert.ok(result.fixture.tty && result.fixture.raw, "the fixture runs in a raw PTY");
-          await waitSaved(ctx, page, windowId, name);
-          proxy = await startTerminalCutProxy({ targetUrl: `${new URL(ctx.serverUrl).origin}/`,
-            path: "/api/terminal/ws", session: row.session_id, deadlineMs: 60_000 });
-          proxy.arm({ boundary: "after-ready" });
-          proxy.holdRedial();
-          script = await page.evaluateOnNewDocument(routeTerminal, { session: row.session_id, relay: proxy.url });
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-          await ctx.waitWindowLive(windowId);
-          // Ready follows the server's placement update for this same session.
-          await waitFor(page, card, "the reloaded terminal received ready", (value) => value.sockets[0]?.ready);
-          result.attachment = await waitRestoredTerminal(page, cs, windowId, row, backend);
-          const terminal = result.attachment.selector;
-          card = `${terminal} .rich-prompt`;
-          await page.click(`${terminal} .terminal-host`);
-          await page.keyboard.down("Control");
-          await page.keyboard.down("Alt");
-          await page.keyboard.press("KeyP");
-          await page.keyboard.up("Alt");
-          await page.keyboard.up("Control");
-          await page.waitForSelector(`${card} .cm-content`, { visible: true, timeout: 15_000 });
-          await page.click(`${card} .cm-content`);
-          await page.keyboard.type(text);
-          await waitFor(page, card, "the initial draft is editable", (value) => value.text === text && value.editable && !value.pending);
-          const ready = await proxy.waitForRecord((record) => record.event === "frame" && record.connection === 1
-            && record.direction === "forwarded" && record.type === "ready");
-          // A later browser task has seen the mounted composer; the ready
-          // handler has returned. This check makes no parser-drain assertion.
-          proxy.acknowledge({ connection: 1, frame: ready.frame });
-          result.cut = await proxy.waitForCut();
-          assert.deepEqual(result.cut.disconnect, { client: "closed", upstream: "closed" });
-          await proxy.waitForHeldRedial();
-          result.held = await waitFor(page, card, "the redial is genuinely CONNECTING", (value) =>
-            value.sockets.length === 2 && value.sockets[0].state === 3 && value.sockets[1].state === 0);
-          assert.equal(proxy.records.filter((record) => record.event === "connection").length, 1,
-            "the held redial has no upstream connection");
+      const spawnArgs = ["--command", "stty -opost -echo && " + fixture.command,
+        ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+      opened = true;
+      result.fixture = await fixture.ready();
+      assert.ok(result.fixture.tty && result.fixture.raw, "the fixture runs in a raw PTY");
+      await waitSaved(ctx, page, windowId, name);
+      proxy = await startTerminalCutProxy({ targetUrl: `${new URL(ctx.serverUrl).origin}/`,
+        path: "/api/terminal/ws", session: row.session_id, deadlineMs: 60_000 });
+      proxy.arm({ boundary: "after-ready" });
+      proxy.holdRedial();
+      script = await page.evaluateOnNewDocument(routeTerminal, { session: row.session_id, relay: proxy.url });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      await ctx.waitWindowLive(windowId);
+      // Ready follows the server's placement update for this same session.
+      await waitFor(page, card, "the reloaded terminal received ready", (value) => value.sockets[0]?.ready);
+      result.attachment = await waitRestoredTerminal(page, cs, windowId, row, "ghostty");
+      const terminal = result.attachment.selector;
+      card = `${terminal} .rich-prompt`;
+      await page.click(`${terminal} .terminal-host`);
+      await page.keyboard.down("Control");
+      await page.keyboard.down("Alt");
+      await page.keyboard.press("KeyP");
+      await page.keyboard.up("Alt");
+      await page.keyboard.up("Control");
+      await page.waitForSelector(`${card} .cm-content`, { visible: true, timeout: 15_000 });
+      await page.click(`${card} .cm-content`);
+      await page.keyboard.type(text);
+      await waitFor(page, card, "the initial draft is editable", (value) => value.text === text && value.editable && !value.pending);
+      const ready = await proxy.waitForRecord((record) => record.event === "frame" && record.connection === 1
+        && record.direction === "forwarded" && record.type === "ready");
+      // A later browser task has seen the mounted composer; the ready
+      // handler has returned. This check makes no parser-drain assertion.
+      proxy.acknowledge({ connection: 1, frame: ready.frame });
+      result.cut = await proxy.waitForCut();
+      assert.deepEqual(result.cut.disconnect, { client: "closed", upstream: "closed" });
+      await proxy.waitForHeldRedial();
+      result.held = await waitFor(page, card, "the redial is genuinely CONNECTING", (value) =>
+        value.sockets.length === 2 && value.sockets[0].state === 3 && value.sockets[1].state === 0);
+      assert.equal(proxy.records.filter((record) => record.event === "connection").length, 1,
+        "the held redial has no upstream connection");
 
-          if (backend === "xterm") {
-            await page.keyboard.down("Control");
-            await page.keyboard.press("Enter");
-            await page.keyboard.up("Control");
-          } else {
-            await page.click(`${card} .rp-primary`);
-          }
-          result.refused = await waitFor(page, card, "disconnected submit shows its refusal", (value) => value.note === NOTICE, 3000);
-          assert.deepEqual(result.refused.sockets.map((socket) => socket.state), [3, 0]);
-          assert.equal(result.refused.text, text);
-          assert.equal(result.refused.editable, true);
-          assert.equal(result.refused.pending, false);
-          assert.equal(result.refused.live, "polite");
-          assert.deepEqual(result.refused.prompts, []);
-          assert.equal(keys(fixture), "");
-          await page.click(`${card} .cm-content`);
-          await page.keyboard.press("End");
-          await page.keyboard.type(" revised");
-          result.edited = await waitFor(page, card, "the refused draft stays editable", (value) => value.text === revised && value.editable && !value.pending);
-          assert.deepEqual(result.edited.sockets.map((socket) => socket.state), [3, 0],
-            "fixture precondition: the held redial has not reached its connect deadline");
-          // Release before the terminal's normal connect deadline. The real
-          // note lifetime is observed after reconnect, with no clock shim.
-          proxy.releaseRedial();
-          await ctx.shot(`290-${backend}-refusal-notice`);
-          await waitFor(page, card, "the redial has received ready", (value) => value.sockets[1]?.ready && value.sockets[1].state === 1);
-          // Neither reconnect nor the refusal timer may send the draft.
-          result.reconnected = await waitFor(page, card, "the refusal is transient and the connected draft remains unsent", (value) => value.note === null, 7000);
-          assert.equal(result.reconnected.text, revised);
-          assert.equal(result.reconnected.editable, true);
-          assert.equal(result.reconnected.pending, false);
-          assert.deepEqual(result.reconnected.prompts, []);
-          assert.equal(keys(fixture), "");
-          await ctx.shot(`290-${backend}-reconnected-unsent`);
-          await page.click(`${card} .rp-primary`);
-          result.sent = await waitFor(page, card, "the explicit retry sends one prompt", (value) => value.prompts.length === 1);
-          assert.equal(result.sent.prompts[0].data, revised);
-          assert.equal(result.sent.prompts[0].connection, 2);
-          assert.equal(typeof result.sent.prompts[0].id, "string");
-          const id = result.sent.prompts[0].id;
-          await fixture.waitFor(() => keys(fixture).includes(revised));
-          result.delivered = await waitFor(page, card, "the delivered retry clears the composer", (value) =>
-            value.sockets[1].delivered.includes(id) && value.text === "" && !value.pending);
-          assert.equal(result.delivered.prompts.length, 1);
-          assert.equal(result.delivered.note, null);
-          result.ptyInput = keys(fixture);
-          assert.equal(result.ptyInput.split(revised).length - 1, 1, "the PTY receives the revised text once");
-          assert.deepEqual(proxy.records.filter((record) => record.event === "failure"), []);
-          assert.deepEqual(result.pageErrors, []);
-          await ctx.shot(`290-${backend}-delivered`);
-          result.passed = true;
-        } catch (error) {
-          result.failure = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
-          failures.push(`${backend}: ${result.failure}`);
-          result.final = await state(page, card).catch(() => null);
-          await ctx.shot(`290-${backend}-failure`).catch(() => {});
-        } finally {
-          result.proxy = proxy?.records ?? [];
-          result.records = fixture.records;
-          const cleanup = async (label, action) => {
-            try { await action(); } catch (error) {
-              result.cleanupErrors.push(`${label}: ${error.message}`);
-              failures.push(`${backend}: ${label}: ${error.message}`);
-              result.passed = false;
-            }
-          };
-          if (script) await cleanup("remove routing script", () => page.removeScriptToEvaluateOnNewDocument(script.identifier));
-          await cleanup("restore native socket constructor", () => page.evaluate(() => window.__prompt290?.restore()));
-          await cleanup("close cut proxy", () => proxy?.close());
-          await cleanup("fixture flush", () => fixture.send("barrier", { name: "cleanup" }));
-          await cleanup("owned terminal cleanup", async () => {
-            try { await cs(["close", "--tab-name", name]); } catch (error) { if (opened) throw error; }
-          });
-          await cleanup("close fixture", () => fixture.close());
-          page.off("pageerror", onError);
-          if (result.passed && result.pageErrors.length) {
-            result.passed = false;
-            failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
-          }
-          writeFileSync(join(ctx.outDir, `290-${backend}.json`),
-            JSON.stringify(result, null, 2).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]") + "\n");
-        }
-      }
+      await page.click(`${card} .rp-primary`);
+      result.refused = await waitFor(page, card, "disconnected submit shows its refusal", (value) => value.note === NOTICE, 3000);
+      assert.deepEqual(result.refused.sockets.map((socket) => socket.state), [3, 0]);
+      assert.equal(result.refused.text, text);
+      assert.equal(result.refused.editable, true);
+      assert.equal(result.refused.pending, false);
+      assert.equal(result.refused.live, "polite");
+      assert.deepEqual(result.refused.prompts, []);
+      assert.equal(keys(fixture), "");
+      await page.click(`${card} .cm-content`);
+      await page.keyboard.press("End");
+      await page.keyboard.type(" revised");
+      result.edited = await waitFor(page, card, "the refused draft stays editable", (value) => value.text === revised && value.editable && !value.pending);
+      assert.deepEqual(result.edited.sockets.map((socket) => socket.state), [3, 0],
+        "fixture precondition: the held redial has not reached its connect deadline");
+      // Release before the terminal's normal connect deadline. The real
+      // note lifetime is observed after reconnect, with no clock shim.
+      proxy.releaseRedial();
+      await ctx.shot(`290-${backend}-refusal-notice`);
+      await waitFor(page, card, "the redial has received ready", (value) => value.sockets[1]?.ready && value.sockets[1].state === 1);
+      // Neither reconnect nor the refusal timer may send the draft.
+      result.reconnected = await waitFor(page, card, "the refusal is transient and the connected draft remains unsent", (value) => value.note === null, 7000);
+      assert.equal(result.reconnected.text, revised);
+      assert.equal(result.reconnected.editable, true);
+      assert.equal(result.reconnected.pending, false);
+      assert.deepEqual(result.reconnected.prompts, []);
+      assert.equal(keys(fixture), "");
+      await ctx.shot(`290-${backend}-reconnected-unsent`);
+      await page.click(`${card} .rp-primary`);
+      result.sent = await waitFor(page, card, "the explicit retry sends one prompt", (value) => value.prompts.length === 1);
+      assert.equal(result.sent.prompts[0].data, revised);
+      assert.equal(result.sent.prompts[0].connection, 2);
+      assert.equal(typeof result.sent.prompts[0].id, "string");
+      const id = result.sent.prompts[0].id;
+      await fixture.waitFor(() => keys(fixture).includes(revised));
+      result.delivered = await waitFor(page, card, "the delivered retry clears the composer", (value) =>
+        value.sockets[1].delivered.includes(id) && value.text === "" && !value.pending);
+      assert.equal(result.delivered.prompts.length, 1);
+      assert.equal(result.delivered.note, null);
+      result.ptyInput = keys(fixture);
+      assert.equal(result.ptyInput.split(revised).length - 1, 1, "the PTY receives the revised text once");
+      assert.deepEqual(proxy.records.filter((record) => record.event === "failure"), []);
+      assert.deepEqual(result.pageErrors, []);
+      await ctx.shot(`290-${backend}-delivered`);
+      result.passed = true;
+    } catch (error) {
+      result.failure = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
+      failures.push(`${backend}: ${result.failure}`);
+      result.final = await state(page, card).catch(() => null);
+      await ctx.shot(`290-${backend}-failure`).catch(() => {});
     } finally {
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
+      result.proxy = proxy?.records ?? [];
+      result.records = fixture.records;
+      const cleanup = async (label, action) => {
+        try { await action(); } catch (error) {
+          result.cleanupErrors.push(`${label}: ${error.message}`);
+          failures.push(`${backend}: ${label}: ${error.message}`);
+          result.passed = false;
+        }
+      };
+      if (script) await cleanup("remove routing script", () => page.removeScriptToEvaluateOnNewDocument(script.identifier));
+      await cleanup("restore native socket constructor", () => page.evaluate(() => window.__prompt290?.restore()));
+      await cleanup("close cut proxy", () => proxy?.close());
+      await cleanup("fixture flush", () => fixture.send("barrier", { name: "cleanup" }));
+      await cleanup("owned terminal cleanup", async () => {
+        try { await cs(["close", "--tab-name", name]); } catch (error) { if (opened) throw error; }
+      });
+      await cleanup("close fixture", () => fixture.close());
+      page.off("pageerror", onError);
+      if (result.passed && result.pageErrors.length) {
+        result.passed = false;
+        failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
+      }
+      writeFileSync(join(ctx.outDir, `290-${backend}.json`),
+        JSON.stringify(result, null, 2).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]") + "\n");
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },

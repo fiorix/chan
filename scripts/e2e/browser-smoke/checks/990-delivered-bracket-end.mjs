@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { shellQuote } from "../lib/program-status.mjs";
 import { findControlSocket, launchServer, seedWorkspace, teardownServer } from "../lib/server.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
 const OPEN = "\x1b[200~";
@@ -106,7 +105,7 @@ export default {
     let cs;
     const names = [];
     const failures = [];
-    const result = { overrideConfig: config, legs: [] };
+    const result = { backend: "ghostty", overrideConfig: config, legs: [] };
     const record = (label, bytes, payload, submitted) => {
       const expected = `${OPEN}${payload}${CLOSE}${submitted ? "\r" : ""}`;
       const events = inputEvents(bytes);
@@ -122,7 +121,6 @@ export default {
     try {
       result.browser = await ctx.browser.browser().version();
       const serverUrl = await server.url;
-      const token = new URL(serverUrl).searchParams.get("t") ?? "";
       const windowId = "paste-end-990";
       const socket = findControlSocket(server.child.pid);
       if (!socket) throw new Error("private server control socket unavailable");
@@ -138,7 +136,6 @@ export default {
         try { await control(["pane", "list", "--window", windowId, "--json"]); break; }
         catch (error) { if (Date.now() > liveDeadline) throw error; await sleep(200); }
       }
-      await writeTerminalPrefs(page, token, { ghostty: false });
       const localCtx = { ...ctx, page, serverUrl, workspaceDir };
       for (const agent of ["codex", "gemini", "muse"]) {
         const name = `PasteEnd990-${agent}`;
@@ -162,13 +159,13 @@ process.stdin.on("data", (bytes) => {
         writeFileSync(stub, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(recorder)}\n`);
         chmodSync(stub, 0o755);
         names.push(name);
-        const row = await openAttachedTerminal(localCtx, page, cs, windowId, name, "xterm", ["--command", shellQuote(stub)]);
+        const row = await openAttachedTerminal(localCtx, page, cs, windowId, name, "ghostty", ["--command", shellQuote(stub)]);
         await ctx.pollFile(ready, 30_000);
         await sleep(500);
         if (row.agent !== agent) throw new Error(`${name}: derived ${JSON.stringify(row.agent)}, expected ${agent}`);
         const host = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
         if (agent === "codex") {
-          const { text, cleaned } = hostile("xterm-paste");
+          const { text, cleaned } = hostile("ghostty-native-paste");
           const clipboardError = await page.evaluate(async (value) => {
             await navigator.clipboard.writeText(value);
             return (await navigator.clipboard.readText()) === value ? null : "clipboard text differs";
@@ -183,7 +180,7 @@ process.stdin.on("data", (bytes) => {
           await page.keyboard.up("KeyV");
           await page.keyboard.up("Shift");
           await page.keyboard.up("Control");
-          record("xterm-paste", await recorded(file, offset, CLOSE), cleaned.replaceAll("\n", "\r"), false);
+          record("ghostty-native-paste", await recorded(file, offset, CLOSE), cleaned.replaceAll("\n", "\r"), false);
         }
         for (const method of ["cs-write", "rich-prompt"]) {
           const label = `${agent}-${method}`;

@@ -9,8 +9,7 @@
 //   throttle: the page's CPU slowed 20 times, so the probes land that far
 //             apart with no single long stall.
 //
-// It says nothing about WebKit, whose stall the desktop driver reads, or about
-// the xterm.js engine.
+// It says nothing about WebKit, whose stall the desktop driver reads.
 
 import assert from "node:assert/strict";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -51,7 +50,7 @@ export default {
     const failures = [];
     const readings = {};
     try {
-      await writeTerminalPrefs(page, token, { ghostty: true, secret_masking: false });
+      await writeTerminalPrefs(page, token, { secret_masking: false });
       assert.ok(await trackGhosttyTerminals(page), "the entry module names a ghostty-web chunk");
       await page.evaluate(installStreamProbe);
       const command = ["stty -echo", ...LEGS.flatMap(({ begin, end, count }) => [

@@ -17,11 +17,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { startRelay } from "../lib/flow-relay.mjs";
-import {
-  readTerminalPrefs,
-  restoreTerminalPrefs,
-  writeTerminalPrefs,
-} from "../lib/terminal-prefs.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
 // api/transport.ts, components/DisconnectOverlay.svelte,
 // components/terminalConnectionHealth.svelte.ts and state/store.svelte.ts.
@@ -179,7 +175,7 @@ function instrument({ bar, desktop, terminalName }) {
 
 // What the page shows of its connection now, with the page's record.
 async function observe(page) {
-  return page.evaluate(({ barSelector, stallNotes }) => {
+  return page.evaluate(({ barSelector, stallNotes, terminalSurface }) => {
     const box = (node) => {
       if (!node) return null;
       const rect = node.getBoundingClientRect();
@@ -202,6 +198,7 @@ async function observe(page) {
       }
     }
     const main = document.querySelector(".terminal-tab.active .terminal-main");
+    const terminalInput = main?.querySelector('.terminal-host[role="textbox"][aria-label="Terminal input"]');
     const pill = main?.querySelector("[data-terminal-connection-pill]") ?? null;
     const live = main?.querySelector(':scope > [role="status"]') ?? null;
     const overTerminal = main
@@ -224,7 +221,7 @@ async function observe(page) {
         background: pillStyle?.backgroundColor ?? null,
       },
       terminalMainBox: box(main),
-      terminalScreenBox: box(document.querySelector(".terminal-tab.active .xterm-screen")),
+      terminalScreenBox: box(document.querySelector(`.terminal-tab.active ${terminalSurface}`)),
       statusPillBox: box(statusPill),
       statusPillText: statusPill?.textContent?.replace(/\s+/g, " ").trim() ?? null,
       band: bar ? { box: box(bar) } : null,
@@ -235,11 +232,12 @@ async function observe(page) {
       } : null,
       viewport: { width: innerWidth, height: innerHeight },
       coverFocused: !!active?.closest('[data-cover="reconnect"]'),
-      terminalInputFocused: !!active?.matches(".terminal-tab.active .xterm-helper-textarea"),
-      terminalInputPresent: !!document.querySelector(".terminal-tab.active .xterm-helper-textarea"),
+      // Ghostty can focus its public host or its descendant input.
+      terminalInputFocused: !!active && !!terminalInput?.contains(active),
+      terminalInputPresent: !!terminalInput,
       record: JSON.parse(JSON.stringify(window.__c295 ?? null)),
     };
-  }, { barSelector: BAR_SELECTOR, stallNotes: STALL_NOTES });
+  }, { barSelector: BAR_SELECTOR, stallNotes: STALL_NOTES, terminalSurface: TERMINAL_SURFACES.ghostty });
 }
 
 function fail(label, seen, relay) {
@@ -472,7 +470,7 @@ async function browserPass(ctx, bar) {
   try {
     ({ page, windowId } = await openPass(ctx, relay, { name, bar, desktop: false, terminalName }));
     if (!bar) writeFileSync(join(ctx.workspaceDir, STATUS_FILE), "the status pill's placement target\n");
-    await terminal(["new", "--tab-name", terminalName]);
+    await openAttachedTerminal(ctx, page, terminal, windowId, terminalName, "ghostty");
     await waitFor(page, `${name} terminal attached`, (seen) =>
       seen.terminalInputPresent && seen.record.terminalFrameCount > 0, Date.now() + PAGE_GUARD_MS, relay);
     await focusTerminal(page, name, relay);
@@ -599,7 +597,7 @@ async function browserPass(ctx, bar) {
         Date.now() + RECOVERY_GUARD_MS, relay, silentTerminal(`${name} reopening`, relay));
       await hold(page, SETTLE_PERIOD_MS, silentTerminal(`${name} reopened with nothing typed`, relay));
     }
-    return { pass: name, relayFlows: relay.flows.length };
+    return { backend: "ghostty", pass: name, relayFlows: relay.flows.length };
   } catch (error) {
     error.smokeDetails = { pass: name, relay: relay.summary(), seen: page ? await observe(page).catch(() => null) : null };
     if (page) await ctx.shot(`${name}-check-failure`, page).catch(() => {});
@@ -658,18 +656,9 @@ export default {
   name: "the window's connection cover through a slow, silent and closed relay",
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("control socket not found for terminal setup");
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const originalPrefs = await readTerminalPrefs(ctx.page, token);
-    // The terminal input the check reads is xterm.js's textarea.
-    const changedPrefs = originalPrefs.ghostty !== false;
     const details = [];
-    try {
-      if (changedPrefs) await writeTerminalPrefs(ctx.page, token, { ghostty: false });
-      for (const bar of [true, false]) details.push(await browserPass(ctx, bar));
-      details.push(await remotePass(ctx));
-    } finally {
-      if (changedPrefs) await restoreTerminalPrefs(ctx, ctx.page, token, originalPrefs);
-    }
+    for (const bar of [true, false]) details.push(await browserPass(ctx, bar));
+    details.push(await remotePass(ctx));
     return details;
   },
 };

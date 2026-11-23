@@ -12,7 +12,6 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
@@ -156,14 +155,11 @@ async function terminalWindow(ctx, dir, engine, failures) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const page = await suiteWindow(ctx, engine);
   const results = [];
-  let originalPrefs = null;
   let originalStrip = null;
   let primary = null;
   try {
-    originalPrefs = await readTerminalPrefs(page, token);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
     await openTerminal(page, engine);
     const file = join(dir, `${engine}.bytes`);
     await startRecorder(page, file);
@@ -191,7 +187,7 @@ async function terminalWindow(ctx, dir, engine, failures) {
     console.log(`[smoke]   strip focus ${JSON.stringify(results)}`);
     const failedBeforeCleanup = primary !== null;
     try {
-      if (originalPrefs) {
+      if (originalStrip) {
         const host = await centreOf(page, `${TERMINAL} .terminal-host`).catch(() => null);
         if (host) await page.mouse.click(host.x, host.y);
         await closeEveryTerminal(page, "cleanup", token);
@@ -200,8 +196,6 @@ async function terminalWindow(ctx, dir, engine, failures) {
       if (primary) console.log(`[smoke]   terminal cleanup also failed: ${error?.message ?? error}`);
       else primary = error;
     }
-    try { if (originalPrefs) await writeTerminalPrefs(page, token, { ghostty: originalPrefs.ghostty }); }
-    catch (error) { if (primary) console.log(`[smoke]   terminal preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
     try { if (originalStrip?.on) await writePaneStripPreference(page, token, true); }
     catch (error) { if (primary) console.log(`[smoke]   strip preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
     await page.close().catch(() => {});
@@ -262,10 +256,15 @@ export default {
     const failures = [];
     try {
       const details = {
-        xterm: await terminalWindow(ctx, dir, "xterm", failures),
         ghostty: await terminalWindow(ctx, dir, "ghostty", failures),
         empty: await emptyWindow(ctx, failures),
       };
+      for (const [kind, required] of Object.entries({
+        ghostty: ["ghostty-control", "ghostty-escape", "ghostty-outside", "ghostty-launcher", "ghostty-left", "ghostty-split"],
+        empty: ["empty-escape", "empty-launcher", "empty-left"],
+      })) {
+        if (JSON.stringify(details[kind].map((arm) => arm.arm)) !== JSON.stringify(required)) failures.push(`${kind}: required arms incomplete`);
+      }
       console.log(`[smoke]   pane strip focus ${JSON.stringify(details)}`);
       if (failures.length) throw new Error(`${failures.length} arm(s) failed:\n  ${failures.join("\n  ")}`);
       return details;

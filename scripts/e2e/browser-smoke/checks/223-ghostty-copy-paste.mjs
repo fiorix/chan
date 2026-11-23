@@ -1,14 +1,13 @@
 // A long command in a ghostty terminal copies by every path as the one line
 // it is, and pasted into a second terminal it runs once as one command; a
 // pasted text that would end its own bracket reaches the program with the
-// bracket intact and its line ends as xterm.js sends them.
+// bracket intact and each LF or CRLF line end sent as CR.
 //
 // Engine: headless Chrome through puppeteer-core; the result names the
 // browser's version. It says nothing about WebKit, chan-desktop's native
 // clipboard or the PRIMARY selection.
 //
-// Terminal A (ghostty; terminal.ghostty written before and restored after)
-// clears itself, takes the prompt "$ " and has a command typed at it, not
+// Terminal A clears itself, takes the prompt "$ " and has a command typed at it, not
 // run: `echo WORD 223-ok-$((6*7)) >> DIR/ran`, where WORD is a path long
 // enough that the terminal's width cuts it in the middle, so the line
 // soft-wraps onto a second row and the wrap falls inside a word. The check
@@ -41,7 +40,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { startRecorder } from "../lib/pty-recorder.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const RUN = Date.now().toString(36);
 const SOURCE = "SmokeCopy223A";
@@ -210,14 +208,11 @@ export default {
     const env = { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
     const cs = (args, opts = {}) =>
       ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], { cwd: ctx.workspaceDir, env, timeout: 90_000, ...opts });
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const original = await readTerminalPrefs(page, token);
     const dir = mkdtempSync(join(tmpdir(), "chan-copy-223-"));
     const ran = join(dir, "ran");
     const failures = [];
-    const result = { browser: await ctx.browser.browser().version(), copies: {}, runs: [], pastes: [] };
+    const result = { backend: "ghostty", browser: await ctx.browser.browser().version(), copies: {}, runs: [], pastes: [] };
     try {
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: true });
       if (!(await trackGhosttyTerminals(page))) throw new Error("no entry module of the page names a ghostty-web chunk");
 
       // Terminal A: the long command at the prompt.
@@ -323,7 +318,6 @@ export default {
     } finally {
       await cs(["close", "--tab-name", TARGET]).catch(() => {});
       await cs(["close", "--tab-name", SOURCE]).catch(() => {});
-      if (original.ghostty !== true) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
       await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
       rmSync(dir, { recursive: true, force: true });
     }

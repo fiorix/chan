@@ -14,7 +14,6 @@
 
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { windowSessions } from "../lib/pane-strip.mjs";
 import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
@@ -280,13 +279,10 @@ export default {
     const results = [];
     const terminals = [];
     let page = await windowPage(ctx);
-    let originalPrefs = null;
     let primary = null;
     try {
       // WINDOW is unique to this page; its routed reply proves subscription.
       await ctx.waitWindowLive(WINDOW);
-      originalPrefs = await readTerminalPrefs(page, token);
-      await writeTerminalPrefs(page, token, { ghostty: true });
       const panes = await layOut(ctx, page, terminals);
       // The new page loads the window only once the old one is gone, so the
       // window comes back from its session rather than joining the open page.
@@ -323,8 +319,6 @@ export default {
       } catch (error) {
         console.log(`[smoke]   reading the window's sessions failed: ${error?.message ?? error}`);
       }
-      try { if (originalPrefs) await writeTerminalPrefs(page, token, { ghostty: originalPrefs.ghostty }); }
-      catch (error) { if (primary) console.log(`[smoke]   terminal preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
       await page.close().catch(() => {});
       const url = new URL("/api/session", ctx.serverUrl);
       url.search = "";

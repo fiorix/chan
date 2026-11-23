@@ -12,7 +12,6 @@ import { join } from "node:path";
 
 import { request } from "../lib/drafts.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB = "SmokePill170";
 const DIR = "pill170";
@@ -32,7 +31,6 @@ export default {
     );
     assert.ok(windowId, "the page's window id");
     await ctx.waitWindowLive(windowId);
-    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
     const shell = (args) => ctx.exec(ctx.chanBin, ["shell", ...args], { cwd: ctx.workspaceDir, env, timeout: 60_000 });
     const terminal = (args) => shell(["terminal", ...args]);
@@ -139,11 +137,9 @@ export default {
       return observed;
     }
 
-    const originalPrefs = await readTerminalPrefs(page, token);
     const observations = {};
     try {
-      await writeTerminalPrefs(page, token, { ghostty: false });
-      await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "xterm");
+      await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "ghostty");
       // The find box opens from the terminal's own menu.
       await read(`(() => {
         const tab = document.querySelector('.terminal-tab.active');
@@ -153,7 +149,11 @@ export default {
       })()`);
       await wait("[...document.querySelectorAll('.mbtn .mbtn-label')].some((label) => label.textContent.trim() === 'Find')", "the terminal menu's Find");
       await read("([...document.querySelectorAll('.mbtn')].find((button) => button.querySelector('.mbtn-label')?.textContent.trim() === 'Find').click(), true)");
-      await wait("Boolean(document.querySelector('.terminal-find input.find'))", "the terminal find box");
+      await wait(`(() => {
+        const input = document.querySelector('.terminal-find input.find');
+        const box = input?.getBoundingClientRect();
+        return input === document.activeElement && box?.width > 0 && box.height > 0;
+      })()`, "the visible terminal find box to hold focus");
       observations.findBox = await leg("find-box", ".terminal-find input.find", true);
 
       await shell(["open", DIR]);
@@ -166,7 +166,6 @@ export default {
       // Wait for the tab to leave before the context closes, so its session
       // is not respawned by a saved layout.
       await page.waitForFunction(() => !document.querySelector(".terminal-tab"), { timeout: 15_000 }).catch(() => {});
-      await restoreTerminalPrefs(ctx, page, token, originalPrefs);
     }
   },
 };

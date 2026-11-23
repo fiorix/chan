@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
-import { openAttachedTerminal } from "./terminal-attach.mjs";
+import { openAttachedTerminal, requireGhosttyBackend } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -159,11 +159,20 @@ export function installProgramStatusRecord() {
   });
 }
 
-export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] } = {}) {
+export function withProgramStatusTabs(ctx, slug, run, options) {
+  return withProgramStatusBackend(ctx, slug, "ghostty", run, options);
+}
+
+export function withProgramStatusBackend(ctx, slug, backend, run, options) {
+  requireGhosttyBackend(backend);
+  return runProgramStatusTabs(ctx, slug, backend, run, options);
+}
+
+async function runProgramStatusTabs(ctx, slug, backend, run, { subjectArgs = [] } = {}) {
   if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
   const page = ctx.page;
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-  const original = await readTerminalPrefs(page, token);
+  const { ghostty: _legacy, ...original } = await readTerminalPrefs(page, token);
   const windowId = new URL(await page.url()).searchParams.get("w");
   assert.ok(windowId, "browser window id");
   await page.evaluateOnNewDocument(installProgramStatusRecord);
@@ -206,111 +215,102 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
   };
   const failures = [];
   try {
-    for (const backend of ["xterm", "ghostty"]) {
-      if (backend === "ghostty") {
-        // Preferences refresh in the live page; a reload can restore closed tabs from a pending save.
-        const stale = await page.evaluate((names) => [...document.querySelectorAll('.tab > [role="tab"]')]
-          .map((node) => node.querySelector(".path")?.textContent?.trim())
-          .filter((name) => names.includes(name)), [`Status${slug}xtermS`, `Status${slug}xtermF`]);
-        assert.deepEqual(stale, [], "xterm tabs closed before changing backend");
-      }
-      const subject = `Status${slug}${backend}S`;
-      const front = `Status${slug}${backend}F`;
-      await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", program_status: true });
-      let subjectRow;
-      let frontRow;
-      let openedSubject = false;
-      let openedFront = false;
-      try {
-        subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, backend, subjectArgs);
-        openedSubject = true;
-        await page.evaluate((name) => {
-          window.__programStatusTrace.subject = name;
-          window.__programStatusTrace.marks.length = 0;
-          window.__programStatusTrace.capture();
-        }, subject);
-        frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
-        openedFront = true;
-        const toolkit = {
-          backend, page, subject, front, subjectRow, frontRow, cs, windowId,
-          async sendReport(body) {
-            await cs(["write", "--tab-name", subject, statusPrintf(body)]);
-          },
-          async sendReportBel(body) {
-            await cs(["write", "--tab-name", subject, statusPrintfBel(body)]);
-          },
-          async sendRaw(format) {
-            await cs(["write", "--tab-name", subject, statusPrintfRaw(format)]);
-          },
-          async sendOutput(value) {
-            assert.match(value, /^[a-zA-Z0-9_]+$/, "fixed output marker");
-            await cs(["write", "--tab-name", subject, `printf '%s\\n' '${value}'\n`]);
-          },
-          async read() {
-            const listed = await cs(["list", "--json"]);
-            const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
-            const row = rows.find((entry) => entry.session_id === subjectRow.session_id);
-            assert.ok(row, `subject ${subjectRow.session_id} remains listed`);
-            const plain = await cs(["list"]);
-            const pageState = await page.evaluate(() => {
-              const trace = window.__programStatusTrace;
-              trace.capture();
-              return { mark: trace.readMark(), marks: trace.marks, frames: trace.frames, frameTimes: trace.frameTimes };
-            });
-            return { row, programCell: parseProgramCell(plain.stdout, subjectRow.session_id), ...pageState };
-          },
-          async wait(label, predicate, timeoutMs = 15_000) {
-            const deadline = Date.now() + timeoutMs;
-            let latest;
-            do {
-              latest = await this.read();
-              if (predicate(latest)) {
-                await ctx.shot(`${backend}-${label}`, page);
-                return latest;
-              }
-              await sleep(200);
-            } while (Date.now() < deadline);
-            throw new Error(`${backend} ${label} absent; last=${JSON.stringify(latest)}`);
-          },
-          async focus(name) {
-            const tabs = await page.$$('.tab > [role="tab"]');
-            for (const tab of tabs) {
-              if (await tab.$eval(".path", (node) => node.textContent?.trim()).catch(() => null) === name) {
-                await tab.click();
-                await page.waitForFunction((target) => [...document.querySelectorAll('.tab > [role="tab"]')].some(
-                  (node) => node.querySelector(".path")?.textContent?.trim() === target &&
-                    node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, name);
-                return;
-              }
+    const subject = `Status${slug}${backend}S`;
+    const front = `Status${slug}${backend}F`;
+    await writeTerminalPrefs(page, token, { program_status: true });
+    let subjectRow;
+    let frontRow;
+    let openedSubject = false;
+    let openedFront = false;
+    try {
+      subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, backend, subjectArgs);
+      openedSubject = true;
+      await page.evaluate((name) => {
+        window.__programStatusTrace.subject = name;
+        window.__programStatusTrace.marks.length = 0;
+        window.__programStatusTrace.capture();
+      }, subject);
+      frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
+      openedFront = true;
+      const toolkit = {
+        backend, page, subject, front, subjectRow, frontRow, cs, windowId,
+        async sendReport(body) {
+          await cs(["write", "--tab-name", subject, statusPrintf(body)]);
+        },
+        async sendReportBel(body) {
+          await cs(["write", "--tab-name", subject, statusPrintfBel(body)]);
+        },
+        async sendRaw(format) {
+          await cs(["write", "--tab-name", subject, statusPrintfRaw(format)]);
+        },
+        async sendOutput(value) {
+          assert.match(value, /^[a-zA-Z0-9_]+$/, "fixed output marker");
+          await cs(["write", "--tab-name", subject, `printf '%s\\n' '${value}'\n`]);
+        },
+        async read() {
+          const listed = await cs(["list", "--json"]);
+          const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
+          const row = rows.find((entry) => entry.session_id === subjectRow.session_id);
+          assert.ok(row, `subject ${subjectRow.session_id} remains listed`);
+          const plain = await cs(["list"]);
+          const pageState = await page.evaluate(() => {
+            const trace = window.__programStatusTrace;
+            trace.capture();
+            return { mark: trace.readMark(), marks: trace.marks, frames: trace.frames, frameTimes: trace.frameTimes };
+          });
+          return { row, programCell: parseProgramCell(plain.stdout, subjectRow.session_id), ...pageState };
+        },
+        async wait(label, predicate, timeoutMs = 15_000) {
+          const deadline = Date.now() + timeoutMs;
+          let latest;
+          do {
+            latest = await this.read();
+            if (predicate(latest)) {
+              await ctx.shot(`${backend}-${label}`, page);
+              return latest;
             }
-            throw new Error(`tab ${name} missing`);
-          },
-          focusSubject() { return this.focus(subject); },
-          focusFront() { return this.focus(front); },
-        };
-        await toolkit.focusFront();
-        await run(toolkit);
-      } catch (error) {
-        failures.push(`${backend}: ${error.stack ?? error}`);
-        await ctx.shot(`${backend}-failure`, page).catch(() => {});
-      } finally {
-        // A busy page can answer after the pane command's five-second reply limit.
-        if (openedFront) {
-          try { await closeTab(frontRow, front); }
-          catch (error) { failures.push(`${backend} cleanup ${front}: ${error.stack ?? error}`); }
-        }
-        if (openedSubject) {
-          try { await closeTab(subjectRow, subject); }
-          catch (error) { failures.push(`${backend} cleanup ${subject}: ${error.stack ?? error}`); }
-        }
+            await sleep(200);
+          } while (Date.now() < deadline);
+          throw new Error(`${backend} ${label} absent; last=${JSON.stringify(latest)}`);
+        },
+        async focus(name) {
+          const tabs = await page.$$('.tab > [role="tab"]');
+          for (const tab of tabs) {
+            if (await tab.$eval(".path", (node) => node.textContent?.trim()).catch(() => null) === name) {
+              await tab.click();
+              await page.waitForFunction((target) => [...document.querySelectorAll('.tab > [role="tab"]')].some(
+                (node) => node.querySelector(".path")?.textContent?.trim() === target &&
+                  node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, name);
+              return;
+            }
+          }
+          throw new Error(`tab ${name} missing`);
+        },
+        focusSubject() { return this.focus(subject); },
+        focusFront() { return this.focus(front); },
+      };
+      await toolkit.focusFront();
+      await run(toolkit);
+    } catch (error) {
+      failures.push(`${backend}: ${error.stack ?? error}`);
+      await ctx.shot(`${backend}-failure`, page).catch(() => {});
+    } finally {
+      // A busy page can answer after the pane command's five-second reply limit.
+      if (openedFront) {
+        try { await closeTab(frontRow, front); }
+        catch (error) { failures.push(`${backend} cleanup ${front}: ${error.stack ?? error}`); }
+      }
+      if (openedSubject) {
+        try { await closeTab(subjectRow, subject); }
+        catch (error) { failures.push(`${backend} cleanup ${subject}: ${error.stack ?? error}`); }
       }
     }
   } finally {
-    // The final ghostty leg may already have restored the original value; a no-op PATCH
-    // need not wait for a second workspace refresh after a long status flood.
-    if (isDeepStrictEqual(await readTerminalPrefs(page, token), original)) {
+    // A check may already restore the original values; a no-op PATCH need
+    // not wait for another workspace refresh after a long status flood.
+    const { ghostty: _ignored, ...current } = await readTerminalPrefs(page, token);
+    if (isDeepStrictEqual(current, original)) {
       await assertTerminalPrefs(ctx, {
-        ghostty: original.ghostty,
         mouse_capture: original.mouse_capture,
         secret_masking: original.secret_masking,
       });

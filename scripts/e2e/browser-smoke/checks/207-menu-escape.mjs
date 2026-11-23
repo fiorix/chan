@@ -1,9 +1,9 @@
 // Escape over a terminal's menu, and an editor's, in real Chrome with the
 // browser's own keys and right-click.
 //
-// The terminal keeps the keyboard while its menu is open, and each engine
-// takes Escape at the focused element and sends ESC to the PTY. On xterm.js
-// and on ghostty, in a workspace window and in a standalone terminal window,
+// The terminal keeps the keyboard while its menu is open. Ghostty takes
+// Escape at the focused element and sends ESC to the PTY. In a workspace
+// window and in a standalone terminal window,
 // the body menu (a right-click in the terminal) and, in the workspace window,
 // the tab's menu from the strip are opened over a shell turned into a raw
 // recorder of every byte the PTY receives. Escape must close the menu and
@@ -18,9 +18,8 @@
 //
 // The workspace terminal arms and the editor arms each run in a window of
 // their own on the suite's server, and the standalone arms in the terminal
-// window a throwaway `chan devserver` mints. The preferences changed on the
-// suite's server are restored to what the check found, and the terminals it
-// opened there are closed.
+// window a throwaway `chan devserver` mints. The pane-strip preference is
+// restored to what the check found, and the terminals it opened are closed.
 
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,7 +31,6 @@ import {
   readPaneStripPreference,
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
 import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
@@ -81,13 +79,10 @@ const OPEN = {
 async function terminalArm(page, file, label, open) {
   const offset = statSync(file).size;
   let opened = null;
-  let engine = null;
   if (open) {
     await open(page);
     await page.waitForSelector(TERMINAL_MENU, { visible: true, timeout: 10_000 });
     opened = await focusOf(page);
-    // The body menu names the engine that draws this terminal.
-    engine = await page.$eval(`${TERMINAL_MENU} .terminal-backend-label`, (el) => el.getAttribute("data-terminal-backend")).catch(() => null);
   }
   await page.keyboard.press("Escape");
   const closed = open
@@ -101,7 +96,7 @@ async function terminalArm(page, file, label, open) {
     await sleep(200);
   }
   await page.keyboard.type("x");
-  return { arm: label, engine, opened, closed, focus, pty: await recordedSince(label, file, offset, TYPED) };
+  return { arm: label, opened, closed, focus, pty: await recordedSince(label, file, offset, TYPED) };
 }
 
 /// How many terminals the window mounts, once a reload's restored terminals
@@ -149,7 +144,6 @@ async function terminalArms(page, dir, prefix, engine, menus, failures) {
   for (const menu of menus) {
     const result = await terminalArm(page, file, `${prefix}-${engine}-${menu}`, OPEN[menu]);
     results.push(result);
-    if (menu === "body" && result.engine !== engine) failures.push(`${result.arm}: the body menu names the engine ${result.engine}, not ${engine}`);
     if (result.opened !== "terminal") failures.push(`${result.arm}: the menu opened with focus on ${result.opened}, not the terminal`);
     if (!result.closed) failures.push(`${result.arm}: Escape left the menu open`);
     if (result.focus !== "terminal") failures.push(`${result.arm}: after Escape focus is on ${result.focus}`);
@@ -223,21 +217,17 @@ async function suiteWindow(ctx, name) {
   return { page, windowId };
 }
 
-/// The suite server's tenant, with the strip drawn: both engines' terminal
-/// arms in one window.
+/// The suite server's tenant, with the strip drawn: Ghostty's terminal arms.
 async function workspaceTerminals(ctx, dir, failures) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const { page } = await suiteWindow(ctx, "terminal");
   const results = [];
-  let prefs = null;
   let strip = null;
   let primary = null;
   try {
-    prefs = await readTerminalPrefs(page, token);
     strip = await readPaneStripPreference(page, token);
     if (strip.on) await writePaneStripPreference(page, token, false);
-    for (const engine of ["xterm", "ghostty"]) {
-      await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
+    for (const engine of ["ghostty"]) {
       await openTerminal(page, engine);
       results.push(...await terminalArms(page, dir, "workspace", engine, ["body", "strip"], failures));
     }
@@ -251,7 +241,6 @@ async function workspaceTerminals(ctx, dir, failures) {
     console.log(`[smoke]   workspace terminals ${JSON.stringify(results)}`);
     await cleanUp(primary, [
       () => closeEveryTerminal(page, "cleanup", token),
-      async () => { if (prefs) await writeTerminalPrefs(page, token, { ghostty: prefs.ghostty }); },
       async () => { if (strip?.on) await writePaneStripPreference(page, token, true); },
       () => page.close(),
     ]);
@@ -315,35 +304,7 @@ function terminalWindowUrl(origin, row) {
   return url.toString();
 }
 
-/// Set the standalone tenant's engine through its own config route and read
-/// it back.
-async function writeTenantEngine(page, token, ghostty) {
-  await page.evaluate(async ({ authToken, value }) => {
-    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
-    const headers = { "content-type": "application/json", authorization: `Bearer ${authToken}` };
-    const got = await fetch(`${prefix}/api/config`, { headers });
-    if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
-    const config = await got.json();
-    const response = await fetch(`${prefix}/api/config`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({
-        expected_revision: config.revision,
-        preferences: { terminal: { ...config.preferences.terminal, ghostty: value } },
-      }),
-    });
-    if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status} ${await response.text()}`);
-  }, { authToken: token, value: ghostty });
-  await poll(`the standalone tenant's terminal.ghostty=${ghostty}`, () => page.evaluate(async ({ authToken, value }) => {
-    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
-    const response = await fetch(`${prefix}/api/config`, { headers: { authorization: `Bearer ${authToken}` } });
-    if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
-    return (await response.json()).preferences.terminal?.ghostty === value;
-  }, { authToken: token, value: ghostty }));
-}
-
-/// A throwaway devserver's terminal window: the body menu on each engine,
-/// each in a terminal opened after the window reloads on that engine.
+/// A throwaway devserver's terminal window: Ghostty's body menu and control.
 async function standaloneTerminals(ctx, dir, failures) {
   let chanHome = null;
   let devserver = null;
@@ -362,10 +323,7 @@ async function standaloneTerminals(ctx, dir, failures) {
     const row = await poll("the minted terminal window", async () =>
       (await fetchWindows(origin, token)).find((r) => r.kind === "terminal" && r.token) ?? null);
     const address = terminalWindowUrl(origin, row);
-    for (const engine of ["xterm", "ghostty"]) {
-      await goto(page, address);
-      await page.waitForSelector(".pane .terminal-tab", { timeout: 30_000 });
-      await writeTenantEngine(page, row.token, engine === "ghostty");
+    for (const engine of ["ghostty"]) {
       await goto(page, address);
       await page.waitForSelector(".pane .terminal-tab", { timeout: 30_000 });
       await openTerminal(page, engine);
@@ -396,6 +354,13 @@ export default {
         editor: await workspaceEditor(ctx, failures),
         standalone: await standaloneTerminals(ctx, dir, failures),
       };
+      for (const [kind, required] of Object.entries({
+        workspace: ["workspace-ghostty-control", "workspace-ghostty-body", "workspace-ghostty-strip"],
+        editor: ["editor-control", "editor-body", "editor-strip"],
+        standalone: ["standalone-ghostty-control", "standalone-ghostty-body"],
+      })) {
+        if (JSON.stringify(details[kind].map((arm) => arm.arm)) !== JSON.stringify(required)) failures.push(`${kind}: required arms incomplete`);
+      }
       if (failures.length) throw new Error(`${failures.length} arm(s) failed:\n  ${failures.join("\n  ")}`);
       return details;
     } finally {
