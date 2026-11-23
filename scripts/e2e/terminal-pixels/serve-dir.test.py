@@ -19,15 +19,12 @@ SPEC.loader.exec_module(pixels)
 
 
 class ServeDirectoryTest(unittest.TestCase):
-    def test_assembles_with_only_compiler_and_widget_build_outputs(self) -> None:
-        # Only the compilers are stubbed. The driver's asset checks, symlinks,
+    def test_assembles_with_only_widget_build_outputs(self) -> None:
+        # Only the widget build is stubbed. The driver's asset checks, symlinks,
         # font injection and emitted-file checks execute over a real tree.
         with tempfile.TemporaryDirectory() as temp:
             work = Path(temp)
             web = work / "web"
-            tsc = web / "node_modules/.bin/tsc"
-            tsc.parent.mkdir(parents=True)
-            tsc.touch()
             app = web / "packages/workspace-app"
             (app / "src/fonts").mkdir(parents=True)
             fonts_css = app / "src/fonts.css"
@@ -36,12 +33,9 @@ class ServeDirectoryTest(unittest.TestCase):
             served.mkdir()
 
             def compile_module(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if argv[0] == "node":
-                    self.assertEqual(argv[1], str(pixels.BUILD_GHOSTTY))
-                    output = Path(argv[2]) / "ghostty-web.js"
-                else:
-                    self.assertEqual(argv[0], str(tsc))
-                    output = Path(argv[argv.index("--outDir") + 1]) / "ghosttyCompat.js"
+                self.assertEqual(argv[0], "node")
+                self.assertEqual(argv[1], str(pixels.BUILD_GHOSTTY))
+                output = Path(argv[2]) / "ghostty-web.js"
                 output.parent.mkdir(parents=True)
                 output.write_text("export {};\n")
                 return subprocess.CompletedProcess(argv, 0, "", "")
@@ -55,14 +49,14 @@ class ServeDirectoryTest(unittest.TestCase):
             ):
                 pixels.build_serve_dir(served)
 
-            self.assertEqual(builds.call_count, 2)
+            self.assertEqual(builds.call_count, 1)
             self.assertEqual([p.name for p in (served / "vendor").iterdir()], ["ghostty-web-ng"])
             self.assertTrue((served / "harness.mjs").is_symlink())
             self.assertEqual((served / "fonts").resolve(), app / "src/fonts")
             page = (served / "index.html").read_text()
             self.assertIn('@font-face { font-family: "fixture"; }', page)
             self.assertNotIn("<!--CHAN_FONT_FACE-->", page)
-            self.assertTrue((served / "product/ghosttyCompat.js").is_file())
+            self.assertFalse((served / "product").exists())
 
 
 if __name__ == "__main__":

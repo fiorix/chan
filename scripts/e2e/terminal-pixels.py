@@ -68,7 +68,6 @@ WORKSPACE_APP = WEB / "packages/workspace-app"
 FONT_MODULE = WORKSPACE_APP / "src/terminal/font.ts"
 FONTS_CSS = WORKSPACE_APP / "src/fonts.css"
 TERMINAL_TAB = WORKSPACE_APP / "src/components/TerminalTab.svelte"
-GHOSTTY_COMPAT = WORKSPACE_APP / "src/terminal/ghosttyCompat.ts"
 PAGE_DIR = pathlib.Path(__file__).resolve().parent / "terminal-pixels"
 BUILD_GHOSTTY = PAGE_DIR / "build-ghostty.mjs"
 
@@ -157,7 +156,7 @@ def dark_palette() -> dict[str, str]:
 
 
 def build_serve_dir(root: pathlib.Path) -> None:
-    """Assemble the served tree: the page, the product modules, the vendors.
+    """Assemble the served tree: the page, fonts and bundled widget.
 
     Symlinks rather than copies, and one link per package rather than one for
     node_modules, so a stray path in the page cannot serve the whole
@@ -201,37 +200,6 @@ def build_serve_dir(root: pathlib.Path) -> None:
             f"{result.stdout}\n{result.stderr}"
         )
 
-    # The ghostty adapters are the product's own TypeScript, compiled rather
-    # than reimplemented: this harness exists to measure what TerminalTab
-    # paints, and a second copy of the custom-glyph and scrollbar code would
-    # measure the copy.
-    tsc = WEB / "node_modules/.bin/tsc"
-    if not tsc.exists():
-        raise SystemExit(f"missing {tsc}; run `npm install` under web/")
-    result = subprocess.run(
-        [
-            str(tsc),
-            str(GHOSTTY_COMPAT),
-            "--outDir",
-            str(root / "product"),
-            "--target",
-            "es2022",
-            "--module",
-            "esnext",
-            "--moduleResolution",
-            "bundler",
-            "--lib",
-            "es2022,dom",
-            "--skipLibCheck",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=WORKSPACE_APP,
-    )
-    if not (root / "product/ghosttyCompat.js").exists():
-        raise SystemExit(
-            f"tsc emitted no ghosttyCompat.js\n{result.stdout}\n{result.stderr}"
-        )
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -266,13 +234,14 @@ def load_gui():
     try:
         import gi
 
+        gi.require_version("Gdk", "3.0")
         gi.require_version("Gtk", "3.0")
         gi.require_version("WebKit2", "4.1")
-        from gi.repository import GLib, Gtk, WebKit2
+        from gi.repository import Gdk, GLib, Gtk, WebKit2
 
         if not Gtk.init_check(None)[0]:
             raise RuntimeError("no display; try xvfb-run")
-        return GLib, Gtk, WebKit2
+        return Gdk, GLib, Gtk, WebKit2
     except (ImportError, ValueError, RuntimeError) as exc:
         print(f"SKIP: WebKitGTK is unavailable ({exc})", file=sys.stderr)
         print("SKIP: a skipped check is not a pass", file=sys.stderr)
@@ -281,8 +250,9 @@ def load_gui():
 
 def render(gui, url: str, png: pathlib.Path):
     """Paint one scenario in a real webview; return (surface, report)."""
-    GLib, Gtk, WebKit2 = gui
+    Gdk, GLib, Gtk, WebKit2 = gui
     window = Gtk.Window()
+    window.set_decorated(False)
     window.set_default_size(HOST_W, HOST_H)
     view = WebKit2.WebView()
     # A page that throws before it reports leaves only a timeout to look at,
@@ -318,6 +288,22 @@ def render(gui, url: str, png: pathlib.Path):
         if title.startswith("chan-pixels-error "):
             result["error"] = title[len("chan-pixels-error ") :]
             Gtk.main_quit()
+        elif title.startswith("chan-pixels-pointer "):
+            try:
+                target = json.loads(title[len("chan-pixels-pointer ") :])
+                # The undecorated window contains only the view. GDK's native
+                # warp reaches WebKit through the window system as real input.
+                origin = window.get_window().get_origin()
+                display = Gdk.Display.get_default()
+                pointer = display.get_default_seat().get_pointer()
+                pointer.warp(
+                    display.get_default_screen(),
+                    origin[-2] + round(target["x"]),
+                    origin[-1] + round(target["y"]),
+                )
+            except Exception as exc:  # noqa: BLE001 - GLib callbacks swallow errors
+                result["error"] = f"native pointer move failed: {exc}"
+                Gtk.main_quit()
         elif title.startswith("chan-pixels "):
             result["report"] = json.loads(title[len("chan-pixels ") :])
             # One settle beat after the page reports ready, so the frame it

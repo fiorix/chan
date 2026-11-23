@@ -55,7 +55,6 @@ const WEB = path.join(REPO, "web");
 const WORKSPACE_APP = path.join(WEB, "packages/workspace-app");
 const FONT_MODULE = path.join(WORKSPACE_APP, "src/terminal/font.ts");
 const FONTS_CSS = path.join(WORKSPACE_APP, "src/fonts.css");
-const GHOSTTY_COMPAT = path.join(WORKSPACE_APP, "src/terminal/ghosttyCompat.ts");
 const PAGE_DIR = path.join(HERE, "terminal-pixels");
 
 // The host element's size in index.html. The viewport is driven to exactly
@@ -112,43 +111,6 @@ function fontFaceBlock() {
   return `<style>\n${match[0]}\n</style>`;
 }
 
-/** Compile the product's own ghostty adapters into `outDir`.
- *
- * Compiled rather than reimplemented: this harness exists to measure what
- * TerminalTab paints, and a second copy of the custom-glyph and scrollbar
- * code would measure the copy.
- */
-async function buildProductModules(outDir) {
-  // The package's own entry point rather than the .bin shim: the shim is a
-  // .cmd on Windows, and spawning one needs a shell, which then has to escape
-  // paths that contain spaces.
-  const tsc = path.join(WEB, "node_modules/typescript/bin/tsc");
-  if (!fs.existsSync(tsc)) {
-    throw new Error(`missing ${tsc}; run \`npm install\` under web/`);
-  }
-  const child = spawn(
-    process.execPath,
-    [
-      tsc,
-      GHOSTTY_COMPAT,
-      "--outDir", outDir,
-      "--target", "es2022",
-      "--module", "esnext",
-      "--moduleResolution", "bundler",
-      "--lib", "es2022,dom",
-      "--skipLibCheck",
-    ],
-    { cwd: WORKSPACE_APP, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  child.stdout.on("data", (d) => (output += d));
-  child.stderr.on("data", (d) => (output += d));
-  await once(child, "close");
-  if (!fs.existsSync(path.join(outDir, "ghosttyCompat.js"))) {
-    throw new Error(`tsc emitted no ghosttyCompat.js\n${output}`);
-  }
-}
-
 // WebAssembly.instantiateStreaming rejects a wasm served as octet-stream, and
 // a module script served as one never executes.
 const CONTENT_TYPES = {
@@ -160,20 +122,19 @@ const CONTENT_TYPES = {
   ".woff2": "font/woff2",
 };
 
-/** Serve the page, the product modules and the vendors on loopback.
+/** Serve the page, fonts and bundled widget on loopback.
  *
  * One mount per package rather than one for node_modules, so a stray path in
  * the page cannot serve the whole dependency tree over the socket. Mounts
  * rather than the Python driver's symlink tree: creating a symlink on Windows
  * needs Developer Mode or an elevated process, and the harness must not.
  */
-async function serve(productDir, ghosttyDir, page) {
+async function serve(ghosttyDir, page) {
   const mounts = [
     ["/fonts/", path.join(WORKSPACE_APP, "src/fonts")],
     // The widget is bundled into the run directory, not linked: its package
     // holds TypeScript sources only (see terminal-pixels/build-ghostty.mjs).
     ["/vendor/ghostty-web-ng/", ghosttyDir],
-    ["/product/", productDir],
   ];
   for (const [, root] of mounts) {
     if (!fs.existsSync(root)) {
@@ -500,11 +461,17 @@ async function render(cdp, url, png) {
   await cdp.send("Page.navigate", { url });
 
   let report = null;
+  let pointerRequest = null;
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     const title = await cdp.evaluate("document.title").catch(() => "");
     if (title && title.startsWith("chan-pixels-error ")) {
       throw new Error(`the page failed: ${title.slice("chan-pixels-error ".length)}`);
+    }
+    if (title?.startsWith("chan-pixels-pointer ") && title !== pointerRequest) {
+      pointerRequest = title;
+      const { x, y } = JSON.parse(title.slice("chan-pixels-pointer ".length));
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
     }
     if (title && title.startsWith("chan-pixels ")) {
       report = JSON.parse(title.slice("chan-pixels ".length));
@@ -916,14 +883,12 @@ async function main() {
   let child = null;
   let server = null;
   try {
-    const productDir = path.join(work, "product");
-    await buildProductModules(productDir);
     const ghosttyDir = path.join(work, "ghostty-web-ng");
     await buildGhostty(ghosttyDir);
     const page = fs
       .readFileSync(path.join(PAGE_DIR, "index.html"), "utf8")
       .replace("<!--CHAN_FONT_FACE-->", fontFaceBlock());
-    server = await serve(productDir, ghosttyDir, page);
+    server = await serve(ghosttyDir, page);
 
     const launched = await launch(host, path.join(work, "profile"));
     child = launched.child;
@@ -969,7 +934,7 @@ async function main() {
     try {
       // Created by this run and positively identified: a mkdtemp path that
       // still holds the modules it was built with.
-      if (fs.existsSync(path.join(work, "product/ghosttyCompat.js"))) {
+      if (fs.existsSync(path.join(work, "ghostty-web-ng/ghostty-web.js"))) {
         fs.rmSync(work, { recursive: true, force: true, maxRetries: 5 });
       }
     } catch (err) {
