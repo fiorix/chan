@@ -50,7 +50,7 @@ export default {
     const failures = [];
     const readings = {};
     try {
-      await writeTerminalPrefs(page, token, { ghostty: true, secret_masking: false });
+      await writeTerminalPrefs(page, token, { secret_masking: false });
       assert.ok(await trackGhosttyTerminals(page), "the entry module names a ghostty-web chunk");
       await page.evaluate(installStreamProbe);
       const command = ["stty -echo", ...LEGS.flatMap(({ begin, end, count }) => [

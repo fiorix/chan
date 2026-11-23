@@ -130,7 +130,7 @@ export default {
     const original = await readTerminalPrefs(page, token);
     let second = null;
     try {
-      await writeTerminalPrefs(page, token, { ghostty: true, secret_masking: false });
+      await writeTerminalPrefs(page, token, { secret_masking: false });
       assert.ok(await trackGhosttyTerminals(page), "the entry module names a ghostty-web chunk");
       await page.evaluate(installStreamProbe);
       const shell = `stty -echo; export PS1='${PROMPT} '; unset PROMPT_COMMAND; exec /bin/bash --noprofile --norc -i`;

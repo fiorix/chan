@@ -141,7 +141,7 @@ export default {
         });
         let opened = false;
         try {
-          await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", mouse_capture: true });
+          await writeTerminalPrefs(page, token, { mouse_capture: true });
           const spawnArgs = ["--command", "stty -opost -echo && " + fixture.command,
             ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
           // Child-process failures include argv. The fixture's private control
@@ -285,7 +285,7 @@ export default {
         if (original === null) localStorage.removeItem("chan:terminal-webgl");
         else localStorage.setItem("chan:terminal-webgl", original);
       }, rendererOverride);
-      await writeTerminalPrefs(page, token, { ghostty: original.ghostty, mouse_capture: original.mouse_capture });
+      await writeTerminalPrefs(page, token, { mouse_capture: original.mouse_capture });
     }
     for (const [backend, result] of Object.entries(readings)) {
       console.log(`[smoke]   ${backend}: history=${result.history ? !result.history.bottom : "unavailable"}, output-kept-history=${result.afterOutput ? !result.afterOutput.bottom : "unavailable"}, input-at-bottom=${result.beforeEcho?.bottom ?? "unavailable"}, cursor=${result.afterEcho?.cursorX ?? "unavailable"}, reports=${result.reports?.length ?? 0}; evidence 229-${backend}.json`);

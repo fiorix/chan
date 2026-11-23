@@ -258,7 +258,7 @@ export default {
     const details = {};
     let runError = null;
     try {
-      await patchTerminalConfig({ ghostty: false, mouse_capture: true });
+      await patchTerminalConfig({ mouse_capture: true });
       await assertTerminalPrefs(ctx, { ghostty: false, mouse_capture: true });
       // ---- Leg 1: mouse capture on ----
       await openTerminal(TAB_ON);

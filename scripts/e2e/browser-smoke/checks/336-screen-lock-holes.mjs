@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { showFiles } from "../lib/files.mjs";
 import { closeActiveTab, closeEveryTerminal, closeExtraPanes, dispatchCommand, readPaneStrip, selectLauncherCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { readTerminalPrefs, restoreTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { LOCK, PATH_PROMPT, checkWindowId, inputValue, keyboardSurface, settle, until } from "../lib/keyboard-layers.mjs";
 
 const PIN = ".screensaver-pin";
@@ -185,9 +185,7 @@ export default {
     const cs = (args) => shell(["terminal", ...args]);
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
-    // The terminal legs run on ghostty, whatever the server was left on.
     const backend = "ghostty";
-    if (!original.ghostty) await writeTerminalPrefs(page, token, { ghostty: true });
     const directory = mkdtempSync(join(ctx.workspaceDir, ".screenlock-336-"));
     const archive = join(directory, "archive.tar.zst");
     writeFileSync(archive, "not a real archive");
