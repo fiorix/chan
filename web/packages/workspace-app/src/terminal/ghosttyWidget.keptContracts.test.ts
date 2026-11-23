@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
 const COLS = 40;
@@ -40,20 +41,19 @@ async function openTerminal() {
   const canvas = host.querySelector("canvas");
   if (!canvas || !term.renderer) throw new Error("the widget did not open its canvas");
   const metrics = term.renderer.getMetrics();
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, COLS * metrics.width, ROWS * metrics.height));
+  modelPointerCapture(canvas);
   return {
     term,
-    // A press and its click on a cell, as a pointer makes them.
+    // A press and its click on a cell, as a pointer makes them: the
+    // captured press and release, the implicit capture loss after the
+    // release, then the click.
     click(column: number, row: number) {
-      const rect = canvas.getBoundingClientRect();
-      const at = {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        clientX: rect.left + (column + 0.5) * metrics.width,
-        clientY: rect.top + (row + 0.5) * metrics.height,
-      };
-      canvas.dispatchEvent(new MouseEvent("mousedown", at));
-      canvas.dispatchEvent(new MouseEvent("click", { ...at, detail: 1 }));
+      const at = { clientX: (column + 0.5) * metrics.width, clientY: (row + 0.5) * metrics.height };
+      mousePointer(canvas, "pointerdown", at);
+      mousePointer(canvas, "pointerup", at);
+      mousePointer(canvas, "lostpointercapture", at);
+      canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 1, ...at }));
     },
   };
 }

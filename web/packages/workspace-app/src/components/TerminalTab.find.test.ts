@@ -56,6 +56,7 @@ import { allCommands } from "../state/commands";
 import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
+import { mousePointer } from "../__tests__/pointer";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
@@ -233,6 +234,7 @@ const ghostty = vi.hoisted(() => ({
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("@chan/ghostty-web-ng");
+  const { modelPointerCapture } = await import("../__tests__/pointer");
   class Terminal {
     cols = 80;
     rows = 24;
@@ -263,6 +265,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
         scrollbackLimit: this.options.scrollback,
       });
+      modelPointerCapture(this.canvas);
       this.selectionManager = new SelectionManager(
         this as never,
         this.renderer as never,
@@ -377,7 +380,6 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 
 globalThis.ResizeObserver = TestResizeObserver as any;
@@ -1497,7 +1499,7 @@ describe("terminal find on the ghostty backend", () => {
   }
 
   /// The user's drag over the terminal from one screen cell to another,
-  /// handled by ghostty-web's own mouse code; returns the clipboard writes
+  /// handled by ghostty-web's own pointer code; returns the clipboard writes
   /// its release made. The canvas has the grid's size, 8 by 16 pixels a cell.
   function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }) {
     const writeText = vi.fn(() => Promise.resolve());
@@ -1505,9 +1507,9 @@ describe("terminal find on the ghostty backend", () => {
     vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
     const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
     try {
-      term.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
-      term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(to) }));
-      term.canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+      mousePointer(term.canvas, "pointerdown", at(from));
+      mousePointer(term.canvas, "pointermove", at(to));
+      mousePointer(term.canvas, "pointerup", at(to));
       term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard;
@@ -1515,9 +1517,7 @@ describe("terminal find on the ghostty backend", () => {
     return writeText;
   }
 
-  // ghostty-web drops its selection on a click anywhere outside its canvas,
-  // and find's highlight is that selection. The bar is the terminal's own:
-  // a click in it keeps the highlight.
+  // The widget keeps its selection on outside clicks, including the find bar.
   test.each(["input", "count", "box"] as const)("a click on the find bar's %s keeps find's highlight", async (part) => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
@@ -1534,17 +1534,34 @@ describe("terminal find on the ghostty backend", () => {
     expect(selection(term)).toEqual(match(3));
   });
 
-  test("a click elsewhere in the page still clears the selection, and find leaves it cleared", async () => {
+  test("a click elsewhere in the page keeps the selection and find highlight", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const elsewhere = document.createElement("button");
     document.body.append(elsewhere);
     click(elsewhere);
-    expect(selection(term), "ghostty-web's click outside its canvas").toBeNull();
+    expect(selection(term), "an outside click keeps the selection").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term)).toBeNull();
+    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
+    pressEnter(input);
+    await tick();
+    expect(selection(term), "a step highlights again").toEqual(match(3));
+  });
+
+  test("a tap in the terminal clears find's highlight, and find leaves it cleared", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    const at = { clientX: 2 * 8 + 1, clientY: 2 * 16 + 1 };
+    mousePointer(term.canvas, "pointerdown", at);
+    mousePointer(term.canvas, "pointerup", at);
+    expect(selection(term), "ghostty-web's press clears it").toBeNull();
+    await output("\r\nmore");
+    frames.settle();
+    await tick();
+    expect(selection(term), "find leaves it cleared").toBeNull();
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();

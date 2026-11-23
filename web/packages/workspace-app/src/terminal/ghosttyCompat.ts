@@ -54,11 +54,6 @@ type GhosttyOverlayScrollbarRenderer = GhosttyRendererLike & {
   ) => void;
 };
 
-type GhosttyScrollbarClickSource = {
-  handleMouseDown?: (event: MouseEvent) => void;
-  scrollbarOpacity?: number;
-};
-
 const XTERM_DOM_MEASURE_REPETITIONS = 32;
 const customGlyphRenderers = new WeakSet<object>();
 const overlayScrollbarRenderers = new WeakSet<object>();
@@ -330,41 +325,6 @@ export function installGhosttyOverlayScrollbar(
 
   overlayScrollbarRenderers.add(renderer);
   return true;
-}
-
-/// ghostty-web claims mousedown across its overlay scrollbar strip whenever the
-/// buffer holds scrollback rather than while the overlay is visible, and stops
-/// immediate propagation, so nothing downstream can recover the event. Those
-/// pixels are content under chan's full-width grid, so an invisible overlay
-/// would swallow a click meant to place a selection in the last columns. Bind
-/// ghostty's own handler behind its own opacity, the same state that decides
-/// whether the user can see a scrollbar to aim at; a second copy of the fade
-/// timing would be a second answer to when a click means scroll. The handler
-/// does nothing outside the strip, so gating the whole listener costs no other
-/// behavior. Returns the listener cleanup, or null if the pinned build stops
-/// exposing the handler or the opacity, in which case its hidden click region
-/// stays live.
-export function gateGhosttyScrollbarClicks(
-  terminal: object,
-  host: HTMLElement,
-): (() => void) | null {
-  const source = terminal as GhosttyScrollbarClickSource;
-  const claimStrip = source.handleMouseDown;
-  if (
-    typeof claimStrip !== "function" ||
-    !Object.prototype.hasOwnProperty.call(terminal, "scrollbarOpacity")
-  ) {
-    return null;
-  }
-
-  const gated = (event: MouseEvent): void => {
-    if ((source.scrollbarOpacity ?? 0) > 0) claimStrip(event);
-  };
-  // Upstream registers its own listener in open() with capture, so the removal
-  // has to match those options for the gate to be the only claimant.
-  host.removeEventListener("mousedown", claimStrip, true);
-  host.addEventListener("mousedown", gated, true);
-  return () => host.removeEventListener("mousedown", gated, true);
 }
 
 function measureWithTextMetrics(

@@ -49,6 +49,7 @@ vi.mock("../state/shortcuts", async (original) => ({
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
@@ -225,9 +226,13 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     const surface = host.querySelector<HTMLElement>(backend === "ghostty" ? "canvas" : ".xterm-screen")!;
     vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
     const position = { bubbles: true, cancelable: true, clientX: 1, clientY: 1 };
-    surface.dispatchEvent(wheel
-      ? new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 })
-      : new MouseEvent("mousedown", { ...position, button: 0 }));
+    // Ghostty reports the press its canvas captures; xterm.js reports the
+    // compatibility mousedown.
+    if (wheel) surface.dispatchEvent(new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 }));
+    else if (backend === "ghostty") {
+      modelPointerCapture(surface);
+      mousePointer(surface, "pointerdown", position);
+    } else surface.dispatchEvent(new MouseEvent("mousedown", { ...position, button: 0 }));
     expect(inputFrames(socket)).toEqual([bytes]);
     // xterm marks SGR reports as user data; its X10 reports use onBinary.
     const expectedHistory = backend === "xterm" && sgr ? 0 : 7;

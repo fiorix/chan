@@ -167,6 +167,8 @@ export interface MouseTrackingConfig {
   hasSgrMouseMode: () => boolean;
   /** Get cell dimensions for pixel to cell conversion */
   getCellDimensions: () => { width: number; height: number };
+  /** Get the live terminal grid dimensions */
+  getGridDimensions: () => { cols: number; rows: number };
   /** Get canvas/container offset for accurate position calculation */
   getCanvasOffset: () => { left: number; top: number };
 }
@@ -188,16 +190,12 @@ export class InputHandler {
   private compositionStartListener: ((e: CompositionEvent) => void) | null = null;
   private compositionUpdateListener: ((e: CompositionEvent) => void) | null = null;
   private compositionEndListener: ((e: CompositionEvent) => void) | null = null;
-  private mousedownListener: ((e: MouseEvent) => void) | null = null;
-  private mouseupListener: ((e: MouseEvent) => void) | null = null;
-  private mousemoveListener: ((e: MouseEvent) => void) | null = null;
-  private documentMouseupListener: ((e: MouseEvent) => void) | null = null;
   private wheelListener: ((e: WheelEvent) => void) | null = null;
   private isComposing = false;
   private isDisposed = false;
   private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
-  // Buttons pressed with Shift held while tracking: the gesture is the
-  // terminal's (a selection, a link click), so none of it is reported.
+  // Non-reported presses stay with the terminal even if tracking or Shift
+  // changes before their release.
   private mouseButtonsBypassed = 0;
   private lastKeyDownData: string | null = null;
   private lastKeyDownTime = 0;
@@ -297,21 +295,6 @@ export class InputHandler {
 
     this.compositionEndListener = this.handleCompositionEnd.bind(this);
     this.container.addEventListener('compositionend', this.compositionEndListener);
-
-    // Mouse event listeners (for terminal mouse tracking)
-    this.mousedownListener = this.handleMouseDown.bind(this);
-    this.container.addEventListener('mousedown', this.mousedownListener);
-
-    this.mouseupListener = this.handleMouseUp.bind(this);
-    this.container.addEventListener('mouseup', this.mouseupListener);
-
-    this.mousemoveListener = this.handleMouseMove.bind(this);
-    this.container.addEventListener('mousemove', this.mousemoveListener);
-
-    // A Shift drag the selection manager carries past the terminal's edge
-    // ends with a release only the document sees; it still ends the bypass.
-    this.documentMouseupListener = this.handleDocumentMouseUp.bind(this);
-    globalThis.document?.addEventListener('mouseup', this.documentMouseupListener);
 
     this.wheelListener = this.handleWheel.bind(this);
     this.container.addEventListener('wheel', this.wheelListener, { passive: false });
@@ -744,10 +727,10 @@ export class InputHandler {
     const col = Math.floor(x / dims.width) + 1;
     const row = Math.floor(y / dims.height) + 1;
 
-    // Clamp to valid range (at least 1)
+    const grid = this.mouseConfig.getGridDimensions();
     return {
-      col: Math.max(1, col),
-      row: Math.max(1, row),
+      col: Math.max(1, Math.min(col, grid.cols)),
+      row: Math.max(1, Math.min(row, grid.rows)),
     };
   }
 
@@ -820,18 +803,18 @@ export class InputHandler {
   }
 
   /**
-   * Handle mousedown event
+   * Report a press forwarded by the captured pointer owner.
    */
-  private handleMouseDown(event: MouseEvent): void {
+  handleMouseDown(event: MouseEvent, reported?: boolean): void {
     if (this.isDisposed) return;
+    reported ??= !!this.mouseConfig?.hasMouseTracking() && !event.shiftKey;
     // A press starts a fresh gesture, whatever became of the last one's
     // release.
     this.mouseButtonsBypassed &= ~(1 << event.button);
-    if (!this.mouseConfig?.hasMouseTracking()) return;
-
+    this.mouseButtonsPressed &= ~(1 << event.button);
     // Shift bypasses mouse reporting, as in xterm.js and native terminals:
     // the press, its drag and its release stay with the terminal.
-    if (event.shiftKey) {
+    if (!reported) {
       this.mouseButtonsBypassed |= 1 << event.button;
       return;
     }
@@ -848,52 +831,47 @@ export class InputHandler {
     this.mouseButtonsPressed |= 1 << button;
 
     this.sendMouseEvent(button, cell.col, cell.row, false, event);
-
-    // Don't prevent default - let SelectionManager handle selection
-    // Only prevent if we actually handled the event
-    // event.preventDefault();
   }
 
   /**
-   * Handle mouseup event
+   * Report the release of a button whose press was reported.
    */
-  private handleMouseUp(event: MouseEvent): void {
+  handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
-    if (!this.mouseConfig?.hasMouseTracking()) return;
 
-    // A release ends the gesture its press began: a bypassed press is not
-    // reported, a reported one is, Shift or not, so the program never holds
-    // a button down.
+    // Pair a reported press with its release even when Shift has changed.
+    // Disposal and detachment only clear held state in endMouseGesture.
     if (this.mouseButtonsBypassed & (1 << event.button)) {
       this.mouseButtonsBypassed &= ~(1 << event.button);
       return;
     }
 
+    const button = event.button;
+    if (!(this.mouseButtonsPressed & (1 << button))) return;
+    this.mouseButtonsPressed &= ~(1 << button);
     const cell = this.pixelToCell(event);
     if (!cell) return;
-
-    const button = event.button;
-
-    // Clear pressed button
-    this.mouseButtonsPressed &= ~(1 << button);
 
     this.sendMouseEvent(button, cell.col, cell.row, true, event);
   }
 
-  /**
-   * A release anywhere in the document ends a bypassed press: the terminal's
-   * own mouseup listener has already reported or withheld it when the
-   * release was over the terminal, and a release past its edge reaches only
-   * the document.
-   */
-  private handleDocumentMouseUp(event: MouseEvent): void {
-    this.mouseButtonsBypassed &= ~(1 << event.button);
+  /** Release held buttons at the supplied position; no event clears state silently. */
+  endMouseGesture(event?: MouseEvent): void {
+    const pressed = this.mouseButtonsPressed;
+    this.mouseButtonsPressed = 0;
+    this.mouseButtonsBypassed = 0;
+    if (!event || this.isDisposed) return;
+    const cell = this.pixelToCell(event);
+    if (!cell) return;
+    for (let button = 0; button < 3; button++) {
+      if (pressed & (1 << button)) this.sendMouseEvent(button, cell.col, cell.row, true, event);
+    }
   }
 
   /**
-   * Handle mousemove event
+   * Report pointer motion with the disposition of its held buttons.
    */
-  private handleMouseMove(event: MouseEvent): void {
+  handleMouseMove(event: MouseEvent): void {
     if (this.isDisposed) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
@@ -1112,25 +1090,7 @@ export class InputHandler {
       this.compositionEndListener = null;
     }
 
-    if (this.mousedownListener) {
-      this.container.removeEventListener('mousedown', this.mousedownListener);
-      this.mousedownListener = null;
-    }
-
-    if (this.mouseupListener) {
-      this.container.removeEventListener('mouseup', this.mouseupListener);
-      this.mouseupListener = null;
-    }
-
-    if (this.mousemoveListener) {
-      this.container.removeEventListener('mousemove', this.mousemoveListener);
-      this.mousemoveListener = null;
-    }
-
-    if (this.documentMouseupListener) {
-      globalThis.document?.removeEventListener('mouseup', this.documentMouseupListener);
-      this.documentMouseupListener = null;
-    }
+    this.endMouseGesture();
 
     if (this.wheelListener) {
       this.container.removeEventListener('wheel', this.wheelListener);

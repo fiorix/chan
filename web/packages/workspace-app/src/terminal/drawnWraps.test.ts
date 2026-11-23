@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { CanvasRenderer, SelectionManager, Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, ghosttyScrollbackText, VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { sessionRunsMuse } from "./drawnWraps";
 import {
@@ -79,6 +80,9 @@ async function museTerminal(input: string | Uint8Array, runsMuse: boolean) {
   const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 });
   renderer.resize(COLS, ROWS);
   term.renderer = renderer;
+  const cell = renderer.getMetrics();
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, COLS * cell.width, ROWS * cell.height));
+  modelPointerCapture(canvas);
   const selection = new SelectionManager(term, renderer, wasmTerm, document.createElement("textarea"));
   (term as unknown as { selectionManager: SelectionManager }).selectionManager = selection;
   const manager = selection as unknown as Manager;
@@ -86,7 +90,6 @@ async function museTerminal(input: string | Uint8Array, runsMuse: boolean) {
   const writes: string[] = [];
   expect(installGhosttySelection(term, (text) => void writes.push(text), () => muse.runs)).toBe(true);
   expect(installGhosttyClickExtents(term, () => muse.runs)).not.toBeNull();
-  const cell = renderer.getMetrics();
   const history = wasmTerm.getScrollbackLength();
   return {
     term,
@@ -100,12 +103,13 @@ async function museTerminal(input: string | Uint8Array, runsMuse: boolean) {
       manager.selectionStart = { col: from[0], absoluteRow: history + from[1] };
       manager.selectionEnd = { col: to[0], absoluteRow: history + to[1] };
     },
-    /// A drag from one screen cell to another, copied on release.
+    /// A drag from one screen cell to another, copied on release; the
+    /// engine retargets the captured gesture to the canvas.
     drag(from: [number, number], to: [number, number]) {
       const at = ([col, row]: [number, number]) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
-      canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at(from) }));
-      canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(to) }));
-      document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+      mousePointer(canvas, "pointerdown", at(from));
+      mousePointer(canvas, "pointermove", at(to));
+      mousePointer(canvas, "pointerup", at(to));
     },
     click(detail: number, col: number, row: number) {
       canvas.dispatchEvent(

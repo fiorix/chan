@@ -206,10 +206,12 @@ export function lineAcrossWraps(core: VtTerminal, row: number, drawn = false): E
 /// whole wrapped line (`lineAcrossWraps`), each copied as ghostty-web copies
 /// its own, through `copyToClipboard`, and the click goes no further. A click
 /// that finds no word or an empty line is left to ghostty-web, which finds
-/// none either. A click walks across drawn wraps too while `joinsDrawnWraps`
-/// answers true. Returns the listener's cleanup, or null, changing nothing,
-/// when the terminal has no selection manager or canvas of the shape this
-/// reaches or runs another core.
+/// none either, and so is a click the program reports (mouse tracking on,
+/// Shift up): ghostty-web latched at the press that the gesture is the
+/// program's, so it selects and copies nothing. A click walks across drawn
+/// wraps too while `joinsDrawnWraps` answers true. Returns the listener's
+/// cleanup, or null, changing nothing, when the terminal has no selection
+/// manager or canvas of the shape this reaches or runs another core.
 export function installGhosttyClickExtents(
   term: Terminal,
   joinsDrawnWraps: () => boolean = () => false,
@@ -230,6 +232,7 @@ export function installGhosttyClickExtents(
   }
   const onClick = (event: MouseEvent): void => {
     if (event.target !== canvas || event.detail < 2) return;
+    if (core.hasMouseTracking() && !event.shiftKey) return;
     const cell = manager.pixelToCell(event.offsetX, event.offsetY);
     const row = manager.viewportRowToAbsolute(cell.row);
     const drawn = joinsDrawnWraps();
