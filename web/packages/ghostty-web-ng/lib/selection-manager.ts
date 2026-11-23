@@ -11,7 +11,9 @@
  */
 
 import { EventEmitter } from './event-emitter';
-import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { copiedText } from '../vt/ghosttyCopy';
+import { drawnWrapAbove, scrollbackAcrossDrawnWraps, textAcrossDrawnWraps } from './drawn-wraps';
+import { VtCells, type VtCell, type VtTerminal, type VtTrackedCell } from '../vt/ghosttyVt';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
 
@@ -33,6 +35,23 @@ export interface SelectionCoordinates {
   endRow: number;
 }
 
+/** A cell in the active buffer; row zero is the oldest retained row. */
+export type SelectionAnchor = { col: number; absoluteRow: number };
+
+/** Inclusive endpoints, in either direction; returned ranges are snapshots. */
+export type SelectionRange = { start: SelectionAnchor; end: SelectionAnchor };
+
+// Keep the widget's path/URL word alphabet for double clicks.
+const WORD_CHAR = /[\w\-./~@+]/;
+
+function isWordCell(cell: VtCell | undefined): boolean {
+  return !!cell && cell.codepoint !== 0 && WORD_CHAR.test(String.fromCodePoint(cell.codepoint));
+}
+
+function isBlankCell(cell: VtCell | undefined): boolean {
+  return !cell || cell.codepoint === 0 || cell.codepoint === 32;
+}
+
 // ============================================================================
 // SelectionManager Class
 // ============================================================================
@@ -43,10 +62,31 @@ export class SelectionManager {
   private wasmTerm: VtTerminal;
   private textarea: HTMLTextAreaElement;
 
-  // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
-  // This ensures selection persists correctly when scrolling
-  private selectionStart: { col: number; absoluteRow: number } | null = null;
-  private selectionEnd: { col: number; absoluteRow: number } | null = null;
+  private startAnchor: SelectionAnchor | null = null;
+  private endAnchor: SelectionAnchor | null = null;
+  private startCell: VtTrackedCell | null = null;
+  private endCell: VtTrackedCell | null = null;
+  private selectionOnAlternateScreen = false;
+
+  // Find assigns these properties directly. Each assignment replaces that
+  // endpoint's reference; reads expose its current absolute coordinates.
+  private get selectionStart(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.startAnchor ? { ...this.startAnchor } : null;
+  }
+
+  private set selectionStart(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('start', anchor);
+  }
+
+  private get selectionEnd(): SelectionAnchor | null {
+    this.syncSelection();
+    return this.endAnchor ? { ...this.endAnchor } : null;
+  }
+
+  private set selectionEnd(anchor: SelectionAnchor | null) {
+    this.replaceEndpoint('end', anchor);
+  }
   private isSelecting: boolean = false;
   private mouseDownX: number = 0;
   private mouseDownY: number = 0;
@@ -139,78 +179,129 @@ export class SelectionManager {
   // Public API
   // ==========================================================================
 
-  /**
-   * Get the selected text as a string
-   */
+  private replaceEndpoint(endpoint: 'start' | 'end', anchor: SelectionAnchor | null): void {
+    this.syncSelection();
+    const cell = anchor ? this.wasmTerm.trackCell(anchor.absoluteRow, anchor.col) : null;
+    if (endpoint === 'start') {
+      this.startCell?.free();
+      this.startCell = cell;
+      this.startAnchor = cell && anchor ? { ...anchor } : null;
+    } else {
+      this.endCell?.free();
+      this.endCell = cell;
+      this.endAnchor = cell && anchor ? { ...anchor } : null;
+    }
+    this.selectionOnAlternateScreen = this.wasmTerm.isAlternateScreen();
+  }
+
+  /** Resolve tracked endpoints before observers or paint read a changed grid. */
+  syncSelection(): void {
+    if (!this.startCell && !this.endCell) return;
+    if (this.selectionOnAlternateScreen !== this.wasmTerm.isAlternateScreen()) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    let start = this.startCell?.point() ?? null;
+    let end = this.endCell?.point() ?? null;
+    if (this.startAnchor && this.endAnchor) {
+      const forwards = this.startAnchor.absoluteRow < this.endAnchor.absoluteRow ||
+        (this.startAnchor.absoluteRow === this.endAnchor.absoluteRow && this.startAnchor.col <= this.endAnchor.col);
+      const first = forwards ? start : end;
+      const last = forwards ? end : start;
+      const firstCell = forwards ? this.startCell : this.endCell;
+      // Direction belongs to the gesture. Pruning belongs to text order:
+      // a backward drag loses its older endpoint just like a forward drag.
+      if (!last || (!first && !firstCell?.moveTo(0, 0))) {
+        this.invalidateSelectionRows();
+        this.releaseSelection();
+        return;
+      }
+      if (!first) {
+        if (forwards) start = { row: 0, col: 0 };
+        else end = { row: 0, col: 0 };
+      }
+    } else if ((this.startCell && !start) || (this.endCell && !end)) {
+      this.invalidateSelectionRows();
+      this.releaseSelection();
+      return;
+    }
+    if (start?.row !== this.startAnchor?.absoluteRow || start?.col !== this.startAnchor?.col ||
+        end?.row !== this.endAnchor?.absoluteRow || end?.col !== this.endAnchor?.col) {
+      this.invalidateSelectionRows();
+    }
+    this.startAnchor = start ? { col: start.col, absoluteRow: start.row } : null;
+    this.endAnchor = end ? { col: end.col, absoluteRow: end.row } : null;
+  }
+
+  private invalidateSelectionRows(): void {
+    // A moved/pruned range can leave paint at its old viewport coordinates.
+    for (let row = 0; row < this.terminal.rows; row++) this.dirtySelectionRows.add(row);
+  }
+
+  private releaseSelection(): void {
+    this.startCell?.free();
+    this.endCell?.free();
+    this.startCell = this.endCell = null;
+    this.startAnchor = this.endAnchor = null;
+    this.isSelecting = false;
+    this.stopAutoScroll();
+  }
+
+  /** Read complete clusters, joining wraps and filtering undrawn controls. */
   getSelection(): string {
-    if (!this.selectionStart || !this.selectionEnd) return '';
+    const range = this.getSelectionRange();
+    if (!range) return '';
+    const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+    const textRange = {
+      startCol: range.start.col, startRow: range.start.absoluteRow,
+      endCol: range.end.col, endRow: range.end.absoluteRow,
+    };
+    const text = (drawn ? textAcrossDrawnWraps(this.wasmTerm, textRange) : null) ?? this.wasmTerm.plainText(textRange);
+    return copiedText(text ?? this.readOwnSelection(range, drawn));
+  }
 
-    // Get absolute row coordinates (not clamped to viewport)
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
+  /** Read history and screen without changing the selection or copying. */
+  getScrollbackText(): string {
+    const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+    const text = (drawn ? scrollbackAcrossDrawnWraps(this.wasmTerm) : null) ?? this.wasmTerm.plainText();
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    return copiedText(text ?? this.readOwnSelection({
+      start: { col: 0, absoluteRow: 0 },
+      end: { col: cols - 1, absoluteRow: this.wasmTerm.getScrollbackLength() + rows - 1 },
+    }, drawn));
+  }
 
-    // Swap if selection goes backwards
-    if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
-      [startCol, endCol] = [endCol, startCol];
-      [startAbsRow, endAbsRow] = [endAbsRow, startAbsRow];
+  /** A row read remains available when the core cannot format a selection. */
+  private readOwnSelection(range: SelectionRange, drawn: boolean): string {
+    let { start, end } = range;
+    if (start.absoluteRow > end.absoluteRow || (start.absoluteRow === end.absoluteRow && start.col > end.col)) {
+      [start, end] = [end, start];
     }
-
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const history = this.wasmTerm.getScrollbackLength();
     let text = '';
-
-    for (let absRow = startAbsRow; absRow <= endAbsRow; absRow++) {
-      // Fetch line based on absolute row position
-      // Absolute row < scrollbackLength means it's in scrollback
-      // Absolute row >= scrollbackLength means it's in the screen buffer
-      if (!this.readAbsoluteRow(absRow, scrollbackLength)) continue;
-      const line = this.cells;
-
-      // Track the last non-empty column for trimming trailing spaces
-      let lastNonEmpty = -1;
-
-      // Determine column range for this row
-      const colStart = absRow === startAbsRow ? startCol : 0;
-      const colEnd = absRow === endAbsRow ? endCol : line.length - 1;
-
-      // Build the line text
-      let lineText = '';
-      for (let col = colStart; col <= colEnd; col++) {
-        const cell = line.at(col);
-        if (cell && cell.codepoint !== 0) {
-          // A cell with several codepoints carries its whole cluster
-          const char = cell.cluster ?? String.fromCodePoint(cell.codepoint);
-          lineText += char;
-          if (char.trim()) {
-            lastNonEmpty = lineText.length;
-          }
-        } else {
-          lineText += ' ';
-        }
+    for (let row = start.absoluteRow; row <= end.absoluteRow; row++) {
+      if (!this.readAbsoluteRow(row, history)) continue;
+      const first = row === start.absoluteRow ? start.col : 0;
+      const last = row === end.absoluteRow ? end.col : this.cells.length - 1;
+      let line = '';
+      for (let col = first; col <= last; col++) {
+        const cell = this.cells.at(col);
+        if (cell?.width === 0) continue;
+        line += cell?.codepoint ? cell.cluster ?? String.fromCodePoint(cell.codepoint) : ' ';
       }
-
-      // Trim trailing spaces from each line
-      if (lastNonEmpty >= 0) {
-        lineText = lineText.substring(0, lastNonEmpty);
-      } else {
-        lineText = '';
-      }
-
-      text += lineText;
-
-      // Add newline between rows (but not after the last row)
-      if (absRow < endAbsRow) {
-        text += '\n';
-      }
+      if (row > start.absoluteRow && !this.continuesAbove(row, drawn)) text += '\n';
+      text += line.replace(/ +$/, '');
     }
-
-    return text;
+    return text.replace(/\n+$/, '');
   }
 
   /**
    * Check if there's an active selection
    */
   hasSelection(): boolean {
-    if (!this.selectionStart || !this.selectionEnd) return false;
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return false;
 
     // Don't report selection until drag threshold is met (prevents flash on click)
     if (this.isSelecting && !this.dragThresholdMet) return false;
@@ -237,7 +328,7 @@ export class SelectionManager {
    * Clear the selection
    */
   clearSelection(): void {
-    if (!this.hasSelection()) return;
+    if (!this.startAnchor && !this.endAnchor) return;
 
     // Mark current selection rows as dirty for redraw
     const coords = this.normalizeSelection();
@@ -247,24 +338,86 @@ export class SelectionManager {
       }
     }
 
-    this.selectionStart = null;
-    this.selectionEnd = null;
-    this.isSelecting = false;
+    this.releaseSelection();
 
     // Force redraw of previously selected lines to clear the overlay
     this.requestRender();
   }
 
-  /**
-   * Select all text in the terminal
-   */
+  /** Select the entire retained history and active screen. */
   selectAll(): void {
-    const dims = this.wasmTerm.getDimensions();
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: 0, absoluteRow: viewportY };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: viewportY + dims.rows - 1 };
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    this.setSelection({
+      start: { col: 0, absoluteRow: 0 },
+      end: { col: cols - 1, absoluteRow: this.wasmTerm.getScrollbackLength() + rows - 1 },
+    });
+  }
+
+  /** Set inclusive absolute endpoints without copying; null clears. */
+  setSelection(range: SelectionRange | null): void {
+    if (range) {
+      for (const anchor of [range.start, range.end]) {
+        if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
+          throw new RangeError('Selection coordinates must be finite integers');
+        }
+      }
+      range = this.clampRange(range);
+    }
+    if (!range) {
+      this.clearSelection();
+      return;
+    }
+    this.markCurrentSelectionDirty();
+    this.selectionStart = range.start;
+    this.selectionEnd = range.end;
+    this.isSelecting = false;
     this.requestRender();
     this.selectionChangedEmitter.fire();
+  }
+
+  /** Current coordinates, copied and widened to whole glyphs. */
+  getSelectionRange(): SelectionRange | null {
+    this.syncSelection();
+    if (!this.startAnchor || !this.endAnchor) return null;
+    return this.clampRange({ start: this.startAnchor, end: this.endAnchor });
+  }
+
+  private clampRange(range: SelectionRange): SelectionRange | null {
+    const { cols, rows } = this.wasmTerm.getDimensions();
+    const history = this.wasmTerm.getScrollbackLength();
+    const last = history + rows - 1;
+    const { start, end } = range;
+    if (Math.max(start.absoluteRow, end.absoluteRow) < 0 || Math.min(start.absoluteRow, end.absoluteRow) > last) return null;
+    const clamp = (anchor: SelectionAnchor): SelectionAnchor => ({
+      col: Math.max(0, Math.min(anchor.col, cols - 1)),
+      absoluteRow: Math.max(0, Math.min(anchor.absoluteRow, last)),
+    });
+    const a = clamp(start);
+    const b = clamp(end);
+    const forwards = a.absoluteRow < b.absoluteRow || (a.absoluteRow === b.absoluteRow && a.col <= b.col);
+    const first = forwards ? a : b;
+    const final = forwards ? b : a;
+    // The spacer after a wide glyph belongs to that glyph; an empty spacer
+    // at the right edge before a wrap belongs to neither endpoint glyph.
+    if (this.readAbsoluteRow(first.absoluteRow, history) && this.cells.at(first.col)?.width === 0 && this.cells.at(first.col - 1)?.width === 2) {
+      first.col--;
+    }
+    if (this.readAbsoluteRow(final.absoluteRow, history) && this.cells.at(final.col)?.width === 2) {
+      final.col = Math.min(final.col + 1, cols - 1);
+    }
+    return { start: a, end: b };
+  }
+
+  /** Client CSS pixels, clamped to a connected grid; null without geometry. */
+  cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
+    const canvas = this.renderer.getCanvas();
+    if (!canvas.isConnected || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const rect = canvas.getBoundingClientRect();
+    const { width, height } = this.renderer.getMetrics();
+    if (![rect.left, rect.top, rect.width, rect.height, width, height].every(Number.isFinite) ||
+        rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
+    const cell = this.pixelToCell(clientX - rect.left, clientY - rect.top);
+    return { ...cell, absoluteRow: this.viewportRowToAbsolute(cell.row) };
   }
 
   /**
@@ -355,6 +508,7 @@ export class SelectionManager {
     if (this.disposed) return;
     this.disposed = true;
     this.endPointer(false);
+    this.releaseSelection();
     this.resetTextarea();
     this.selectionChangedEmitter.dispose();
     const canvas = this.renderer.getCanvas();
@@ -533,59 +687,16 @@ export class SelectionManager {
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
     this.boundClickHandler = (e: MouseEvent) => {
       if (!this.clickSelects || e.button !== 0) return;
-      // event.detail: 1 = single, 2 = double, 3 = triple click
-      if (e.detail === 2) {
-        // Double-click - select word
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-        const word = this.getWordAtCell(cell.col, cell.row);
-
-        if (word) {
-          const absoluteRow = this.viewportRowToAbsolute(cell.row);
-          this.selectionStart = { col: word.startCol, absoluteRow };
-          this.selectionEnd = { col: word.endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
-        }
-      } else if (e.detail >= 3) {
-        // Triple-click (or more) - select line content (like native Ghostty)
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
-
-        // Find actual line length (exclude trailing empty cells)
-        // Use scrollback-aware line retrieval (like getSelection does)
-        const scrollbackLength = this.wasmTerm.getScrollbackLength();
-        // Find last non-empty cell (-1 means empty line)
-        let endCol = -1;
-        if (this.readAbsoluteRow(absoluteRow, scrollbackLength)) {
-          const line = this.cells;
-          for (let i = line.length - 1; i >= 0; i--) {
-            const cell = line.at(i)!;
-            if (cell.codepoint !== 0 && cell.codepoint !== 32) {
-              endCol = i;
-              break;
-            }
-          }
-        }
-
-        // Only select if line has content (endCol >= 0)
-        if (endCol >= 0) {
-          // Select line content only (not trailing whitespace)
-          this.selectionStart = { col: 0, absoluteRow };
-          this.selectionEnd = { col: endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
-        }
-      }
+      if (e.detail < 2) return;
+      const cell = this.cellAt(e.clientX, e.clientY);
+      if (!cell) return;
+      const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
+      const extent = e.detail === 2
+        ? this.wordAcrossWraps(cell.col, cell.absoluteRow, drawn)
+        : this.lineAcrossWraps(cell.absoluteRow, drawn);
+      if (!extent) return;
+      this.setSelection(extent);
+      this.copySelection();
     };
     canvas.addEventListener('click', this.boundClickHandler);
 
@@ -746,10 +857,11 @@ export class SelectionManager {
    * Returns coordinates in VIEWPORT space for rendering, clamped to visible area
    */
   private normalizeSelection(): SelectionCoordinates | null {
-    if (!this.selectionStart || !this.selectionEnd) return null;
+    const range = this.getSelectionRange();
+    if (!range) return null;
 
-    let { col: startCol, absoluteRow: startAbsRow } = this.selectionStart;
-    let { col: endCol, absoluteRow: endAbsRow } = this.selectionEnd;
+    let { col: startCol, absoluteRow: startAbsRow } = range.start;
+    let { col: endCol, absoluteRow: endAbsRow } = range.end;
 
     // Swap if selection goes backwards
     if (startAbsRow > endAbsRow || (startAbsRow === endAbsRow && startCol > endCol)) {
@@ -784,39 +896,80 @@ export class SelectionManager {
   }
 
   /**
-   * Get word boundaries at a cell position
+   * The word under a cell, carried across core wraps and enabled drawn
+   * wraps. Null when the cell holds no
+   * word character.
    */
-  private getWordAtCell(col: number, row: number): { startCol: number; endCol: number } | null {
-    const absoluteRow = this.viewportRowToAbsolute(row);
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (!this.readAbsoluteRow(absoluteRow, scrollbackLength)) return null;
-    const line = this.cells;
-
-    // Word characters: letters, numbers, and common path/URL characters
-    // Matches native Ghostty behavior where double-click selects entire paths
-    // Includes: / (path sep), . (extensions), ~ (home), @ (emails), + (encodings)
-    const isWordChar = (cell: VtCell | undefined) => {
-      if (!cell || cell.codepoint === 0) return false;
-      const char = String.fromCodePoint(cell.codepoint);
-      return /[\w\-./~@+]/.test(char);
-    };
-
-    // Only return if we're actually on a word character
-    if (!isWordChar(line.at(col))) return null;
-
-    // Find start of word
-    let startCol = col;
-    while (startCol > 0 && isWordChar(line.at(startCol - 1))) {
-      startCol--;
+  private wordAcrossWraps(col: number, absoluteRow: number, drawn: boolean): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    const cells = this.readCells(absoluteRow);
+    if (!cells || !isWordCell(cells.at(col))) return null;
+    let start = { col, absoluteRow };
+    let startCells = cells;
+    for (;;) {
+      while (start.col > 0 && isWordCell(startCells.at(start.col - 1))) start.col--;
+      if (start.col > 0 || !this.continuesAbove(start.absoluteRow, drawn)) break;
+      const above = this.readCells(start.absoluteRow - 1);
+      if (!above || !isWordCell(above.at(above.length - 1))) break;
+      start = { col: above.length - 1, absoluteRow: start.absoluteRow - 1 };
+      startCells = above;
     }
-
-    // Find end of word
-    let endCol = col;
-    while (endCol < line.length - 1 && isWordChar(line.at(endCol + 1))) {
-      endCol++;
+    let end = { col, absoluteRow };
+    let endCells = cells;
+    for (;;) {
+      while (end.col < endCells.length - 1 && isWordCell(endCells.at(end.col + 1))) end.col++;
+      if (end.col < endCells.length - 1 || !this.continuesAbove(end.absoluteRow + 1, drawn)) break;
+      const below = this.readCells(end.absoluteRow + 1);
+      if (!below || !isWordCell(below.at(0))) break;
+      end = { col: 0, absoluteRow: end.absoluteRow + 1 };
+      endCells = below;
     }
+    return { start, end };
+  }
 
-    return { startCol, endCol };
+  /**
+   * The whole line across core wraps and enabled drawn wraps, through
+   * its last nonblank cell. Null when the line is blank.
+   */
+  private lineAcrossWraps(absoluteRow: number, drawn: boolean): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    let first = absoluteRow;
+    while (first > 0 && this.continuesAbove(first, drawn)) first--;
+    let last = absoluteRow;
+    while (this.continuesAbove(last + 1, drawn)) last++;
+    for (let row = last; row >= first; row--) {
+      const cells = this.readCells(row);
+      if (!cells) continue;
+      for (let col = cells.length - 1; col >= 0; col--) {
+        if (!isBlankCell(cells.at(col))) {
+          return { start: { col: 0, absoluteRow: first }, end: { col, absoluteRow: row } };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether a row continues the preceding row under the current policy.
+   */
+  private continuesAbove(absoluteRow: number, drawn: boolean): boolean {
+    const history = this.wasmTerm.getScrollbackLength();
+    if (absoluteRow < 1 || absoluteRow >= history + this.terminal.rows) return false;
+    const wrapped = absoluteRow < history
+      ? this.wasmTerm.isScrollbackRowWrapped(absoluteRow)
+      : this.wasmTerm.isRowWrapped(absoluteRow - history);
+    return wrapped || (drawn && drawnWrapAbove(this.wasmTerm, absoluteRow));
+  }
+
+  /**
+   * Row `row` of the history and the screen, 0 the oldest history row, in
+   * a view of its own. Null when no such row exists.
+   */
+  private readCells(absoluteRow: number): VtCells | null {
+    const cells = new VtCells();
+    const history = this.wasmTerm.getScrollbackLength();
+    const read = absoluteRow < history
+      ? this.wasmTerm.readHistoryRow(absoluteRow, cells)
+      : this.wasmTerm.readRow(absoluteRow - history, cells);
+    return read ? cells : null;
   }
 
   /**
@@ -839,6 +992,10 @@ export class SelectionManager {
    * 3. Fall back to execCommand (legacy, for older browsers)
    */
   private copyToClipboard(text: string): void {
+    if (this.terminal.options.copy) {
+      this.terminal.options.copy(text);
+      return;
+    }
     // First try: ClipboardItem API (modern, Safari-compatible)
     // Safari allows this because we create the ClipboardItem synchronously
     // within the user gesture, even though the write is async
