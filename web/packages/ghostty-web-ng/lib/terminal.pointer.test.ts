@@ -441,6 +441,39 @@ describe('report and bypass completion', () => {
     expect(reports).toEqual(['\x1b[<0;1;1M', '\x1b[<2;1;1M']);
   });
 
+  test.each([0, 1, 2])('a captured buttonless move releases reported button %i once at that position', async (button) => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { button, buttons: [1, 4, 2][button] });
+    pointer(canvas, 'pointermove', 33, 1, { buttons: [1, 4, 2][button] });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 97, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 97, 1, { button });
+    expect(reports).toEqual([`\x1b[<${button};1;1M`, `\x1b[<${32 + button};5;1M`, `\x1b[<${button};9;1m`]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('captured moves release only missing reported buttons, including all remaining buttons', async () => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown');
+    pointer(canvas, 'pointermove', 1, 1, { button: 1, buttons: 5 });
+    pointer(canvas, 'pointermove', 1, 1, { button: 2, buttons: 7 });
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 6 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M',
+      '\x1b[<0;5;1m', '\x1b[<33;5;1M',
+    ]);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 97, 1, { buttons: 0 });
+    pointer(canvas, 'pointerup', 97, 1, { button: 2 });
+    expect(reports).toEqual([
+      '\x1b[<0;1;1M', '\x1b[<1;1;1M', '\x1b[<2;1;1M',
+      '\x1b[<0;5;1m', '\x1b[<33;5;1M', '\x1b[<1;9;1m', '\x1b[<2;9;1m',
+    ]);
+  });
+
   test('a Shift selection copies once on connected capture loss', async () => {
     const { term, canvas, captured, reports, write } = await open();
     term.write('\x1b[?1000h\x1b[?1006h');

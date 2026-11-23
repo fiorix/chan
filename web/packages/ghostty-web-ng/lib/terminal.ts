@@ -476,10 +476,10 @@ export class Terminal {
             this.handleLinkPress(event, reported);
             this.inputHandler?.handleMouseDown(event, reported);
           },
-          move: (event) => {
+          move: (event, reportMotion) => {
             if (this.scrollbarDrag) return;
             this.checkLinkDrag(event);
-            this.inputHandler?.handleMouseMove(event);
+            this.inputHandler?.handleMouseMove(event, reportMotion);
           },
           release: (event) => this.inputHandler?.handleMouseUp(event),
           end: (event) => {

@@ -838,15 +838,17 @@ export class InputHandler {
    */
   handleMouseUp(event: MouseEvent): void {
     if (this.isDisposed) return;
+    this.releaseMouseButton(event, event.button);
+  }
 
+  private releaseMouseButton(event: MouseEvent, button: number): void {
     // Shift changes do not break the pair, but a program that stopped
     // tracking must not leave release bytes for the next PTY reader.
-    if (this.mouseButtonsBypassed & (1 << event.button)) {
-      this.mouseButtonsBypassed &= ~(1 << event.button);
+    if (this.mouseButtonsBypassed & (1 << button)) {
+      this.mouseButtonsBypassed &= ~(1 << button);
       return;
     }
 
-    const button = event.button;
     if (!(this.mouseButtonsPressed & (1 << button))) return;
     this.mouseButtonsPressed &= ~(1 << button);
     if (!this.mouseConfig?.hasMouseTracking()) return;
@@ -872,8 +874,16 @@ export class InputHandler {
   /**
    * Report pointer motion with the disposition of its held buttons.
    */
-  handleMouseMove(event: MouseEvent): void {
+  handleMouseMove(event: MouseEvent, reportMotion = true): void {
     if (this.isDisposed) return;
+    // Capture can outlive a release with no pointerup. Reconcile only
+    // reported buttons; a local selection keeps its buttonless moves.
+    for (let button = 0; button < 3; button++) {
+      if ((this.mouseButtonsPressed & (1 << button)) && !(event.buttons & [1, 4, 2][button])) {
+        this.releaseMouseButton(event, button);
+      }
+    }
+    if (!reportMotion) return;
     if (!this.mouseConfig?.hasMouseTracking()) return;
 
     // Check if button motion mode or any-event tracking is enabled
