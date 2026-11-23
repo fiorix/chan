@@ -391,6 +391,13 @@ test("process.exit(-1) before finalization exits 2", (t) => {
   assert.equal(rc, 2);
 });
 
+for (const code of [256, 257]) {
+  test(`process.exit(${code}) before finalization exits 2`, (t) => {
+    const { rc } = run(t, { body: `process.exit(${code});`, interrupted: true });
+    assert.equal(rc, 2);
+  });
+}
+
 test("selection is persisted before importing dependencies", (t) => {
   const { rc } = run(t, { startup: `
     import fs from "node:fs";
