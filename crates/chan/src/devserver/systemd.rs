@@ -212,11 +212,17 @@ fn persisted_tunnel_token(unit: &str) -> Option<String> {
 /// The value of an `Environment="KEY=value"` line in a persisted unit, read up
 /// to the closing quote so values containing spaces survive the round trip.
 /// Callers undo whatever escaping their own write site applies.
+///
+/// Only a line that is the directive counts. systemd ignores a commented-out
+/// assignment, so reading one would hand a restart a value the service is not
+/// running with: a retired PAT kept above the live one would be written back
+/// as the unit's only credential.
 fn persisted_unit_environment<'a>(unit: &'a str, key: &str) -> Option<&'a str> {
     let marker = format!("Environment=\"{key}=");
-    let start = unit.find(&marker)? + marker.len();
-    let rest = &unit[start..];
-    Some(&rest[..rest.find('"')?])
+    unit.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(marker.as_str())?;
+        Some(&rest[..rest.find('"')?])
+    })
 }
 
 /// Matches the unit's `TimeoutStartSec=10min`, which outlives the bounded
@@ -2107,6 +2113,48 @@ mod tests {
         // No endpoint anywhere: not a tunnel unit, so nothing pins.
         let local = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert_eq!(persisted_tunnel_url(local), None);
+    }
+
+    #[test]
+    fn persisted_environment_readers_skip_commented_lines() {
+        // A hand-rotated unit keeps the retired registration commented out
+        // above the live one. systemd ignores those lines and the classifier
+        // treats them as inert, so a flagless restart must come back as the
+        // live registration: reading the retired PAT would rewrite the unit
+        // around it and destroy the only copy of the live one.
+        let rotated = "#Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_retired\"\n\
+                       # Environment=\"CHAN_TUNNEL_URL=https://retired.test/v1/tunnel\"\n\
+                       ;Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=retired box\"\n\
+                       Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_live\"\n\
+                       Environment=\"CHAN_TUNNEL_URL=https://live.test/v1/tunnel\"\n\
+                       Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=live box\"\n\
+                       ExecStart=/usr/bin/chan devserver run\n";
+        assert_eq!(
+            persisted_tunnel_token(rotated),
+            Some("chan_pat_live".to_string())
+        );
+        assert_eq!(
+            persisted_tunnel_url(rotated),
+            Some("https://live.test/v1/tunnel".to_string())
+        );
+        assert_eq!(persisted_tunnel_name(rotated), Some("live box".to_string()));
+        let spec = tunnel_spec_for(None, None, false, false, Some(rotated))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.token, "chan_pat_live");
+        assert_eq!(spec.url, "https://live.test/v1/tunnel");
+        assert_eq!(spec.pinned_name.as_deref(), Some("live box"));
+
+        // A unit whose only registration is commented out is a local unit: a
+        // restart must not turn a retired PAT back into a tunnel.
+        let retired = "#Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_retired\"\n\
+                       #Environment=\"CHAN_TUNNEL_URL=https://retired.test/v1/tunnel\"\n\
+                       ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
+        assert_eq!(persisted_tunnel_token(retired), None);
+        assert_eq!(persisted_tunnel_url(retired), None);
+        assert!(tunnel_spec_for(None, None, false, false, Some(retired))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
