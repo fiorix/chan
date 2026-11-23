@@ -11,7 +11,7 @@
  */
 
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
-import { drawBoxGlyph } from './box-glyphs';
+import { drawBoxGlyph, isCustomGlyph } from './box-glyphs';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { HighlightsManager, HighlightSpan, HighlightStyle } from './highlights';
@@ -711,9 +711,7 @@ export class CanvasRenderer {
     // Complex clusters stay with the font. Cell paths share the resolved
     // foreground and decorations, including selection and cursor overrides.
     const char = cell.cluster ?? String.fromCodePoint(cell.codepoint || 32);
-    const boxed = this.boxGlyphs && cell.cluster === null &&
-      drawBoxGlyph(this.ctx, this.metrics, cell.codepoint, x, y,
-        (cell.flags & VtFlag.FAINT) !== 0, this.devicePixelRatio);
+    const boxed = this.boxGlyphs && cell.cluster === null && isCustomGlyph(cell.codepoint);
     if (!boxed) this.ctx.fillText(char, textX, textY);
 
     // Reset alpha
@@ -785,6 +783,12 @@ export class CanvasRenderer {
         this.ctx.lineTo(cellX + cellWidth, underlineY);
         this.ctx.stroke();
       }
+    }
+
+    // Cell paths sit above decorations where their ink intersects.
+    if (boxed) {
+      drawBoxGlyph(this.ctx, this.metrics, cell.codepoint, x, y,
+        (cell.flags & VtFlag.FAINT) !== 0, this.devicePixelRatio);
     }
   }
 

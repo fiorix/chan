@@ -410,19 +410,24 @@ class RecordingCanvasContext extends SoftwareCanvasContext {
   readonly paths: [string, ...number[]][] = [];
   readonly strokes: { style: string; alpha: number }[] = [];
   readonly fills: { rect: number[]; alpha: number; style: string }[] = [];
+  readonly paintOrder: string[] = [];
 
   override measureText(): TextMetrics {
     return { width: ink.width, actualBoundingBoxAscent: ink.ascent, actualBoundingBoxDescent: ink.descent } as TextMetrics;
   }
   override fillText(text = '', x = 0, y = 0): void { this.texts.push({ text, x, y, style: this.fillStyle }); }
   override fillRect(x: number, y: number, width: number, height: number): void {
+    this.paintOrder.push(`fill:${this.fillStyle}`);
     this.fills.push({ rect: [x, y, width, height], alpha: this.globalAlpha, style: this.fillStyle });
     super.fillRect(x, y, width, height);
   }
   override moveTo(x = 0, y = 0): void { this.paths.push(['moveTo', x, y]); }
   override lineTo(x = 0, y = 0): void { this.paths.push(['lineTo', x, y]); }
   bezierCurveTo(...points: number[]): void { this.paths.push(['bezierCurveTo', ...points]); }
-  override stroke(): void { this.strokes.push({ style: this.strokeStyle, alpha: this.globalAlpha }); }
+  override stroke(): void {
+    this.paintOrder.push(`stroke:${this.strokeStyle}`);
+    this.strokes.push({ style: this.strokeStyle, alpha: this.globalAlpha });
+  }
 }
 
 describe('widget grid options', () => {
@@ -616,6 +621,10 @@ describe('widget block glyphs', () => {
     screen.paint('\x1b[7;2;4;9;53;48;2;1;2;3;58;2;9;8;7m\u2588\x1b[0m\u754c');
     expect(screen.context.fills).toContainEqual({ rect: [0, 0, 8, 19], alpha: 0.5, style: 'rgb(1, 2, 3)' });
     expect(screen.context.strokes.map(stroke => stroke.style)).toEqual(['rgb(9, 8, 7)', 'rgb(1, 2, 3)', 'rgb(1, 2, 3)']);
+    // Cell paths cover decorations where their ink overlaps.
+    expect(screen.context.paintOrder.indexOf('fill:rgb(1, 2, 3)')).toBeGreaterThan(
+      screen.context.paintOrder.lastIndexOf('stroke:rgb(1, 2, 3)'),
+    );
     expect(screen.context.texts.filter(t => t.text === '\u754c')).toHaveLength(1);
     expect(screen.context.texts.find(t => t.text === '\u754c')?.x).toBe(8);
   });

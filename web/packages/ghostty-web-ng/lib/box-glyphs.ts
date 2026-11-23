@@ -63,6 +63,10 @@ const BLOCK_GLYPHS = new Map<number, BlockGlyph>([
   [0x259f, { rects: [UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT] }],
 ]);
 
+export function isCustomGlyph(codepoint: number): boolean {
+  return isCustomBoxGlyph(codepoint) || BLOCK_GLYPHS.has(codepoint);
+}
+
 function isCustomBoxGlyph(codepoint: number): boolean {
   return (
     codepoint === 0x2500 ||
