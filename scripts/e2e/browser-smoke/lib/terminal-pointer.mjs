@@ -112,7 +112,7 @@ export function penPointer(cdp, type, x, y) {
   });
 }
 
-export async function observePointer(term) {
+async function observePointer(term) {
   return term.evaluateHandle((terminal) => {
     const canvas = terminal.element.querySelector(":scope > canvas");
     const events = [];
@@ -168,11 +168,12 @@ export async function runPointerCheck(ctx, number, body) {
     || sessionStorage.getItem("chan.session.window")?.trim() || "");
   assert.ok(windowId, "the page has a window id");
   await ctx.waitWindowLive(windowId);
-  const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+  const shell = (args) => ctx.exec(ctx.chanBin, ["shell", ...args], {
     cwd: ctx.workspaceDir,
     env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
     timeout: 90_000,
   });
+  const cs = (args) => shell(["terminal", ...args]);
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const original = await readTerminalPrefs(page, token);
   const cdp = await page.createCDPSession();
@@ -199,6 +200,7 @@ export async function runPointerCheck(ctx, number, body) {
     let row;
     try { row = await openAttachedTerminal(ctx, page, cs, windowId, tab, "ghostty", args); }
     catch (error) { throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]")); }
+    resource.row = row;
     resource.query = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"]`;
     resource.ready = await fixture.ready();
     assert.ok(resource.ready.tty && resource.ready.raw, "the fixture owns a raw PTY");
@@ -257,7 +259,7 @@ export async function runPointerCheck(ctx, number, body) {
         restore();
       };
     });
-    await body({ page, cdp, details, open, leg });
+    await body({ page, cdp, details, open, leg, shell, windowId });
   } catch (error) {
     details.failures.push(`setup/body: ${error.message}`);
   } finally {
