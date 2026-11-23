@@ -191,7 +191,7 @@ export async function ghosttyBackendModule(importOriginal: <T>() => Promise<T>) 
   // Awaited by the first load; a failure here surfaces there, as a terminal
   // that cannot initialize.
   coreCompiled.catch(() => {});
-  useGhosttyFixture({ opened: openedGhostty, press: pressInGhostty, reset: resetGhosttyFixture });
+  useGhosttyFixture({ opened: openedGhostty, reset: resetGhosttyFixture });
   return {
     ...actual,
     loadGhosttyKit: async (): Promise<GhosttyKit> => {
@@ -238,22 +238,16 @@ export async function openedGhostty(within: Node = document): Promise<Terminal> 
   );
 }
 
-/// What the app's key handler answered for each key the widget asked it
-/// about: true when the app consumed the key.
-const keyAnswers = new WeakMap<KeyboardEvent, boolean>();
-
 /// Type a key into the terminal: the keydown goes to the element the widget
-/// focuses and listens on, and the widget asks the app's key handler about
-/// it. `handled` is false when the app consumed the key, so the terminal
-/// sends nothing for it. A key the widget never asked about is an error, not
-/// an answer.
-function pressInGhostty(term: Terminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
+/// focuses, where the app's key handling listens ahead of the widget's own.
+/// What the key did is what the product shows for it: the input frames on
+/// the terminal's socket, and whether the returned event's default action
+/// was prevented.
+export function pressInGhostty(term: Terminal, init: KeyboardEventInit): KeyboardEvent {
   if (!term.element) throw new Error("the Ghostty terminal is not open");
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   term.element.dispatchEvent(event);
-  const consumed = keyAnswers.get(event);
-  if (consumed === undefined) throw new Error("the widget never asked the app's key handler about this key");
-  return { event, handled: !consumed };
+  return event;
 }
 
 function resetGhosttyFixture(): void {
@@ -270,24 +264,6 @@ export function typeInGhostty(term: Terminal, data: string): void {
 export function ghosttyHasFocus(term: Terminal): boolean {
   const focused = document.activeElement;
   return !!term.element && !!focused && term.element.contains(focused);
-}
-
-/// Counts the full repaints of the terminal from now on: the app's repaint
-/// and the widget's own after a resize both draw every row.
-export function watchGhosttyRepaints(term: Terminal): { readonly count: number } {
-  const renderer = term.renderer;
-  if (!renderer) throw new Error("the Ghostty terminal is not open");
-  const render = renderer.render;
-  let count = 0;
-  renderer.render = function (this: typeof renderer, ...args: Parameters<typeof render>) {
-    if (args[1] === true) count += 1;
-    return render.apply(this, args);
-  };
-  return {
-    get count() {
-      return count;
-    },
-  };
 }
 
 function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
@@ -314,14 +290,6 @@ function fixtureKit(kitFrom: typeof ghosttyKitFrom): GhosttyKit {
     override dispose(): void {
       super.dispose();
       this.#close();
-    }
-
-    override attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
-      super.attachCustomKeyEventHandler((event) => {
-        const consumed = handler(event);
-        keyAnswers.set(event, consumed);
-        return consumed;
-      });
     }
 
     #close(): void {

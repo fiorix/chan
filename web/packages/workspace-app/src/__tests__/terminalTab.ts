@@ -82,7 +82,6 @@ export class TerminalSocket {
 /// imports this module.
 export type GhosttyFixture = {
   opened(within: Node): Promise<GhosttyTerminal>;
-  press(term: GhosttyTerminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean };
   reset(): void;
 };
 
@@ -254,19 +253,12 @@ export function openSocket(): TerminalSocket {
   return socket;
 }
 
-/// Type a key into the terminal and return whether the terminal goes on to
-/// handle it (false: the component consumed it). On the widget the keydown
-/// is dispatched where the widget listens and the app's handler is asked as
-/// the widget asks it. On the stand-in `init` goes straight to the handler
-/// the component registered, as xterm hands it before it processes a key.
-export function pressInTerminal(
-  term: FakeTerminal | GhosttyTerminal,
-  init: KeyboardEventInit,
-): { event: KeyboardEvent; handled: boolean } {
-  if (!(term instanceof FakeTerminal)) {
-    if (!ghostty) throw new Error("a Ghostty terminal is pressed through the shared fixture in ./ghosttyTab");
-    return ghostty.press(term, init);
-  }
+/// Type a key into the stand-in and return whether xterm goes on to handle
+/// it (false: the component consumed it): `init` goes straight to the
+/// handler the component registered, as xterm hands it a key before it
+/// processes one. A key typed into the widget is `pressInGhostty` in
+/// `./ghosttyTab`, read by what the terminal sent.
+export function pressInTerminal(term: FakeTerminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
   if (!term.keyHandler) throw new Error("no key handler registered");
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   return { event, handled: term.keyHandler(event) };
