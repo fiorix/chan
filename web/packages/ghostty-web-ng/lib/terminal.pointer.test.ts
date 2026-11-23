@@ -497,6 +497,65 @@ describe('report and bypass completion', () => {
     expect(write).toHaveBeenCalledExactlyOnceWith('hello');
   });
 
+  test('a reported chord preserves a threshold-crossing Shift drag and its buttonless tail', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 17, 1, { shiftKey: true });
+    expect(term.getSelection()).toBe('hel');
+    pointer(canvas, 'pointermove', 17, 1, { button: 2, buttons: 3 });
+    expect(term.getSelection()).toBe('hel');
+    term.write('\x1b[?1002l');
+    pointer(canvas, 'pointermove', 33, 1, { buttons: 0 });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    term.write('\x1b[?1002h');
+    pointer(canvas, 'pointerup', 49, 1, { button: 2 });
+    expect(reports).toEqual(['\x1b[<2;3;1M']);
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+  });
+
+  test('a reported click clears a stale selection when no local gesture is live', async () => {
+    const { term, canvas, reports, write } = await open();
+    drag(canvas);
+    pointer(canvas, 'pointerup', 33, 1);
+    expect(term.getSelection()).toBe('hello');
+    write.mockClear();
+    term.write('\x1b[?1000h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 65, 1);
+    expect(term.getSelection()).toBe('');
+    pointer(canvas, 'pointerup', 65, 1);
+    expect(reports).toEqual(['\x1b[<0;9;1M', '\x1b[<0;9;1m']);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('clearing a live local selection does not end its captured buttonless tail', async () => {
+    const { term, canvas, reports, write } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    drag(canvas, { shiftKey: true });
+    term.clearSelection();
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    expect(canvas.hasPointerCapture(7)).toBe(true);
+    pointer(canvas, 'pointerup', 65, 1);
+    expect(canvas.hasPointerCapture(7)).toBe(false);
+    expect(reports).toEqual([]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('a local drag survives its reported chord release and a synchronous capture-loss callback', async () => {
+    const { term, canvas, reports, write, release } = await open();
+    term.write('\x1b[?1002h\x1b[?1006h');
+    drag(canvas, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1, { button: 2, buttons: 3 });
+    term.onData((data) => {
+      if (data.endsWith('m')) pointer(canvas, 'lostpointercapture');
+    });
+    pointer(canvas, 'pointerup', 33, 1, { button: 2 });
+    expect(reports).toEqual(['\x1b[<2;5;1M', '\x1b[<2;5;1m']);
+    expect(term.getSelection()).toBe('hello');
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+    expect(release).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
   test('a held move while tracking is off preserves the press when tracking resumes', async () => {
     const { term, canvas, reports } = await open();
     term.write('\x1b[?1002h\x1b[?1006h');

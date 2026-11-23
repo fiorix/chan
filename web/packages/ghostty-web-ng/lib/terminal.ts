@@ -456,8 +456,10 @@ export class Terminal {
             this.scrollToBottom();
             this.awaitingEcho = true;
           }
-          // Clear selection when user types
-          if (isUserInput) this.selectionManager?.clearSelection();
+          // Reports clear stale selection, but cannot cancel a local drag.
+          if (isUserInput || !this.selectionManager?.hasLocalSelectionGesture()) {
+            this.selectionManager?.clearSelection();
+          }
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },

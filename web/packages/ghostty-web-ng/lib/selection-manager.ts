@@ -96,6 +96,8 @@ export class SelectionManager {
     type: string;
     buttons: number;
     lastEvent: PointerEvent;
+    localSelection: boolean;
+    ending: boolean;
   } | null = null;
   private clickSelects = true;
   private contextMenuTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -307,6 +309,11 @@ export class SelectionManager {
     if (this.isSelecting && !this.dragThresholdMet) return false;
 
     return true;
+  }
+
+  /** Whether the captured gesture began as a local left-button selection. */
+  hasLocalSelectionGesture(): boolean {
+    return this.activePointer?.localSelection ?? false;
   }
 
   /**
@@ -554,8 +561,11 @@ export class SelectionManager {
     } catch {
       return;
     }
-    this.activePointer = { id: event.pointerId, type: event.pointerType, buttons: event.buttons, lastEvent: event };
     const reported = this.wasmTerm.hasMouseTracking() && !event.shiftKey;
+    this.activePointer = {
+      id: event.pointerId, type: event.pointerType, buttons: event.buttons, lastEvent: event,
+      localSelection: event.button === 0 && !reported, ending: false,
+    };
     this.clickSelects = !reported;
     this.mouseInput?.press(event, reported);
     if (event.button !== 0 || !this.clickSelects) return;
@@ -583,6 +593,7 @@ export class SelectionManager {
       return;
     }
     const pointer = this.activePointer;
+    if (pointer.ending) return;
     pointer.lastEvent = event;
     let buttonChanged = false;
     // Pointer Events reports chorded button changes as moves, not downs/ups.
@@ -596,10 +607,11 @@ export class SelectionManager {
     }
     pointer.buttons = event.buttons;
     this.mouseInput?.move(event, !buttonChanged);
-    if (!this.isSelecting) {
-      if (event.buttons === 0) this.endPointer(false);
+    if (event.buttons === 0 && !pointer.localSelection) {
+      this.endPointer(false);
       return;
     }
+    if (!this.isSelecting) return;
     if (!this.dragThresholdMet) {
       const dx = event.clientX - this.mouseDownX;
       const dy = event.clientY - this.mouseDownY;
@@ -634,19 +646,22 @@ export class SelectionManager {
 
   private endPointer(copy: boolean, release?: MouseEvent): void {
     const pointer = this.activePointer;
-    if (!pointer) return;
+    if (!pointer || pointer.ending) return;
+    const canvas = this.renderer.getCanvas();
+    // Release reports still belong to this gesture. Keep its disposition
+    // through emission, but reject a synchronous attempt to end it again.
+    pointer.ending = true;
+    this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
     this.activePointer = null;
     this.stopAutoScroll();
     const selecting = this.isSelecting;
     this.isSelecting = false;
     // Clear ownership before releasePointerCapture can deliver a loss event.
-    const canvas = this.renderer.getCanvas();
     try {
       if (canvas.hasPointerCapture(pointer.id)) canvas.releasePointerCapture(pointer.id);
     } catch {
       // A detached element can already have lost its capture.
     }
-    this.mouseInput?.end(!this.disposed && canvas.isConnected ? release ?? pointer.lastEvent : undefined);
     if (!selecting) return;
     if (!this.dragThresholdMet) {
       this.clearSelection();
