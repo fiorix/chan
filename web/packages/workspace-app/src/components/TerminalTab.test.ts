@@ -2,7 +2,9 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { useXtermStandIn } from "../__tests__/xterm";
+import { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyFixture, openedGhostty, pressInGhostty } from "../__tests__/ghosttyTab";
+import { runTerminalFit } from "../terminal/resize";
 
 // Static top-level import avoids per-test dynamic import timeouts under
 // the full parallel suite (contended Svelte transform/import across
@@ -34,7 +36,6 @@ import {
   sentFrames,
   TerminalSocket,
   terminalTab,
-  xterm,
 } from "../__tests__/terminalTab";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -43,38 +44,32 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-const noticeSize = vi.hoisted(() => ({ grid: null as { cols: number; rows: number } | null }));
-vi.mock("../terminal/backend", async (importOriginal) => {
-  const { FakeTerminal } = await import("../__tests__/terminalTab");
-  class GhosttyTerminal extends FakeTerminal {
-    renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
-    buffer = { active: {}, alternate: {} };
-    onLinkActivate() { return { dispose() {} }; }
-    hasMouseTracking() { return false; }
-    hasFocusEvents() { return false; }
-  }
-  return (await import("../__tests__/xterm")).xtermStandInSwitch({
-    ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
-  });
+vi.mock("../terminal/backend", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
+vi.mock("../terminal/resize", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../terminal/resize")>();
+  return { ...actual, runTerminalFit: vi.fn(actual.runTerminalFit) };
 });
-vi.mock("../terminal/ghosttyCompat", () => ({
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
-}));
-vi.mock("../terminal/ghosttyViewport", () => ({
-  GhosttyViewportController: class {
-    write() {}
-    dispose() {}
-  },
-}));
-vi.mock("../terminal/resize", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../terminal/resize")>()),
-  proposeGhosttyDimensions: () => noticeSize.grid,
-}));
+
+let hostSize: { cols: number; rows: number } | null = null;
+let hostFailure = false;
+const focusCalls = () => vi.mocked(Terminal.prototype.focus);
+
+beforeEach(() => {
+  vi.spyOn(Terminal.prototype, "focus");
+  vi.mocked(runTerminalFit).mockClear();
+  // The fixture's software canvas measures 8 by 19 CSS-pixel cells.
+  for (const [property, axis, cell] of [["clientWidth", "cols", 8], ["clientHeight", "rows", 19]] as const) {
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, property)!.get!;
+    vi.spyOn(Element.prototype, property, "get").mockImplementation(function (this: Element) {
+      if (!this.classList.contains("terminal-host")) return original.call(this);
+      if (hostFailure) throw new Error("host is not measurable");
+      return (hostSize?.[axis] ?? 0) * cell;
+    });
+  }
+});
 
 const mounted: Array<Record<string, any>> = [];
 
@@ -85,35 +80,25 @@ const mounted: Array<Record<string, any>> = [];
 // in font.test.ts.
 installTerminalDom();
 
-/// Focus calls on every terminal the tests made.
 function terminalFocuses(): number {
-  return xterm.terminals.reduce((n, term) => n + term.focusCount, 0);
+  return focusCalls().mock.calls.length;
 }
 
 function clearTerminalFocuses(): void {
-  for (const term of xterm.terminals) term.focusCount = 0;
+  focusCalls().mockClear();
 }
-
-/// The key handler the last terminal registered with xterm.
-function keyHandler(): (e: KeyboardEvent) => boolean {
-  const handler = xterm.terminals.at(-1)?.keyHandler;
-  if (!handler) throw new Error("no key handler registered");
-  return handler;
-}
-
-// Every case runs on the xterm stand-in unless it names ghostty.
-beforeEach(() => useXtermStandIn());
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   resetTerminals();
-  noticeSize.grid = null;
+  hostSize = null;
+  hostFailure = false;
   __testSetStandalonePreferences(null);
   sessionStorage.removeItem("chan-cli-reload-bits");
   seatTerminals([]);
   surveyState.byTab = {};
   surveyState.windowWide = null;
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 async function renderTerminal(
@@ -132,8 +117,9 @@ async function renderTerminal(
   mounted.push(component);
   await tick();
   await tick();
+  const term = await openedGhostty(target);
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(previousSocketCount + 1));
-  return { component, target };
+  return { component, target, term };
 }
 
 function openSocket(): TerminalSocket {
@@ -188,41 +174,36 @@ describe("TerminalTab CLI reload notice", () => {
     expect(inactive.target.querySelector(".cli-reload-notice"), "inactive tabs do not announce a notice").toBeNull();
   });
 
-  test.each(["xterm", "ghostty"] as const)("%s publishes one larger grid after dismissal and none while inactive", async (backend) => {
-    useXtermStandIn(backend === "xterm");
+  test("publishes one larger grid after dismissal and none while inactive", async () => {
     __testSetStandalonePreferences(terminalPreferences());
-    xterm.fit.size = { cols: 100, rows: 30 };
-    noticeSize.grid = { cols: 100, rows: 30 };
+    hostSize = { cols: 100, rows: 30 };
     const [tab, hidden] = seatTerminals([
       terminalTab({ cliReloadNotice: true }),
       terminalTab({ id: "term-hidden", cliReloadNotice: true }),
     ]);
     const { target } = await renderTerminal(tab, false);
-    const term = xterm.terminals.at(-1)!;
-    expect("renderer" in term, "the selected backend stand-in is mounted").toBe(backend === "ghostty");
+    const term = ghosttyFixture.terminals.at(-1)!;
     const socket = openSocket();
     await receive(socket, { type: "ready", cols: 100, rows: 30 });
     socket.sent.splice(0);
     const rowsBefore = term.rows;
     expect(rowsBefore, "the banner occupies rows before dismissal").toBe(30);
     const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
-    xterm.fit.size = { cols: 100, rows: 33 };
-    noticeSize.grid = { cols: 100, rows: 33 };
+    hostSize = { cols: 100, rows: 33 };
     button?.click();
     await tick();
     await tick();
-    expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal exactly once")
-      .toEqual([{ type: "resize", cols: 100, rows: 33 }]);
+    await vi.waitFor(() => expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal exactly once")
+      .toEqual([{ type: "resize", cols: 100, rows: 33 }]));
     expect(term.rows, "the measured grid gains rows after dismissal").toBeGreaterThan(rowsBefore);
 
     await renderTerminal(hidden, false, "a", false);
     const hiddenSocket = openSocket();
     hiddenSocket.sent.splice(0);
     dismissCliReloadNotice(hidden);
-    xterm.fit.size = { cols: 100, rows: 36 };
-    noticeSize.grid = { cols: 100, rows: 36 };
+    hostSize = { cols: 100, rows: 36 };
     resizeObservers.at(-1)!.callback();
-    xterm.terminals.at(-1)!.resize(100, 36);
+    ghosttyFixture.terminals.at(-1)!.resize(100, 36);
     await tick();
     expect(sentFrames(hiddenSocket).filter((frame) => frame.type === "resize"), "inactive dismissal publishes no grid").toEqual([]);
   });
@@ -230,12 +211,12 @@ describe("TerminalTab CLI reload notice", () => {
 
 describe("TerminalTab initial fit", () => {
   test("dials with the measured grid before deferred resize callbacks", async () => {
-    xterm.fit.size = { cols: 132, rows: 41 };
+    hostSize = { cols: 132, rows: 41 };
     globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
 
     await renderTerminal(terminalTab(), true);
 
-    expect(xterm.fit.calls).toBe(1);
+    expect(runTerminalFit).toHaveBeenCalledTimes(1);
     expect(TerminalSocket.all).toHaveLength(1);
     const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
     expect(query.get("cols")).toBe("132");
@@ -243,15 +224,15 @@ describe("TerminalTab initial fit", () => {
   });
 
   // A size on the dial fits the live PTY before the attach replay, so the
-  // dial declares only a grid the fitter measured; xterm's 80x24 default is
+  // dial declares only a grid the fitter measured; the widget's 80x24 default is
   // not one.
   test("dials without a size when the initial fit throws on the host", async () => {
-    xterm.fit.failure = new Error("host is not measurable");
+    hostFailure = true;
     globalThis.requestAnimationFrame = vi.fn(() => 1) as any;
 
     await renderTerminal(terminalTab(), true);
 
-    expect(xterm.fit.calls).toBe(1);
+    expect(runTerminalFit).toHaveBeenCalledTimes(1);
     expect(TerminalSocket.all).toHaveLength(1);
     const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")]).toEqual([null, null]);
@@ -262,7 +243,7 @@ describe("TerminalTab initial fit", () => {
 
     await renderTerminal(terminalTab({ terminalSessionId: "session-live" }), true);
 
-    expect(xterm.fit.calls).toBe(1);
+    expect(runTerminalFit).toHaveBeenCalledTimes(1);
     const query = new URL(TerminalSocket.all[0].url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")]).toEqual([null, null]);
     expect(query.get("session")).toBe("session-live");
@@ -282,8 +263,8 @@ describe("TerminalTab host resume under the launcher", () => {
 
   test("a resume refocuses the terminal only after the launcher hides", async () => {
     await renderTerminal(terminalTab(), true);
-    const term = xterm.terminals.at(-1)!;
-    const focused = vi.spyOn(term, "focus");
+    const term = ghosttyFixture.terminals.at(-1)!;
+    const focused = vi.spyOn(term, "focus").mockClear();
     document.documentElement.setAttribute("data-launcher-shown", "");
     try {
       await resume();
@@ -307,14 +288,14 @@ describe("TerminalTab host resume under the launcher", () => {
       bumpTabFocusPulse();
       await tick();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(xterm.terminals.at(-1)!.focusCount, "no focus while the launcher is shown").toBe(0);
+      expect(terminalFocuses(), "no focus while the launcher is shown").toBe(0);
     } finally {
       document.documentElement.removeAttribute("data-launcher-shown");
     }
     bumpTabFocusPulse();
     await tick();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(xterm.terminals.at(-1)!.focusCount, "the pane focus after the launcher hid focuses").toBe(1);
+    expect(terminalFocuses(), "the pane focus after the launcher hid focuses").toBe(1);
   });
 });
 
@@ -347,6 +328,7 @@ describe("TerminalTab activity frames", () => {
     mounted.push(component);
     await tick();
     await tick();
+    await openedGhostty(target);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
     const socket = openSocket();
     await tick();
@@ -538,6 +520,7 @@ describe("TerminalTab metadata settlement", () => {
       const target = document.createElement("div");
       document.body.append(target);
       mounted.push(mount(Workspace, { target }));
+      await openedGhostty(target);
       await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
 
       expect(next).toHaveBeenCalledTimes(1);
@@ -683,6 +666,7 @@ describe("TerminalTab seed input", () => {
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(Workspace, { target }));
+    await openedGhostty(target);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
     const socket = TerminalSocket.all[0]!;
     await attach(socket);
@@ -757,14 +741,18 @@ describe("TerminalTab menu", () => {
 describe("TerminalTab and the app around it", () => {
   const SURVEY: SurveySpec = { surveyId: "survey-1", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] };
 
-  test("an app chord is left to the app: xterm skips it and the PTY gets nothing", async () => {
+  test("an app chord is left to the app and the PTY gets nothing", async () => {
     await renderTerminal(terminalTab(), true);
     const socket = openSocket();
     socket.sent.splice(0);
 
     // The command launcher's chord off the Mac, flagged to escape terminals.
-    const event = new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true, altKey: true });
-    expect(keyHandler()(event)).toBe(false);
+    const term = ghosttyFixture.terminals.at(-1)!;
+    const outer = vi.fn();
+    term.element!.parentElement!.addEventListener("keydown", outer);
+    const event = pressInGhostty(term, { key: "k", code: "KeyK", keyCode: 75, ctrlKey: true, altKey: true });
+    expect(outer).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
     expect(socket.sent.filter((f) => JSON.parse(f).type === "input")).toEqual([]);
   });
 
@@ -805,8 +793,7 @@ describe("TerminalTab and the app around it", () => {
     expect(terminalFocuses()).toBe(1);
   });
 
-  test("an xterm finishing its mount leaves the keyboard in the Team dialog's field", async () => {
-    xterm.textareaFocus = true;
+  test("a terminal finishing its mount leaves the keyboard in the Team dialog's field", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const field = document.createElement("input");
     document.body.append(field);
@@ -814,24 +801,21 @@ describe("TerminalTab and the app around it", () => {
     field.focus();
     try {
       const { target } = await renderTerminal(tab, true);
-      expect(target.querySelector("textarea"), "xterm has finished opening its input").not.toBeNull();
+      expect(target.querySelector("textarea"), "the widget has finished opening its input").not.toBeNull();
       await tick();
-      expect(document.activeElement, "the modal field keeps focus after xterm startup").toBe(field);
-      expect(terminalFocuses(), "startup does not ask xterm to take focus under a modal").toBe(0);
+      expect(document.activeElement, "the modal field keeps focus after widget startup").toBe(field);
+      expect(terminalFocuses(), "startup does not ask the terminal to take focus under a modal").toBe(0);
     } finally {
       closeTeamDialog();
       field.remove();
     }
   });
 
-  test("a click on a URL xterm.js underlines opens the link menu with its target and host", async () => {
-    await renderTerminal(terminalTab(), true);
-    const { handler, options } = xterm.webLinks.at(-1)!;
-    const range = { start: { x: 1, y: 1 }, end: { x: 30, y: 1 } };
-    const click = new MouseEvent("mouseup", { button: 0, detail: 1, clientX: 40, clientY: 40 });
-    options.hover(click, "https://github.com@evil.example/x", range);
-    handler(click, "https://github.com@evil.example/x");
-    await vi.waitFor(() => expect(document.querySelector('[aria-label="terminal link menu"]')).not.toBeNull());
+  test("a click on a URL opens the link menu with its target and host", async () => {
+    const { term } = await renderTerminal(terminalTab(), true);
+    const socket = openSocket();
+    await output(socket, "https://github.com@evil.example/x");
+    await clickLink(term);
     const menu = document.querySelector('[aria-label="terminal link menu"]')!;
     expect(menu.querySelector("[data-terminal-link-target]")?.getAttribute("data-terminal-link-target")).toBe(
       "https://github.com@evil.example/x",
@@ -840,28 +824,19 @@ describe("TerminalTab and the app around it", () => {
   });
 
   test("the link menu closes when its link's row changes and hands the keyboard it held back", async () => {
-    await renderTerminal(terminalTab(), true);
-    const term = xterm.terminals.at(-1)!;
-    let row = "https://example.com/a";
-    Object.defineProperty(term, "buffer", {
-      configurable: true,
-      get: () => ({ active: { viewportY: 0, getLine: (y: number) => (y === 0 ? { translateToString: () => row } : undefined) } }),
-    });
+    const { term } = await renderTerminal(terminalTab(), true);
+    const socket = openSocket();
+    await output(socket, "https://example.com/a");
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
-      const { handler, options } = xterm.webLinks.at(-1)!;
-      const click = new MouseEvent("mouseup", { button: 0, detail: 1, clientX: 40, clientY: 40 });
-      options.hover(click, "https://example.com/a", { start: { x: 1, y: 1 }, end: { x: 21, y: 1 } });
-      handler(click, "https://example.com/a");
+      await clickLink(term);
       const selector = '[aria-label="terminal link menu"]';
-      await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
-      // The menu holds the keyboard, on its first entry.
       document.querySelector<HTMLButtonElement>(`${selector} button.mbtn`)!.focus();
       clearTerminalFocuses();
       vi.advanceTimersByTime(100);
       await tick();
       expect(document.querySelector(selector), "the same row: the menu stays").not.toBeNull();
-      row = "$ clear";
+      await output(socket, "\r\x1b[2K$ clear");
       vi.advanceTimersByTime(100);
       await tick();
       expect(document.querySelector(selector)).toBeNull();
@@ -871,3 +846,13 @@ describe("TerminalTab and the app around it", () => {
     }
   });
 });
+
+async function clickLink(term: Terminal): Promise<void> {
+  const canvas = term.element!.querySelector("canvas")!;
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+  const position = { bubbles: true, cancelable: true, button: 0, detail: 1, clientX: 12, clientY: 9 };
+  canvas.dispatchEvent(new MouseEvent("mousedown", position));
+  canvas.dispatchEvent(new MouseEvent("mouseup", position));
+  canvas.dispatchEvent(new MouseEvent("click", position));
+  await vi.waitFor(() => expect(document.querySelector('[aria-label="terminal link menu"]')).not.toBeNull());
+}
