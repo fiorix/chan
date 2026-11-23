@@ -457,7 +457,7 @@ export class Terminal {
             this.awaitingEcho = true;
           }
           // Clear selection when user types
-          this.selectionManager?.clearSelection();
+          if (isUserInput) this.selectionManager?.clearSelection();
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
