@@ -378,10 +378,17 @@ test("process.exit(0) in a check cannot report success", (t) => {
 });
 
 test("process.exit(1) before finalization is incomplete, not an assertion red", (t) => {
-  const { results: r, rc } = run(t, { body: "process.exit(1);", interrupted: true });
+  const { results: r, log, rc } = run(t, { body: "process.exit(1);", interrupted: true });
   assert.equal(rc, 2);
   assert.equal(r.currentCheck, "001-control.mjs");
   assert.deepEqual(r.checks, []);
+  assert.match(log, /CONTROL_SERVER_KILL SIGKILL/);
+  assert.match(log, /CONTROL_BROWSER_KILL SIGKILL/);
+});
+
+test("process.exit(-1) before finalization exits 2", (t) => {
+  const { rc } = run(t, { body: "process.exit(-1);", interrupted: true });
+  assert.equal(rc, 2);
 });
 
 test("selection is persisted before importing dependencies", (t) => {

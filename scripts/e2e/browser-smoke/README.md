@@ -26,7 +26,9 @@ The full run builds `web/` and `cargo build -p chan` first; set `SMOKE_SKIP_BUIL
 
 ## Exit status
 
-A smoke run exits `0` only after finalizing a nonempty selection whose every check passed. An empty fatal detail still reports an error. A direct `process.exit(0)` or `process.exit(1)` before finalization exits `2` and leaves only partial evidence; higher exit codes are preserved. An unfinished exit synchronously kills the runner's chan server and Chrome children. Assertion failures exit `1`; incomplete runs, environment errors and invalid selections exit `2`. The printed verdict and `results.json.status` distinguish the non-passing cases that share exit `2`.
+A smoke run exits `0` only after finalizing a nonempty selection whose every check passed. An empty fatal detail still reports an error. A direct `process.exit(0)` or `process.exit(1)` before finalization exits `2` and leaves only partial evidence; positive exit codes above `1` are preserved. A negative direct exit code such as `process.exit(-1)` becomes `2` before OS exit-code wrapping. An unfinished exit synchronously kills the runner's chan server and Chrome children. Assertion failures exit `1`; incomplete runs, environment errors and invalid selections exit `2`. The printed verdict and `results.json.status` distinguish the non-passing cases that share exit `2`.
+
+For the isolated rig, `unit` runs svelte-check before vitest and validates a fresh JSON report. Status `0` requires `success: true`, at least one passed test, and zero failed tests and suites; status `1` requires a failed test or suite and at least one executed test. No file, no matching test, all skipped tests, an import error without executed tests, absent or invalid JSON, and other unverified outcomes read `3`; the validator prints the report counts. The host wrapper requires exactly one agreeing `rc=0 unit` or `rc=1 unit` line. A svelte-check failure emits no unit verdict and reads `3` through the wrapper. Run the rig build after switching source so unit uses its locked dependencies.
 
 | Outcome | Check line | Run verdict / JSON status | Exit |
 | --- | --- | --- | --- |
