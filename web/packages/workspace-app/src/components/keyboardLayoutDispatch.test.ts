@@ -8,7 +8,11 @@
 // nothing happens, so a matcher that still reads `code` fails here.
 //
 // A Linux browser client (jsdom's own user agent), so `Mod` is Ctrl and the
-// web chord set applies.
+// web chord set applies. A terminal the app opens runs on the real widget
+// (the shared fixture), whose render loop asks for its next frame from inside
+// each one, so frames run one task later, as in a browser; CodeMirror
+// measures text ranges on those frames, which jsdom does not lay out, so a
+// range answers with empty geometry.
 
 import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -32,7 +36,9 @@ import {
   type FileTab,
   type LeafNode,
 } from "../state/tabs.svelte";
+import { openedGhostty } from "../__tests__/ghosttyTab";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
+import { taskFrames } from "../__tests__/terminalTab";
 
 class TestResizeObserver {
   observe() {}
@@ -74,13 +80,16 @@ vi.mock("@xterm/addon-serialize", () => ({
 }));
 vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 globalThis.ResizeObserver = TestResizeObserver as any;
-globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
-  cb(0);
-  return 0;
-}) as any;
+const frames = taskFrames();
+globalThis.requestAnimationFrame = frames.request;
+globalThis.cancelAnimationFrame = frames.cancel;
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect();
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 Object.defineProperty(document, "fonts", {
   configurable: true,
@@ -385,6 +394,7 @@ describe("a chord relayed from a focused extension frame", () => {
     expect(relay(frame.contentWindow, COLEMAK_T)).toBe(1);
     await settle();
     expect(terminalCount()).toBe(1);
+    await openedGhostty();
   });
 
   test("the G on KeyT is not advertised, so nothing is recreated", async () => {
