@@ -57,6 +57,7 @@ import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { Osc52Bridge } from "../terminal/osc52Bridge";
 import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
+import { requestXtermStandIn } from "../__tests__/xterm";
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -231,10 +232,10 @@ describe("choosing the backend", () => {
   });
 
   test("a kit that fails to load falls back to xterm", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     // Deliberate loader-failure exception while the app still falls back to
     // xterm; replace this case when terminal load failures have their own UI.
-    vi.mocked(loadGhosttyKit).mockRejectedValueOnce(new Error("wasm fetch failed"));
+    // The failure is the route's, which asks for the fallback the case reads.
+    vi.mocked(loadGhosttyKit).mockImplementationOnce(requestXtermStandIn);
     const [tab] = seatTerminals([terminalTab()]);
     const target = document.createElement("div");
     document.body.append(target);

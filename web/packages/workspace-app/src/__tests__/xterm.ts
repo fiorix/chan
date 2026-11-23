@@ -277,13 +277,12 @@ export function webglAddonModule() {
 // The route is transitional: a file leaves it when its assertions move to the
 // widget fixture (`./ghosttyTab`), and the route goes with the last file.
 //
-// Each load that asks for the fallback pays for one stand-in: the route's
-// own failure, or a file's own kit failing under the switch, which is that
-// file's choice. A stand-in nothing paid for fell back on its own, with
-// neither fixture nor route, and the setup file's guard fails its test from
-// this count, whatever the test did with the console. The count is per file:
-// a load whose component was torn down before it built a terminal leaves its
-// payment for the next.
+// Each load that asks for the fallback, with the route's own failure, pays
+// for one stand-in. A stand-in nothing paid for fell back on its own: with
+// neither fixture nor route, or from a file's own kit failing to load. The
+// setup file's guard fails its test from this count, whatever the test did
+// with the console. The count is per file: a load whose component was torn
+// down before it built a terminal leaves its payment for the next.
 
 /// The load failure a file on the stand-in route asks for.
 export class XtermStandInRequested extends Error {
@@ -328,18 +327,12 @@ export function useXtermStandIn(on = true): void {
 
 /// Wraps the module a file's own backend mock returns, so `useXtermStandIn`
 /// decides each load. The file's own load is returned as it is, so a kit's
-/// timing is the file's; when it fails, the fallback it leads to is paid.
+/// timing is the file's, and a failure of it pays for nothing: a case that
+/// means its kit to fail asks for the fallback with `requestXtermStandIn`.
 export function xtermStandInSwitch<T extends { loadGhosttyKit: () => Promise<unknown> }>(module: T): T {
   const load = module.loadGhosttyKit;
   return {
     ...module,
-    loadGhosttyKit: (() => {
-      if (standIn.on) return requestXtermStandIn();
-      const loading = load();
-      loading.catch(() => {
-        route.paid += 1;
-      });
-      return loading;
-    }) as T["loadGhosttyKit"],
+    loadGhosttyKit: (() => (standIn.on ? requestXtermStandIn() : load())) as T["loadGhosttyKit"],
   };
 }
