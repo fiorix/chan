@@ -25,6 +25,7 @@ import { teardownDemoApp } from "./demo/teardown";
 import { trackTimers, type TimerTrack } from "./demo/timers";
 import { closeTeamDialog, teamDialogState } from "./state/teamDialog.svelte";
 import { layout, type LeafNode } from "./state/tabs.svelte";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { installTerminalDom, terminalTab } from "./__tests__/terminalTab";
 
 installTerminalDom();
@@ -86,6 +87,7 @@ describe("Team Work", () => {
     expect(pane.tabs.map((t) => t.id)).toEqual(["term-existing"]);
     expect(teamDialogState.request).toBeNull();
     expect(event.defaultPrevented).toBe(false);
+    await seatedGhostty();
   });
 
   test("its command while the team dialog is open opens no second lead", async () => {

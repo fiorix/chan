@@ -242,6 +242,21 @@ export async function openedGhostty(within: Node = document): Promise<Terminal> 
   );
 }
 
+/// The fixture terminal open in a test that seated one through the app (a
+/// layout, a command, a pane), rather than with `mountGhosttyTerminal`. A
+/// file whose fixture mocks did not apply would otherwise finish before the
+/// real loader fails, every terminal lost and no report to fail on: this
+/// refuses such a file, and waits for the widget.
+export async function seatedGhostty(within: Node = document): Promise<Terminal> {
+  if (!ghosttyFixtureDeclared()) {
+    throw new Error(
+      'seatedGhostty needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule ' +
+        'and "../terminal/ghosttyCompat" with ghosttyCompatModule',
+    );
+  }
+  return openedGhostty(within);
+}
+
 /// Type a key into the terminal: the keydown goes to the element the widget
 /// focuses, where the app's key handling listens ahead of the widget's own.
 /// What the key did is what the product shows for it: the input frames on

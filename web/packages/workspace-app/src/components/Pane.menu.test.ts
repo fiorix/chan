@@ -24,6 +24,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { expectWords, type WordSource } from "../__tests__/menuWords";
 import { resetLayout } from "../__tests__/tabs";
 import { api } from "../api/client";
@@ -244,5 +245,6 @@ describe("New terminal's shell rows", () => {
     await vi.waitFor(() =>
       expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([{ kind: "terminal", profile: "bash" }]),
     );
+    await seatedGhostty();
   });
 });

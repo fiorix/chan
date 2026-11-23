@@ -44,6 +44,7 @@ import { api } from "../api/client";
 import { downloadBytes } from "../api/download";
 import { exportMarkdownToPdf } from "../editor/pdf_export";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { resetLayout } from "../__tests__/tabs";
 import {
   commandById,
@@ -189,6 +190,7 @@ describe("a folder's menu", () => {
     await settle();
 
     expect(tabs().at(-1)).toMatchObject({ kind: "terminal", cwd: "docs" });
+    await seatedGhostty();
   });
 
   test("New graph here opens a graph, under the graph chord", async () => {

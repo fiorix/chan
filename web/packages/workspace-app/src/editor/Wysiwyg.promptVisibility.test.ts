@@ -18,6 +18,7 @@ vi.mock("../components/canvasAnimation", async (importOriginal) =>
 );
 
 import { demoData, mountApp, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { seatedGhostty } from "../__tests__/ghosttyTab";
 import { draftPath, draftSeed } from "../__tests__/drafts";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { mouseDown, mouseUp } from "../__tests__/pointer";
@@ -89,6 +90,7 @@ describe.each<Overlay>(["URL", "date pill", "caret calendar"])("Rich Prompt %s v
     await settle();
     expect(EditorView.findFromDOM(view.contentDOM)).toBe(view);
     expect(document.querySelectorAll(OVERLAYS)).toHaveLength(0);
+    await seatedGhostty();
   });
 
   test("closes when its terminal's pane flips", async () => {

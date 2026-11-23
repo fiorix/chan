@@ -23,7 +23,7 @@ vi.mock("./terminal/ghosttyCompat", async (importOriginal) =>
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { boardLoaded } from "./__tests__/excalidraw";
-import { openedGhostty } from "./__tests__/ghosttyTab";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { closeConfirmState } from "./state/closeConfirm.svelte";
 import { confirmState } from "./state/confirm.svelte";
@@ -215,7 +215,7 @@ describe("Ctrl+D is left alone", () => {
 
   test("in a terminal, where the shell reads it as EOF", async () => {
     await seed(terminalTab({ id: "term" }));
-    await openedGhostty();
+    await seatedGhostty();
 
     const event = press(CTRL_D);
     await settle();

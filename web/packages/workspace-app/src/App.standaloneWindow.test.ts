@@ -54,7 +54,7 @@ import { api, sessionWindowId } from "./api/client";
 import { requestCloseWindow } from "./api/desktop";
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
-import { openedGhostty } from "./__tests__/ghosttyTab";
+import { seatedGhostty } from "./__tests__/ghosttyTab";
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { __testResetSessionDiscarded, __testSetBootstrapHydrated, clearRemoteApplyEmptyWindow, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
 import { hasAnyTab, openTerminalInActivePane } from "./state/tabs.svelte";
@@ -132,7 +132,7 @@ describe("a window with no workspace", () => {
     openTerminalInActivePane({});
     await settle();
     expect(ui.terminalArmed).toBe(true);
-    await openedGhostty();
+    await seatedGhostty();
   });
 
   test("an apply that empties a desktop window leaves it open and sends no DELETE", async () => {
