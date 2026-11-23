@@ -7,7 +7,7 @@ import test from "node:test";
 
 // Run the production entry point with inert browser/server dependencies. No
 // chan process, browser, network, build or package installation is involved.
-function run(t, { body = "return { observed: true };", bodies = [body], before = "", only = "00", mode = "", startup = "", args = [] } = {}) {
+function run(t, { body = "return { observed: true };", bodies = [body], before = "", only = "00", mode = "", startup = "", args = [], interrupted = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "smoke-verdict-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const suite = join(root, "scripts/e2e/browser-smoke");
@@ -56,6 +56,10 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
     }
     export async function teardownServer() {
       console.log("CONTROL_TEARDOWN");
+      if (process.env.CONTROL_MODE === "empty-teardown-crash") {
+        setTimeout(() => { throw ""; }, 5);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       if (process.env.CONTROL_MODE === "teardown") throw new Error("CONTROL_TEARDOWN_ERROR");
     }
   `);
@@ -95,10 +99,20 @@ function run(t, { body = "return { observed: true };", bodies = [body], before =
     return { log, rc: child.status };
   }
   const results = JSON.parse(readFileSync(join(root, "out/results.json"), "utf8"));
-  assert.equal(results.exitCode, child.status);
+  if (interrupted) {
+    assert.equal(results.status, "running");
+    assert.equal(results.exitCode, null);
+    assert.equal(results.finishedAt, undefined);
+  } else {
+    assert.equal(results.exitCode, child.status);
+  }
   if (child.status !== 0) {
     assert.equal(results.ok, false);
     assert.doesNotMatch(log, /ALL GREEN/);
+  } else {
+    assert.equal(results.status, "passed");
+    assert.ok(results.passed > 0);
+    assert.equal(results.passed, results.selectedChecks.length);
   }
   assert.equal((log.match(/\[smoke\]   PASS:/g) ?? []).length,
     results.checks.filter((check) => check.status === "passed").length);
@@ -245,6 +259,8 @@ test("completed rows are persisted as running before the next body", (t) => {
     assert.equal(partial.ok, false);
     assert.equal(partial.exitCode, null);
     assert.equal(partial.finishedAt, undefined);
+    assert.deepEqual(partial.selectedChecks, ["001-control.mjs", "002-control.mjs"]);
+    assert.equal(partial.currentCheck, "002-control.mjs");
     assert.equal(partial.checks.length, 1);
     assert.equal(partial.checks[0].status, "failed");
     return { partialRead: true };
@@ -299,4 +315,86 @@ test("dependency-only failure emits one cause without a results-path TypeError",
   assert.equal(rc, 2);
   assert.match(log, /CONTROL_MISSING_DRIVER/);
   assert.doesNotMatch(log, /ERROR \(results\)|TypeError|ALL GREEN/);
+});
+
+for (const startup of ['throw "";', 'throw Object.assign(new Error("empty stack"), { stack: "" });']) {
+  test(`empty fatal detail is still an error: ${startup}`, (t) => {
+    const { results: r, rc } = run(t, { startup });
+    assert.equal(rc, 2);
+    assert.equal(r.status, "error");
+    assert.equal(r.errorPhase, "startup");
+    assert.equal(r.fatal, "");
+  });
+}
+
+test("an empty timer throw during teardown revokes success", (t) => {
+  const { results: r, log, rc } = run(t, { mode: "empty-teardown-crash" });
+  assert.equal(rc, 2);
+  assert.equal(r.errorPhase, "uncaught exception");
+  assert.equal(r.fatal, "");
+  assert.equal(r.passed, 1);
+  assert.match(log, /CONTROL_TEARDOWN/);
+});
+
+for (const mode of ["cleanup", "timeline"]) {
+  test(`${mode} error preserves a failed body`, (t) => {
+    const { results: r, log, rc } = run(t, { body: checkBodies.fail, mode });
+    assert.equal(rc, 1);
+    assert.equal(r.failed, 1);
+    assert.equal(r.errors, 0);
+    assert.deepEqual(r.checks[0].errors.map(({ phase, status }) => [phase, status]),
+      [["check", "failed"], [mode, "error"]]);
+    assert.match(log, /1 failed/);
+  });
+}
+
+test("unserializable environment details retain the error verdict", (t) => {
+  const { results: r, rc } = run(t, {
+    body: 'throw Object.assign(new Error("CONTROL_ENVIRONMENT"), { smokeEnvironment: true, smokeDetails: { value: 1n } });',
+  });
+  assert.equal(rc, 2);
+  assert.equal(r.errors, 1);
+  assert.equal(r.failed, 0);
+  assert.deepEqual(r.checks[0].errors.map((e) => e.status), ["error", "failed"]);
+});
+
+test("process.exit(0) in a check cannot report success", (t) => {
+  const { results: r, rc } = run(t, { body: "process.exit(0);", interrupted: true });
+  assert.equal(rc, 2);
+  assert.equal(r.currentCheck, "001-control.mjs");
+  assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.deepEqual(r.checks, []);
+});
+
+test("selection is persisted before importing dependencies", (t) => {
+  const { rc } = run(t, { startup: `
+    import fs from "node:fs";
+    import assert from "node:assert/strict";
+    const partial = JSON.parse(fs.readFileSync(process.env.SMOKE_OUT_DIR + "/results.json", "utf8"));
+    assert.equal(partial.status, "running");
+    assert.deepEqual(partial.selectedChecks, ["001-control.mjs"]);
+    assert.equal(partial.currentCheck, null);
+  ` });
+  assert.equal(rc, 0);
+});
+
+test("an interrupted snapshot write preserves the previous readable file", (t) => {
+  const { results: r, rc } = run(t, { interrupted: true, body: `
+    const fs = (await import("node:fs")).default;
+    const { syncBuiltinESMExports } = await import("node:module");
+    const write = fs.writeFileSync;
+    fs.writeFileSync = (path, data, ...args) => {
+      if (String(path).includes("results.json")) {
+        write(path, String(data).slice(0, 20), ...args);
+        process.exit(23);
+      }
+      return write(path, data, ...args);
+    };
+    syncBuiltinESMExports();
+    return null;
+  ` });
+  assert.equal(rc, 23);
+  assert.deepEqual(r.selectedChecks, ["001-control.mjs"]);
+  assert.equal(r.currentCheck, "001-control.mjs");
+  assert.deepEqual(r.checks, []);
 });
