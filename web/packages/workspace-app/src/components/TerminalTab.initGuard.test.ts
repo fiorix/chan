@@ -9,7 +9,8 @@
 // from the guard itself, so it passes while the guard still fails any other
 // test that does the same; the second leaves it to the guard and is expected
 // to fail. The runner settles an expected failure after the test's hooks, so
-// that case passes only while the guard's own hook fails it.
+// that case passes only while the guard's own hook fails it, and the case
+// after it reads that its body ran to the end, so the failure was the hook's.
 //
 // A load the stand-in route asks for is the one the guard lets through: its
 // report by its class, so an error that only reads like it still fails, and
@@ -62,6 +63,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Set at the end of the expected failure's body.
+let unguardedBodyRan = false;
+
 test("a terminal opened without the shared widget fixture fails its test, naming the fixture", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await mountTerminal(TerminalTab, tab!);
@@ -75,6 +79,11 @@ test("a terminal opened without the shared widget fixture fails its test, naming
 test.fails("a terminal opened without the shared widget fixture, its report left to the guard, fails the test", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await mountTerminal(TerminalTab, tab!);
+  unguardedBodyRan = true;
+});
+
+test("the expected failure above ran its body to the end, so the guard's hook failed it", () => {
+  expect(unguardedBodyRan).toBe(true);
 });
 
 test("a terminal opened with neither fixture nor route fails its test under a silenced console", async () => {
