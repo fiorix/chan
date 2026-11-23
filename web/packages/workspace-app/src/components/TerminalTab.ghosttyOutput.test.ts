@@ -173,6 +173,9 @@ describe("a loss inside an unfinished sequence", () => {
     ["an OSC string", "\x1b]0;a title the loss cut"],
     ["a DCS string", "\x1bP1$qa request the loss cut"],
     ["a control sequence", "\x1b[1;"],
+    ["an APC string", "\x1b_Ga=q;cut"],
+    ["an SOS string", "\x1bXcut"],
+    ["a charset designation", "\x1b("],
   ])("ends %s before the notice and the replay", async (_name, open) => {
     const { socket, term } = await mounted();
     await attached(socket, { seq: 0, replay_bytes: 0 });
