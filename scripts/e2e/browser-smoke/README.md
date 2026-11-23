@@ -26,13 +26,25 @@ The full run builds `web/` and `cargo build -p chan` first; set `SMOKE_SKIP_BUIL
 
 ## Exit status
 
-`0` every selected check ran and passed, `1` at least one check failed, `2` the environment cannot exercise the suite at all, following the same convention as `webview-flip-render.py` and `terminal-pixels.py`. A skip is not a pass, so the two nonzero codes are kept apart: `1` is a defect to chase and `2` is an environment to fix.
+Only a complete passing selection exits `0`. Assertion failures exit `1`; incomplete runs, environment errors and invalid selections exit `2`. The printed verdict and `results.json.status` distinguish the non-passing cases that share exit `2`.
 
-`provision.sh` uses the same three codes, and **`make` erases the distinction**: GNU make exits `2` for any recipe failure, so `make browser-smoke-deps` returning 2 means only "it failed": the provisioner's own `1` (it tried and could not) and `2` (this environment is not provisionable) both arrive as make's 2. Run `scripts/e2e/browser-smoke/provision.sh` directly whenever a caller needs to tell those apart; the make target is a convenience, not the interface.
+| Outcome | Check line | Run verdict / JSON status | Exit |
+| --- | --- | --- | --- |
+| Every check passes | `PASS` | `ALL GREEN` / `passed` | 0 |
+| Check assertion throws | `FAIL` | `N FAILURE(S)` / `failed` | 1 |
+| `ctx.skip(reason)` | `SKIP` | `INCOMPLETE` / `skipped` | 2 |
+| Setup, I/O, browser or evidence error | `ERROR` | `ERROR` / `error` | 2 |
+| Unmatched selection prefix | No check runs | `SELECTION ERROR` / `selection-error` | 2 |
 
-The run exits `2`, before it builds or starts anything, when `XDG_RUNTIME_DIR` is unset or is the user's own runtime directory (see Environment), when no Chrome is found, when the Chrome it found will not start (the stock container state: the browser links against `libnss3` and `libasound2` and the rootfs carries neither, so the dynamic linker kills it at exec), when `CHAN_BIN` names no binary, or when `SMOKE_ONLY` selects no check. That last one is the same defect in miniature: a filter matching nothing used to build the tree, run zero checks, and report `ALL GREEN`.
+Every requested `SMOKE_ONLY` prefix must match a check, including when other prefixes match. Selection validation precedes dependency installation, builds and server startup. An unset or shared `XDG_RUNTIME_DIR`, missing binary, unusable Chrome, dependency import failure or broken seed fixture reports an error. Startup errors write `results.json` when the output directory is writable.
 
-A check that calls `ctx.skip` did not run and so cannot have passed, but its precondition is absent rather than broken, so it does not fail the run. It is named on the verdict line and counted in `results.json` as `skipped`, never left to be inferred from the absence of a line.
+A check gets its final line only after page cleanup and timeline persistence. Cleanup or timeline errors override a passed or skipped body, retain exception stacks in `errors` with their phase, and exit `2`; a displaced skip's reason remains in `skipReason`. No skip or error prints `PASS`. Aggregate precedence is error, assertion failure, skip, pass. `ok` is true only for `passed`; the aggregate also records `selectedChecks`, `failed`, `errors`, `skipped` and `exitCode`. The error count covers check rows; `fatal` and `errorPhase` record errors outside a check.
+
+Check imports and runner setup/cleanup failures are errors. In a check body, typed missing-module/file/access errors, `ETIMEDOUT`, Puppeteer's `TimeoutError`, an error while the browser is disconnected, or an exception tagged `smokeEnvironment: true` are errors. Other thrown exceptions are assertion failures. This classification describes how the run ended, not the root cause: a product defect can also cause a timeout. Message text alone is never classified; a custom timeout thrown as an ordinary `Error` remains a failure. Exception stacks are retained with bearer tokens masked.
+
+`provision.sh` also uses `0`, `1` and `2`, but GNU make exits `2` for any recipe failure and erases that distinction. Call the runner or provisioner directly when a caller needs their exit status. `run.mjs --deps-only` exits `0` after dependency validation and runs no check; it is not a smoke pass.
+
+The runner controls use inert browser/server fixtures and exercise the production entry point without launching either. Run `node --test scripts/e2e/browser-smoke/lib/runner-results.test.mjs` for pass, red, skip, cleanup-after-skip, timeline failure, delayed PASS, unmatched-prefix and environment-error controls. The real-browser preflight remains necessary to verify the guest wrappers and actual dependencies.
 
 The binary-transfer check skips when the workspace filesystem does not keep a truncated fixture sparse.
 
@@ -75,11 +87,11 @@ A check passes alone and in any suite position, so verify a new check both ways 
 
 The suite was counted whole and each check alone on a guest capped at two and at four CPUs; among passing runs at four CPUs, only the eleven-minute check 156 ran ten seconds or more over its best alone time, by about two percent, so the suite is documented for a four-CPU guest, and a check that runs longer under a smaller cap is the cap's cost, not a stall to explain.
 
-A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use xterm.js on every platform unless ghostty is stored as true. The runner grants clipboard read and sanitized write to every check's browser context.
+A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use Ghostty on every platform unless ghostty is stored as false. The runner grants clipboard read and sanitized write to every check's browser context.
 
 A check that creates another page with a fresh window id waits for `ctx.waitWindowLive(id)` before PATCHing preferences. The routed reply proves that window has subscribed to the event bus; DOMContentLoaded and a mounted pane do not. The preference helper still requires that page's post-PATCH workspace refresh. This window-level barrier identifies a page only when no co-viewer shares its id.
 
-`results.json` is written after `teardownServer`, so a teardown that throws takes the results file, the `ALL GREEN` / `N FAILURE(S)` line, and the exit code with it. The run's screenshots still land in the output directory, but its verdict does not, and a full run is exactly where that hurts because `98-workspace-root-loss` deletes the workspace root the teardown then reads. Treat an output directory holding screenshots and no `results.json` as a lost verdict, not as a pass, and read the console transcript for the per-check lines.
+`results.json` is written after teardown. An exception escaping teardown produces an error verdict; helpers that explicitly swallow their own best-effort cleanup errors retain that behavior. A process killed by an outer timeout or signal, an interpreter/static-import failure, or an unwritable output directory can still leave no result file. Missing JSON, incomplete selection coverage or missing timelines is a lost verdict, even if an outer wrapper reports zero. Keep the raw console and exit status; an outer timeout is an environment error, not an assertion red or skip.
 
 Add a new check by dropping a numbered file into `checks/`; nothing else needs editing.
 
