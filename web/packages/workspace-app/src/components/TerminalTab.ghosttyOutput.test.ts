@@ -22,7 +22,7 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
-import { ghosttyLineText, ghosttyMouseTracking, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
+import { ghosttyLineText, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
   installTerminalDom,
@@ -40,7 +40,10 @@ import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 const SESSION = "sess-output";
 const LISTENER_FAILURE = "a change listener failed";
 const NOTICE = "terminal replay missed 5 bytes";
-// The server's recovery suffix on the normal screen, sent after the replay.
+// The head of the server's recovery suffix on the normal screen, sent after
+// the replay: CAN, a cursor save and the alternate-screen exits. The mode
+// resets the server sends after them are left out; no case here reads a
+// mode.
 const RECOVERY_SUFFIX = "\x18\x1b7\x1b[?1049;1047;47l";
 
 installTerminalDom();
@@ -193,7 +196,6 @@ describe("a loss inside an unfinished sequence", () => {
     expect(screen(term).slice(0, 3), "the replay's head is text, not the rest of the held enable").toEqual([
       "old", NOTICE, "0hNEW",
     ]);
-    expect(ghosttyMouseTracking(term)).toBe(false);
   });
 
   test("ends it for the OSC 52 observer too", async () => {

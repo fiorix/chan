@@ -484,8 +484,9 @@
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
   let receivedSeq = 0;
-  // Reports what the ghostty core has parsed; xterm.js queues its writes, so
-  // that backend never dials with `ack` and never paces the program.
+  // Reports each frame as the ghostty core takes it, in the same task as its
+  // parse; xterm.js queues its writes, so that backend never dials with `ack`
+  // and never paces the program.
   const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
