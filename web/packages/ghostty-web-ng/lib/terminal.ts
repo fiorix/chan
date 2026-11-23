@@ -32,7 +32,7 @@ import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
-import { DRAG_THRESHOLD_CELLS, SelectionManager } from './selection-manager';
+import { DRAG_THRESHOLD_CELLS, SelectionManager, type SelectionRange } from './selection-manager';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -137,6 +137,8 @@ export class Terminal {
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
       disableStdin: options.disableStdin ?? false,
+      copy: options.copy,
+      joinDrawnWraps: options.joinDrawnWraps,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
@@ -806,6 +808,26 @@ export class Terminal {
    */
   public clearSelection(): void {
     this.selectionManager?.clearSelection();
+  }
+
+  /** Inclusive absolute-row selection, in either direction; null clears. */
+  public setSelection(range: SelectionRange | null): void {
+    this.selectionManager?.setSelection(range);
+  }
+
+  /** A snapshot of the current selection, or null when unavailable. */
+  public getSelectionRange(): SelectionRange | null {
+    return this.selectionManager?.getSelectionRange() ?? null;
+  }
+
+  /** Client CSS pixels to viewport and absolute cells; null without geometry. */
+  public cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
+    return this.selectionManager?.cellAt(clientX, clientY) ?? null;
+  }
+
+  /** Copy-formatted retained history and screen; leaves selection untouched. */
+  public getScrollbackText(): string {
+    return this.selectionManager?.getScrollbackText() ?? '';
   }
 
   /**

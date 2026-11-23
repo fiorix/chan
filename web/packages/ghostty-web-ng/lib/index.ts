@@ -25,3 +25,5 @@ export { CanvasRenderer } from './renderer';
 export type { FontMetrics } from './renderer';
 export { InputHandler } from './input-handler';
 export { SelectionManager } from './selection-manager';
+
+export type { SelectionAnchor, SelectionRange } from './selection-manager';

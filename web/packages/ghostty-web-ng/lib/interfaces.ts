@@ -20,6 +20,11 @@ export interface ITerminalOptions {
 
   // The core this terminal runs on, through chan's libghostty-vt binding.
   ghostty: GhosttyVt;
+
+  /** Receives automatic and explicit widget copies; defaults to the clipboard. */
+  copy?: (text: string) => void;
+  /** Asked on each text read and word/line click; defaults to false. */
+  joinDrawnWraps?: () => boolean;
 }
 
 export interface ITheme {

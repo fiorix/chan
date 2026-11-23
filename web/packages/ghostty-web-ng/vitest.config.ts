@@ -1,12 +1,14 @@
 import { defineConfig } from "vitest/config";
 
-// The binding, input handler, link, pointer and viewport tests use the vendored core.
+// The binding and widget tests use the vendored core.
 export default defineConfig({
   test: {
     include: [
       "vt/**/*.test.ts",
       "lib/input-handler.test.ts",
       "lib/terminal.focus.test.ts",
+      "lib/terminal.selection.test.ts",
+      "lib/drawn-wraps.test.ts",
       "lib/terminal.links.test.ts",
       "lib/terminal.pointer.test.ts",
       "lib/terminal.viewport.test.ts",
