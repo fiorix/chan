@@ -2,10 +2,11 @@
 //
 // A file browser tab takes the keyboard when its pane becomes the focused
 // one, and only then. The whole app is mounted over the demo workspace with a
-// terminal in the top pane, holding the keyboard in its textarea (the stand-in
-// xterm), and a file browser tab in the bottom pane, listing a folder of three
-// files. A key reaches the terminal when its target is inside the terminal's
-// element, where xterm.js and ghostty-web listen.
+// terminal in the top pane on the real widget (the shared fixture), holding
+// the keyboard in its input textarea as after a press into it, and a file
+// browser tab in the bottom pane, listing a folder of three files. A key
+// reaches the terminal when its target is inside the terminal's element,
+// where the widget listens.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -16,11 +17,14 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) =>
+  (await import("../__tests__/ghosttyTab")).ghosttyCompatModule(importOriginal));
 
 import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
 import { terminalTab } from "../__tests__/tabs";
-import { xterm } from "../__tests__/xterm";
 import { fbTreeInstance } from "../state/store.svelte";
 import { api } from "../api/client";
 import { resetSurveysForTest, showSurvey, surveyFor } from "../state/survey.svelte";
@@ -48,7 +52,6 @@ function recordTerminalKeys(e: KeyboardEvent): void {
 }
 
 beforeEach(async () => {
-  xterm.textareaFocus = true;
   terminalKeys.length = 0;
   document.addEventListener("keydown", recordTerminalKeys, true);
   await mountApp(demoData(files));
@@ -59,8 +62,6 @@ afterEach(async () => {
   resetSurveysForTest();
   document.removeEventListener("keydown", recordTerminalKeys, true);
   await unmountApp();
-  xterm.terminals.splice(0);
-  xterm.textareaFocus = false;
   vi.restoreAllMocks();
 });
 
@@ -91,6 +92,7 @@ async function layOut(
   layout.rootId = "root";
   layout.activePaneId = active;
   await settleLong();
+  if (top.some((tab) => tab.kind === "terminal")) await terminal();
   if (bottom.some((tab) => tab.kind === "browser")) {
     await vi.waitFor(() => expect(rows().length).toBe(3));
   }
@@ -123,17 +125,20 @@ function selected(): string | null {
   return fbTreeInstance(`fb-tab-${BROWSER}`)?.selection.path ?? null;
 }
 
-function terminalTextarea(): HTMLTextAreaElement {
-  const textarea = xterm.terminals.at(-1)?.textarea;
-  if (!textarea) throw new Error("the terminal opened no textarea");
-  return textarea;
+/// The top pane's terminal, once its widget has opened.
+function terminal(): Promise<Terminal> {
+  return openedGhostty(pane(TOP));
 }
 
-/// The terminal holding the keyboard, as after a press into it.
-async function terminalHoldsKeyboard(): Promise<void> {
-  terminalTextarea().focus();
+/// The terminal holding the keyboard in its input textarea, as after a press
+/// into it.
+async function terminalHoldsKeyboard(): Promise<Terminal> {
+  const term = await terminal();
+  if (!term.textarea) throw new Error("the widget opened no input textarea");
+  term.textarea.focus();
   await settleLong();
-  expect(document.activeElement, "the terminal holds the keyboard").toBe(terminalTextarea());
+  expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true);
+  return term;
 }
 
 /// A key typed at whatever holds the keyboard, as the browser targets it.
@@ -363,7 +368,7 @@ describe("a pane focus move from a terminal to a file browser hands the browser 
 
   test("the browser keeps its selection and the keyboard comes back to the terminal on the way back", async () => {
     await layOut();
-    await terminalHoldsKeyboard();
+    const term = await terminalHoldsKeyboard();
     press({ key: "]", code: "BracketRight", altKey: true });
     await settleLong();
     await typeKey("ArrowDown");
@@ -372,7 +377,7 @@ describe("a pane focus move from a terminal to a file browser hands the browser 
     press({ key: "]", code: "BracketRight", altKey: true });
     await settleLong();
     expect(layout.activePaneId).toBe(TOP);
-    expect(document.activeElement, "the terminal takes the keyboard back").toBe(terminalTextarea());
+    expect(ghosttyHasFocus(term), "the terminal takes the keyboard back").toBe(true);
     press({ key: "]", code: "BracketRight", altKey: true });
     await settleLong();
     expect(browser().contains(document.activeElement)).toBe(true);
@@ -392,7 +397,7 @@ describe("nothing takes the keyboard without a focus move", () => {
 
   test("Hybrid Nav's commit back to the terminal's pane leaves it in the terminal", async () => {
     await layOut();
-    await terminalHoldsKeyboard();
+    const term = await terminalHoldsKeyboard();
     press({ key: ".", code: "Period", ctrlKey: true });
     press({ key: "h", code: "KeyH" });
     await settleLong();
@@ -401,7 +406,7 @@ describe("nothing takes the keyboard without a focus move", () => {
     await settleLong();
     expect(paneMode.active).toBe(false);
     expect(layout.activePaneId).toBe(TOP);
-    expect(document.activeElement, "the terminal takes the keyboard back").toBe(terminalTextarea());
+    expect(ghosttyHasFocus(term), "the terminal takes the keyboard back").toBe(true);
     expect(browser().contains(document.activeElement)).toBe(false);
   });
 });
