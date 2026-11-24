@@ -2818,7 +2818,7 @@
     userInput?.dispose();
     userInput = null;
     // Before the terminal: it frees its search and clears its highlight
-    // through the terminal's selection.
+    // layer on the terminal.
     ghosttyFind?.dispose();
     ghosttyFind = null;
     term?.dispose();
