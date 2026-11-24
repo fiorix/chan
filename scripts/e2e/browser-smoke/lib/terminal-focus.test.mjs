@@ -1,6 +1,50 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { assertKeyboard, focusReports } from "./terminal-focus.mjs";
+import { assertKeyboard, focusReports, runFocusCheck } from "./terminal-focus.mjs";
+
+// A page that answers every read with the window id: enough for the harness
+// to reach a body that opens no terminal.
+function checkFixture(t) {
+  const outDir = mkdtempSync(join(tmpdir(), "chan-focus-check-"));
+  t.after(() => rmSync(outDir, { recursive: true, force: true }));
+  const page = { bringToFront: async () => {}, evaluate: async () => "window", on: () => {}, off: () => {} };
+  return {
+    ctx: { page, outDir, controlSocket: "/stub/socket", waitWindowLive: async () => {}, shot: async () => {} },
+    saved: () => JSON.parse(readFileSync(join(outDir, "901-focus.json"), "utf8")),
+  };
+}
+
+test("a failed leg still runs every restorer, the newest first, and fails the check", async (t) => {
+  const f = checkFixture(t);
+  const ran = [];
+  await assert.rejects(runFocusCheck(f.ctx, 901, async ({ leg, restore }) => {
+    restore("first", async () => { ran.push("first"); });
+    restore("second", async () => { ran.push("second"); });
+    await leg("probe", async () => assert.fail("the leg's assertion"));
+    await leg("later", async () => {});
+  }), (error) => {
+    assert.match(error.message, /^probe \(failed\): the leg's assertion$/);
+    assert.notEqual(error.smokeSkip, true);
+    return true;
+  });
+  assert.deepEqual(ran, ["second", "first"]);
+  assert.deepEqual(Object.values(f.saved().legs).map((leg) => leg.status), ["failed", "passed"]);
+});
+
+test("a body that throws still runs its restorers, and a restorer that fails is reported beside it", async (t) => {
+  const f = checkFixture(t);
+  const ran = [];
+  await assert.rejects(runFocusCheck(f.ctx, 901, async ({ restore }) => {
+    restore("first", async () => { ran.push("first"); });
+    restore("second", async () => { ran.push("second"); throw new Error("not restored"); });
+    throw new Error("setup stopped");
+  }), { message: "setup/body: setup stopped\nsecond: not restored" });
+  assert.deepEqual(ran, ["second", "first"]);
+  assert.deepEqual(f.saved().failures, ["setup/body: setup stopped", "second: not restored"]);
+});
 
 test("focus byte reader retains every report around replayed cursor replies", () => {
   assert.deepEqual(focusReports("\x1b[1;2R\x1b[I\x1b[O\x1b[24;80R"), ["\x1b[I", "\x1b[O"]);
