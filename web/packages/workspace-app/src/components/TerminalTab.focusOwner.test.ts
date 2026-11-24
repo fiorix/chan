@@ -413,8 +413,8 @@ describe("a menu copy or paste that waits for the clipboard", () => {
 });
 
 describe("closing the inspector", () => {
-  async function withInspector() {
-    const live = await liveTab({ active: true, focused: true });
+  async function withInspector(fields: Partial<TerminalTabState> = {}) {
+    const live = await liveTab({ active: true, focused: true }, fields);
     live.tab.inspectorOpen = true;
     await settle();
     const close = live.target.querySelector<HTMLButtonElement>("aside.inspector button.close");
@@ -429,6 +429,24 @@ describe("closing the inspector", () => {
     close.click();
     await settle();
     expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
+
+  test("with the Rich Prompt shown hands the keyboard back to the composer that held it", async () => {
+    const { tab, target, close, host } = await withInspector({ richPromptDraftPath: draftPath("focus-owner-inspector") });
+    showRichPromptForTab(tab.id);
+    const content = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLElement>(".rich-prompt .cm-content");
+      expect(el, "the composer mounts").not.toBeNull();
+      return el!;
+    });
+    const view = EditorView.findFromDOM(content)!;
+    await vi.waitFor(() => expect(view.hasFocus, "the composer takes the keyboard as it mounts").toBe(true));
+    const takes = countTakes(host);
+    close.focus();
+    close.click();
+    await settle();
+    expect(takes(), "the terminal took the keyboard from its composer").toBe(0);
+    expect(view.hasFocus, "the composer has the keyboard back").toBe(true);
   });
 
   test("under a survey over the terminal hands the keyboard back to the survey's card", async () => {

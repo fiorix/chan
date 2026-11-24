@@ -902,12 +902,20 @@
     else if (host?.contains(target)) keyboardSurface = "terminal";
   }
 
+  // Give the keyboard to the find input, the composer or the terminal,
+  // whichever last took it and is still open.
+  function focusLastKeyboardSurface(): void {
+    if (keyboardHeld()) return;
+    if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
+    else if (keyboardSurface === "composer" && composer) composer.focus();
+    else focusTerminal();
+  }
+
   // Give the keyboard back when this is still the focused terminal and
   // nothing outside it has taken the keyboard since the move: to its owner
   // when something owns it, as the owner's surface takes it (a survey over
   // this terminal among them; the Computers launcher takes nothing here),
-  // else to the find input, the composer or the terminal, whichever last
-  // took it and is still open.
+  // else to the surface of this terminal that last took it.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused || !keyboardFreeOrIn(tabEl)) return;
@@ -915,10 +923,7 @@
         handKeyboardToOwner();
         return;
       }
-      if (keyboardHeld()) return;
-      if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
-      else if (keyboardSurface === "composer" && composer) composer.focus();
-      else focusTerminal();
+      focusLastKeyboardSurface();
     });
   }
 
@@ -2456,11 +2461,12 @@
   // Closing the inspector hands the keyboard back: to its owner when
   // something owns it (a survey over this terminal, which the floating
   // inspector does not cover), as the owner's surface takes it, else to the
-  // terminal.
+  // surface of this terminal that last took it, so a shown Rich Prompt's
+  // composer gets it back and not the terminal under it.
   function closeInspector(): void {
     tab.inspectorOpen = false;
     if (owner() !== null) handKeyboardToOwner();
-    else focusTerminal();
+    else focusLastKeyboardSurface();
   }
 
   // The launcher opens from this terminal, as its chord does from a focused
