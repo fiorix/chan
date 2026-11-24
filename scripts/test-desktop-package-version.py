@@ -126,6 +126,12 @@ exec cargo-tauri "$@"
 """
 
 
+# The recipe only needs the directory the real script prints.
+GSTREAMER_PLUGINS = """#!/bin/sh
+printf '%s\\n' "$1"
+"""
+
+
 def executable(path: Path, content: str) -> None:
     path.write_text(content)
     path.chmod(0o755)
@@ -138,6 +144,7 @@ def fixture(root: Path, makefile: str, version: str) -> tuple[Path, Path]:
     config.parent.mkdir(parents=True)
     bin_dir.mkdir()
     (desktop / "Makefile").write_text(makefile)
+    executable(desktop / "appimage-gstreamer-plugins.sh", GSTREAMER_PLUGINS)
     (root / "Makefile").write_text("web:\n\t@:\n")
     config.write_text(json.dumps({"version": version}))
     executable(bin_dir / "cargo", CARGO)
@@ -153,6 +160,7 @@ def fixture_pinned(root: Path, makefile: str, version: str, cargo_script: str) -
     config.parent.mkdir(parents=True)
     bin_dir.mkdir()
     (desktop / "Makefile").write_text(makefile)
+    executable(desktop / "appimage-gstreamer-plugins.sh", GSTREAMER_PLUGINS)
     (root / "Makefile").write_text("web:\n\t@:\n")
     config.write_text(json.dumps({"version": version}))
     executable(bin_dir / "cargo", cargo_script)

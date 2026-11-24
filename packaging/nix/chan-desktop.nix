@@ -16,6 +16,7 @@
   wrapGAppsHook4,
   desktop-file-utils,
   glib-networking,
+  gst_all_1,
   libappindicator-gtk3,
   openssl,
   webkitgtk_4_1,
@@ -52,6 +53,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   buildInputs = [
     glib-networking
+    # WebKitGTK records the microphone through these GStreamer elements, and
+    # the wrapper puts every plugin listed here on its search path.
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
     libappindicator-gtk3
     openssl
     webkitgtk_4_1

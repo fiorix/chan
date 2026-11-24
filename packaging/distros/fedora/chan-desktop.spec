@@ -42,6 +42,10 @@ BuildRequires:  desktop-file-utils
 BuildRequires:  systemd-rpm-macros
 
 Requires:       systemd
+# WebKitGTK records the microphone through these GStreamer elements.
+Recommends:     gstreamer1-plugins-good
+Recommends:     gstreamer1-plugins-bad-free
+Recommends:     pipewire-gstreamer
 # Both packages own %%{_bindir}/{chan,cs,chan-files,chan-edit,chan-term}; the desktop
 # binary provides the full CLI in-process, so install one or the other.
 Conflicts:      chan

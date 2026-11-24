@@ -17,7 +17,8 @@ Build-Depends: debhelper-compat (= 13),
 Package: chan-desktop
 Architecture: amd64 arm64
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Recommends: systemd, xdg-utils
+Recommends: systemd, xdg-utils, gstreamer1.0-plugins-good,
+ gstreamer1.0-plugins-bad, gstreamer1.0-pipewire | gstreamer1.0-pulseaudio
 Provides: chan
 Conflicts: chan
 Replaces: chan

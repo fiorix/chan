@@ -47,6 +47,11 @@
     "linux": {
       "deb": {
         "depends": [],
+        "recommends": [
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-pipewire | gstreamer1.0-pulseaudio"
+        ],
         "files": {
           "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
           "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",
@@ -54,6 +59,11 @@
         }
       },
       "rpm": {
+        "recommends": [
+          "gstreamer1-plugins-good",
+          "gstreamer1-plugins-bad-free",
+          "pipewire-gstreamer"
+        ],
         "files": {
           "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
           "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",
@@ -61,6 +71,7 @@
         }
       },
       "appimage": {
+        "bundleMediaFramework": true,
         "files": {
           "/usr/share/chan/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
           "/usr/share/chan/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",

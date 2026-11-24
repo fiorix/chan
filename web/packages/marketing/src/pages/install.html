@@ -115,6 +115,7 @@ sudo dnf install chan-desktop</b></code>
     </div>
     <p class="minor">The web bundles' build tools ship native code for FreeBSD on amd64 only. On arm64, run <code>make web</code> in a checkout on a Linux or macOS machine, copy its <code>web/dist</code> and <code>web-launcher/dist</code> into the FreeBSD checkout, and run only the <code>cargo build</code>.</p>
     <p class="minor">Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
+    <p class="minor">To record the microphone for extensions, also install <code>gstreamer1-plugins-good gstreamer1-plugins-opus gstreamer1-plugins-pulse</code>.</p>
   </div>
 </section>
 

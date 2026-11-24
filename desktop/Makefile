@@ -39,6 +39,7 @@ DMGBUILD_SPEC ?= dmgbuild>=1.6,<2
 # that created it.
 DMG_VENV ?= $(abspath $(CHAN_REPO))/.build-tools/dmg-venv
 BUNDLE_DIR := $(abspath $(CHAN_REPO))/target/release/bundle
+APPIMAGE_GST_DIR := $(abspath $(CHAN_REPO))/target/appimage-gstreamer
 CI_MACOS_CONFIG := tauri.ci.macos.conf.json
 CI_WINDOWS_CONFIG := tauri.ci.windows.conf.json
 WEB_ALREADY_BUILT ?= 0
@@ -74,6 +75,10 @@ dev: tauri-cli web
 # so its RPM uses the GA Version and 0~rcN Release for the same ordering.
 build: tauri-cli web
 	@version="$$(node -p 'require("./src-tauri/tauri.conf.json").version')" || exit; \
+	if [ "$$(uname -s)" = Linux ]; then \
+	    GSTREAMER_PLUGINS_DIR="$$(./appimage-gstreamer-plugins.sh "$(APPIMAGE_GST_DIR)")" || exit; \
+	    export GSTREAMER_PLUGINS_DIR; \
+	fi; \
 	if [ "$$(uname -s)" = Linux ] && [ "$${version#*-}" != "$$version" ]; then \
 	    suffix="$${version#*-}"; \
 	    printf 'desktop bundle: candidate %s, RPM release 0~%s\n' "$$version" "$$suffix"; \
@@ -103,7 +108,9 @@ ci-linux: ci-linux-prereqs tauri-cli $(CI_WEB_PREREQ)
 	@test "$$(uname -s)" = Linux || { \
 	    echo "error: desktop ci-linux requires a native Linux host"; exit 1; \
 	}
-	cd src-tauri && $(TAURI) build --bundles appimage
+	GSTREAMER_PLUGINS_DIR="$$(./appimage-gstreamer-plugins.sh "$(APPIMAGE_GST_DIR)")" && \
+	    export GSTREAMER_PLUGINS_DIR && \
+	    cd src-tauri && $(TAURI) build --bundles appimage
 	@appimage="$$(find "$(BUNDLE_DIR)/appimage" -name '*.AppImage' \
 	    -type f -print -quit)"; \
 	    [ -n "$$appimage" ] \

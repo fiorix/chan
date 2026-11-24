@@ -153,6 +153,10 @@ jobs:
               libayatana-appindicator3-dev \
               librsvg2-dev \
               libsoup-3.0-dev \
+              gstreamer1.0-plugins-base \
+              gstreamer1.0-plugins-good \
+              gstreamer1.0-plugins-bad \
+              gstreamer1.0-pulseaudio \
               gcc-mingw-w64-x86-64 \
               patchelf
           }
@@ -575,6 +579,10 @@ jobs:
               libayatana-appindicator3-dev \
               librsvg2-dev \
               libsoup-3.0-dev \
+              gstreamer1.0-plugins-base \
+              gstreamer1.0-plugins-good \
+              gstreamer1.0-plugins-bad \
+              gstreamer1.0-pulseaudio \
               patchelf \
               xdg-utils \
               desktop-file-utils \
@@ -620,6 +628,8 @@ jobs:
 
       - run: make chan-desktop
         working-directory: chan
+        env:
+          CHAN_APPIMAGE_GST_STRICT: "1"
 
       - name: Stage candidate Linux desktop packages
         if: needs.context.outputs.prerelease == 'true'

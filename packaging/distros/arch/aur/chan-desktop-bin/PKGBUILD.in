@@ -32,6 +32,11 @@ depends=(
     'webkit2gtk-4.1'
     'xdg-utils'
 )
+optdepends=(
+    'gst-plugins-bad-libs: record the microphone for extensions'
+    'gst-plugins-good: record the microphone for extensions'
+    'gst-plugin-pipewire: record the microphone for extensions'
+)
 provides=("chan=$pkgver" "chan-desktop=$pkgver")
 conflicts=('chan' 'chan-desktop')
 # makepkg already stripped the binary and split its debug symbols out when it

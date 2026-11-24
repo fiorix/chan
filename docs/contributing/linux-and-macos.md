@@ -62,7 +62,9 @@ limactl shell default sudo sdme exec chan-build /bin/bash -c '
   apt-get install -y --no-install-recommends build-essential git curl \
     ca-certificates pkg-config python3 jq ripgrep xz-utils unzip zip dbus \
     util-linux libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-    librsvg2-dev libsoup-3.0-dev patchelf xdg-utils desktop-file-utils \
+    librsvg2-dev libsoup-3.0-dev gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-pulseaudio \
+    patchelf xdg-utils desktop-file-utils \
     gcc-mingw-w64-x86-64 file libssl-dev clang lld
   if ! id ubuntu >/dev/null 2>&1; then useradd -m -u 1000 -U -s /bin/bash ubuntu; fi
   test "$(id -u ubuntu)" = 1000

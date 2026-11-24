@@ -27,6 +27,11 @@ depends=(
     'webkit2gtk-4.1'
     'xdg-utils'
 )
+optdepends=(
+    'gst-plugins-bad-libs: record the microphone for extensions'
+    'gst-plugins-good: record the microphone for extensions'
+    'gst-plugin-pipewire: record the microphone for extensions'
+)
 makedepends=('cargo' 'desktop-file-utils' 'nodejs' 'npm' 'pkgconf')
 provides=("chan=$pkgver")
 conflicts=('chan')
