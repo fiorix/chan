@@ -73,6 +73,26 @@ describe('synchronous terminal focus', () => {
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
   });
 
+  test('a press, a tap and a context menu on the canvas focus without scrolling the page', async () => {
+    const { host, textarea } = await open();
+    const canvas = host.querySelector('canvas')!;
+    const hostFocus = vi.spyOn(host, 'focus');
+    const inputFocus = vi.spyOn(textarea, 'focus');
+    const quiet = [{ preventScroll: true }];
+    canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+    expect(inputFocus.mock.calls).toEqual([quiet]);
+    expect(hostFocus.mock.calls).toEqual([quiet]);
+    expect(document.activeElement).toBe(host);
+    canvas.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true }));
+    expect(inputFocus.mock.calls).toEqual([quiet, quiet]);
+    expect(document.activeElement).toBe(textarea);
+    host.focus({ preventScroll: true });
+    canvas.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    expect(inputFocus.mock.calls).toEqual([quiet, quiet, quiet]);
+    expect(document.activeElement).toBe(textarea);
+    expect(hostFocus.mock.calls).toEqual([quiet, quiet]);
+  });
+
   test('focus() schedules no timer or animation frame', async () => {
     const { term, host } = await open();
     // Isolate widget scheduling from jsdom's own deferred selectionchange event.

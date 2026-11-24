@@ -556,7 +556,7 @@ export class SelectionManager {
   }
 
   private handleFocus = (event: MouseEvent): void => {
-    if (event.button === 0) this.renderer.getCanvas().parentElement?.focus();
+    if (event.button === 0) this.renderer.getCanvas().parentElement?.focus({ preventScroll: true });
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
@@ -764,7 +764,7 @@ export class SelectionManager {
       }
 
       // Focus the textarea so the context menu appears on it
-      this.textarea.focus();
+      this.textarea.focus({ preventScroll: true });
 
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first

@@ -1544,7 +1544,7 @@ export class Terminal {
 
   private handleCanvasFocus = (event: Event): void => {
     event.preventDefault();
-    this.textarea?.focus();
+    this.textarea?.focus({ preventScroll: true });
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
