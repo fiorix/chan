@@ -1,6 +1,6 @@
 # chan drives ghostty-web from outside, through its private internals
 
-Status: boundary amended on 2026-11-23, xterm.js leaving chan in a row of its own (the last section); moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); in v0.132.0, part 6's test net stage 1 shipped; part 4 task 2's stage A is built on `v0132/ghosttyng-p4t2` at `8263902ee`, its third fix round unread, with part 4's tasks 2b, 3 and 4 stacked on it (`v0132/ghosttyng-p4t2b` `6e9e8dc84`, `-p4t3` `eedeeed79`, `-p4t4` `27853ca0d`), none merged. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
+Status: the 2026-11-23 pointer, focus and widget work ships in v0.134.0, with find on the widget (part 5), the input modernization (part 6) and the private-field seal open (the last section); boundary amended on 2026-11-23, xterm.js leaving chan in a row of its own (the last section); moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); in v0.132.0, part 6's test net stage 1 shipped; part 4 task 2's stage A is built on `v0132/ghosttyng-p4t2` at `8263902ee`, its third fix round unread, with part 4's tasks 2b, 3 and 4 stacked on it (`v0132/ghosttyng-p4t2b` `6e9e8dc84`, `-p4t3` `eedeeed79`, `-p4t4` `27853ca0d`), none merged. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record before the move: part 2, re-seating the core, shipped in [v0.129.0](../../release/release-v0.129.0.md), with the vendored core at libghostty-vt 1.0.1. The owner moved the remaining parts to v0.131.0 on 2026-11-13. Part 3 (the inventory, the input-handler test port and the pruning) is built, reviewed and merged; at the integrated tip `692273d5e` the full gate and the terminal browser suite (19 checks on both backends) are green. Parts 4 to 6 remain.
 
@@ -260,3 +260,26 @@ Built and reviewed on branches not merged here: selection and copy through the w
 
 Open: the key encoder ignores the kitty keyboard flags (Ctrl+C sends 0x03 after `CSI > 1 u`; the widget answers no kitty query on purpose); the widget prevents the default of every chord chan lets out of the terminal, where xterm.js did not; WebKitGTK and Mac readings of the pointer and focus changes; the private-field seal; ConPTY.
 
+## What v0.134.0 ships, 2026-11-24
+
+On the v0.134.0 integration line, by merge of `v0134/ghostty-ng-app-m3` (`f487fd27f`), `v0134/ghostty-ng-input-focus` (`094339ab0`) and `v0134/ghostty-ng-app-port4` (`678a5f1f9`), with the app half the section above lists as patches now applied:
+
+- Everything the section above names, merged then or not: pointer and focus handling, selection and copy through the widget, named highlights, ordered paint layers, grid and render options, the read-only core facade, `setTheme`, scrollback as a byte budget, the widget's all-match find, the selection-clear rule, per-cell motion reports and Alt as a modifier bit.
+- `TerminalTab.svelte` constructs the widget with `copy`, `joinDrawnWraps`, a 1.2 line height, cell-drawn box glyphs and the overlay scrollbar. The app's `terminal/ghosttyCompat.ts` and `terminal/ghosttySelection.ts` are gone, and find paints its active match on the `search-active` highlight layer.
+- The browser and pixel instruments read the widget through its public API.
+- After a move to a display of another pixel ratio the app fits the grid again, since the widget now measures its cell at the new ratio (found by review, read from the arithmetic, not reproduced in a browser).
+
+What a user sees change: the row height comes from the widget's own measurement at a 1.2 line height; box and block glyphs are drawn per cell; one overlay scrollbar; a program that tracks motion gets one report per cell, with code 35 for buttonless motion and Alt in the modifier bits; under mouse tracking a reported click clears a stale local selection unless a local selection gesture is in progress; a find match no longer replaces the selection, so the menu's Copy with a match and nothing selected copies the scrollback, where it copied the match (whether Copy should prefer the active match is the owner's question; the widget has no reader for the text of a range yet).
+
+Read: the web gate at the tip (workspace app 795 files and 11351 tests, the widget package 728, every type check clean); the terminal browser suite in a guest in Chrome before the review's fixes, its 74 terminal checks green, with 341's corrected refusal arm; two independent reviews of the range, the widget package and the app, both accepting with fixes (in the development tree, `dev/ghostty-web-ng-team/evidence/m3int-review/`). Not read: the pixel harness at the new geometry, WebKitGTK, WKWebView, and the owner's desktop walk.
+
+Open, carried with the row:
+
+- Acceptance 2 is not met. `terminal/ghosttyTheme.ts` calls the widget's private `buildWasmConfig` and changes `options.theme` in place where `setTheme` now exists, and `terminal/secretMaskingGhostty.ts` replaces `renderer.render` and reads its context where a `mask` paint layer now exists. The private-field seal follows them.
+- Part 5 on the widget: the app still runs its own `GhosttyFind` over the core facade. The widget's `term.search`, which nothing calls yet, drops its all-match layer and its count on every write until its next frame, so under steady output they never show, and a step pressed while the active match is unplaced restarts from the newest match after one second.
+- The light theme's contrast floor is not passed to the widget, whose theme now takes `minimumContrastRatio`.
+- A drag that rests within 30 px of the top or bottom edge while the view cannot scroll snaps its end to the edge row, as upstream's code has done since the import; the rule for a pointer inside the canvas is to be decided with the fix.
+- A paint layer that keeps throwing makes every frame a full repaint that throws, and can make `write()` throw after the core took the bytes; the app registers no layer today.
+- Under any-motion tracking a hover report clears a finished Shift selection.
+- The checks: 344 stops in its setup on a 409 from the draft PUT; 345's cleanup leaves its recorder shell as the default terminal profile, so checks run after it in one runner call fail; 346's same-pane leg is unavailable in Chrome; 343 needs the staged sha of its tree. The reviews' test gaps (the kitty Ctrl+C case, block glyph snapping off the device grid, an invalid pixel ratio).
+- The open list of the section above: the kitty keyboard flags, the default prevented on every chord chan lets out, the WebKitGTK and Mac readings, ConPTY.

@@ -1,6 +1,6 @@
 # chan carries xterm.js as a second terminal backend
 
-Status: in progress, on `v0134/ghostty-ng-int` at `518ac933d`, not merged into `v0134/int`. Contract items 2 to 6 are built and acceptance 1 is met (below). Items 1 and 7 are open: a failed load still falls back to an unlabelled xterm.js terminal, and `@xterm/*` is still a runtime dependency. Accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, as amended by its review `dev/team-ghostty-web-ng-plan-review.md`). Split out of [the migration row](chan-drives-ghostty-web-from-outside-through-its-private-internals.md), whose boundary kept xterm.js as a second backend "a separate decision", so that this part can close while the migration's input modernization carries. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
+Status: contract items 2 to 6 ship in v0.134.0 and acceptance 1 is met (the last two sections). Items 1 and 7 are open and carry: a failed load still falls back to an unlabelled xterm.js terminal, and `@xterm/*` is still a runtime dependency. Accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, as amended by its review `dev/team-ghostty-web-ng-plan-review.md`). Split out of [the migration row](chan-drives-ghostty-web-from-outside-through-its-private-internals.md), whose boundary kept xterm.js as a second backend "a separate decision", so that this part can close while the migration's input modernization carries. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 ## What is there now
 
@@ -43,3 +43,15 @@ On `v0134/ghostty-ng-int` at `518ac933d`; by test, and by the browser suite in a
 - `CHAN_TERMINAL=ghostty` on every spawn path.
 - Open: the load-failure error UI and its fault tests (acceptance 2); the runtime removal of `@xterm/*`, its addons, aliases, CSS and the fallback (acceptance 3); 40 app test files still on a test-only xterm stand-in route, which must reach 0 before the removal; the desktop drivers, read not run since their port.
 
+## What v0.134.0 ships, 2026-11-24
+
+The section above ships as written, on the v0.134.0 integration line. Since it was written:
+
+- Browser check 341's corrected refusal arm is merged and passes in a guest: its own server with the extractor's debug log, an exact 422 with the generic body, no write, and the logged rejection naming the key.
+- The app's terminal tests moved onto the real widget: 11 test files still name the xterm stand-in, down from 40.
+
+Open, carried with the row:
+
+- Items 1 and 7 and acceptances 2 and 3, as above: the load-failure error UI with its fault tests, and the removal of `@xterm/*`, its addons, aliases, CSS and the fallback.
+- Until the fallback goes it ships with little mounted coverage, found by review of the test ports: the search addon and its 1000-match cap, the mounted paste path, the PRIMARY selection state machine, the WebGL context-loss path and copy of the scrollback through the serialize addon have no mounted test left. The removal closes this; a release that keeps the fallback longer needs those cases back.
+- The desktop drivers, read not run since their port.
