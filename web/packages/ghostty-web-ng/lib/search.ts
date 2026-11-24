@@ -333,7 +333,11 @@ export class SearchOwner {
       const restoring = this.kept !== null && this.index === null;
       const lands = !restoring && (direction === 'newer' ? this.index !== null && this.index > 0
         : this.index === null ? total > 0 : this.index < total - 1);
-      const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
+      // A press made while the kept match's index is unplaced has no
+      // deadline: applied without the index it would start over from the
+      // newest or oldest match. It goes through once placement finds the
+      // index or the match is lost.
+      const capped = !restoring && performance.now() - at >= WAIT_CAP_MS && total > 0;
       if (!this.complete && !lands && !capped) break;
       this.waiting.shift();
       if (!total) continue;
