@@ -131,7 +131,7 @@ import { setTmuxLayout } from "./tmuxWindowSize.svelte";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
 import {
-  activeTransferCount,
+  windowActivityCount,
   applyTransferQueueFrame,
   beginTransfer,
   cancelTransfer,
@@ -2771,10 +2771,10 @@ function onWatchReady(): void {
   // Later opens do not read: the server blob can lag this page's local saves.
   if (!watchOpenedBefore) scheduleSessionSyncRefetch();
   watchOpenedBefore = true;
-  // Re-announce this window's active-transfer count: the server registry is
+  // Re-announce this window's activity count: the server registry is
   // per-socket and a fresh socket starts at zero, so a reconnect mid-transfer
   // must re-assert the count or the close guard would think the window is idle.
-  unwatch?.reportTransfers(activeTransferCount());
+  unwatch?.reportTransfers(windowActivityCount());
   fbWatchResyncAll();
   // The server may have broadcast a root removal before this socket was
   // subscribed. This HTTP check runs alongside, without delaying, the

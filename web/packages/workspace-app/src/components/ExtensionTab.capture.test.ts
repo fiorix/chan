@@ -42,6 +42,9 @@ class FakeTrack extends EventTarget {
 
 class FakeRecorder extends EventTarget {
   static instances: FakeRecorder[] = [];
+  static isTypeSupported(): boolean {
+    return false;
+  }
   state: RecordingState = "inactive";
   mimeType = "audio/webm";
   constructor(readonly stream: unknown) {
@@ -274,6 +277,41 @@ describe("extension capture tab", () => {
     if (view) await unmount(view);
     view = null;
     expect(track.stopped).toBe(true);
+  });
+
+  test("a take that ends leaves focus held outside the tab alone", async () => {
+    setupMedia();
+    const { frame } = await show();
+    const focusFrame = vi.spyOn(frame, "focus");
+    await startRecording(frame);
+    const elsewhere = document.createElement("input");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    FakeRecorder.instances[0]!.data(new Blob([new Uint8Array(4)]));
+    fromFrame(frame, {
+      type: EXTENSION_CAPTURE_REQUEST,
+      request_id: "request-1",
+      action: "stop",
+    });
+    await settle();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(focusFrame).not.toHaveBeenCalled();
+    elsewhere.remove();
+  });
+
+  test("the frame takes focus when the focused bar button goes away", async () => {
+    setupMedia();
+    const { frame } = await show();
+    const focusFrame = vi.spyOn(frame, "focus");
+    await startRecording(frame);
+    FakeRecorder.instances[0]!.data(new Blob([new Uint8Array(4)]));
+    const stop = [...target!.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Stop",
+    )!;
+    stop.focus();
+    stop.click();
+    await settle();
+    expect(focusFrame).toHaveBeenCalled();
   });
 
   test("a grant removed while permission is pending never builds a recorder", async () => {

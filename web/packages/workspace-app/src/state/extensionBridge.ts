@@ -38,6 +38,10 @@ export type ExtensionCaptureErrorCode =
   | "too_large"
   | "invalid_request"
   | "failed";
+export type ExtensionCaptureFailureCode = Exclude<
+  ExtensionCaptureErrorCode,
+  "available"
+>;
 
 export type ExtensionCaptureRequest =
   | {
@@ -95,7 +99,7 @@ export type ExtensionCaptureEvent =
       type: typeof EXTENSION_CAPTURE_EVENT;
       request_id: string;
       state: "error";
-      code: Exclude<ExtensionCaptureErrorCode, "available">;
+      code: ExtensionCaptureFailureCode;
       message: string;
     };
 
@@ -179,12 +183,32 @@ export function extensionPresentationAction(
     : null;
 }
 
+export function isExtensionCaptureMessage(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === EXTENSION_CAPTURE_REQUEST
+  );
+}
+
+/// The `request_id` a capture message carries, when it is one the host may
+/// answer on.
+export function extensionCaptureRequestId(
+  message: Record<string, unknown>,
+): string | null {
+  const id = message.request_id;
+  return typeof id === "string" && id.length >= 1 && id.length <= 128
+    ? id
+    : null;
+}
+
 export function extensionCaptureRequest(
   value: unknown,
 ): ExtensionCaptureRequest | null {
-  if (!value || typeof value !== "object") return null;
-  const message = value as Record<string, unknown>;
-  if (message.type !== EXTENSION_CAPTURE_REQUEST) return null;
+  if (!isExtensionCaptureMessage(value)) return null;
+  const message = value;
   if (message.action === "ack") {
     if (
       typeof message.take_id !== "string" ||
@@ -198,18 +222,13 @@ export function extensionCaptureRequest(
       take_id: message.take_id,
     };
   }
-  if (
-    typeof message.request_id !== "string" ||
-    message.request_id.length === 0 ||
-    message.request_id.length > 128
-  ) {
-    return null;
-  }
+  const requestId = extensionCaptureRequestId(message);
+  if (requestId === null) return null;
   if (message.action === "stop" || message.action === "cancel") {
     return {
       type: EXTENSION_CAPTURE_REQUEST,
       action: message.action,
-      request_id: message.request_id,
+      request_id: requestId,
     };
   }
   if (message.action !== "open" || message.source !== "microphone") return null;
@@ -232,7 +251,7 @@ export function extensionCaptureRequest(
   return {
     type: EXTENSION_CAPTURE_REQUEST,
     action: "open",
-    request_id: message.request_id,
+    request_id: requestId,
     source: "microphone",
     ...(message.max_ms !== undefined ? { max_ms: message.max_ms } : {}),
     ...(message.processing !== undefined

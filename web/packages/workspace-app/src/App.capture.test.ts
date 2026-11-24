@@ -16,9 +16,11 @@ vi.mock("./api/desktop", async (importOriginal) => ({
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { EXTENSION_CAPTURE_REQUEST } from "./state/extensionBridge";
 import {
+  captureViewFor,
   handleCaptureRequest,
   registerCapturePoster,
   resetExtensionCapture,
+  startCaptureRecording,
 } from "./state/extensionCapture.svelte";
 
 stubAppEnvironment();
@@ -34,46 +36,68 @@ afterEach(async () => {
   await unmountApp();
 });
 
+async function startRecording(): Promise<void> {
+  vi.stubGlobal(
+    "MediaRecorder",
+    class extends EventTarget {
+      static isTypeSupported(): boolean {
+        return false;
+      }
+      state: RecordingState = "inactive";
+      mimeType = "audio/webm";
+      start(): void {
+        this.state = "recording";
+      }
+      stop(): void {
+        this.state = "inactive";
+      }
+    },
+  );
+  const track = Object.assign(new EventTarget(), { stop() {} });
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [track] }),
+    },
+  });
+  Object.defineProperty(window, "isSecureContext", {
+    configurable: true,
+    value: true,
+  });
+  registerCapturePoster("tab-capture", () => {});
+  handleCaptureRequest(
+    "tab-capture",
+    { extensionId: "echo", extensionName: "Echo", granted: true },
+    {
+      type: EXTENSION_CAPTURE_REQUEST,
+      action: "open",
+      request_id: "request-1",
+      source: "microphone",
+    },
+  );
+  await startCaptureRecording("tab-capture");
+}
+
 describe("capture page-close guard", () => {
-  test("a live capture session holds the page open in a plain browser", async () => {
+  test("a live recording holds the page open in a plain browser", async () => {
     const idle = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(idle);
     expect(idle.defaultPrevented).toBe(false);
 
-    vi.stubGlobal(
-      "MediaRecorder",
-      class extends EventTarget {
-        state: RecordingState = "inactive";
-        mimeType = "audio/webm";
-        start(): void {
-          this.state = "recording";
-        }
-        stop(): void {
-          this.state = "inactive";
-        }
-      },
-    );
-    Object.defineProperty(navigator, "mediaDevices", {
-      configurable: true,
-      value: { getUserMedia: vi.fn() },
-    });
-    Object.defineProperty(window, "isSecureContext", {
-      configurable: true,
-      value: true,
-    });
-    registerCapturePoster("tab-capture", () => {});
-    handleCaptureRequest(
-      "tab-capture",
-      { extensionId: "echo", extensionName: "Echo", granted: true },
-      {
-        type: EXTENSION_CAPTURE_REQUEST,
-        action: "open",
-        request_id: "request-1",
-        source: "microphone",
-      },
-    );
+    await startRecording();
     const guarded = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(guarded);
     expect(guarded.defaultPrevented).toBe(true);
+  });
+
+  test("the desktop's stop command ends a live recording", async () => {
+    await startRecording();
+    expect(captureViewFor("tab-capture")?.phase).toBe("recording");
+    window.dispatchEvent(
+      new CustomEvent("chan:command", {
+        detail: { name: "app.capture.stopAll" },
+      }),
+    );
+    expect(captureViewFor("tab-capture")?.phase).toBe("finishing");
   });
 });

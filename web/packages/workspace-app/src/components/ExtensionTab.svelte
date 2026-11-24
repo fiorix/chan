@@ -13,8 +13,6 @@
   // The menu names its rows through the catalog, which this fills.
   import "../state/commands/install";
   import {
-    EXTENSION_CAPTURE_EVENT,
-    EXTENSION_CAPTURE_REQUEST,
     EXTENSION_CAPTURE_SOURCES_MESSAGE,
     EXTENSION_KEYMAP_MESSAGE,
     EXTENSION_SESSION_CONTEXT_MESSAGE,
@@ -25,6 +23,7 @@
     extensionHostKeys,
     hostKeyId,
     isAdvertisedHostKey,
+    isExtensionCaptureMessage,
     isExtensionKeydownMessage,
     keyboardEventFromExtension,
   } from "../state/extensionBridge";
@@ -36,6 +35,7 @@
     handleCaptureRequest,
     redeliverCapture,
     registerCapturePoster,
+    rejectCaptureRequest,
     startCaptureRecording,
     stopCaptureRecording,
   } from "../state/extensionCapture.svelte";
@@ -100,6 +100,7 @@
   const captureName = $derived(extension?.name ?? tab.title);
   let unregisterCapture: (() => void) | undefined;
   let nowMs = $state(Date.now());
+  let captureBar = $state<HTMLElement | null>(null);
 
   // The command context as it reads with this tab focused: a row's check is
   // the catalog's state for the tab the menu belongs to.
@@ -150,11 +151,11 @@
     void closeTab(paneId, tab.id);
   }
 
-  function tabStillExists(): boolean {
+  function tabInLayout(id: string): boolean {
     return Object.values(layout.nodes).some(
       (node) =>
         node.kind === "leaf" &&
-        allPaneTabs(node).some((candidate) => candidate.id === tab.id),
+        allPaneTabs(node).some((candidate) => candidate.id === id),
     );
   }
 
@@ -165,7 +166,7 @@
 
   const captureElapsedMs = $derived(
     captureView?.phase === "recording" && captureView.startedAt !== null
-      ? nowMs - (captureView.startedAt ?? nowMs)
+      ? nowMs - captureView.startedAt
       : 0,
   );
 
@@ -275,32 +276,16 @@
       else if (!event.data.ok) notify(`${tab.title} refused the command`);
       return;
     }
-    const captureRequest = extensionCaptureRequest(event.data);
-    if (captureRequest) {
-      handleCaptureRequest(tab.id, {
-        extensionId: tab.extensionId,
-        extensionName: captureName,
-        granted: extensionHasCapability(extension, "microphone"),
-      }, captureRequest);
-      return;
-    }
-    if ((event.data as { type?: unknown } | null)?.type === EXTENSION_CAPTURE_REQUEST) {
-      const raw = event.data as Record<string, unknown>;
-      if (
-        typeof raw.request_id === "string" &&
-        raw.request_id.length >= 1 &&
-        raw.request_id.length <= 128
-      ) {
-        frame?.contentWindow?.postMessage(
-          {
-            type: EXTENSION_CAPTURE_EVENT,
-            request_id: raw.request_id,
-            state: "error",
-            code: "invalid_request",
-            message: "The capture request is not valid.",
-          },
-          "*",
-        );
+    if (isExtensionCaptureMessage(event.data)) {
+      const captureRequest = extensionCaptureRequest(event.data);
+      if (captureRequest) {
+        handleCaptureRequest(tab.id, {
+          extensionId: tab.extensionId,
+          extensionName: captureName,
+          granted: extensionHasCapability(extension, "microphone"),
+        }, captureRequest);
+      } else {
+        rejectCaptureRequest(tab.id, event.data);
       }
       return;
     }
@@ -324,8 +309,13 @@
     window.removeEventListener("message", onFrameMessage);
     document.removeEventListener("visibilitychange", postViewState);
     // A pane move recreates this component under the same tab id; only a
-    // tab that is gone from the layout ends its capture here.
-    if (!tabStillExists()) disposeCaptureTab(tab.id);
+    // tab that is gone from the layout ends its capture. Teardown inside the
+    // flush that removed the tab still reads the layout from before it, so
+    // the check waits for that flush to end.
+    const id = tab.id;
+    queueMicrotask(() => {
+      if (!tabInLayout(id)) disposeCaptureTab(id);
+    });
   });
 
   // Refresh the child-side claimed-key set when preferences replace a chord.
@@ -355,12 +345,17 @@
     return () => clearInterval(timer);
   });
 
-  let hadSession = false;
+  // Removing the focused bar button drops focus to the body, so it goes to
+  // the frame. Focus anywhere else, such as a terminal in another pane, stays.
+  let barHadFocus = false;
+  $effect.pre(() => {
+    void captureView?.phase;
+    barHadFocus = captureBar?.contains(document.activeElement) ?? false;
+  });
   $effect(() => {
-    if (captureView?.phase) {
-      hadSession = true;
-    } else if (hadSession) {
-      hadSession = false;
+    void captureView?.phase;
+    if (barHadFocus && !captureBar?.contains(document.activeElement)) {
+      barHadFocus = false;
       frame?.focus();
     }
   });
@@ -471,25 +466,28 @@
   {/if}
 
   {#if captureView}
-    <div class="capture-bar" role="status">
+    <div class="capture-bar" role="group" aria-label="Microphone capture" bind:this={captureBar}>
       {#if captureView.phase === "armed"}
-        <span>{captureName} wants to record your microphone</span>
+        <span role="status">{captureName} wants to record your microphone</span>
         <div>
           <button type="button" onclick={() => void startCaptureRecording(tab.id)}>Record</button>
           <button type="button" onclick={() => cancelCaptureRecording(tab.id, "viewer")}>Dismiss</button>
         </div>
       {:else if captureView.phase === "starting"}
-        <span>Starting the microphone for {captureName}...</span>
+        <span role="status">Starting the microphone for {captureName}...</span>
+        <div>
+          <button type="button" onclick={() => cancelCaptureRecording(tab.id, "viewer")}>Cancel</button>
+        </div>
       {:else if captureView.phase === "recording"}
-        <span>Recording for {captureName}: {formatClock(captureElapsedMs)} of {formatClock(captureView.maxMs)}</span>
+        <span role="status">Recording for {captureName}: {formatClock(captureElapsedMs)} of {formatClock(captureView.maxMs)}</span>
         <div>
           <button type="button" onclick={() => stopCaptureRecording(tab.id)}>Stop</button>
           <button type="button" onclick={() => cancelCaptureRecording(tab.id, "viewer")}>Cancel</button>
         </div>
       {:else if captureView.phase === "finishing"}
-        <span>Finishing the recording for {captureName}...</span>
+        <span role="status">Finishing the recording for {captureName}...</span>
       {:else}
-        <span>{captureView.outboxCount} {captureView.outboxCount === 1 ? "recording" : "recordings"} waiting for {captureName}</span>
+        <span role="status">{captureView.outboxCount} {captureView.outboxCount === 1 ? "recording" : "recordings"} waiting for {captureName}</span>
         <div>
           <button type="button" onclick={() => discardCaptureOutbox(tab.id)}>Discard</button>
         </div>
@@ -566,6 +564,8 @@
   }
 
   .presentation-chrome {
+    flex: 0 0 42px;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -596,6 +596,7 @@
   }
 
   .capture-bar {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -620,9 +621,13 @@
     padding: 0 10px;
     border: 1px solid var(--border);
     border-radius: 5px;
-    background: var(--surface, #202936);
-    color: inherit;
+    background: var(--bg-card);
+    color: var(--text);
     cursor: pointer;
+  }
+
+  .capture-bar button:hover {
+    background: var(--hover-bg);
   }
 
   iframe {

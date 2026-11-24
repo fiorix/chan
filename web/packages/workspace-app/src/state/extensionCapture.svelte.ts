@@ -6,29 +6,39 @@
 import {
   EXTENSION_CAPTURE_EVENT,
   extensionCaptureSourceStatus,
+  extensionCaptureRequestId,
   type ExtensionCaptureEvent,
+  type ExtensionCaptureFailureCode,
   type ExtensionCaptureProcessing,
   type ExtensionCaptureRequest,
 } from "./extensionBridge";
 import { newUuid } from "./ids";
 import { notify } from "./notify.svelte";
+import { setCaptureActivityCount } from "./transfers.svelte";
 
 export const MAX_CAPTURE_MS = 10 * 60 * 1000;
 export const CAPTURE_SOFT_BYTES = 56 * 1024 * 1024;
 export const CAPTURE_HARD_BYTES = 64 * 1024 * 1024;
 export const MAX_OUTBOX_TAKES = 4;
 export const MAX_OUTBOX_BYTES = 128 * 1024 * 1024;
+/// How long a stopped recorder may take to deliver its last chunk.
+export const CAPTURE_FINISH_TIMEOUT_MS = 5000;
+
+/// Opus first: WebKitGTK's own default is AAC in MP4, which its decoder can
+/// refuse to read back. Safari records only MP4.
+const RECORDER_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/ogg;codecs=opus",
+  "audio/mp4",
+];
 
 export type CapturePhase = "armed" | "starting" | "recording" | "finishing";
 
 export type CaptureView = {
   phase: CapturePhase | null;
-  requestId: string | null;
   startedAt: number | null;
   maxMs: number;
   outboxCount: number;
-  outboxBytes: number;
-  extensionName: string;
 };
 
 type Take = {
@@ -71,7 +81,7 @@ const entries = new Map<string, Entry>();
 const posters = new Map<string, (event: ExtensionCaptureEvent) => void>();
 let views = $state<Record<string, CaptureView>>({});
 
-const ERROR_MESSAGES = {
+const ERROR_MESSAGES: Record<ExtensionCaptureFailureCode, string> = {
   not_granted: "This extension has not been granted microphone access.",
   insecure_context: "Microphone capture needs a secure context.",
   unsupported: "Microphone capture is unavailable in this browser.",
@@ -86,7 +96,15 @@ const ERROR_MESSAGES = {
   failed: "Microphone recording failed.",
 };
 
+function holdsAudio(entry: Entry): boolean {
+  return (
+    entry.outbox.length > 0 ||
+    (entry.session !== null && entry.session.phase !== "armed")
+  );
+}
+
 function syncView(entry: Entry): void {
+  setCaptureActivityCount([...entries.values()].filter(holdsAudio).length);
   if (!entry.session && entry.outbox.length === 0) {
     if (views[entry.tabId]) {
       const next = { ...views };
@@ -99,12 +117,9 @@ function syncView(entry: Entry): void {
     ...views,
     [entry.tabId]: {
       phase: entry.session?.phase ?? null,
-      requestId: entry.session?.requestId ?? null,
       startedAt: entry.session?.startedAt ?? null,
       maxMs: entry.session?.maxMs ?? MAX_CAPTURE_MS,
       outboxCount: entry.outbox.length,
-      outboxBytes: entry.outbox.reduce((sum, take) => sum + take.bytes, 0),
-      extensionName: entry.extensionName,
     },
   };
 }
@@ -116,14 +131,14 @@ function post(tabId: string, event: ExtensionCaptureEvent): void {
 function postError(
   tabId: string,
   requestId: string,
-  code: keyof typeof ERROR_MESSAGES,
+  code: ExtensionCaptureFailureCode,
 ): void {
   post(tabId, {
     type: EXTENSION_CAPTURE_EVENT,
     request_id: requestId,
     state: "error",
     code,
-    message: ERROR_MESSAGES[code] ?? ERROR_MESSAGES.failed!,
+    message: ERROR_MESSAGES[code],
   });
 }
 
@@ -158,9 +173,14 @@ function anySession(): boolean {
   return false;
 }
 
+/// Whether a new take could overrun the outbox. It is reserved at its hard
+/// limit, since its size is unknown until it ends.
 function outboxFull(entry: Entry): boolean {
   const bytes = entry.outbox.reduce((sum, take) => sum + take.bytes, 0);
-  return entry.outbox.length >= MAX_OUTBOX_TAKES || bytes >= MAX_OUTBOX_BYTES;
+  return (
+    entry.outbox.length >= MAX_OUTBOX_TAKES ||
+    bytes + CAPTURE_HARD_BYTES > MAX_OUTBOX_BYTES
+  );
 }
 
 export function registerCapturePoster(
@@ -181,13 +201,6 @@ export function isCaptureRecording(tabId: string): boolean {
   return views[tabId]?.phase === "recording";
 }
 
-export function hasCaptureActivity(): boolean {
-  for (const entry of entries.values()) {
-    if (entry.session || entry.outbox.length > 0) return true;
-  }
-  return false;
-}
-
 function clearTimer(session: Session): void {
   if (session.timer !== null) {
     clearTimeout(session.timer);
@@ -195,9 +208,8 @@ function clearTimer(session: Session): void {
   }
 }
 
-function cancelSession(entry: Entry, by: "viewer" | "extension" | "host"): void {
-  const session = entry.session;
-  if (!session) return;
+/// Detach the session from its tab and let go of the device.
+function releaseSession(entry: Entry, session: Session): void {
   entry.session = null;
   clearTimer(session);
   if (session.recorder && session.recorder.state !== "inactive") {
@@ -208,6 +220,12 @@ function cancelSession(entry: Entry, by: "viewer" | "extension" | "host"): void 
     }
   }
   stopTracks(session.stream);
+}
+
+function cancelSession(entry: Entry, by: "viewer" | "extension" | "host"): void {
+  const session = entry.session;
+  if (!session) return;
+  releaseSession(entry, session);
   syncView(entry);
   post(entry.tabId, {
     type: EXTENSION_CAPTURE_EVENT,
@@ -219,20 +237,11 @@ function cancelSession(entry: Entry, by: "viewer" | "extension" | "host"): void 
 
 function failSession(
   session: Session,
-  code: keyof typeof ERROR_MESSAGES,
+  code: ExtensionCaptureFailureCode,
 ): void {
   const entry = entries.get(session.tabId);
   if (!entry || entry.session !== session) return;
-  entry.session = null;
-  clearTimer(session);
-  if (session.recorder && session.recorder.state !== "inactive") {
-    try {
-      session.recorder.stop();
-    } catch {
-      // The recorder is already inactive.
-    }
-  }
-  stopTracks(session.stream);
+  releaseSession(entry, session);
   syncView(entry);
   postError(entry.tabId, session.requestId, code);
 }
@@ -254,18 +263,22 @@ function beginFinish(session: Session): void {
       session.recorder.stop();
     } catch {
       completeTake(session);
+      return;
     }
-  } else {
-    completeTake(session);
   }
+  // An inactive recorder still owes its last chunk and `stop` after an error
+  // or a track end, and a recorder that never answers must not hold the
+  // single capture slot.
+  session.timer = setTimeout(() => {
+    session.end = "interrupted";
+    completeTake(session);
+  }, CAPTURE_FINISH_TIMEOUT_MS);
 }
 
 function completeTake(session: Session): void {
   const entry = entries.get(session.tabId);
   if (!entry || entry.session !== session) return;
-  entry.session = null;
-  clearTimer(session);
-  stopTracks(session.stream);
+  releaseSession(entry, session);
   if (session.bytes === 0) {
     syncView(entry);
     postError(entry.tabId, session.requestId, "empty");
@@ -310,15 +323,32 @@ function takeEvent(take: Take, redelivered: boolean): ExtensionCaptureEvent {
   };
 }
 
-function errorCodeFor(error: unknown): keyof typeof ERROR_MESSAGES {
-  if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+function errorCodeFor(error: unknown): ExtensionCaptureFailureCode {
+  switch ((error as { name?: unknown } | null)?.name) {
+    case "NotAllowedError":
+    case "SecurityError":
       return "permission_denied";
-    }
-    if (error.name === "NotFoundError") return "no_device";
-    if (error.name === "NotReadableError") return "device_error";
+    case "NotFoundError":
+    // WebKit's answer when no capture device exists. Every constraint chan
+    // sends is `ideal`, so nothing else can overconstrain the request.
+    case "OverconstrainedError":
+      return "no_device";
+    case "NotReadableError":
+      return "device_error";
+    // A WebKitGTK without GStreamer's encoders has a MediaRecorder class
+    // whose constructor refuses every stream.
+    case "NotSupportedError":
+      return "unsupported";
+    default:
+      return "failed";
   }
-  return "failed";
+}
+
+function recorderOptions(): MediaRecorderOptions | undefined {
+  const mimeType = RECORDER_MIME_TYPES.find((type) =>
+    MediaRecorder.isTypeSupported(type),
+  );
+  return mimeType ? { mimeType } : undefined;
 }
 
 /// The viewer pressed Record in the capture bar. Only this path touches the
@@ -365,15 +395,11 @@ export async function startCaptureRecording(tabId: string): Promise<void> {
       session.end = "interrupted";
       beginFinish(session);
     };
-    if (typeof track.addEventListener === "function") {
-      track.addEventListener("ended", onEnded);
-    } else {
-      (track as MediaStreamTrack).onended = onEnded;
-    }
+    track.addEventListener("ended", onEnded);
   }
   let recorder: MediaRecorder;
   try {
-    recorder = new MediaRecorder(stream);
+    recorder = new MediaRecorder(stream, recorderOptions());
   } catch (error) {
     failSession(session, errorCodeFor(error));
     return;
@@ -394,7 +420,14 @@ export async function startCaptureRecording(tabId: string): Promise<void> {
       beginFinish(session);
     }
   });
-  recorder.addEventListener("error", () => failSession(session, "device_error"));
+  recorder.addEventListener("error", () => {
+    if (session.bytes === 0) {
+      failSession(session, "device_error");
+      return;
+    }
+    session.end = "interrupted";
+    beginFinish(session);
+  });
   recorder.addEventListener("stop", () => completeTake(session));
   try {
     recorder.start(1000);
@@ -438,12 +471,34 @@ export function cancelCaptureRecording(
   if (entry) cancelSession(entry, by);
 }
 
+/// Finish every live recording, keeping what it captured as a take. The
+/// desktop asks for this before it hides a window whose webview stays alive,
+/// because a hidden window has no capture bar or tab indicator.
+export function stopAllCaptureRecordings(): void {
+  for (const entry of entries.values()) {
+    const session = entry.session;
+    if (session?.phase === "recording") beginFinish(session);
+    else if (session?.phase === "armed" || session?.phase === "starting") {
+      cancelSession(entry, "host");
+    }
+  }
+}
+
 export function discardCaptureOutbox(tabId: string): void {
   const entry = entries.get(tabId);
   if (!entry) return;
   entry.outbox = [];
   if (!entry.session) entries.delete(tabId);
   syncView(entry);
+}
+
+/// Answer a capture message the bridge refused, when it names a request.
+export function rejectCaptureRequest(
+  tabId: string,
+  message: Record<string, unknown>,
+): void {
+  const requestId = extensionCaptureRequestId(message);
+  if (requestId !== null) postError(tabId, requestId, "invalid_request");
 }
 
 /// Handle one validated request from the tab's own frame.
@@ -553,12 +608,9 @@ export function disposeCaptureTab(tabId: string): void {
       : 0);
   const name = entry.extensionName;
   if (entry.session) cancelSession(entry, "host");
+  entry.outbox = [];
   entries.delete(tabId);
-  views = (() => {
-    const next = { ...views };
-    delete next[tabId];
-    return next;
-  })();
+  syncView(entry);
   if (dropped > 0) {
     notify(
       dropped === 1
@@ -578,4 +630,5 @@ export function resetExtensionCapture(): void {
   entries.clear();
   posters.clear();
   views = {};
+  setCaptureActivityCount(0);
 }

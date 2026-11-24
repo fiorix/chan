@@ -195,7 +195,26 @@ export function activeTransferCount(): number {
   return transfers.items.filter(occupiesWindow).length;
 }
 
-/// The sink that pushes the active-transfer count to the server over the window
+/// Extension tabs holding a live recording or takes not yet saved. Closing
+/// the window loses them, so they count toward the close guard.
+let captureActivity = $state(0);
+
+export function captureActivityCount(): number {
+  return captureActivity;
+}
+
+/// Everything in THIS window that a close would lose.
+export function windowActivityCount(): number {
+  return activeTransferCount() + captureActivity;
+}
+
+export function setCaptureActivityCount(count: number): void {
+  if (count === captureActivity) return;
+  captureActivity = count;
+  emitSignal();
+}
+
+/// The sink that pushes the window activity count to the server over the window
 /// `/ws` ({"type":"transfers","active":<n>}). `store` registers it against the
 /// watch socket; we call it whenever the count could change. null in tests / on
 /// a surface with no watch socket.
@@ -206,7 +225,7 @@ export function setTransferSignalSink(sink: ((active: number) => void) | null): 
 }
 
 function emitSignal(): void {
-  signalSink?.(activeTransferCount());
+  signalSink?.(windowActivityCount());
 }
 
 /// A download's source: its path, whether it is a directory, and the root

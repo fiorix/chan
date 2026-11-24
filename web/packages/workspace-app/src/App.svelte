@@ -176,8 +176,8 @@
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
   import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
-  import { activeTransferCount } from "./state/transfers.svelte";
-  import { hasCaptureActivity } from "./state/extensionCapture.svelte";
+  import { windowActivityCount } from "./state/transfers.svelte";
+  import { stopAllCaptureRecordings } from "./state/extensionCapture.svelte";
   import {
     currentOS,
     resolvedEventKey,
@@ -1805,6 +1805,12 @@
   function onChanCommand(e: Event): void {
     const detail = (e as CustomEvent).detail ?? {};
     if (typeof detail.name !== "string") return;
+    // The desktop sends this as it hides a window whose webview stays alive.
+    // No cover, dialog or window mode may keep the microphone on past it.
+    if (detail.name === "app.capture.stopAll") {
+      stopAllCaptureRecordings();
+      return;
+    }
     runCommand(detail.name, detail);
   }
   onMount(() => window.addEventListener("chan:command", onChanCommand));
@@ -1846,10 +1852,7 @@
   // avoid a double prompt). The XHR dies on unload, so a standard-cancellable
   // beforeunload gives the user the chance to keep the page.
   function onBeforeUnloadTransfers(e: BeforeUnloadEvent): void {
-    if (
-      !isTauriDesktop() &&
-      (activeTransferCount() > 0 || hasCaptureActivity())
-    ) {
+    if (!isTauriDesktop() && windowActivityCount() > 0) {
       e.preventDefault();
       e.returnValue = "";
     }

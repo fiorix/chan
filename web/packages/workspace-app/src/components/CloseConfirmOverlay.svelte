@@ -23,6 +23,7 @@
   } from "../state/closeConfirm.svelte";
   import { appInputBlocked, discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
   import { tmuxPaneTabs } from "../state/tabs.svelte";
+  import { captureActivityCount } from "../state/transfers.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { connectionHealth } from "../state/connectionHealth.svelte";
@@ -199,6 +200,9 @@
           Hide it to keep its tabs and terminals warm, or close to discard
         {/if}
       </div>
+      {#if captureActivityCount() > 0}
+        <div class="refusal" role="alert">A recording or unsaved take in this window will be lost.</div>
+      {/if}
       {#if refusal}
         <div class="refusal" role="alert">{refusal}</div>
       {/if}

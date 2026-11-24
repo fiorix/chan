@@ -32,6 +32,7 @@ import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelt
 import { discardWindowSession, ui } from "../state/store.svelte";
 import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus } from "../state/connectionHealth.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { setCaptureActivityCount } from "../state/transfers.svelte";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 
 type TauriWindow = { __TAURI_INTERNALS__?: unknown };
@@ -88,6 +89,18 @@ function action(label: string): HTMLButtonElement {
 }
 
 describe("the close prompt", () => {
+  test("warns only while the window holds a recording or an unsaved take", async () => {
+    const warning = "A recording or unsaved take in this window will be lost.";
+    await ask();
+    expect(target.textContent).not.toContain(warning);
+    setCaptureActivityCount(1);
+    await tick();
+    expect(target.textContent).toContain(warning);
+    setCaptureActivityCount(0);
+    await tick();
+    expect(target.textContent).not.toContain(warning);
+  });
+
   test("stays open during an uncovered outage and cancels when the cover appears", async () => {
     setConnectionWatchStatus("reconnecting");
     ui.ws = "reconnecting";
