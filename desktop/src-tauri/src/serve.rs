@@ -1162,13 +1162,9 @@ fn build_workspace_window_with_completion(
             tauri::webview::PageLoadEvent::Finished => {
                 crate::titlebar_tabs::page_load_finished(&window);
             }
-        })
-        .on_permission_request(|_, kind| {
-            crate::webview_permission::permission_response(
-                kind,
-                crate::webview_permission::PermissionSurface::Workspace,
-            )
         });
+        let embedded_addr = state.embedded().map(|embedded| embedded.addr());
+        let builder = crate::webview_permission::with_workspace_policy(builder, embedded_addr);
         // Build hidden when restored geometry will be applied, so the window
         // never flashes at the default size/position before it is repositioned.
         let builder = if geometry_plan.builds_hidden() {
@@ -1180,6 +1176,7 @@ fn build_workspace_window_with_completion(
         let builder = builder.transparent(true);
         let result = match builder.build() {
             Ok(window) => {
+                crate::webview_permission::attach_workspace_policy(&window, embedded_addr);
                 #[cfg(target_os = "macos")]
                 keep_title_bar_opaque(&window);
                 // Apply the restored OS geometry (physical px) and reveal the
@@ -1280,7 +1277,7 @@ fn on_close_requested(
     // silently and kill the transfer. A LOCAL window reports its
     // count through the embedded host (keyed on the `?w=` session
     // id), and its red-dot close DESTROYS it -- so the prompt
-    // offers "Cancel transfer & close" vs "Keep open". A
+    // offers "Cancel & close" vs "Keep open". A
     // connected-DEVSERVER window's transfer lives in the remote
     // SPA + server, surfaced via the `active_transfer` feed bit
     // (cached, keyed by composite label); its red-dot close only
@@ -1636,6 +1633,10 @@ pub(crate) fn desktop_holder_tag() -> Option<&'static str> {
 /// Hide / Close / Cancel overlay.
 const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.window.confirmClose' } }));";
 
+/// Host-to-webview dispatch that finishes every live recording in the page and
+/// keeps what it captured, on the same bridge as the close confirmation.
+const STOP_CAPTURE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.capture.stopAll' } }));";
+
 /// Bury an SPA window -- hide it, keep its record warm and reopenable -- WITHOUT
 /// asking or teaching. The label prefix selects the mechanism, mirroring the
 /// window classes `build_workspace_window_with_completion` mints:
@@ -1730,7 +1731,7 @@ pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppStat
 /// - "Keep open" (the safe default / Escape) leaves the window untouched and
 ///   VISIBLE so the user watches the transfer's bubble finish -- a hold, NOT a
 ///   bury.
-/// - "Cancel transfer & close" buries the watcher view (so the reconcile won't
+/// - "Cancel & close" buries the watcher view (so the reconcile won't
 ///   reopen it) + keeps it in the Window menu, then DESTROYS the webview now.
 ///   That teardown triggers the SPA's pagehide cancellation for native and
 ///   browser transfers (server upload cleanup is already safe -- no
@@ -1747,12 +1748,12 @@ fn prompt_transfer_close(app: &AppHandle, state: &Arc<AppState>, label: &str) {
     let label_cb = label.to_string();
     crate::native_dialog::confirm(
         app,
-        "Transfer in progress",
+        "Transfer or recording in progress",
         &format!(
-            "\"{title}\" has a file transfer in progress. Cancel it and close the \
-             window, or keep the window open until the transfer finishes?"
+            "\"{title}\" has a file transfer or recording in progress. Cancel it and \
+             close the window, or keep the window open until it finishes?"
         ),
-        "Cancel transfer & close",
+        "Cancel & close",
         "Keep open",
         move |cancel_and_close| {
             if !cancel_and_close {
@@ -1793,11 +1794,12 @@ fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label
     let label_cb = label.to_string();
     crate::native_dialog::confirm(
         app,
-        "Transfer in progress",
+        "Transfer or recording in progress",
         &format!(
-            "\"{title}\" has a file transfer in progress. Keep the window open to \
-             watch it finish, or hide it; the transfer keeps running in the \
-             background (cancel it from the transfer bar if you need to)."
+            "\"{title}\" has a file transfer or recording in progress. Keep the window \
+             open to watch it finish, or hide it. A transfer keeps running in the \
+             background (cancel it from the transfer bar if you need to); a recording \
+             stops and keeps what it captured."
         ),
         "Hide window",
         "Keep open",
@@ -1813,6 +1815,8 @@ fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label
             if let Some(w) = app_cb.get_webview_window(&label_cb) {
                 let t = w.title().unwrap_or_else(|_| label_cb.clone());
                 crate::launcher_panel::close_for_host(&app_cb, &label_cb);
+                // A hidden window shows no capture bar or tab indicator.
+                let _ = w.eval(STOP_CAPTURE_DISPATCH_JS);
                 let _ = w.hide();
                 state_cb.bury_window(&label_cb, &t);
                 crate::rebuild_window_menu(&app_cb);

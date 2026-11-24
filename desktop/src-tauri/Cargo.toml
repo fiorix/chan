@@ -156,6 +156,10 @@ gtk = "0.18"
 # A launch's startup id applies to X11 windows only, even when GTK also
 # supports Wayland. This is the version wry already links.
 gdkx11 = "0.18"
+# The workspace windows answer WebKitGTK's permission requests themselves
+# (src/webview_permission.rs), because a dialog has to hold a request open and
+# wry's handler answers at once. This is the version wry already links.
+webkit2gtk = "2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)
