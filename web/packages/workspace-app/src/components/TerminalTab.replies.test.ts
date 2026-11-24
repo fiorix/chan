@@ -84,6 +84,22 @@ describe("answers the terminal generates while parsing output", () => {
     expect(frames(socket, "input"), "a live query is answered").toEqual([CPR]);
   });
 
+  test("Ctrl+[ pressed while history replays into a reattached terminal reaches the shell", async () => {
+    const { term, socket } = await attached({ terminalSessionId: "sess-9" }, false);
+    // The window is open: the core's answer to a replayed query is dropped.
+    await output(socket, "\x1b[6n");
+    expect(frames(socket, "input")).toEqual([]);
+
+    // The key is a lone ESC, the byte every dropped answer begins with, and
+    // it is the user's: it goes out at once, to this PTY.
+    pressInGhostty(term, { key: "[", code: "BracketLeft", keyCode: 219, ctrlKey: true });
+    expect(frames(socket, "input")).toEqual(["\x1b"]);
+
+    // And the window is still open after it.
+    await output(socket, "\x1b[6n");
+    expect(frames(socket, "input")).toEqual(["\x1b"]);
+  });
+
   test("an answer to history replayed on a redial of a live terminal is dropped", async () => {
     vi.useFakeTimers();
     const { socket: first } = await attached();

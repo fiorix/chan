@@ -288,6 +288,39 @@ describe("a ghostty mouse report", () => {
     expect(pings(socket)).toBe(1);
   });
 
+  // The tab reads a chunk's shape before it reads whether a PTY write is
+  // being parsed. Whatever the widget emits inside a live write is otherwise
+  // the core's reply to that write, which goes to this PTY alone and as text.
+  test.each([
+    ["an X10", "", REPORT, true],
+    ["an SGR", "\x1b[?1006h", "\x1b[<0;151;4M", false],
+  ] as const)("%s report emitted while a PTY write is being parsed is still the user's", async (_name, mode, report, binary) => {
+    const { term, socket, received } = await attached();
+    if (mode) await output(socket, mode);
+    socket.sent.splice(0);
+    // The widget reports a change from inside the write that made it, which
+    // is inside the tab's live write.
+    const change = term.onChange(() => {
+      change.dispose();
+      typeInGhostty(term, report);
+    });
+    await output(socket, "x");
+    const frame = binary ? { data: report, binary } : { data: report };
+    expect(inputFrames(socket)).toEqual([
+      { type: "input", ...frame },
+      { type: "broadcast-input", ...frame },
+    ]);
+    expect(received).toEqual([[report, binary]]);
+
+    // The control: a reply the core makes to a write, from inside that
+    // write, stays this PTY's own.
+    socket.sent.splice(0);
+    received.splice(0);
+    await output(socket, "\x1b[5n");
+    expect(inputFrames(socket)).toEqual([{ type: "input", data: "\x1b[0n" }]);
+    expect(received).toEqual([]);
+  });
+
   test("keeps an X10-shaped chunk above U+00FF as text", async () => {
     const { term, socket, received } = await attached();
     const chunk = "\x1b[M \u0100$";
