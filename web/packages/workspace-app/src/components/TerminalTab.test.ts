@@ -192,8 +192,12 @@ describe("TerminalTab CLI reload notice", () => {
     button?.click();
     await tick();
     await tick();
-    await vi.waitFor(() => expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal exactly once")
+    await vi.waitFor(() => expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal")
       .toEqual([{ type: "resize", cols: 100, rows: 33 }]));
+    await tick();
+    await tick();
+    expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "exactly once: no second frame follows")
+      .toEqual([{ type: "resize", cols: 100, rows: 33 }]);
     expect(term.rows, "the measured grid gains rows after dismissal").toBeGreaterThan(rowsBefore);
 
     await renderTerminal(hidden, false, "a", false);

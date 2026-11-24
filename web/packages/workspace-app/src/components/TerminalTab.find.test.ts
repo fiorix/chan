@@ -292,10 +292,12 @@ describe("terminal find command routing", () => {
     expect(findInput()).toBeNull();
     term.select(0, 0, 1);
     expect(term.getSelection()).toBe("a");
+    expect(activeHighlight(term), "closing the bar drops the highlight").toBeNull();
     fireCommand("app.find.next");
     await tick();
     expect(findInput()).toBeNull();
     expect(term.getSelection()).toBe("a");
+    expect(activeHighlight(term), "the step highlights nothing").toBeNull();
   });
 });
 
@@ -888,9 +890,11 @@ describe("terminal find on the ghostty backend", () => {
     modelPointerCapture(canvas);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
     const at = { clientX: 2 * 8 + 1, clientY: 2 * 19 + 1 };
+    term.select(0, 0, 1);
+    expect(term.getSelectionRange(), "a selection for the tap to clear").not.toBeNull();
     mousePointer(canvas, "pointerdown", at);
     mousePointer(canvas, "pointerup", at);
-    expect(term.getSelectionRange()).toBeNull();
+    expect(term.getSelectionRange(), "the tap reached the widget").toBeNull();
     expect(activeHighlight(term), "a press clears only the user selection").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
