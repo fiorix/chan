@@ -278,6 +278,49 @@ describe('captured selection lifecycle', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test.each(['bottom', 'top'])('a drag resting near the %s edge of a view that cannot scroll keeps the cell under the pointer', async (edge) => {
+    const { term, canvas, width, height, write } = await open(Array.from({ length: ROWS }, (_, i) => `row ${i} abcdefgh`).join('\r\n'));
+    expect(term.getScrollbackLength()).toBe(0);
+    vi.useFakeTimers();
+    const row = edge === 'bottom' ? ROWS - 2 : 1;
+    const y = row * height + (edge === 'bottom' ? height - 2 : 2);
+    expect(edge === 'bottom' ? ROWS * height - y : y, 'inside the auto-scroll zone').toBeLessThan(30);
+    pointer(canvas, 'pointerdown', 6 * width + 1, y);
+    pointer(canvas, 'pointermove', 9 * width + 1, y);
+    expect(term.getSelection()).toBe('abcd');
+    vi.advanceTimersByTime(200);
+    expect(term.getSelectionRange()).toEqual({ start: { col: 6, absoluteRow: row }, end: { col: 9, absoluteRow: row } });
+    pointer(canvas, 'pointerup', 9 * width + 1, y);
+    expect(write).toHaveBeenCalledExactlyOnceWith('abcd');
+  });
+
+  test('auto-scroll moves the selection end only in a tick that scrolls the view', async () => {
+    const { term, canvas, width, height } = await open(history());
+    expect(term.getScrollbackLength()).toBe(34);
+    term.viewport.scrollTo(8);
+    vi.useFakeTimers();
+    const y = (ROWS - 2) * height + height - 2;
+    const end = () => term.getSelectionRange()?.end;
+    pointer(canvas, 'pointerdown', 1, y);
+    pointer(canvas, 'pointermove', 4 * width + 1, y);
+    expect(term.getSelectionRange()).toEqual({ start: { col: 0, absoluteRow: 30 }, end: { col: 4, absoluteRow: 30 } });
+    vi.advanceTimersByTime(50);
+    expect(term.viewport.offset).toBe(5);
+    expect(end(), 'a scrolling tick extends to the edge row').toEqual({ col: COLS - 1, absoluteRow: 34 });
+    vi.advanceTimersByTime(100);
+    expect(term.viewport.offset).toBe(0);
+    expect(end()).toEqual({ col: COLS - 1, absoluteRow: 39 });
+    pointer(canvas, 'pointermove', 5 * width + 1, y);
+    expect(end(), 'the pointer names its own cell').toEqual({ col: 5, absoluteRow: 38 });
+    vi.advanceTimersByTime(200);
+    expect(term.viewport.offset).toBe(0);
+    expect(end(), 'a tick that cannot scroll leaves it there').toEqual({ col: 5, absoluteRow: 38 });
+    // Beyond the edge the pointer-move path already names the edge row.
+    pointer(canvas, 'pointermove', 5 * width + 1, ROWS * height + 50);
+    vi.advanceTimersByTime(200);
+    expect(end()).toEqual({ col: COLS - 1, absoluteRow: 39 });
+  });
+
   test('buttonless moves retain a captured selection, silent loss stops it without copy', async () => {
     const { term, canvas, captured, write } = await open();
     drag(canvas);

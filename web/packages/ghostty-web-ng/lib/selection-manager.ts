@@ -835,7 +835,13 @@ export class SelectionManager {
 
       // Pointer Y grows toward newer output; viewport offsets grow into history.
       const scrollAmount = SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection;
+      const topBefore = this.viewportRowToAbsolute(0);
       this.terminal.viewport.scrollBy(-scrollAmount);
+
+      // A view that could not scroll shows the same rows, so the end stays
+      // at the cell the pointer named: a drag resting in the edge zone of a
+      // view at its limit selects no more than the pointer covers.
+      if (this.viewportRowToAbsolute(0) === topBefore) return;
 
       // Extend selection in the scroll direction
       // Key insight: we need to EXTEND the selection, not reset it to viewport edge
