@@ -67,8 +67,8 @@ export interface FontMetrics {
  * the one it does without: a theme that names none leaves selected text in
  * its own color, as xterm.js does.
  */
-type RendererTheme = Required<Omit<ITheme, 'selectionForeground'>> &
-  Pick<ITheme, 'selectionForeground'>;
+type RendererTheme = Required<Omit<ITheme, 'selectionForeground' | 'contrastBackdrop'>> &
+  Pick<ITheme, 'selectionForeground' | 'contrastBackdrop'>;
 
 export const DEFAULT_THEME: RendererTheme = {
   minimumContrastRatio: 1,
@@ -711,7 +711,7 @@ export class CanvasRenderer {
       const foreground = inverse ? cell.bg : cell.fg;
       let background: Color | undefined;
       if (this.theme.minimumContrastRatio > 1) {
-        const rowBackground = this.backgroundColor(this.theme.background);
+        const rowBackground = this.contrastRowBackground();
         if (isSelected || highlight) {
           const overlay = this.backgroundColor(isSelected ? this.theme.selectionBackground
             : highlight!.background ?? this.theme.selectionBackground);
@@ -980,8 +980,19 @@ export class CanvasRenderer {
     return this.backgroundCache.get(css);
   }
 
+  /**
+   * The row fill as the contrast floor measures it: over the theme's known
+   * backdrop when the fill itself is not opaque.
+   */
+  private contrastRowBackground(): Color | undefined {
+    const fill = this.backgroundColor(this.theme.background);
+    if (!fill || fill[3] >= 1 || this.theme.contrastBackdrop === undefined) return fill;
+    const backdrop = this.backgroundColor(this.theme.contrastBackdrop);
+    return backdrop && backdrop[3] >= 1 ? compositeColor(fill, backdrop) : fill;
+  }
+
   private cellForeground(foreground: number, background: Color | undefined): string {
-    // A transparent canvas has no known backdrop against which to measure.
+    // A background that is still not opaque has no known color to measure against.
     if (this.theme.minimumContrastRatio <= 1 || !background || background[3] < 1) return this.rgbToCSS(foreground);
     const key = `${foreground}:${background}`;
     let color = this.contrastCache.get(key);

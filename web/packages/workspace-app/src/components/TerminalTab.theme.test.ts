@@ -122,6 +122,8 @@ describe("the widget's contrast floor", () => {
     hybridSurfaceThemes.terminal = "light";
     const { term } = await mounted();
     expect(floor(term), "opened light").toBe(4.5);
+    expect((term.options.theme as { contrastBackdrop?: string }).contrastBackdrop,
+      "an opaque window paints its own background and names no backdrop").toBeUndefined();
 
     delete hybridSurfaceThemes.terminal;
     flushSync();
@@ -167,6 +169,10 @@ describe("the widget's contrast floor", () => {
     flushSync();
     await tick();
     expect(floor(term), "the tint is opaque").toBe(4.5);
+    const theme = term.options.theme as { background?: string; contrastBackdrop?: string };
+    expect(theme.contrastBackdrop, "the floor is measured against the tint behind the clear background")
+      .toBe(getComputedStyle(term.element!).getPropertyValue("--bg").trim() || "#1c1c1e");
+    expect(theme.background, "the widget's own background stays clear").not.toBe(theme.contrastBackdrop);
 
     applyDesktopTerminalOpacity(85);
     flushSync();

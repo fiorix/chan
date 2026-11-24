@@ -52,6 +52,13 @@ export interface TerminalTestHooks {
 export interface ITheme {
   /** Cell ink contrast before faint/antialiasing; default 1, invalid values use 1. */
   minimumContrastRatio?: number;
+  /**
+   * The opaque color known to sit behind a clear or translucent background,
+   * such as the page's own fill. The contrast floor measures inherited ink
+   * against the background composited over it. Unset, or not opaque, ink on
+   * a background that is not opaque is left unchanged.
+   */
+  contrastBackdrop?: string;
   foreground?: string;
   background?: string;
   cursor?: string;

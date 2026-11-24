@@ -965,13 +965,20 @@
     return customTerminalColors?.contrast ?? surfaceThemeOverride("terminal");
   }
 
+  /// The terminal's background colour, opaque: what the renderer fills in an
+  /// opaque window and what `.terminal-tab` tints with in a transparent one.
+  function terminalBackground(styles: CSSStyleDeclaration): string {
+    return (
+      customTerminalColors?.background ??
+      (styles.getPropertyValue("--bg").trim() || "#1c1c1e")
+    );
+  }
+
   function terminalTheme() {
     // Read CSS variables from `host` so the terminal surface's
     // `data-theme` override resolves before xterm paints.
     const styles = getComputedStyle(host ?? document.documentElement);
-    const bg =
-      customTerminalColors?.background ??
-      (styles.getPropertyValue("--bg").trim() || "#1c1c1e");
+    const bg = terminalBackground(styles);
     const text =
       customTerminalColors?.foreground ??
       (styles.getPropertyValue("--text").trim() || "#ebebf0");
@@ -1037,11 +1044,7 @@
   // and the palette cannot reach truecolor. 4.5 (WCAG AA) has either
   // renderer darken only under-contrast foregrounds; 1 is the identity,
   // keeping dark rendering untouched. xterm.js takes the floor as an option
-  // of its own, the widget as a field of its theme. The widget measures a
-  // cell on the default background against the background it paints, so in
-  // a window built transparent, where that background is clear and the tint
-  // is the page's, its floor reaches only cells with a background of their
-  // own.
+  // of its own, the widget as a field of its theme.
   function terminalMinimumContrastRatio(): number {
     // While the desktop shows through, the backdrop is whatever sits behind
     // the window, so a ratio measured against the theme background would be
@@ -1051,11 +1054,18 @@
   }
 
   /// The widget's theme: the colours plus the contrast floor, which it
-  /// takes only there.
+  /// takes only there. The widget measures a cell on the default background
+  /// against the background it paints. In a window built transparent that
+  /// background is clear and `.terminal-tab` paints the tint behind it, so
+  /// the tint is named as the backdrop to measure against; below 100%
+  /// opacity the floor is off and the backdrop is not read.
   function ghosttyTerminalTheme() {
     return {
       ...terminalTheme(),
       minimumContrastRatio: terminalMinimumContrastRatio(),
+      contrastBackdrop: transparentWindow
+        ? terminalBackground(getComputedStyle(host ?? document.documentElement))
+        : undefined,
     };
   }
 

@@ -312,6 +312,21 @@ describe('widget themes', () => {
     expect(contrast(cellPixel(ctx, 4), cellPixel(ctx, 5))).toBeGreaterThanOrEqual(4.5);
   });
 
+  test('a clear background over a known backdrop gets the floor against that backdrop', async () => {
+    const { term, ctx } = await open(LIGHT, '\x1b[?25l\x1b[38;2;153;153;153m\u2588 ');
+    const clear = { background: 'rgba(0, 0, 0, 0)', minimumContrastRatio: 4.5 };
+    setTheme(term, { ...clear, contrastBackdrop: '#ffffff' } as Theme);
+    expect(contrast(cellPixel(ctx, 0), [255, 255, 255, 1])).toBeGreaterThanOrEqual(4.5);
+    expect(cellPixel(ctx, 1), 'the background stays clear').toEqual([0, 0, 0, 0]);
+    setTheme(term, { ...clear, contrastBackdrop: '#101010' } as Theme);
+    expect(contrast(cellPixel(ctx, 0), [16, 16, 16, 1]), 'a dark backdrop already contrasts').toBeGreaterThanOrEqual(4.5);
+    expect(cellPixel(ctx, 0)).toEqual([153, 153, 153, 1]);
+    setTheme(term, { ...clear, contrastBackdrop: 'rgba(255, 255, 255, 0.5)' } as Theme);
+    expect(cellPixel(ctx, 0), 'a translucent backdrop is not a known color').toEqual([153, 153, 153, 1]);
+    setTheme(term, { background: 'rgba(255, 255, 255, 0.5)', minimumContrastRatio: 4.5, contrastBackdrop: '#ffffff' } as Theme);
+    expect(contrast(cellPixel(ctx, 0), [255, 255, 255, 1]), 'a translucent fill composites over it').toBeGreaterThanOrEqual(4.5);
+  });
+
   test('selection and highlights adjust inherited ink against their composite background but keep explicit ink', async () => {
     const { term, ctx } = await open(DARK, '\x1b[?25l\x1b[38;2;153;153;153m\u2588 \u2588 ');
     term.setSelection({ start: { absoluteRow: 0, col: 0 }, end: { absoluteRow: 0, col: 1 } });
