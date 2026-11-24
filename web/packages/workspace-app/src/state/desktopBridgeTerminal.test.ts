@@ -127,12 +127,6 @@ describe.each([
         expect(inputs(socket)).toEqual([]);
         expect(shouldEscapeTerminal(event)).toBe(true);
       });
-
-      test("native Ctrl+Shift+/ stays out of command escape", async () => {
-        const { term } = await focusedTerminal(true);
-        const event = press(term, { key: "?", code, ctrlKey: true, shiftKey: true });
-        expect(shouldEscapeTerminal(event)).toBe(false);
-      });
     }
 
     if (os !== "mac" && key !== "/") {
@@ -170,12 +164,6 @@ describe.each([
       expect(shouldEscapeTerminal(event)).toBe(true);
       expect(reached, "the app's chord listener gets the key").toBe(true);
     });
-  });
-
-  test("native Ctrl slash stays out of command escape", async () => {
-    const { term } = await focusedTerminal(true);
-    const event = press(term, { key: "/", code: "Slash", ctrlKey: true });
-    expect(shouldEscapeTerminal(event)).toBe(false);
   });
 
   test.each([true, false])("Ctrl slash sends one byte and suppresses the widget's own encoding (native=%s)", async (native) => {

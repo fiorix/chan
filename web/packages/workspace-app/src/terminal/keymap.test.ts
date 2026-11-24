@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   applyKittyKeyboardProtocol,
   applyXtermModifierKeys,
+  controlSlashBytes,
   createTerminalKeyboardProtocolState,
   disableXtermModifierKeys,
   handleTerminalMetaKey,
@@ -217,6 +218,31 @@ describe("terminal meta key mapping", () => {
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", shiftKey: true }), restored)).toBe(
       "\x1b[13;2u",
     );
+  });
+});
+
+describe("controlSlashBytes", () => {
+  const slash = { key: "/", shiftKey: false };
+
+  test("Ctrl+/ sends the Unit Separator", () => {
+    expect(controlSlashBytes(keyEvent({ key: "/", code: "Slash", ctrlKey: true }), slash)).toBe("\x1f");
+  });
+
+  // Each row fails one guard alone, so dropping any one sends the byte.
+  test.each([
+    ["no Ctrl", { key: "/" }, slash],
+    ["Shift held, though the chord resolved without it", { key: "/", ctrlKey: true, shiftKey: true }, slash],
+    ["Ctrl+Alt+/", { key: "/", ctrlKey: true, altKey: true }, slash],
+    ["Cmd+Ctrl+/", { key: "/", ctrlKey: true, metaKey: true }, slash],
+    ["a chord that resolved with Shift", { key: "?", ctrlKey: true }, { key: "/", shiftKey: true }],
+    ["another key", { key: "-", ctrlKey: true }, { key: "-", shiftKey: false }],
+    ["a key that resolves to no chord", { key: "/", ctrlKey: true }, null],
+  ])("%s sends nothing", (_label, init, resolved) => {
+    expect(controlSlashBytes(keyEvent(init), resolved)).toBeNull();
+  });
+
+  test.each(["keyup", "keypress"])("a %s sends nothing", (type) => {
+    expect(controlSlashBytes(keyEvent({ type, key: "/", ctrlKey: true }), slash)).toBeNull();
   });
 });
 

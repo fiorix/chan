@@ -103,8 +103,10 @@ export function handleTerminalMetaKey(
 
 /// xterm.js leaves Ctrl+/ unencoded; chan sends the shell's Unit Separator.
 /// `resolved` is the chord the event resolves to on the user's layout
-/// (state/shortcuts.ts resolvedEventKey), so a Shift that only typed the
-/// symbol does not count.
+/// (state/shortcuts.ts resolvedEventKey): the slash is read from there, not
+/// from the physical key. Shift held on the event excludes the chord whatever
+/// it resolved to, so a layout that types the slash with Shift sends nothing
+/// here.
 export function controlSlashBytes(
   ev: KeyboardEvent,
   resolved: { key: string; shiftKey: boolean } | null,
