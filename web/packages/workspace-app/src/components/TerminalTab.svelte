@@ -195,6 +195,7 @@
     webglRendererOverride,
     webglRendererSignal,
   } from "../terminal/renderer";
+  import { watchDevicePixelRatio } from "../terminal/pixelRatio";
   import { resolveReadyTerminalFont } from "../terminal/font";
   import {
     createFitFrameScheduler,
@@ -516,6 +517,7 @@
   const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let stopPixelRatioWatch: (() => void) | null = null;
   // Publication needs a fit since the last visibility change or relocation.
   let gridMeasured = false;
   // The dial may use a host measurement across a hide, but never a grid
@@ -1577,6 +1579,8 @@
     });
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
+    stopPixelRatioWatch?.();
+    stopPixelRatioWatch = watchDevicePixelRatio(queueFit);
     // This empty renderer needs its host's grid before parsing replay, even
     // when born hidden. There is no socket to publish to at this one fit.
     broadcastGrid = null;
@@ -2797,6 +2801,8 @@
     replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
+    stopPixelRatioWatch?.();
+    stopPixelRatioWatch = null;
     primarySelectionCleanup?.();
     primarySelectionCleanup = null;
     ghosttyKeyParity?.();
