@@ -10,10 +10,13 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+vi.mock("../terminal/backend", async (importOriginal) => {
+  const fixture = await (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal);
+  return { ...fixture, loadGhosttyKit: vi.fn(fixture.loadGhosttyKit) };
+});
 
 import TerminalTab from "./TerminalTab.svelte";
+import { loadGhosttyKit } from "../terminal/backend";
 // Build-time contract: the app entry imports fonts.css, so the bundled face starts loading at boot.
 import main from "../main.ts?raw";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -36,6 +39,7 @@ const fonts = readFileSync("src/fonts.css", "utf8");
 afterEach(() => {
   resetTerminals();
   __testSetStandalonePreferences(null);
+  vi.mocked(loadGhosttyKit).mockClear();
 });
 
 // TerminalTab ships Source Code Pro Regular and defaults renderers to a
@@ -53,11 +57,18 @@ describe("the mounted terminal", () => {
       target,
       props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
     });
+    // The terminal has reached the wait: it asked for the face. The widget's
+    // load is the next thing it starts, so a terminal that did not wait
+    // would have started it within these turns, long before a renderer
+    // exists to count.
+    await vi.waitFor(() => expect(loaded, "the terminal asked for the face").toBeDefined());
     for (let i = 0; i < 4; i += 1) await tick();
+    expect(loadGhosttyKit, "the widget's load has not started while the face loads").not.toHaveBeenCalled();
     expect(ghosttyFixture.terminals, "nothing built while the face loads").toHaveLength(0);
 
     loaded([{} as FontFace]);
     const term = await openedGhostty(target);
+    expect(loadGhosttyKit).toHaveBeenCalledOnce();
     expect(ghosttyFixture.terminals).toHaveLength(1);
     expect(ghosttyFontFamily(term)).toContain("Source Code Pro");
     await unmount(component);

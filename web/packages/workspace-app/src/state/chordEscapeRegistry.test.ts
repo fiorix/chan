@@ -2,6 +2,8 @@ import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import {
   SHORTCUTS,
   chordFromEvent,
+  currentOS,
+  currentPlatform,
   shouldEscapeTerminal,
 } from "./shortcuts";
 import { ghosttyKeydownAction } from "../terminal/ghosttyKeys";
@@ -242,6 +244,49 @@ describe("shouldEscapeTerminal lookup", () => {
     const e = new KeyboardEvent("keydown", { key: "d", ctrlKey: true });
     expect(shouldEscapeTerminal(e)).toBe(false);
   });
+});
+
+// Ctrl with the slash key is the shell's Unit Separator on every desktop. The
+// split chords sit beside it (Cmd+/ on macOS, Ctrl+Alt+/ elsewhere), so the
+// registry must keep letting the bare Control form stay in the terminal.
+describe.each([
+  ["mac", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"],
+  ["linux", "Mozilla/5.0 (X11; Linux x86_64)"],
+  ["windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"],
+] as const)("Ctrl with the slash key on the %s desktop", (os, userAgent) => {
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { userAgent });
+    vi.stubGlobal("__TAURI_INTERNALS__", { invoke: vi.fn(async () => undefined) });
+    expect(currentOS()).toBe(os);
+    expect(currentPlatform()).toBe("native");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("Ctrl+/ stays out of command escape", () => {
+    const e = new KeyboardEvent("keydown", { key: "/", code: "Slash", ctrlKey: true });
+    expect(shouldEscapeTerminal(e)).toBe(false);
+  });
+
+  if (os !== "mac") {
+    test("Ctrl+Shift+/ stays out of command escape", () => {
+      const e = new KeyboardEvent("keydown", { key: "?", code: "Slash", ctrlKey: true, shiftKey: true });
+      expect(shouldEscapeTerminal(e)).toBe(false);
+    });
+
+    // The control: the same key with Alt is the split, which does leave.
+    test("Ctrl+Alt+/ leaves the terminal", () => {
+      const e = new KeyboardEvent("keydown", { key: "/", code: "Slash", ctrlKey: true, altKey: true });
+      expect(shouldEscapeTerminal(e)).toBe(true);
+    });
+  } else {
+    // The control: the same key with Command is the split, which does leave.
+    test("Cmd+/ leaves the terminal", () => {
+      const e = new KeyboardEvent("keydown", { key: "/", code: "Slash", metaKey: true });
+      expect(shouldEscapeTerminal(e)).toBe(true);
+    });
+  }
 });
 
 describe("terminal find's escape flag decides who owns Cmd+F", () => {

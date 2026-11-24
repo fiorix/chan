@@ -755,7 +755,9 @@ describe("TerminalTab and the app around it", () => {
     term.element!.parentElement!.addEventListener("keydown", outer);
     const event = pressInGhostty(term, { key: "k", code: "KeyK", keyCode: 75, ctrlKey: true, altKey: true });
     expect(outer).toHaveBeenCalledTimes(1);
-    expect(event.defaultPrevented).toBe(true);
+    // No app is mounted here to act on the chord, and the terminal cancels
+    // no key it lets out: whoever acts on one cancels it.
+    expect(event.defaultPrevented).toBe(false);
     expect(socket.sent.filter((f) => JSON.parse(f).type === "input")).toEqual([]);
   });
 

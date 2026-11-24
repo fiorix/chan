@@ -49,16 +49,25 @@ function target(): HTMLElement {
 describe("a terminal", () => {
   test("mounts only once the pane that holds it draws its layer", async () => {
     seatTerminals([terminalTab({ id: "term" })]);
+    vi.mocked(document.fonts.load).mockClear();
     mounted.push(mount(Terminals, { target: target() }));
     await tick();
     await tick();
     await new Promise((r) => setTimeout(r, 20));
+    // A renderer and a dial come only once the widget has loaded, so their
+    // absence within this wait depends on how long that load takes. The
+    // terminal's body and the font it asks for first are there within a turn
+    // of a mount, whatever the load.
+    expect(document.querySelector(".terminal-tab"), "no terminal is mounted").toBeNull();
+    expect(document.fonts.load, "none of a terminal's mount-time work has begun").not.toHaveBeenCalled();
     expect({ renderers: ghosttyFixture.terminals.length, dials: TerminalSocket.all.length }).toEqual({
       renderers: 0,
       dials: 0,
     });
 
     mounted.push(mount(Pane, { target: target(), props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode } }));
+    await vi.waitFor(() => expect(document.querySelector(".terminal-tab"), "docked, the terminal mounts").not.toBeNull());
+    expect(document.fonts.load).toHaveBeenCalled();
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
 
     const term = await openedGhostty();

@@ -861,6 +861,72 @@ describe('InputHandler', () => {
     });
   });
 
+  describe('Custom Key Handler', () => {
+    test('a key the handler claims is left to the embedder with its default intact', () => {
+      const claimed = vi.fn(() => true);
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        claimed
+      );
+
+      // An embedder's chord, a key the widget would type and one it would encode.
+      for (const event of [
+        createKeyEvent('KeyK', 'k', { ctrl: true, alt: true }),
+        createKeyEvent('KeyA', 'a'),
+        createKeyEvent('Enter', 'Enter'),
+        createKeyEvent('KeyR', 'R', { ctrl: true, shift: true }),
+      ]) {
+        simulateKey(container, event);
+        expect(claimed).toHaveBeenLastCalledWith(event);
+        expect(event.preventDefault, `${event.code} keeps its default`).not.toHaveBeenCalled();
+        expect(event.stopPropagation, `${event.code} keeps travelling`).not.toHaveBeenCalled();
+      }
+      expect(dataReceived).toEqual([]);
+    });
+
+    test('a key the handler lets through is the widget\'s: sent and its default prevented', () => {
+      const passed = vi.fn(() => false);
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        passed
+      );
+
+      const typed = createKeyEvent('KeyA', 'a');
+      const encoded = createKeyEvent('Enter', 'Enter');
+      simulateKey(container, typed);
+      simulateKey(container, encoded);
+
+      expect(passed).toHaveBeenCalledTimes(2);
+      expect(dataReceived).toEqual(['a', '\r']);
+      expect(typed.preventDefault).toHaveBeenCalled();
+      expect(encoded.preventDefault).toHaveBeenCalled();
+    });
+
+    test('a handler set after construction decides the next key the same way', () => {
+      const handler = new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+      handler.setCustomKeyEventHandler(() => true);
+
+      const event = createKeyEvent('KeyA', 'a');
+      simulateKey(container, event);
+
+      expect(dataReceived).toEqual([]);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Unknown Keys', () => {
     test('ignores unmapped keys', () => {
       new InputHandler(

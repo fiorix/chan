@@ -1,49 +1,19 @@
 /// A theme switch on a live ghostty terminal.
 ///
-/// WHY: ghostty-web takes its colors once, in `open()`: it turns the theme
-/// into the core's config and hands the renderer a copy, and assigning
-/// `options.theme` later only logs that theme changes after open are not
-/// supported. chan's binding can take new colors in the live core
-/// (`VtTerminal.setColors`), and the renderer's `setTheme` swaps the
-/// colors it fills rows, the cursor and the selection with. Together they
-/// repaint the terminal on its next frame without rebuilding it, so the
-/// session, the screen and scrollback, the selection, the scroll position
-/// and focus stay as they were.
+/// WHY: the widget's `setTheme` holds a copy of the theme, gives the live
+/// core its new default colors and palette, swaps the colors the renderer
+/// fills rows, the cursor and the selection with, and repaints, all without
+/// rebuilding the terminal. The session, the screen and scrollback, the
+/// selection, the scroll position and focus stay as they were, and colors
+/// the program set itself stay over the new defaults. This module is the one
+/// place the app switches a ghostty terminal's theme, so the tab has one call
+/// for it and its tests one seam to read the theme a switch carried.
 
 import type { ITheme, Terminal } from "@chan/ghostty-web-ng";
-import { VtTerminal, type VtTerminalConfig } from "@chan/ghostty-web-ng/vt";
 
-/// The widget's private builder of the core's config from
-/// `options.theme`, the one `open()` calls, so a switch
-/// converts each color exactly as a newly opened terminal would.
-type ConfigBuilder = { buildWasmConfig?: () => VtTerminalConfig | undefined };
-
-/// Switches `term` to `theme`. False when the terminal is not open or the
-/// pinned widget lacks a hook the switch needs; the theme is then still
-/// what `open()` and `reset()` will use.
+/// Switches `term` to `theme`. False when the terminal is not open: the
+/// widget then only holds the theme, for `open()` to use.
 export function applyGhosttyTheme(term: Terminal, theme: ITheme): boolean {
-  holdTheme(term.options, theme);
-  const core = term.wasmTerm;
-  const renderer = term.renderer;
-  const build = (term as unknown as ConfigBuilder).buildWasmConfig;
-  if (!(core instanceof VtTerminal) || !renderer || typeof build !== "function") return false;
-  core.setColors(build.call(term));
-  renderer.setTheme(theme);
-  return true;
-}
-
-/// Makes the theme object the widget holds equal to `theme`. Assigning
-/// `options.theme` goes through the widget's option proxy, which only
-/// warns once the terminal is open; rewriting the object it holds keeps
-/// the theme the widget reports current without that warning.
-function holdTheme(options: { theme: ITheme }, theme: ITheme): void {
-  const held = options.theme as Record<string, unknown> | undefined;
-  if (!held) {
-    options.theme = { ...theme };
-    return;
-  }
-  for (const key of Object.keys(held)) {
-    if (!(key in theme)) delete held[key];
-  }
-  Object.assign(held, theme);
+  term.setTheme(theme);
+  return term.core !== undefined;
 }

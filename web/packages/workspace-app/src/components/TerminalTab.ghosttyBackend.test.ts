@@ -52,6 +52,7 @@ import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { commandById } from "../state/commands";
+import { shouldEscapeTerminal } from "../state/shortcuts";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
@@ -336,6 +337,31 @@ describe("keys", () => {
     expect(clipboard.writeText).toHaveBeenCalledWith("chosen");
     expect(paste.defaultPrevented).toBe(false);
     expect(inputs(socket)).toEqual([]);
+  });
+
+  test("a chord chan lets out of the terminal leaves with its default, and the tab cancels the one it acts on", async () => {
+    const { term, socket } = await mountGhostty();
+    const reached: Event[] = [];
+    const record = (event: Event) => reached.push(event);
+    document.addEventListener("keydown", record);
+    try {
+      // The launcher's chord: this tab acts on no part of it, and no app is
+      // mounted here to take it.
+      const launcher = pressInGhostty(term, { key: "k", code: "KeyK", ctrlKey: true, altKey: true });
+      expect(shouldEscapeTerminal(launcher), "the launcher's chord").toBe(true);
+      expect(reached.includes(launcher), "it reaches the page").toBe(true);
+      expect(launcher.defaultPrevented, "nothing took the key, so the browser still may").toBe(false);
+
+      // Find: the tab's own root opens its bar and cancels the key.
+      const find = pressInGhostty(term, { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true });
+      expect(shouldEscapeTerminal(find), "the find chord").toBe(true);
+      await tick();
+      expect(document.querySelector(".terminal-find input.find"), "the find bar").not.toBeNull();
+      expect(find.defaultPrevented, "the tab took the key").toBe(true);
+      expect(inputs(socket)).toEqual([]);
+    } finally {
+      document.removeEventListener("keydown", record);
+    }
   });
 
   test("a bare Ctrl+V sends the control byte, before ghostty would drop it with its paste chords", async () => {
@@ -765,6 +791,40 @@ describe("focus reports", () => {
     ]);
   });
 
+  test("a change made while the mode was off does not swallow the next report", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    await output(socket, "\x1b[?1004h");
+    move(host, "focusin");
+    expect(reports(socket), "focus-in, reported").toEqual(["\x1b[I"]);
+
+    // The program stops listening, the terminal loses the keyboard unheard,
+    // and a program listens again: the next focus-in is news to it.
+    await output(socket, "\x1b[?1004l");
+    move(host, "focusout");
+    await output(socket, "\x1b[?1004h");
+    socket.sent.splice(0);
+    move(host, "focusin");
+    expect(reports(socket), "focus-in after the mode went off and on unfocused").toEqual(["\x1b[I"]);
+
+    // The same the other way round: the last report was a focus-out, the
+    // keyboard came back unheard, and the next focus-out is news.
+    move(host, "focusout");
+    expect(reports(socket)).toEqual(["\x1b[I", "\x1b[O"]);
+    await output(socket, "\x1b[?1004l");
+    move(host, "focusin");
+    await output(socket, "\x1b[?1004h");
+    socket.sent.splice(0);
+    move(host, "focusout");
+    expect(reports(socket), "focus-out after the mode went off and on focused").toEqual(["\x1b[O"]);
+
+    // With the mode on throughout, a repeated event is still one report.
+    move(host, "focusout");
+    move(host, "focusin");
+    move(host, "focusin");
+    expect(reports(socket)).toEqual(["\x1b[O", "\x1b[I"]);
+  });
+
   test("a resume reports each focus transition once despite retained browser events", async () => {
     const { target, socket } = await mountGhostty();
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
@@ -938,7 +998,7 @@ describe("a theme switch", () => {
     delete hybridSurfaceThemes.terminal;
   });
 
-  test("reaches the live terminal through the binding, not through the option ghostty-web ignores after open", async () => {
+  test("reaches the live terminal through the widget's theme update, which replaces the theme it held", async () => {
     ui.theme = "dark";
     const { term } = await mountGhostty();
     const openedWith = term.options.theme;
@@ -951,7 +1011,8 @@ describe("a theme switch", () => {
     expect(switched?.[0]).toBe(term);
     expect(switched?.[1].red, "the light palette").toBe("#cf222e");
     expect(term.options.theme.red).toBe("#cf222e");
-    expect(term.options.theme, "the option is not reassigned").toBe(openedWith);
+    expect(term.options.theme, "the widget holds a new theme object").not.toBe(openedWith);
+    expect(openedWith.red, "the theme held at open is not rewritten in place").toBe("#ff6b6b");
 
     delete hybridSurfaceThemes.terminal;
     flushSync();

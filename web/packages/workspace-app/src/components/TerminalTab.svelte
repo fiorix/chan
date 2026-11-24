@@ -1034,10 +1034,14 @@
   // Agents print truecolor secondary text tuned for dark backgrounds
   // (#999999 hints and summaries, #b1b9f9 selections, #ffc107 warnings);
   // on the light theme those land below 3:1 against the white background
-  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has xterm
-  // darken only under-contrast foregrounds; 1 is the identity, keeping
-  // dark rendering untouched. xterm-only: ghostty-web has no equivalent
-  // option.
+  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has either
+  // renderer darken only under-contrast foregrounds; 1 is the identity,
+  // keeping dark rendering untouched. xterm.js takes the floor as an option
+  // of its own, the widget as a field of its theme. The widget measures a
+  // cell on the default background against the background it paints, so in
+  // a window built transparent, where that background is clear and the tint
+  // is the page's, its floor reaches only cells with a background of their
+  // own.
   function terminalMinimumContrastRatio(): number {
     // While the desktop shows through, the backdrop is whatever sits behind
     // the window, so a ratio measured against the theme background would be
@@ -1046,12 +1050,21 @@
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
+  /// The widget's theme: the colours plus the contrast floor, which it
+  /// takes only there.
+  function ghosttyTerminalTheme() {
+    return {
+      ...terminalTheme(),
+      minimumContrastRatio: terminalMinimumContrastRatio(),
+    };
+  }
+
   function applyTerminalTheme(): void {
     if (!term) return;
-    const theme = terminalTheme();
     if (backend === "ghostty") {
-      applyGhosttyTheme(term as GhosttyTerminal, theme);
+      applyGhosttyTheme(term as GhosttyTerminal, ghosttyTerminalTheme());
     } else {
+      const theme = terminalTheme();
       term.options.theme = theme;
       (term as Terminal).options.minimumContrastRatio =
         terminalMinimumContrastRatio();
@@ -1405,7 +1418,7 @@
         // Synchronous scrolling matches xterm.js and lets calibrated pixel
         // gestures accumulate directly in the widget's fractional viewport.
         smoothScrollDuration: 0,
-        theme: terminalTheme(),
+        theme: ghosttyTerminalTheme(),
       });
       term = ghosttyTerm;
       ghosttyTerm.onLinkActivate(onGhosttyLink);
@@ -1583,7 +1596,7 @@
       // DOM renderer. See the helper for the WKWebView rationale.
       enableWebglRenderer();
     } else {
-      // After open(): the renderer the painter hooks exists from there.
+      // After open(): the widget retains a paint layer only once it is open.
       secretMasker = new GhosttySecretMasker(
         term as GhosttyTerminal,
         secretMaskSuffixes,
@@ -1600,7 +1613,9 @@
     // handleTerminalKeyEvent uses xterm's semantics except for the native
     // paste result prepared for this inversion; wrap it for ghostty so "chan
     // consumed this chord" maps to ghostty's "handled" on both backends while
-    // paste still reaches ghostty-web's native-paste early-return.
+    // paste still reaches ghostty-web's native-paste early-return. Neither
+    // renderer cancels a key the handler takes from it, so every path in
+    // handleTerminalKeyEvent that acts on a key cancels it itself.
     if (backend === "ghostty") {
       term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     } else {
@@ -2637,7 +2652,13 @@
       return;
     }
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
-    if (!t?.hasFocusEvents()) return;
+    if (!t?.hasFocusEvents()) {
+      // The program did not hear of this change, so its last report no
+      // longer says where the keyboard is: the next change it does hear of
+      // is reported whichever way it goes.
+      ghosttyReportedFocus = null;
+      return;
+    }
     const hasFocus = e.type === "focusin";
     // A resume's blur/refocus and the browser's retained focus events can
     // report the same transition twice.
@@ -3341,10 +3362,10 @@
     if (!isCloseExitedTabKey(e)) return false;
     e.preventDefault();
     // Both renderers call their custom key handler and then let the event
-    // keep going: xterm.js returns out of its keydown without touching it,
-    // ghostty-web calls preventDefault and returns. Neither stops
-    // propagation, so without this the key this close took would go on to
-    // the terminal root's onkeydown and every handler above it.
+    // keep going: each returns out of its keydown without touching it.
+    // Neither stops propagation, so without this the key this close took
+    // would go on to the terminal root's onkeydown and every handler above
+    // it.
     e.stopPropagation();
     void closeTab(paneId, tab.id, { force: true });
     return true;
@@ -3377,7 +3398,10 @@
     }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
-    // does not consume the keystroke.
+    // does not consume the keystroke. It leaves either renderer with its
+    // default intact: the handler that acts on it (this tab's root for find,
+    // the app's window keymap for the rest) cancels it there, and a chord
+    // the app declines is still the browser's.
     if (shouldEscapeTerminal(e)) return false;
     // On ghostty every other key was decided before ghostty-web saw it
     // (ghosttyKeys.ts); what reaches here is plain typing, which ghostty-web

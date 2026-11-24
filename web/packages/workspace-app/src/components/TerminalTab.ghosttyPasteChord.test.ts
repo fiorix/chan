@@ -28,11 +28,10 @@ function dispatchGhosttyClipboardChord(
       os,
       "ghostty",
     );
-    // This is ghostty-web's custom-key-handler contract: true claims the
-    // key and calls preventDefault before returning. TerminalTab passes the
-    // inverse of chanResult to that handler.
+    // This is the widget's custom-key-handler contract: true claims the
+    // key, which the widget then neither sends nor default-prevents.
+    // TerminalTab passes the inverse of chanResult to that handler.
     ghosttyClaimed = !chanResult;
-    if (ghosttyClaimed) event.preventDefault();
   });
 
   const event = new KeyboardEvent("keydown", {
@@ -61,7 +60,7 @@ describe("Ghostty terminal paste chord", () => {
     expect(copySelection).not.toHaveBeenCalled();
   });
 
-  test("copy keeps Ghostty's existing claimed-key routing", () => {
+  test("copy is claimed from Ghostty, and chan cancels the key itself", () => {
     const { event, ghosttyClaimed, copySelection } =
       dispatchGhosttyClipboardChord(
         { key: "c", code: "KeyC", ctrlKey: true, shiftKey: true },

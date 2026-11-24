@@ -80,8 +80,7 @@ describe.each([
   }
 
   /// Whether a keydown typed into the widget bubbled to the document, where
-  /// the app's chord listener reads it. The widget prevents the default of
-  /// a key the app takes from it, so its default says nothing here.
+  /// the app's chord listener reads it.
   function reachesDocument(term: Terminal, init: KeyboardEventInit): { event: KeyboardEvent; reached: boolean } {
     let reached = false;
     const record = () => { reached = true; };
@@ -128,12 +127,6 @@ describe.each([
         expect(inputs(socket)).toEqual([]);
         expect(shouldEscapeTerminal(event)).toBe(true);
       });
-
-      test("native Ctrl+Shift+/ stays out of command escape", async () => {
-        const { term } = await focusedTerminal(true);
-        const event = press(term, { key: "?", code, ctrlKey: true, shiftKey: true });
-        expect(shouldEscapeTerminal(event)).toBe(false);
-      });
     }
 
     if (os !== "mac" && key !== "/") {
@@ -171,12 +164,6 @@ describe.each([
       expect(shouldEscapeTerminal(event)).toBe(true);
       expect(reached, "the app's chord listener gets the key").toBe(true);
     });
-  });
-
-  test("native Ctrl slash stays out of command escape", async () => {
-    const { term } = await focusedTerminal(true);
-    const event = press(term, { key: "/", code: "Slash", ctrlKey: true });
-    expect(shouldEscapeTerminal(event)).toBe(false);
   });
 
   test.each([true, false])("Ctrl slash sends one byte and suppresses the widget's own encoding (native=%s)", async (native) => {
