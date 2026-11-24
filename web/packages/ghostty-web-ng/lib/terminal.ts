@@ -631,6 +631,7 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
+        this.#searchOwner?.runDue();
         this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
       }
     }
@@ -1185,6 +1186,9 @@ export class Terminal {
    */
   private startRenderLoop(): void {
     if (this.animationFrameId) return; // already running
+    // Search work belongs to animation frames, not to the open or resize
+    // call that starts the loop with a paint of its own.
+    let inFrame = false;
     const loop = () => {
       if (!this.isDisposed && this.isOpen) {
         // Render using the core's own dirty tracking
@@ -1194,6 +1198,9 @@ export class Terminal {
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
         try {
+          // Search runs first, so this paint shows its results.
+          if (inFrame) this.#searchOwner?.runDue();
+          inFrame = true;
           this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
         } finally {
           if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);

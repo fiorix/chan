@@ -232,6 +232,64 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(1, 0)]);
   });
 
+  test('each paint after a write shows the refreshed all-match layer, also under steady output', async () => {
+    const { term } = await create('needle a\r\nplain\r\nneedle b\r\nneedle c');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    expect(all(term)).toHaveLength(3);
+    const painted: (number | undefined)[] = [];
+    term.addPaintLayer({ order: 0, paint: () => painted.push(all(term)?.length) });
+    frame();
+    painted.length = 0;
+    const feed = vi.spyOn(VtSearch.prototype, 'feed');
+    for (let i = 0; i < 5; i++) {
+      term.write(`\r\nline ${i}`);
+      frame();
+    }
+    expect(painted.length).toBeGreaterThanOrEqual(5);
+    expect(painted.every(count => count === 3), `painted with ${painted} matches`).toBe(true);
+    expect(feed, 'one feed a frame').toHaveBeenCalledTimes(5);
+    expect(search.state).toEqual({ index: 1, total: 3, partial: false });
+  });
+
+  test('the echo paint inside a write shows the refreshed all-match layer', async () => {
+    const { term } = await create('needle a\r\nneedle b');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    const painted: (number | undefined)[] = [];
+    term.addPaintLayer({ order: 0, paint: () => painted.push(all(term)?.length) });
+    frame();
+    painted.length = 0;
+    term.input('x', true);
+    term.write('x');
+    expect(painted, 'the write painted its echo').toEqual([2]);
+  });
+
+  test('a write keeps the last total as a partial count until the refreshed results replace it', async () => {
+    const { term } = await create('needle a\r\nplain\r\nneedle b\r\nneedle c');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    const counts: Count[] = [];
+    search.onChange(count => counts.push(count));
+    term.write('\r\nmore');
+    expect(search.state).toEqual({ index: null, total: 3, partial: true });
+    term.write('\r\nneedle d');
+    expect(search.state).toEqual({ index: null, total: 3, partial: true });
+    frame();
+    expect(search.state).toEqual({ index: 2, total: 4, partial: false });
+    // Output that erases matches: the kept total is a claim only until the
+    // rescan ends.
+    term.write('\x1b[3J\x1b[2J\x1b[H');
+    expect(search.state).toEqual({ index: null, total: 4, partial: true });
+    settle(search);
+    expect(search.state).toEqual({ index: 0, total: 0, partial: false });
+    expect(counts.filter(count => count.partial).map(count => count.total), 'no zero between a write and its frame').toEqual([3, 4]);
+    expect(all(term) ?? []).toEqual([]);
+  });
+
   test('a queued step waits for placement of its active index but still honors its deadline', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);

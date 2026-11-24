@@ -24,6 +24,9 @@ export class SearchOwner {
   private needle = '';
   private matches: HighlightRange[][] = [];
   private total = 0;
+  // The total before a change emptied the list. The count keeps it, as a
+  // partial one, until the rebuilt list passes it or completes.
+  private lastTotal = 0;
   // Shard the index and chunk the list so growth never rehashes or copies
   // every known match in one animation frame.
   private indices: MatchIndex[] = Array.from({ length: 256 }, () => new Map());
@@ -40,7 +43,8 @@ export class SearchOwner {
   private keptOnScreen = false;
   private dirty = false;
   private resized = false;
-  private frame: number | undefined;
+  // Search work is waiting for the widget's next frame.
+  private due = false;
   private readMs: number = COST_PRIORS.read;
   private checkMs: number = COST_PRIORS.check;
   private completeMs: number = COST_PRIORS.complete;
@@ -106,6 +110,18 @@ export class SearchOwner {
     this.stopResizing();
   }
 
+  /**
+   * Run the search work that is due. The widget calls this once in each
+   * animation frame, ahead of its paint, and ahead of the echo paint inside
+   * a write, so a paint that follows a change shows the refreshed matches
+   * rather than the emptied layer.
+   */
+  runDue(): void {
+    if (!this.due) return;
+    this.due = false;
+    this.pump();
+  }
+
   /** Called after the core and viewport change, before a synchronous repaint. */
   changed(kind: TerminalChange['kind'], alternate: boolean): void {
     const switched = alternate !== this.alternateScreen;
@@ -113,6 +129,8 @@ export class SearchOwner {
     if (!this.search) return;
     this.dirty = true;
     this.resized ||= kind === 'resize';
+    // The other screen's total says nothing about this one.
+    this.lastTotal = switched ? 0 : Math.max(this.lastTotal, this.total);
     this.matches = [];
     this.total = 0;
     this.indices = Array.from({ length: 256 }, () => new Map());
@@ -147,8 +165,7 @@ export class SearchOwner {
   }
 
   private release(): void {
-    if (this.frame !== undefined) cancelAnimationFrame(this.frame);
-    this.frame = undefined;
+    this.due = false;
     this.search?.free();
     this.search = null;
     this.forget();
@@ -158,6 +175,7 @@ export class SearchOwner {
     this.needle = '';
     this.matches = [];
     this.total = 0;
+    this.lastTotal = 0;
     this.indices = Array.from({ length: 256 }, () => new Map());
     this.readCursor = 0;
     this.waiting = [];
@@ -216,11 +234,7 @@ export class SearchOwner {
   }
 
   private schedule(): void {
-    if (this.frame !== undefined || !this.search) return;
-    this.frame = requestAnimationFrame(() => {
-      this.frame = undefined;
-      this.pump();
-    });
+    if (this.search) this.due = true;
   }
 
   private pump(): void {
@@ -281,6 +295,7 @@ export class SearchOwner {
       if (performance.now() >= deadline) break;
     }
     this.complete = state.complete && this.readCursor >= state.total;
+    if (this.complete) this.lastTotal = 0;
     const range = this.keptRange();
     const index = range ? this.indexOf(range) : undefined;
     this.index = index ?? null;
@@ -384,7 +399,7 @@ export class SearchOwner {
   }
 
   private publish(): void {
-    const total = this.total;
+    const total = this.complete ? this.total : Math.max(this.total, this.lastTotal);
     const next: TerminalSearchState = Object.freeze({
       index: total === 0 ? 0 : this.index === null ? null : this.index + 1,
       total,
