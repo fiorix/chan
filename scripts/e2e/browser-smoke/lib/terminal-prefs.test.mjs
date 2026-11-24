@@ -88,7 +88,9 @@ function patchFixture(t, terminal) {
   let requestListener, acceptResponse, finishRefresh, patchBody;
   const page = {
     on: (_event, listener) => { requestListener = listener; }, off: () => {},
-    evaluate: (fn, arg) => fn(arg),
+    // The browser receives an argument as JSON, so a key whose value is
+    // undefined never reaches the page.
+    evaluate: (fn, arg) => fn(arg === undefined ? arg : JSON.parse(JSON.stringify(arg))),
     waitForResponse: (predicate) => {
       acceptResponse = predicate;
       return new Promise((resolve) => { finishRefresh = resolve; });
@@ -97,7 +99,10 @@ function patchFixture(t, terminal) {
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     if (options.method === "PATCH") {
       patchBody = JSON.parse(options.body);
-      terminal = patchBody.preferences.terminal;
+      // The server stores the object it is sent, and answers without an
+      // unset choice, an empty profile list or an unset default.
+      terminal = Object.fromEntries(Object.entries(patchBody.preferences.terminal)
+        .filter(([, value]) => value !== null && !(Array.isArray(value) && value.length === 0)));
       const patch = { url: () => "http://test.invalid/api/config", method: () => "PATCH" };
       const refresh = { url: () => "http://test.invalid/api/workspace", method: () => "GET" };
       requestListener(patch);
@@ -128,9 +133,50 @@ test("restoring preferences strips an inherited retired key without losing origi
   await restoreTerminalPrefs(ctx, f.page, "", original);
   assert.deepEqual(f.body(), {
     expected_revision: 7,
-    preferences: { terminal: { mouse_capture: false, secret_masking: true, program_status: false } },
+    preferences: { terminal: { mouse_capture: false, secret_masking: true, program_status: false, profiles: [], default_profile: null } },
   });
   assert.deepEqual(original, { ghostty: false, mouse_capture: false, secret_masking: true, program_status: false });
+});
+
+const RECORDER = { id: "recorder", name: "Recorder", program: "/bin/sh", args: ["/gone/shell.sh"], kind: "posix", hidden: false };
+
+test("restoring preferences removes a profile and a default the original read did not have", async (t) => {
+  const original = { mouse_capture: true, program_status: true };
+  const f = patchFixture(t, { ...original, profiles: [RECORDER], default_profile: RECORDER.id });
+  const ctx = prefsFixture(t, "[terminal]\nmouse_capture = true\n");
+  await restoreTerminalPrefs(ctx, f.page, "", original);
+  assert.deepEqual(f.body().preferences.terminal,
+    { mouse_capture: true, program_status: true, secret_masking: null, profiles: [], default_profile: null });
+});
+
+test("restoring preferences keeps the profiles and the default the original read had", async (t) => {
+  const kept = { id: "fish", program: "/usr/bin/fish", hidden: false };
+  const original = { mouse_capture: true, profiles: [kept], default_profile: kept.id };
+  const f = patchFixture(t, { mouse_capture: true, profiles: [kept, RECORDER], default_profile: RECORDER.id });
+  const ctx = prefsFixture(t, '[terminal]\nmouse_capture = true\ndefault_profile = "fish"\n[[terminal.profiles]]\nid = "fish"\nprogram = "/usr/bin/fish"\nhidden = false\n');
+  await restoreTerminalPrefs(ctx, f.page, "", original);
+  assert.deepEqual(f.body().preferences.terminal,
+    { mouse_capture: true, profiles: [kept], default_profile: kept.id, secret_masking: null });
+});
+
+test("a restore is refused while the stored file still names a default the original read did not have", async (t) => {
+  const original = { mouse_capture: true };
+  const f = patchFixture(t, { ...original, profiles: [RECORDER], default_profile: RECORDER.id });
+  const ctx = prefsFixture(t, '[terminal]\nmouse_capture = true\ndefault_profile = "recorder"\n');
+  await assert.rejects(restoreTerminalPrefs(ctx, f.page, "", original), /did not persist/);
+});
+
+test("a write refuses an undefined value before any read, since it would send nothing", () => {
+  const page = { on: () => assert.fail("no listeners or reads before refusal") };
+  assert.throws(() => writeTerminalPrefs(page, "", { mouse_capture: true, default_profile: undefined }),
+    /default_profile is undefined/);
+});
+
+test("an expected empty list is met by an absent key and by no stored entry", async (t) => {
+  await assertTerminalPrefs(prefsFixture(t, "[terminal]\nmouse_capture = true\n"), { profiles: [] });
+  const stored = prefsFixture(t, '[terminal]\n[[terminal.profiles]]\nid = "recorder"\n');
+  await assert.rejects(assertTerminalPrefs(stored, { profiles: [] }), /did not persist/);
+  await assert.rejects(assertTerminalPrefs(stored, { profiles: null }), /did not persist/);
 });
 
 function prefsFixture(t, source) {

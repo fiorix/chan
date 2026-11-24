@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { selectLauncherCommand } from "../lib/pane-strip.mjs";
 import { drainPointerInput, pointerInputSince } from "../lib/terminal-pointer.mjs";
-import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import {
   assertKeyboard, clearFocus, clickTerminal, enableFocusReports,
   readFocus, runFocusCheck, settleFocus, waitFocus,
@@ -21,7 +21,7 @@ const INPUT = ` ${SEED}\x01`;
 export default {
   name: "seeded-prompt-focus",
   run(ctx) {
-    return runFocusCheck(ctx, 345, async ({ page, windowId, shell, cs, open, create, attach, leg, restore }) => {
+    return runFocusCheck(ctx, 345, async ({ page, details, windowId, shell, cs, open, create, attach, leg, restore }) => {
       const panes = async () => JSON.parse((await shell(["pane", "list", "--json"])).stdout);
       const initial = await panes();
       assert.equal(initial.panes.length, 1, "the check starts with one pane");
@@ -46,14 +46,23 @@ export default {
       writeFileSync(join(directory, SEED), "# Focus seed\n");
       const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
       const original = await readTerminalPrefs(page, token);
-      restore("restore terminal profile", () => writeTerminalPrefs(page, token, {
-        // Empty profiles serialize away; undefined also removes the temporary
-        // fields from the replacement terminal config sent by the helper.
-        profiles: original.profiles, default_profile: original.default_profile,
-      }));
+      // The default profile is the server's, not this window's: left in
+      // place it would start every later terminal on a script that is gone.
+      // The three readings are kept so the saved details show the round trip.
+      const profileOf = (terminal) => ({
+        default_profile: terminal.default_profile ?? null, profiles: (terminal.profiles ?? []).map((entry) => entry.id),
+      });
+      details.terminalProfile = { before: profileOf(original) };
+      restore("restore terminal profile", async () => {
+        await restoreTerminalPrefs(ctx, page, token, original);
+        details.terminalProfile.after = profileOf(await readTerminalPrefs(page, token));
+        assert.deepEqual(details.terminalProfile.after, details.terminalProfile.before,
+          "the server's terminal profiles and default are the ones the check found");
+      });
       const profile = { id: "focus-345", name: "Focus recorder", program: "/bin/sh", args: [script], kind: "posix", hidden: false };
       assert.ok(!(original.profiles ?? []).some((entry) => entry.id === profile.id), "the temporary profile id is unused");
       await writeTerminalPrefs(page, token, { profiles: [...(original.profiles ?? []), profile], default_profile: profile.id });
+      details.terminalProfile.during = profileOf(await readTerminalPrefs(page, token));
       const known = new Set(Object.values(JSON.parse((await cs(["list", "--json"])).stdout).groups ?? {}).flat().map((row) => row.session_id));
       const relative = `${directory.slice(ctx.workspaceDir.length + 1)}/${SEED}`;
       await shell(["open", relative, "--pane", right.id]);

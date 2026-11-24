@@ -4,9 +4,12 @@ import { join } from "node:path";
 import { openAttachedTerminal } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The server answers without an unset choice, an empty profile list or an
+// unset default, so null and an empty list are both met by an absent key.
+const unset = (value) => value == null || (Array.isArray(value) && value.length === 0);
 const matchesChanges = (terminal, changes) => Object.entries(changes).every(
   ([key, value]) => {
-    if (value == null) return terminal[key] == null;
+    if (unset(value)) return unset(terminal[key]);
     if (typeof value === "object") return JSON.stringify(terminal[key]) === JSON.stringify(value);
     return terminal[key] === value;
   },
@@ -24,6 +27,13 @@ export async function readTerminalPrefs(page, token) {
 export function writeTerminalPrefs(page, token, changes) {
   if (Object.hasOwn(changes, "ghostty")) {
     throw new Error("retired terminal preference ghostty; use openLegacyConfiguredTerminal for compatibility checks");
+  }
+  // The page receives the changes as JSON. An undefined value would be left
+  // out there, the stored value written back, and the wait for its removal
+  // would only time out.
+  const missing = Object.keys(changes).find((key) => changes[key] === undefined);
+  if (missing) {
+    throw new Error(`terminal preference ${missing} is undefined and would not be sent; name the value that clears it`);
   }
   return writeCurrentTerminalPrefs(page, token, changes);
 }
@@ -129,14 +139,16 @@ export async function assertTerminalPrefs(ctx, expected, { expectMissingFile = f
 
 export async function restoreTerminalPrefs(ctx, page, token, original) {
   const { ghostty: _legacy, ...current } = original;
-  await writeTerminalPrefs(page, token, {
-    ...current,
+  // A read leaves these three out while they are unset, and a write is laid
+  // over the stored object, so each is named with the value that clears it:
+  // otherwise a profile or a default set since the read would be written back.
+  const optional = {
     secret_masking: original.secret_masking ?? null,
-  });
-  await assertTerminalPrefs(ctx, {
-    mouse_capture: original.mouse_capture,
-    secret_masking: original.secret_masking,
-  });
+    profiles: original.profiles ?? [],
+    default_profile: original.default_profile ?? null,
+  };
+  await writeTerminalPrefs(page, token, { ...current, ...optional });
+  await assertTerminalPrefs(ctx, { mouse_capture: original.mouse_capture, ...optional });
 }
 
 // Undefined sends no legacy key; booleans deliberately carry it. Prove the

@@ -253,7 +253,7 @@ test("runPointerCheck saves successful legs and restores its instruments and pre
   assert.deepEqual(f.saved(), details);
   assert.equal(f.fixture.closed, true);
   assert.equal(window.__pointerSmoke, undefined);
-  assert.deepEqual(f.requests.at(-1), { mouse_capture: false, secret_masking: false });
+  assert.deepEqual(f.requests.at(-1), { mouse_capture: false, secret_masking: false, profiles: [], default_profile: null });
   assert.ok(f.commands.some((args) => args[0] === "close"));
 });
 
