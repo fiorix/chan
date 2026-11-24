@@ -317,6 +317,15 @@ describe("a seeded prompt, sent on the shell's first output", () => {
     expect(takes(), "the terminal took the keyboard").toBe(0);
     expect(document.activeElement, "the field keeps the keyboard").toBe(field);
   });
+
+  // With the keyboard at large nothing but the pane's focus decides: the
+  // seed of a terminal in another pane lands while the focused pane's
+  // surface holds no DOM focus.
+  test("in a pane without focus takes no keyboard left at large", async () => {
+    const { takes } = await seeded({ active: true, focused: false }, false);
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(document.activeElement, "the keyboard stays at large").toBe(document.body);
+  });
 });
 
 describe("a menu copy or paste that waits for the clipboard", () => {
@@ -368,6 +377,18 @@ describe("a menu copy or paste that waits for the clipboard", () => {
     await settle();
     expect(takes(), "the terminal took the keyboard").toBe(0);
     expect(document.activeElement, "the other pane keeps the keyboard").toBe(field);
+  });
+
+  test("a copy that lands after the pane lost focus takes no keyboard left at large", async () => {
+    const { props, takes } = await fromMenu("terminal.copy");
+    expect(clipboard.written, "the copy writes the clipboard").not.toBeNull();
+    props.focused = false;
+    await settle();
+    expect(document.activeElement, "the keyboard is at large as the clipboard answers").toBe(document.body);
+    clipboard.written!();
+    await settle();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(document.activeElement, "the keyboard stays at large").toBe(document.body);
   });
 });
 
