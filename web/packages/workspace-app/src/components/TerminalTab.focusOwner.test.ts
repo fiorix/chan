@@ -227,6 +227,63 @@ describe("once the font and the core have loaded", () => {
     expect(takes(), "the terminal took the keyboard as its load ended").toBe(0);
     expect(document.activeElement, "the other pane keeps the keyboard").toBe(field);
   });
+
+  test("a field that takes the keyboard while the terminal loads keeps it", async () => {
+    const release = holdFont();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target, host } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    // The pane and the tab stay in front: only the keyboard moved, as into
+    // the tab menu's Name field or a sidebar field.
+    const field = fieldOutside();
+    const takes = countTakes(host);
+
+    release();
+    await openedGhostty(target);
+    await settle();
+
+    expect(takes(), "the terminal took the keyboard as its load ended").toBe(0);
+    expect(document.activeElement, "the field keeps the keyboard").toBe(field);
+  });
+
+  test("what held the keyboard when the pane asked for its loading terminal loses it", async () => {
+    const release = holdFont();
+    // The surface the user came from keeps the keyboard until something
+    // takes it. A field stands in for it: one that held the keyboard before
+    // the ask is not one the user moved to during the load.
+    const field = fieldOutside();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    expect(document.activeElement, "nothing took the keyboard during the load").toBe(field);
+
+    release();
+    const term = await openedGhostty(target);
+    await settle();
+
+    expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
+
+  test("a surface handed the keyboard back while the terminal loads loses it", async () => {
+    const release = holdFont();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    // The launcher's Split right opens a terminal in a new pane and, closing
+    // while it loads, returns the keyboard to the terminal it opened from in
+    // the pane just left. No field: the pane's focus still names the new one.
+    const opener = document.createElement("div");
+    opener.tabIndex = 0;
+    document.body.append(opener);
+    opener.focus();
+    expect(document.activeElement, "the opener has the keyboard back").toBe(opener);
+
+    release();
+    const term = await openedGhostty(target);
+    await settle();
+
+    expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
 });
 
 describe("a seeded prompt, sent on the shell's first output", () => {

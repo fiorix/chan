@@ -288,6 +288,11 @@
     );
   }
 
+  // What held the keyboard when the pane's focus last asked for this
+  // terminal and found it still loading; undefined when no such ask waits
+  // for start().
+  let keyboardHolderAtLoadingAsk: Element | null | undefined;
+
   // The focused pane's active terminal takes the keyboard as the pane gains
   // focus and again once start() has wired it, since the focus effect found
   // no terminal while the core and font loaded. Both run later than the
@@ -298,6 +303,29 @@
   function focusActiveTerminal(): void {
     if (!active || !focused) return;
     if (isRichPromptVisible(tab.id)) return;
+    if (!term) {
+      keyboardHolderAtLoadingAsk = document.activeElement;
+      return;
+    }
+    focusTerminal();
+  }
+
+  // start() answers the pane's ask unless the user moved to a field while
+  // the terminal loaded: a form field that did not hold the keyboard at the
+  // ask (the tab menu's Name field, a sidebar field) keeps it, where taking
+  // it would cut a word short and send the rest to the shell. Anything else
+  // loses it, as the pane's focus says: the surface of the tab the user came
+  // from, which under WebKit keeps DOM focus while hidden, and a surface
+  // handed the keyboard back during the load, as the launcher hands it to
+  // the terminal it opened from while the terminal its Split right opened
+  // still loads.
+  function focusLoadedTerminal(): void {
+    const holderAtAsk = keyboardHolderAtLoadingAsk;
+    keyboardHolderAtLoadingAsk = undefined;
+    if (!active || !focused) return;
+    if (isRichPromptVisible(tab.id)) return;
+    const holder = document.activeElement;
+    if (holder !== holderAtAsk && holder?.matches("input, textarea, select")) return;
     focusTerminal();
   }
 
@@ -1595,7 +1623,7 @@
     // carried-over cursor would make the server skip everything the
     // PREVIOUS xterm had seen, and that buffer died with term.dispose().
     void connect();
-    queueMicrotask(focusActiveTerminal);
+    queueMicrotask(focusLoadedTerminal);
   }
 
   function clearLiveness(): void {
