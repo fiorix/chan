@@ -481,6 +481,38 @@ describe('widget grid options', () => {
     expect(seen, 'the backing store settled').toEqual([]);
   });
 
+  test.each([0, NaN, -1, Infinity])('a device pixel ratio of %s at open measures the natural cell', async ratio => {
+    vi.stubGlobal('devicePixelRatio', ratio);
+    const { term, canvas } = await open({ lineHeight: 1.2 });
+    expect(term.getMetrics()).toEqual({ width: 9, height: 22.8, baseline: 15.9 });
+    expect(Number.parseFloat(canvas.style.width)).toBe(90);
+    expect(Number.parseFloat(canvas.style.height)).toBe(4 * 22.8);
+    expect(term.cellAt(9.5, 23)).toMatchObject({ col: 1, row: 1 });
+  });
+
+  test.each([0, NaN, -1, Infinity])('a change to a device pixel ratio of %s keeps the last valid grid', async ratio => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    measured = { width: 8.7, height: 16.3 };
+    const { term, canvas } = await open({ lineHeight: 1.2 });
+    const seen: PaintFrame[] = [];
+    term.addPaintLayer({ order: 0, paint: frame => seen.push(frame) });
+    tick();
+    const metrics = term.getMetrics();
+    expect(metrics).toEqual({ width: 8.5, height: 19.5, baseline: 14.25 });
+    const size = [canvas.width, canvas.height];
+    expect(size).toEqual([170, 156]);
+    seen.length = 0;
+    vi.stubGlobal('devicePixelRatio', ratio);
+    expect(term.getMetrics()).toEqual(metrics);
+    tick();
+    expect(seen, 'an unusable ratio repaints nothing').toEqual([]);
+    expect([canvas.width, canvas.height]).toEqual(size);
+    term.refresh();
+    expect(seen.at(-1)).toMatchObject({ pixelRatio: 2, full: true });
+    vi.stubGlobal('devicePixelRatio', 1);
+    expect(term.getMetrics(), 'a usable ratio is followed again').toEqual({ width: 8, height: 20, baseline: 14.5 });
+  });
+
   test('DPR and font changes update public geometry without publishing a PTY resize', async () => {
     const { term, canvas, context } = await open({ lineHeight: 1.2 });
     const resize = vi.fn();
