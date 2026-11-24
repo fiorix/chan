@@ -14,12 +14,16 @@ export function isPrimarySelectionDesktop(): boolean {
 /// Capture owns the middle button before the widget can report it or WebKit
 /// can paste it, and the right click before either widget can select its
 /// textarea;
-/// `openMenu` opens chan's terminal menu for that click.
+/// `openMenu` opens chan's terminal menu for that click. The middle press
+/// reaches neither the widget nor the pane around it, so `focus` does what
+/// a left press does through both: it makes the terminal's pane the active
+/// one and gives the terminal the keyboard.
 export function installTerminalPrimarySelection(
   host: HTMLElement,
   term: XtermTerminal | GhosttyTerminal,
   backend: "xterm" | "ghostty",
   openMenu: (event: MouseEvent) => void,
+  focus: () => void,
 ): (() => void) | null {
   if (!isPrimarySelectionDesktop()) return null;
   let alive = true;
@@ -86,7 +90,7 @@ export function installTerminalPrimarySelection(
     if (event.button !== 1) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    term.focus();
+    focus();
     void readPrimarySelection().then((text) => {
       if (!alive || !text) return;
       if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);

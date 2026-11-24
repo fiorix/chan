@@ -80,6 +80,7 @@
     resolveTerminalMetadataRename,
     resolvePromptCancelled,
     seedTerminalSecretMasking,
+    setActivePane,
     toggleTerminalGroupBroadcast,
     toggleTerminalSecretMasking,
     setTerminalActivity,
@@ -327,6 +328,15 @@
     const holder = document.activeElement;
     if (holder !== holderAtAsk && holder?.matches("input, textarea, select")) return;
     focusTerminal();
+  }
+
+  // The Linux desktop's middle press (PRIMARY paste) is kept from the widget
+  // and from the pane, so it does here what a left press does through them:
+  // the pane becomes the active one and the terminal takes the keyboard,
+  // whatever owns it, as the widget's own pointer focus does.
+  function focusFromMiddlePress(): void {
+    setActivePane(paneId);
+    term?.focus();
   }
 
   // An action on this terminal that waited before handing it the keyboard
@@ -1522,7 +1532,7 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
-    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu);
+    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu, focusFromMiddlePress);
     // The masker logged and disabled itself; record it on the tab so the
     // toggle's check stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {

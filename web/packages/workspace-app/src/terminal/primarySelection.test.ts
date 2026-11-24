@@ -74,7 +74,7 @@ async function openedXterm(bracketed: boolean) {
   const sent: string[] = [];
   term.onData((data) => void sent.push(data));
   if (bracketed) await new Promise<void>((resolve) => term.write("\x1b[?2004h", resolve));
-  const uninstall = installTerminalPrimarySelection(host, term, "xterm", () => {});
+  const uninstall = installTerminalPrimarySelection(host, term, "xterm", () => {}, () => term.focus());
   if (!uninstall) throw new Error("no PRIMARY listeners on the Linux desktop");
   cleanups.push(uninstall, () => term.dispose());
   return { target: host, sent };
@@ -100,7 +100,7 @@ async function openedGhostty(bracketed: boolean) {
   const sent: string[] = [];
   term.onData((data) => void sent.push(data));
   if (bracketed) term.write("\x1b[?2004h");
-  const uninstall = installTerminalPrimarySelection(host, term, "ghostty", () => {});
+  const uninstall = installTerminalPrimarySelection(host, term, "ghostty", () => {}, () => term.focus());
   if (!uninstall) throw new Error("no PRIMARY listeners on the Linux desktop");
   cleanups.push(uninstall, () => term.dispose());
   return { target: canvas, sent };
