@@ -52,6 +52,14 @@ function isBlankCell(cell: VtCell | undefined): boolean {
   return !cell || cell.codepoint === 0 || cell.codepoint === 32;
 }
 
+function assertIntegerRange(range: SelectionRange): void {
+  for (const anchor of [range.start, range.end]) {
+    if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
+      throw new RangeError('Selection coordinates must be finite integers');
+    }
+  }
+}
+
 // ============================================================================
 // SelectionManager Class
 // ============================================================================
@@ -117,6 +125,12 @@ export class SelectionManager {
   // The row a read of the selection's text or a click's word or line looks
   // at, one row at a time.
   private readonly cells = new VtCells();
+  // The rows of a range's first and last cells, each in a view of its own.
+  // A view answers a repeated read of its row from what it holds until the
+  // core changes the row, so a paint that widens an unchanged selection
+  // reads no row; one shared view would lose each row to the other.
+  private readonly firstCells = new VtCells();
+  private readonly lastCells = new VtCells();
 
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
@@ -253,7 +267,20 @@ export class SelectionManager {
   /** Read complete clusters, joining wraps and filtering undrawn controls. */
   getSelection(): string {
     const range = this.getSelectionRange();
-    if (!range) return '';
+    return range ? this.rangeText(range) : '';
+  }
+
+  /**
+   * The text a selection of `range` would read, clamped and widened to whole
+   * glyphs the same way, without selecting it or copying.
+   */
+  getRangeText(range: SelectionRange): string {
+    assertIntegerRange(range);
+    const clamped = this.clampRange(range);
+    return clamped ? this.rangeText(clamped) : '';
+  }
+
+  private rangeText(range: SelectionRange): string {
     const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
     const textRange = {
       startCol: range.start.col, startRow: range.start.absoluteRow,
@@ -363,11 +390,7 @@ export class SelectionManager {
   /** Set inclusive absolute endpoints without copying; null clears. */
   setSelection(range: SelectionRange | null): void {
     if (range) {
-      for (const anchor of [range.start, range.end]) {
-        if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
-          throw new RangeError('Selection coordinates must be finite integers');
-        }
-      }
+      assertIntegerRange(range);
       range = this.clampRange(range);
     }
     if (!range) {
@@ -406,10 +429,12 @@ export class SelectionManager {
     const final = forwards ? b : a;
     // The spacer after a wide glyph belongs to that glyph; an empty spacer
     // at the right edge before a wrap belongs to neither endpoint glyph.
-    if (this.readAbsoluteRow(first.absoluteRow, history) && this.cells.at(first.col)?.width === 0 && this.cells.at(first.col - 1)?.width === 2) {
+    const firstCells = this.firstCells;
+    if (this.readAbsoluteRow(first.absoluteRow, history, firstCells) && firstCells.at(first.col)?.width === 0 && firstCells.at(first.col - 1)?.width === 2) {
       first.col--;
     }
-    if (this.readAbsoluteRow(final.absoluteRow, history) && this.cells.at(final.col)?.width === 2) {
+    const lastCells = this.lastCells;
+    if (this.readAbsoluteRow(final.absoluteRow, history, lastCells) && lastCells.at(final.col)?.width === 2) {
       final.col = Math.min(final.col + 1, cols - 1);
     }
     return { start: a, end: b };
@@ -428,8 +453,8 @@ export class SelectionManager {
   }
 
   /**
-   * Select text at specific column and row with length
-   * xterm.js compatible API
+   * Select `length` cells from a column of a viewport row, carrying past the
+   * last column into the rows below it.
    */
   select(column: number, row: number, length: number): void {
     // The rows the old selection painted repaint without it
@@ -454,9 +479,8 @@ export class SelectionManager {
     endRow = Math.min(endRow, dims.rows - 1);
 
     // Convert viewport rows to absolute rows
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: column, absoluteRow: viewportY + row };
-    this.selectionEnd = { col: endCol, absoluteRow: viewportY + endRow };
+    this.selectionStart = { col: column, absoluteRow: this.viewportRowToAbsolute(row) };
+    this.selectionEnd = { col: endCol, absoluteRow: this.viewportRowToAbsolute(endRow) };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
@@ -540,7 +564,7 @@ export class SelectionManager {
   }
 
   private handleFocus = (event: MouseEvent): void => {
-    if (event.button === 0) this.renderer.getCanvas().parentElement?.focus();
+    if (event.button === 0) this.renderer.getCanvas().parentElement?.focus({ preventScroll: true });
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
@@ -748,7 +772,7 @@ export class SelectionManager {
       }
 
       // Focus the textarea so the context menu appears on it
-      this.textarea.focus();
+      this.textarea.focus({ preventScroll: true });
 
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first
@@ -818,7 +842,13 @@ export class SelectionManager {
 
       // Pointer Y grows toward newer output; viewport offsets grow into history.
       const scrollAmount = SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection;
+      const topBefore = this.viewportRowToAbsolute(0);
       this.terminal.viewport.scrollBy(-scrollAmount);
+
+      // A view that could not scroll shows the same rows, so the end stays
+      // at the cell the pointer named: a drag resting in the edge zone of a
+      // view at its limit selects no more than the pointer covers.
+      if (this.viewportRowToAbsolute(0) === topBefore) return;
 
       // Extend selection in the scroll direction
       // Key insight: we need to EXTEND the selection, not reset it to viewport edge
@@ -993,13 +1023,13 @@ export class SelectionManager {
   }
 
   /**
-   * Read absolute row `row` (history first, then the screen) into this.cells.
-   * False when there is no such row.
+   * Read absolute row `row` (history first, then the screen) into `into`,
+   * this.cells unless given. False when there is no such row.
    */
-  private readAbsoluteRow(row: number, scrollbackLength: number): boolean {
+  private readAbsoluteRow(row: number, scrollbackLength: number, into: VtCells = this.cells): boolean {
     return row < scrollbackLength
-      ? this.wasmTerm.readHistoryRow(row, this.cells)
-      : this.wasmTerm.readRow(row - scrollbackLength, this.cells);
+      ? this.wasmTerm.readHistoryRow(row, into)
+      : this.wasmTerm.readRow(row - scrollbackLength, into);
   }
 
   /**

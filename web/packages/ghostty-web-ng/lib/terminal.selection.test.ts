@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { GhosttyVt } from '../vt/ghosttyVt';
+import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -11,6 +11,7 @@ type SelectionAPI = {
   setSelection(range: Range | null): void;
   getSelectionRange(): Range | null;
   getScrollbackText(): string;
+  getRangeText(range: Range): string;
   cellAt(x: number, y: number): { col: number; row: number; absoluteRow: number } | null;
 };
 
@@ -328,6 +329,22 @@ describe('public selection ranges', () => {
     expect(term.getSelection()).toBe(text.replaceAll('\r\n', '\n'));
   });
 
+  test('select takes viewport rows, with history and with the view scrolled back', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `row ${i}`).join('\r\n');
+    const { term } = await open(text);
+    expect(term.getScrollbackLength()).toBe(8);
+    term.select(0, 1, 5);
+    expect(term.getSelectionRange()).toEqual(range(0, 9, 4, 9));
+    expect(term.getSelection()).toBe('row 9');
+    term.viewport.scrollTo(3.5);
+    // A length past the last column carries into the next viewport row.
+    term.select(4, 0, 18);
+    expect(term.getSelectionRange()).toEqual(range(4, 5, 1, 6));
+    expect(term.getSelection()).toBe('5\nro');
+    term.selectLines(0, 0);
+    expect(term.getSelectionRange(), 'selectLines names the same row').toEqual(range(0, 5, 19, 5));
+  });
+
   test.each([1, 2])('widens either half (%s) of a wide glyph and preserves clusters', async (col) => {
     const { term } = await open('a界e\u0301👩‍💻z');
     term.setSelection(range(col, 0, col, 0));
@@ -346,6 +363,41 @@ describe('public selection ranges', () => {
     pointer('pointerup', 9, 1);
     expect(term.getSelection()).toBe('ab界e\u0301👩‍💻xyzq');
     expect(clipboard).toHaveBeenCalledExactlyOnceWith('ab界e\u0301👩‍💻xyzq');
+  });
+
+  test('idle paints do not read a selection\'s endpoint rows again, and a write refreshes them', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `row ${i}`).join('\r\n');
+    const { term } = await open(text);
+    expect(term.getScrollbackLength()).toBe(8);
+    // Both endpoints in history above the view: a paint draws no selected row.
+    term.setSelection(range(1, 1, 3, 5));
+    const paint = () => term.renderer!.render(term.wasmTerm!, false, term.viewport.offset, 0);
+    paint();
+    const fill = vi.spyOn(VtCells.prototype, 'fill');
+    for (let i = 0; i < 5; i++) paint();
+    expect(fill, 'row reads from the core in five idle paints').toHaveBeenCalledTimes(0);
+    expect(term.getSelectionRange()).toEqual(range(1, 1, 3, 5));
+    expect(fill).toHaveBeenCalledTimes(0);
+    // Output changes what the endpoint cells may hold: the next read is fresh.
+    term.write('\x1b[4;1Hmore');
+    expect(term.getSelectionRange()).toEqual(range(1, 1, 3, 5));
+    const endpointReads = () => fill.mock.calls.filter(([, history, row]) => history && (row === 1 || row === 5)).length;
+    expect(endpointReads()).toBe(2);
+    for (let i = 0; i < 5; i++) paint();
+    expect(endpointReads()).toBe(2);
+  });
+
+  test('widening follows a glyph written under an endpoint after the range was read', async () => {
+    const { term } = await open('abcdef');
+    term.setSelection(range(1, 0, 4, 0));
+    expect(term.getSelectionRange()).toEqual(range(1, 0, 4, 0));
+    term.write('\x1b[1;4H\u754c');
+    expect(term.getSelectionRange(), 'the end is the wide glyph\'s first half').toEqual(range(1, 0, 4, 0));
+    term.setSelection(range(1, 0, 3, 0));
+    expect(term.getSelectionRange()).toEqual(range(1, 0, 4, 0));
+    term.write('\x1b[1;1H\u754c');
+    expect(term.getSelectionRange(), 'the start is the wide glyph\'s second half').toEqual(range(0, 0, 4, 0));
+    expect(term.getSelection()).toBe('\u754cc\u754c');
   });
 
   test('selection replacement and clear invalidate the old visible rows', async () => {
@@ -425,6 +477,53 @@ describe('copy operations and click extents', () => {
     expect(copy).not.toHaveBeenCalled();
   });
 
+  test('a range reads as its selection would, without selecting or copying', async () => {
+    let drawn = false;
+    const copy = vi.fn();
+    const rows = ['abcdefghij', 'klmnop', 'a界b', 'x\x7fy', '0123456789ABCD'];
+    const { term, clipboard } = await open(rows.join('\r\n'), 10, 3, copy, () => drawn);
+    expect(term.getScrollbackLength()).toBe(3);
+    const users = range(0, 5, 3, 5);
+    term.setSelection(users);
+    const cases: Array<[Range, string]> = [
+      [range(2, 0, 4, 0), 'cde'],
+      // Either direction, from history into the screen.
+      [range(1, 1, 8, 0), 'ij\nkl'],
+      // Either half of a wide glyph reads the whole glyph.
+      [range(2, 2, 2, 2), '界'],
+      [range(1, 2, 1, 2), '界'],
+      // An undrawn control is filtered and a core soft wrap joins.
+      [range(0, 3, 2, 3), 'xy'],
+      [range(8, 4, 1, 5), '89AB'],
+      // Columns and rows clamp to the retained grid.
+      [range(-4, 4, 99, 99), '0123456789ABCD'],
+    ];
+    for (const [read, text] of cases) {
+      expect(term.getRangeText(read), JSON.stringify(read)).toBe(text);
+      term.setSelection(read);
+      expect(term.getSelection(), 'the same text as a selection of it').toBe(text);
+      term.setSelection(users);
+    }
+    expect(term.getRangeText(range(0, 0, 9, 1))).toBe('abcdefghij\nklmnop');
+    drawn = true;
+    expect(term.getRangeText(range(0, 0, 9, 1)), 'the drawn-wrap policy is asked at each read').toBe('abcdefghijklmnop');
+    expect(term.getRangeText(range(0, 40, 9, 41)), 'wholly beyond the retained rows').toBe('');
+    expect(term.getRangeText(range(0, -3, 9, -1))).toBe('');
+    for (const invalid of [NaN, Infinity, 0.5]) {
+      expect(() => term.getRangeText(range(0, 0, invalid, 0))).toThrow(RangeError);
+      expect(() => term.getRangeText(range(0, invalid, 3, 0))).toThrow(RangeError);
+    }
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(copy).not.toHaveBeenCalled();
+    expect(clipboard).not.toHaveBeenCalled();
+  });
+
+  test('the range reader takes the row fallback when the core cannot format', async () => {
+    const { term } = await open('ab界e\u0301👩‍💻xyz\x7fq', 10, 4);
+    vi.spyOn(term.wasmTerm!, 'plainText').mockReturnValue(null);
+    expect(term.getRangeText(range(1, 0, 9, 1))).toBe('b界e\u0301👩‍💻xyzq');
+  });
+
   test('the policy changes word and line extents and explicit copies after open', async () => {
     let drawn = true;
     const copy = vi.fn();
@@ -500,6 +599,8 @@ describe('hit testing and lifetime', () => {
     expect(term.hasSelection()).toBe(false);
     expect(term.copySelection()).toBe(false);
     expect(term.getScrollbackText()).toBe('');
+    expect(term.getRangeText(range(0, 0, 4, 0))).toBe('');
+    expect(term.getRangeText(range(NaN, 0, 4, 0))).toBe('');
     expect(term.cellAt(1, 1)).toBeNull();
   });
 });

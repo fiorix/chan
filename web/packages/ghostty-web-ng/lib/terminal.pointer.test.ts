@@ -278,6 +278,49 @@ describe('captured selection lifecycle', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test.each(['bottom', 'top'])('a drag resting near the %s edge of a view that cannot scroll keeps the cell under the pointer', async (edge) => {
+    const { term, canvas, width, height, write } = await open(Array.from({ length: ROWS }, (_, i) => `row ${i} abcdefgh`).join('\r\n'));
+    expect(term.getScrollbackLength()).toBe(0);
+    vi.useFakeTimers();
+    const row = edge === 'bottom' ? ROWS - 2 : 1;
+    const y = row * height + (edge === 'bottom' ? height - 2 : 2);
+    expect(edge === 'bottom' ? ROWS * height - y : y, 'inside the auto-scroll zone').toBeLessThan(30);
+    pointer(canvas, 'pointerdown', 6 * width + 1, y);
+    pointer(canvas, 'pointermove', 9 * width + 1, y);
+    expect(term.getSelection()).toBe('abcd');
+    vi.advanceTimersByTime(200);
+    expect(term.getSelectionRange()).toEqual({ start: { col: 6, absoluteRow: row }, end: { col: 9, absoluteRow: row } });
+    pointer(canvas, 'pointerup', 9 * width + 1, y);
+    expect(write).toHaveBeenCalledExactlyOnceWith('abcd');
+  });
+
+  test('auto-scroll moves the selection end only in a tick that scrolls the view', async () => {
+    const { term, canvas, width, height } = await open(history());
+    expect(term.getScrollbackLength()).toBe(34);
+    term.viewport.scrollTo(8);
+    vi.useFakeTimers();
+    const y = (ROWS - 2) * height + height - 2;
+    const end = () => term.getSelectionRange()?.end;
+    pointer(canvas, 'pointerdown', 1, y);
+    pointer(canvas, 'pointermove', 4 * width + 1, y);
+    expect(term.getSelectionRange()).toEqual({ start: { col: 0, absoluteRow: 30 }, end: { col: 4, absoluteRow: 30 } });
+    vi.advanceTimersByTime(50);
+    expect(term.viewport.offset).toBe(5);
+    expect(end(), 'a scrolling tick extends to the edge row').toEqual({ col: COLS - 1, absoluteRow: 34 });
+    vi.advanceTimersByTime(100);
+    expect(term.viewport.offset).toBe(0);
+    expect(end()).toEqual({ col: COLS - 1, absoluteRow: 39 });
+    pointer(canvas, 'pointermove', 5 * width + 1, y);
+    expect(end(), 'the pointer names its own cell').toEqual({ col: 5, absoluteRow: 38 });
+    vi.advanceTimersByTime(200);
+    expect(term.viewport.offset).toBe(0);
+    expect(end(), 'a tick that cannot scroll leaves it there').toEqual({ col: 5, absoluteRow: 38 });
+    // Beyond the edge the pointer-move path already names the edge row.
+    pointer(canvas, 'pointermove', 5 * width + 1, ROWS * height + 50);
+    vi.advanceTimersByTime(200);
+    expect(end()).toEqual({ col: COLS - 1, absoluteRow: 39 });
+  });
+
   test('buttonless moves retain a captured selection, silent loss stops it without copy', async () => {
     const { term, canvas, captured, write } = await open();
     drag(canvas);
@@ -545,6 +588,40 @@ describe('report and bypass completion', () => {
     pointer(canvas, 'pointerup', 65, 1);
     expect(reports).toEqual(['\x1b[<0;9;1M', '\x1b[<0;9;1m']);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { name: 'SGR', modes: '\x1b[?1003h\x1b[?1006h', hover: ['\x1b[<35;9;1M', '\x1b[<51;10;1M'], press: '\x1b[<0;10;1M' },
+    { name: 'X10', modes: '\x1b[?1003h', hover: ['\x1b[M\x43\x29\x21', '\x1b[M\x53\x2a\x21'], press: '\x1b[M\x20\x2a\x21' },
+  ])('an any-motion hover report ($name) leaves a finished Shift selection for a later copy', async ({ modes, hover, press }) => {
+    const { term, canvas, reports, write } = await open();
+    term.write(modes);
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1, { shiftKey: true });
+    pointer(canvas, 'pointerup', 33, 1, { shiftKey: true });
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+    expect(reports).toEqual([]);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 73, 1, { buttons: 0, ctrlKey: true });
+    expect(reports, 'the program still hears the hover').toEqual(hover);
+    expect(term.getSelection()).toBe('hello');
+    expect(term.copySelection()).toBe(true);
+    expect(write).toHaveBeenLastCalledWith('hello');
+    // A reported press still clears the stale selection.
+    pointer(canvas, 'pointerdown', 73, 1);
+    expect(reports.at(-1)).toBe(press);
+    expect(term.getSelection()).toBe('');
+  });
+
+  test.each(['drag', 'release'])('a reported %s still clears a stale selection', async (kind) => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 65, 1);
+    term.setSelection({ start: { col: 0, absoluteRow: 0 }, end: { col: 4, absoluteRow: 0 } });
+    if (kind === 'drag') pointer(canvas, 'pointermove', 73, 1);
+    else pointer(canvas, 'pointerup', 65, 1);
+    expect(reports.at(-1)).toBe(kind === 'drag' ? '\x1b[<32;10;1M' : '\x1b[<0;9;1m');
+    expect(term.getSelection()).toBe('');
   });
 
   test('clearing a live local selection does not end its captured buttonless tail', async () => {

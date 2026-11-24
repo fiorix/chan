@@ -43,6 +43,23 @@ import { createTerminalCore } from './terminal-core';
 import { SearchOwner } from './search';
 import type { ILink } from './types';
 
+/**
+ * Whether a mouse report is motion with no button held: code 35 under the
+ * Shift, Meta and Control bits, in the SGR or the X10 form.
+ */
+function isButtonlessMotionReport(data: string): boolean {
+  const sgr = /^\x1b\[<(\d+);\d+;\d+M$/.exec(data);
+  const code = sgr ? Number(sgr[1])
+    : data.length === 6 && data.startsWith('\x1b[M') ? data.charCodeAt(3) - 32 : NaN;
+  return (code & ~0x1c) === 35;
+}
+
+/** Report an error as an uncaught one, without unwinding the caller. */
+function reportPaintError(error: unknown): void {
+  if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
+  else setTimeout(() => { throw error; });
+}
+
 // ============================================================================
 // Terminal Class
 // ============================================================================
@@ -456,8 +473,9 @@ export class Terminal {
             this.scrollToBottom();
             this.awaitingEcho = true;
           }
-          // Reports clear stale selection, but cannot cancel a local drag.
-          if (isUserInput || !this.selectionManager?.hasLocalSelectionGesture()) {
+          // Reports clear stale selection, but cannot cancel a local drag,
+          // and the pointer passing over the grid is not a reason to clear.
+          if (isUserInput || !(this.selectionManager?.hasLocalSelectionGesture() || isButtonlessMotionReport(data))) {
             this.selectionManager?.clearSelection();
           }
           // Input handler fires data events
@@ -631,7 +649,14 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        // The core has taken the bytes and the observers have run, so a
+        // failed paint is reported rather than thrown at the writer.
+        try {
+          this.#searchOwner?.runDue();
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        } catch (error) {
+          reportPaintError(error);
+        }
       }
     }
 
@@ -819,6 +844,14 @@ export class Terminal {
   /** Client CSS pixels to viewport and absolute cells; null without geometry. */
   public cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } | null {
     return this.selectionManager?.cellAt(clientX, clientY) ?? null;
+  }
+
+  /**
+   * The text a selection of `range` would copy; leaves selection untouched.
+   * Throws RangeError for non-integer coordinates while the terminal is open.
+   */
+  public getRangeText(range: SelectionRange): string {
+    return this.selectionManager?.getRangeText(range) ?? '';
   }
 
   /** Copy-formatted retained history and screen; leaves selection untouched. */
@@ -1177,6 +1210,9 @@ export class Terminal {
    */
   private startRenderLoop(): void {
     if (this.animationFrameId) return; // already running
+    // Search work belongs to animation frames, not to the open or resize
+    // call that starts the loop with a paint of its own.
+    let inFrame = false;
     const loop = () => {
       if (!this.isDisposed && this.isOpen) {
         // Render using the core's own dirty tracking
@@ -1186,6 +1222,9 @@ export class Terminal {
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
         try {
+          // Search runs first, so this paint shows its results.
+          if (inFrame) this.#searchOwner?.runDue();
+          inFrame = true;
           this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
         } finally {
           if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);
@@ -1505,7 +1544,7 @@ export class Terminal {
 
   private handleCanvasFocus = (event: Event): void => {
     event.preventDefault();
-    this.textarea?.focus();
+    this.textarea?.focus({ preventScroll: true });
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
