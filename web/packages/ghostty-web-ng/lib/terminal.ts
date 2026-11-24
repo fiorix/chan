@@ -43,6 +43,17 @@ import { createTerminalCore } from './terminal-core';
 import { SearchOwner } from './search';
 import type { ILink } from './types';
 
+/**
+ * Whether a mouse report is motion with no button held: code 35 under the
+ * Shift, Meta and Control bits, in the SGR or the X10 form.
+ */
+function isButtonlessMotionReport(data: string): boolean {
+  const sgr = /^\x1b\[<(\d+);\d+;\d+M$/.exec(data);
+  const code = sgr ? Number(sgr[1])
+    : data.length === 6 && data.startsWith('\x1b[M') ? data.charCodeAt(3) - 32 : NaN;
+  return (code & ~0x1c) === 35;
+}
+
 /** Report an error as an uncaught one, without unwinding the caller. */
 function reportPaintError(error: unknown): void {
   if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
@@ -462,8 +473,9 @@ export class Terminal {
             this.scrollToBottom();
             this.awaitingEcho = true;
           }
-          // Reports clear stale selection, but cannot cancel a local drag.
-          if (isUserInput || !this.selectionManager?.hasLocalSelectionGesture()) {
+          // Reports clear stale selection, but cannot cancel a local drag,
+          // and the pointer passing over the grid is not a reason to clear.
+          if (isUserInput || !(this.selectionManager?.hasLocalSelectionGesture() || isButtonlessMotionReport(data))) {
             this.selectionManager?.clearSelection();
           }
           // Input handler fires data events

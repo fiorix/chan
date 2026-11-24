@@ -590,6 +590,40 @@ describe('report and bypass completion', () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test.each([
+    { name: 'SGR', modes: '\x1b[?1003h\x1b[?1006h', hover: ['\x1b[<35;9;1M', '\x1b[<51;10;1M'], press: '\x1b[<0;10;1M' },
+    { name: 'X10', modes: '\x1b[?1003h', hover: ['\x1b[M\x43\x29\x21', '\x1b[M\x53\x2a\x21'], press: '\x1b[M\x20\x2a\x21' },
+  ])('an any-motion hover report ($name) leaves a finished Shift selection for a later copy', async ({ modes, hover, press }) => {
+    const { term, canvas, reports, write } = await open();
+    term.write(modes);
+    pointer(canvas, 'pointerdown', 1, 1, { shiftKey: true });
+    pointer(canvas, 'pointermove', 33, 1, { shiftKey: true });
+    pointer(canvas, 'pointerup', 33, 1, { shiftKey: true });
+    expect(write).toHaveBeenCalledExactlyOnceWith('hello');
+    expect(reports).toEqual([]);
+    pointer(canvas, 'pointermove', 65, 1, { buttons: 0 });
+    pointer(canvas, 'pointermove', 73, 1, { buttons: 0, ctrlKey: true });
+    expect(reports, 'the program still hears the hover').toEqual(hover);
+    expect(term.getSelection()).toBe('hello');
+    expect(term.copySelection()).toBe(true);
+    expect(write).toHaveBeenLastCalledWith('hello');
+    // A reported press still clears the stale selection.
+    pointer(canvas, 'pointerdown', 73, 1);
+    expect(reports.at(-1)).toBe(press);
+    expect(term.getSelection()).toBe('');
+  });
+
+  test.each(['drag', 'release'])('a reported %s still clears a stale selection', async (kind) => {
+    const { term, canvas, reports } = await open();
+    term.write('\x1b[?1003h\x1b[?1006h');
+    pointer(canvas, 'pointerdown', 65, 1);
+    term.setSelection({ start: { col: 0, absoluteRow: 0 }, end: { col: 4, absoluteRow: 0 } });
+    if (kind === 'drag') pointer(canvas, 'pointermove', 73, 1);
+    else pointer(canvas, 'pointerup', 65, 1);
+    expect(reports.at(-1)).toBe(kind === 'drag' ? '\x1b[<32;10;1M' : '\x1b[<0;9;1m');
+    expect(term.getSelection()).toBe('');
+  });
+
   test('clearing a live local selection does not end its captured buttonless tail', async () => {
     const { term, canvas, reports, write } = await open();
     term.write('\x1b[?1003h\x1b[?1006h');
