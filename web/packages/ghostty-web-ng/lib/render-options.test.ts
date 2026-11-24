@@ -563,6 +563,18 @@ describe('widget block glyphs', () => {
     expect(second[0]).toBe(8.5);
   });
 
+  test('half blocks in an odd-sized cell split on one device pixel', async () => {
+    // A 9 by 19 cell at ratio 1: both halves fall on half a device pixel.
+    measured.width = 9.2;
+    const screen = await glyphTerminal();
+    expect(screen.term.getMetrics()).toMatchObject({ width: 9, height: 19 });
+    screen.paint(cup(0, 0) + '\u2580' + cup(1, 0) + '\u2584' + cup(0, 1) + '\u258c' + cup(1, 1) + '\u2590');
+    const [upper, lower, left, right] = screen.glyphFills().map(fill => fill.rect);
+    expect([upper, lower, left, right]).toEqual([[0, 0, 9, 10], [9, 10, 9, 9], [0, 19, 5, 19], [14, 19, 4, 19]]);
+    expect(upper[1] + upper[3], 'the halves of a row meet').toBe(lower[1]);
+    expect(left[0] + left[2] + 9, 'and the halves of a column').toBe(right[0]);
+  });
+
   test('partial blocks fill only their own fraction of the cell', async () => {
     const screen = await glyphTerminal({ lineHeight: 1 });
     screen.paint(cup(0, 0) + '\u2581');
