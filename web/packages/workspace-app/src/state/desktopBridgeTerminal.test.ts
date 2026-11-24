@@ -80,8 +80,7 @@ describe.each([
   }
 
   /// Whether a keydown typed into the widget bubbled to the document, where
-  /// the app's chord listener reads it. The widget prevents the default of
-  /// a key the app takes from it, so its default says nothing here.
+  /// the app's chord listener reads it.
   function reachesDocument(term: Terminal, init: KeyboardEventInit): { event: KeyboardEvent; reached: boolean } {
     let reached = false;
     const record = () => { reached = true; };

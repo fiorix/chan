@@ -10,7 +10,8 @@
  *
  * Limitations:
  * - Does not handle IME/composition events (CJK input) - to be added later
- * - Captures all keyboard input (preventDefault on everything)
+ * - Prevents the default of every key it sends; a key the embedder's custom
+ *   handler claims keeps its default
  */
 
 import type { GhosttyVt, VtKeyEncoder } from '../vt/ghosttyVt';
@@ -216,7 +217,8 @@ export class InputHandler {
    * @param onData - Callback for terminal data; mouse reports pass false as the second argument
    * @param _onBell - Callback for bell/beep event; the handler raises none
    * @param onKey - Optional callback for raw key events
-   * @param customKeyEventHandler - Optional custom key event handler
+   * @param customKeyEventHandler - Optional custom key event handler; true claims the key, which is
+   *   then neither sent nor default-prevented here
    * @param getMode - Optional callback to query terminal mode state (for application cursor mode)
    * @param onCopy - Optional callback to handle copy (Cmd+C/Ctrl+C with selection)
    * @param inputElement - Optional input element for beforeinput events
@@ -249,7 +251,8 @@ export class InputHandler {
   }
 
   /**
-   * Set custom key event handler (for runtime updates)
+   * Set custom key event handler (for runtime updates). A key it returns
+   * true for is neither sent nor default-prevented here.
    */
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
     this.customKeyEventHandler = handler;
@@ -364,15 +367,10 @@ export class InputHandler {
       this.onKeyCallback({ key: event.key, domEvent: event });
     }
 
-    // Check custom key event handler
-    if (this.customKeyEventHandler) {
-      const handled = this.customKeyEventHandler(event);
-      if (handled) {
-        // Custom handler consumed the event
-        event.preventDefault();
-        return;
-      }
-    }
+    // A key the embedder's handler claims is the embedder's: nothing is sent,
+    // and its default is left for the embedder to prevent where it acts on
+    // the key, so one it lets out to the page or the browser still works.
+    if (this.customKeyEventHandler?.(event)) return;
 
     // Allow Ctrl+V and Cmd+V to trigger paste event (don't preventDefault)
     if ((event.ctrlKey || event.metaKey) && event.code === 'KeyV') {

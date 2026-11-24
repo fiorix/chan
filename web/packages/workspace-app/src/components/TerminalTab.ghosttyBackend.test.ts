@@ -52,6 +52,7 @@ import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { commandById } from "../state/commands";
+import { shouldEscapeTerminal } from "../state/shortcuts";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
@@ -335,6 +336,31 @@ describe("keys", () => {
     expect(clipboard.writeText).toHaveBeenCalledWith("chosen");
     expect(paste.defaultPrevented).toBe(false);
     expect(inputs(socket)).toEqual([]);
+  });
+
+  test("a chord chan lets out of the terminal leaves with its default, and the tab cancels the one it acts on", async () => {
+    const { term, socket } = await mountGhostty();
+    const reached: Event[] = [];
+    const record = (event: Event) => reached.push(event);
+    document.addEventListener("keydown", record);
+    try {
+      // The launcher's chord: this tab acts on no part of it, and no app is
+      // mounted here to take it.
+      const launcher = pressInGhostty(term, { key: "k", code: "KeyK", ctrlKey: true, altKey: true });
+      expect(shouldEscapeTerminal(launcher), "the launcher's chord").toBe(true);
+      expect(reached.includes(launcher), "it reaches the page").toBe(true);
+      expect(launcher.defaultPrevented, "nothing took the key, so the browser still may").toBe(false);
+
+      // Find: the tab's own root opens its bar and cancels the key.
+      const find = pressInGhostty(term, { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true });
+      expect(shouldEscapeTerminal(find), "the find chord").toBe(true);
+      await tick();
+      expect(document.querySelector(".terminal-find input.find"), "the find bar").not.toBeNull();
+      expect(find.defaultPrevented, "the tab took the key").toBe(true);
+      expect(inputs(socket)).toEqual([]);
+    } finally {
+      document.removeEventListener("keydown", record);
+    }
   });
 
   test("a bare Ctrl+V sends the control byte, before ghostty would drop it with its paste chords", async () => {

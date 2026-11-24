@@ -1014,9 +1014,8 @@
     // Escape: pop just the topmost overlay so a stack of open
     // surfaces unwinds one at a time. An Escape a handler nearer the focus
     // already took (a menu, a viewer, a dialog closing itself) is that
-    // handler's. Only Escape defers: ghostty-web prevents the default of
-    // every key its custom handler claims, which is every app chord the
-    // terminal lets through, so the other chords must not.
+    // handler's. Only Escape defers to a prevented default; the chords
+    // above act whatever a nearer handler did with theirs.
     if (e.key === "Escape" && !e.defaultPrevented && !meta && !e.altKey && !e.shiftKey) {
       const top = topOverlay();
       if (top) {

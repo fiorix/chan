@@ -1563,7 +1563,9 @@
     // handleTerminalKeyEvent uses xterm's semantics except for the native
     // paste result prepared for this inversion; wrap it for ghostty so "chan
     // consumed this chord" maps to ghostty's "handled" on both backends while
-    // paste still reaches ghostty-web's native-paste early-return.
+    // paste still reaches ghostty-web's native-paste early-return. Neither
+    // renderer cancels a key the handler takes from it, so every path in
+    // handleTerminalKeyEvent that acts on a key cancels it itself.
     if (backend === "ghostty") {
       term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     } else {
@@ -3291,10 +3293,10 @@
     if (!isCloseExitedTabKey(e)) return false;
     e.preventDefault();
     // Both renderers call their custom key handler and then let the event
-    // keep going: xterm.js returns out of its keydown without touching it,
-    // ghostty-web calls preventDefault and returns. Neither stops
-    // propagation, so without this the key this close took would go on to
-    // the terminal root's onkeydown and every handler above it.
+    // keep going: each returns out of its keydown without touching it.
+    // Neither stops propagation, so without this the key this close took
+    // would go on to the terminal root's onkeydown and every handler above
+    // it.
     e.stopPropagation();
     void closeTab(paneId, tab.id, { force: true });
     return true;
@@ -3327,7 +3329,10 @@
     }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
-    // does not consume the keystroke.
+    // does not consume the keystroke. It leaves either renderer with its
+    // default intact: the handler that acts on it (this tab's root for find,
+    // the app's window keymap for the rest) cancels it there, and a chord
+    // the app declines is still the browser's.
     if (shouldEscapeTerminal(e)) return false;
     // On ghostty every other key was decided before ghostty-web saw it
     // (ghosttyKeys.ts); what reaches here is plain typing, which ghostty-web
