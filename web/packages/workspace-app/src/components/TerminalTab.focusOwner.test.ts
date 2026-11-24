@@ -578,7 +578,12 @@ describe("hand-backs that focus once", () => {
     window.addEventListener("chan:command", onCommand);
     try {
       await openBodyMenu(target);
-      menuRow(shortcutLabel("app.launcher.toggle")).click();
+      // The press takes the keyboard to the row, so the terminal holds it
+      // as the launcher opens only if the row hands it back first.
+      const row = menuRow(shortcutLabel("app.launcher.toggle"));
+      row.focus();
+      expect(ghosttyHasFocus(term), "the row took the keyboard from the terminal").toBe(false);
+      row.click();
       await settle();
     } finally {
       window.removeEventListener("chan:command", onCommand);
