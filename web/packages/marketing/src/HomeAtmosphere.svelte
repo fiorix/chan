@@ -18,16 +18,17 @@
       return;
     }
     const section = document.querySelector("[data-home-morph-target]");
-    let sectionTop = 0;
     let viewportHeight = window.innerHeight;
     let progress = morph ? 0 : 1;
 
     function scroll(): void {
-      if (morph) progress = sectionScrollProgress(window.scrollY, sectionTop, viewportHeight);
+      if (!morph) return;
+      // The tour expands after mounting, so the morph target can move.
+      const sectionTop = section ? section.getBoundingClientRect().top + window.scrollY : viewportHeight;
+      progress = sectionScrollProgress(window.scrollY, sectionTop, viewportHeight);
     }
     function measure(): void {
       viewportHeight = window.innerHeight;
-      sectionTop = section ? section.getBoundingClientRect().top + window.scrollY : viewportHeight;
       scroll();
     }
     measure();

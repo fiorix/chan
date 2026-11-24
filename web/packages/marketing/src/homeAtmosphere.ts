@@ -11,7 +11,7 @@ export const HOME_POINT_COUNT = BEADED_TORUS_BEAD_COUNT;
 export const HOME_SOURCE_SIZE = BEADED_TORUS_SOURCE_SIZE;
 const TORUS_SCALE = 1.55;
 
-/** Scrub as the first section enters, independent of the rest of the page's length. */
+/** Scrub as the target section enters, independent of the rest of the page's length. */
 export function sectionScrollProgress(scrollY: number, sectionTop: number, viewportHeight: number): number {
   const start = Math.max(0, sectionTop - viewportHeight * 0.7);
   const end = Math.max(start + 1, sectionTop - viewportHeight * 0.1);
