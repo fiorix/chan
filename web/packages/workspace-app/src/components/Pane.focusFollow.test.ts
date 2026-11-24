@@ -46,6 +46,7 @@ import {
 } from "../state/tabs.svelte";
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
+import { engineClick, modelPointerCapture } from "../__tests__/pointer";
 import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { installTerminalDom, resetTerminals, terminalTab } from "../__tests__/terminalTab";
 
@@ -567,5 +568,55 @@ describe("the tab strip", () => {
     press(tab, "mouseup");
     await settle();
     expect(focusedEditor()).toContain("wysiwyg body");
+  });
+});
+
+// The Linux desktop pastes PRIMARY on a middle press. The terminal claims
+// that press before its widget and its pane see it, so the terminal itself
+// makes its pane the active one, as a left press does through the pane.
+describe("a middle press on the Linux desktop", () => {
+  const OTHER = "focus-follow-other";
+  const desktop = window as unknown as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
+
+  afterEach(() => {
+    delete desktop.__TAURI_INTERNALS__;
+  });
+
+  test("on a terminal in another pane makes that pane the active one and gives its terminal the keyboard", async () => {
+    desktop.__TAURI_INTERNALS__ = {
+      invoke: vi.fn(async (cmd: string) => (cmd === "read_primary_selection" ? "pasted" : undefined)),
+    };
+    const near = terminalTab({ id: "term-near" });
+    const far = terminalTab({ id: "term-far" });
+    layout.nodes = {
+      [PANE]: { kind: "leaf", id: PANE, tabs: [near], activeTabId: near.id },
+      [OTHER]: { kind: "leaf", id: OTHER, tabs: [far], activeTabId: far.id },
+      "focus-follow-split": { kind: "split", id: "focus-follow-split", direction: "row", ratio: 0.5, a: PANE, b: OTHER },
+    };
+    layout.rootId = "focus-follow-split";
+    layout.activePaneId = PANE;
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Workspace, { target }));
+    const seated = async (id: string): Promise<Terminal> =>
+      seatedGhostty(await vi.waitFor(() => {
+        const tab = target.querySelector(`[data-terminal-tab-id="${id}"]`);
+        expect(tab, `the terminal ${id} is drawn`).not.toBeNull();
+        return tab!;
+      }));
+    const nearTerm = await seated(near.id);
+    const farTerm = await seated(far.id);
+    await settle();
+    expect(ghosttyHasFocus(nearTerm), "the active pane's terminal holds the keyboard").toBe(true);
+
+    const canvas = farTerm.element!.querySelector("canvas")!;
+    modelPointerCapture(canvas);
+    const { down } = engineClick(canvas, 1);
+    expect(down.defaultPrevented, "the terminal claims the middle press").toBe(true);
+    await settle();
+
+    expect(layout.activePaneId, "the pressed terminal's pane is the active one").toBe(OTHER);
+    expect(ghosttyHasFocus(farTerm), "the pressed terminal has the keyboard").toBe(true);
+    expect(focusMessages(far.id).at(-1), "and reports itself focused to its session").toBe(true);
   });
 });

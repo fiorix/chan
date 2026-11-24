@@ -3,10 +3,11 @@
 // The terminal's focus calls that run after a wait, and the hand-backs that
 // run at once. A focus that waited (start() once the font and the core have
 // loaded, a seeded prompt sent on the shell's first output, a clipboard read
-// or write that landed) asks when it runs whether this is still the focused
-// pane's active tab, whether its Rich Prompt or a surface outside the
-// terminal took the keyboard meanwhile, and whether the keyboard's owner lets
-// the terminal have it. Closing the inspector hands the keyboard to the owner
+// or write that landed, the link menu's open once the shell's directory is
+// known) asks when it runs whether this is still the focused pane's active
+// tab, whether its Rich Prompt or a surface outside the terminal took the
+// keyboard meanwhile, and whether the keyboard's owner lets the terminal
+// have it. Closing the inspector hands the keyboard to the owner
 // when one holds it; Escape in the find bar and the body menu's launcher row
 // focus the terminal once, and nothing takes the keyboard back later from
 // the find bar or the launcher that took it. A TerminalTab is mounted on the
@@ -30,6 +31,12 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+// A file link opens at once; the wait a test holds is the shell's directory.
+vi.mock("../terminal/linkActions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/linkActions")>()),
+  editorRefusalForWindow: () => null,
+  openTerminalFileInEditor: vi.fn(async () => null),
+}));
 // The clipboard round trips wait until the test lands them.
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
@@ -63,9 +70,11 @@ import type { SurveySpec } from "../api/client";
 import { commandTitle } from "../state/commands";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { shortcutLabel } from "../state/shortcuts";
+import { openTerminalFileInEditor } from "../terminal/linkActions";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { draftPath } from "../__tests__/drafts";
+import { engineClick, modelPointerCapture } from "../__tests__/pointer";
 import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
@@ -227,6 +236,63 @@ describe("once the font and the core have loaded", () => {
     expect(takes(), "the terminal took the keyboard as its load ended").toBe(0);
     expect(document.activeElement, "the other pane keeps the keyboard").toBe(field);
   });
+
+  test("a field that takes the keyboard while the terminal loads keeps it", async () => {
+    const release = holdFont();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target, host } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    // The pane and the tab stay in front: only the keyboard moved, as into
+    // the tab menu's Name field or a sidebar field.
+    const field = fieldOutside();
+    const takes = countTakes(host);
+
+    release();
+    await openedGhostty(target);
+    await settle();
+
+    expect(takes(), "the terminal took the keyboard as its load ended").toBe(0);
+    expect(document.activeElement, "the field keeps the keyboard").toBe(field);
+  });
+
+  test("what held the keyboard when the pane asked for its loading terminal loses it", async () => {
+    const release = holdFont();
+    // The surface the user came from keeps the keyboard until something
+    // takes it. A field stands in for it: one that held the keyboard before
+    // the ask is not one the user moved to during the load.
+    const field = fieldOutside();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    expect(document.activeElement, "nothing took the keyboard during the load").toBe(field);
+
+    release();
+    const term = await openedGhostty(target);
+    await settle();
+
+    expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
+
+  test("a surface handed the keyboard back while the terminal loads loses it", async () => {
+    const release = holdFont();
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = mountTab(tab!, { active: true, focused: true });
+    await settle();
+    // The launcher's Split right opens a terminal in a new pane and, closing
+    // while it loads, returns the keyboard to the terminal it opened from in
+    // the pane just left. No field: the pane's focus still names the new one.
+    const opener = document.createElement("div");
+    opener.tabIndex = 0;
+    document.body.append(opener);
+    opener.focus();
+    expect(document.activeElement, "the opener has the keyboard back").toBe(opener);
+
+    release();
+    const term = await openedGhostty(target);
+    await settle();
+
+    expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
 });
 
 describe("a seeded prompt, sent on the shell's first output", () => {
@@ -260,11 +326,20 @@ describe("a seeded prompt, sent on the shell's first output", () => {
     expect(takes(), "the terminal took the keyboard").toBe(0);
     expect(document.activeElement, "the field keeps the keyboard").toBe(field);
   });
+
+  // With the keyboard at large nothing but the pane's focus decides: the
+  // seed of a terminal in another pane lands while the focused pane's
+  // surface holds no DOM focus.
+  test("in a pane without focus takes no keyboard left at large", async () => {
+    const { takes } = await seeded({ active: true, focused: false }, false);
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(document.activeElement, "the keyboard stays at large").toBe(document.body);
+  });
 });
 
 describe("a menu copy or paste that waits for the clipboard", () => {
-  async function fromMenu(label: string) {
-    const live = await liveTab({ active: true, focused: true });
+  async function fromMenu(label: string, fields: Partial<TerminalTabState> = {}) {
+    const live = await liveTab({ active: true, focused: true }, fields);
     await output(live.socket, "hello from the shell\r\n");
     await settle();
     await openBodyMenu(live.target);
@@ -312,11 +387,103 @@ describe("a menu copy or paste that waits for the clipboard", () => {
     expect(takes(), "the terminal took the keyboard").toBe(0);
     expect(document.activeElement, "the other pane keeps the keyboard").toBe(field);
   });
+
+  test("a copy that lands after the pane lost focus takes no keyboard left at large", async () => {
+    const { props, takes } = await fromMenu("terminal.copy");
+    expect(clipboard.written, "the copy writes the clipboard").not.toBeNull();
+    props.focused = false;
+    await settle();
+    expect(document.activeElement, "the keyboard is at large as the clipboard answers").toBe(document.body);
+    clipboard.written!();
+    await settle();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(document.activeElement, "the keyboard stays at large").toBe(document.body);
+  });
+
+  test("a paste that lands after the Rich Prompt took the keyboard leaves it in the composer", async () => {
+    const { tab, target, socket, takes } = await fromMenu("terminal.paste", {
+      richPromptDraftPath: draftPath("focus-owner-paste"),
+    });
+    expect(clipboard.read, "the paste reads the clipboard").not.toBeNull();
+    showRichPromptForTab(tab.id);
+    const content = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLElement>(".rich-prompt .cm-content");
+      expect(el, "the composer mounts").not.toBeNull();
+      return el!;
+    });
+    const view = EditorView.findFromDOM(content)!;
+    await vi.waitFor(() => expect(view.hasFocus, "the composer takes the keyboard as it mounts").toBe(true));
+    clipboard.read!("echo pasted");
+    await settle();
+    expect(inputs(socket).join(""), "the text still reaches the shell").toContain("echo pasted");
+    expect(takes(), "the terminal took the keyboard from its composer").toBe(0);
+    expect(view.hasFocus, "the composer keeps the keyboard").toBe(true);
+  });
+});
+
+describe("the link menu's Open in editor, which waits for the shell's directory", () => {
+  const MENU = '[aria-label="terminal link menu"]';
+
+  /// A terminal showing a link to a relative path, its link menu open and
+  /// "Open in editor" pressed: the open waits for `reply`, the shell's
+  /// directory.
+  async function opening() {
+    const live = await liveTab({ active: true, focused: true });
+    await output(live.socket, "\x1b]8;;./notes.md\x1b\\notes\x1b]8;;\x1b\\");
+    await settle();
+    const term = await openedGhostty(live.target);
+    const canvas = term.element!.querySelector("canvas")!;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+    modelPointerCapture(canvas);
+    engineClick(canvas, 0, { clientX: 12, clientY: 9 });
+    const row = await vi.waitFor(() => {
+      const el = document.querySelector<HTMLButtonElement>(`${MENU} [data-terminal-link-action="open-editor"]`);
+      expect(el, "the link menu opens with its editor entry").not.toBeNull();
+      expect(document.activeElement, "the menu takes the keyboard onto its first entry").toBe(el);
+      return el!;
+    });
+    row.click();
+    await settle();
+    expect(openTerminalFileInEditor, "the open waits for the shell's directory").not.toHaveBeenCalled();
+    const reply = async () => {
+      await receive(live.socket, { type: "cwd", cwd: "/home/me/repo" });
+      await settle();
+      expect(openTerminalFileInEditor, "the open goes out once the directory is known").toHaveBeenCalledWith("/home/me/repo/notes.md");
+      expect(document.querySelector(MENU), "the menu is closed").toBeNull();
+    };
+    return { ...live, takes: countTakes(live.host), reply };
+  }
+
+  test("an open that lands with the terminal still in front gives it the keyboard back", async () => {
+    const { takes, reply, host } = await opening();
+    await reply();
+    expect(takes(), "the terminal takes the keyboard").toBe(1);
+    expect(host.contains(document.activeElement)).toBe(true);
+  });
+
+  test("an open that lands after the pane lost focus takes no keyboard", async () => {
+    const { props, takes, reply, host } = await opening();
+    props.focused = false;
+    await settle();
+    await reply();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(host.contains(document.activeElement)).toBe(false);
+  });
+
+  test("a menu closed by a press outside it is over: its open lands and hands the terminal nothing", async () => {
+    const { takes, reply } = await opening();
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await settle();
+    expect(document.querySelector(MENU), "the press outside closes the menu").toBeNull();
+    expect(document.activeElement, "the keyboard is at large").toBe(document.body);
+    await reply();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+  });
 });
 
 describe("closing the inspector", () => {
-  async function withInspector() {
-    const live = await liveTab({ active: true, focused: true });
+  async function withInspector(fields: Partial<TerminalTabState> = {}) {
+    const live = await liveTab({ active: true, focused: true }, fields);
     live.tab.inspectorOpen = true;
     await settle();
     const close = live.target.querySelector<HTMLButtonElement>("aside.inspector button.close");
@@ -331,6 +498,24 @@ describe("closing the inspector", () => {
     close.click();
     await settle();
     expect(ghosttyHasFocus(term), "the terminal has the keyboard").toBe(true);
+  });
+
+  test("with the Rich Prompt shown hands the keyboard back to the composer that held it", async () => {
+    const { tab, target, close, host } = await withInspector({ richPromptDraftPath: draftPath("focus-owner-inspector") });
+    showRichPromptForTab(tab.id);
+    const content = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLElement>(".rich-prompt .cm-content");
+      expect(el, "the composer mounts").not.toBeNull();
+      return el!;
+    });
+    const view = EditorView.findFromDOM(content)!;
+    await vi.waitFor(() => expect(view.hasFocus, "the composer takes the keyboard as it mounts").toBe(true));
+    const takes = countTakes(host);
+    close.focus();
+    close.click();
+    await settle();
+    expect(takes(), "the terminal took the keyboard from its composer").toBe(0);
+    expect(view.hasFocus, "the composer has the keyboard back").toBe(true);
   });
 
   test("under a survey over the terminal hands the keyboard back to the survey's card", async () => {
@@ -393,7 +578,12 @@ describe("hand-backs that focus once", () => {
     window.addEventListener("chan:command", onCommand);
     try {
       await openBodyMenu(target);
-      menuRow(shortcutLabel("app.launcher.toggle")).click();
+      // The press takes the keyboard to the row, so the terminal holds it
+      // as the launcher opens only if the row hands it back first.
+      const row = menuRow(shortcutLabel("app.launcher.toggle"));
+      row.focus();
+      expect(ghosttyHasFocus(term), "the row took the keyboard from the terminal").toBe(false);
+      row.click();
       await settle();
     } finally {
       window.removeEventListener("chan:command", onCommand);

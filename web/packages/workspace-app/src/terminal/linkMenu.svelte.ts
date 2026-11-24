@@ -1,4 +1,5 @@
 import type { IBufferRange, Terminal as XtermTerminal } from "@xterm/xterm";
+import { tick } from "svelte";
 
 import { openExternalUrl } from "../editor/external_links";
 import { copyTextToClipboard, setTransientStatus, ui } from "../state/store.svelte";
@@ -48,6 +49,9 @@ export type LinkMenuHost = {
   /// Close the tab's menu bubble if it shows the link menu.
   close(): void;
   focusTerminal(): void;
+  /// Give the terminal the keyboard after a wait, if it is still the
+  /// focused pane's active tab and nothing took the keyboard meanwhile.
+  focusTerminalAfterWait(): void;
 };
 
 const CWD_WAIT_MS = 1500;
@@ -126,6 +130,13 @@ export class TerminalLinkMenu {
     if (refocus) this.host.focusTerminal();
   }
 
+  /// The bubble closed without the menu asking (a press outside it, another
+  /// menu in its place). The menu is over: an "Open in editor" still waiting
+  /// lands its open and touches neither the bubble nor the keyboard.
+  dismiss(): void {
+    this.menu = null;
+  }
+
   /// Whether the menu no longer points at what is on the screen.
   stale(): boolean {
     const menu = this.menu;
@@ -145,11 +156,20 @@ export class TerminalLinkMenu {
     const refusal = await this.#openFile(menu.link, menu.cwdSince);
     menu.editorBusy = false;
     if (this.menu !== menu) return;
-    if (refusal) menu.editorRefusal = refusal;
+    if (refusal) {
+      menu.editorRefusal = refusal;
+      return;
+    }
     // The keyboard goes back to the terminal: an open routed to another
     // window or revealed in the file browser takes none here, and an editor
-    // tab that opens takes it as it arrives.
-    else this.close(true);
+    // tab that opens takes it as it arrives. The open waited (the shell's
+    // directory, then the open itself), so the terminal takes the keyboard
+    // as after any wait: once the bubble has left the page and its entry
+    // has let go of the keyboard, and only if the user did not leave the
+    // tab or the pane meanwhile.
+    this.close(false);
+    await tick();
+    this.host.focusTerminalAfterWait();
   }
 
   async copyTarget(): Promise<void> {

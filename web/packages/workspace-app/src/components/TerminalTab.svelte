@@ -80,6 +80,7 @@
     resolveTerminalMetadataRename,
     resolvePromptCancelled,
     seedTerminalSecretMasking,
+    setActivePane,
     toggleTerminalGroupBroadcast,
     toggleTerminalSecretMasking,
     setTerminalActivity,
@@ -288,6 +289,11 @@
     );
   }
 
+  // What held the keyboard when the pane's focus last asked for this
+  // terminal and found it still loading; undefined when no such ask waits
+  // for start().
+  let keyboardHolderAtLoadingAsk: Element | null | undefined;
+
   // The focused pane's active terminal takes the keyboard as the pane gains
   // focus and again once start() has wired it, since the focus effect found
   // no terminal while the core and font loaded. Both run later than the
@@ -298,7 +304,39 @@
   function focusActiveTerminal(): void {
     if (!active || !focused) return;
     if (isRichPromptVisible(tab.id)) return;
+    if (!term) {
+      keyboardHolderAtLoadingAsk = document.activeElement;
+      return;
+    }
     focusTerminal();
+  }
+
+  // start() answers the pane's ask unless the user moved to a field while
+  // the terminal loaded: a form field that did not hold the keyboard at the
+  // ask (the tab menu's Name field, a sidebar field) keeps it, where taking
+  // it would cut a word short and send the rest to the shell. Anything else
+  // loses it, as the pane's focus says: the surface of the tab the user came
+  // from, which under WebKit keeps DOM focus while hidden, and a surface
+  // handed the keyboard back during the load, as the launcher hands it to
+  // the terminal it opened from while the terminal its Split right opened
+  // still loads.
+  function focusLoadedTerminal(): void {
+    const holderAtAsk = keyboardHolderAtLoadingAsk;
+    keyboardHolderAtLoadingAsk = undefined;
+    if (!active || !focused) return;
+    if (isRichPromptVisible(tab.id)) return;
+    const holder = document.activeElement;
+    if (holder !== holderAtAsk && holder?.matches("input, textarea, select")) return;
+    focusTerminal();
+  }
+
+  // The Linux desktop's middle press (PRIMARY paste) is kept from the widget
+  // and from the pane, so it does here what a left press does through them:
+  // the pane becomes the active one and the terminal takes the keyboard,
+  // whatever owns it, as the widget's own pointer focus does.
+  function focusFromMiddlePress(): void {
+    setActivePane(paneId);
+    term?.focus();
   }
 
   // An action on this terminal that waited before handing it the keyboard
@@ -864,12 +902,20 @@
     else if (host?.contains(target)) keyboardSurface = "terminal";
   }
 
+  // Give the keyboard to the find input, the composer or the terminal,
+  // whichever last took it and is still open.
+  function focusLastKeyboardSurface(): void {
+    if (keyboardHeld()) return;
+    if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
+    else if (keyboardSurface === "composer" && composer) composer.focus();
+    else focusTerminal();
+  }
+
   // Give the keyboard back when this is still the focused terminal and
   // nothing outside it has taken the keyboard since the move: to its owner
   // when something owns it, as the owner's surface takes it (a survey over
   // this terminal among them; the Computers launcher takes nothing here),
-  // else to the find input, the composer or the terminal, whichever last
-  // took it and is still open.
+  // else to the surface of this terminal that last took it.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused || !keyboardFreeOrIn(tabEl)) return;
@@ -877,10 +923,7 @@
         handKeyboardToOwner();
         return;
       }
-      if (keyboardHeld()) return;
-      if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
-      else if (keyboardSurface === "composer" && composer) composer.focus();
-      else focusTerminal();
+      focusLastKeyboardSurface();
     });
   }
 
@@ -1076,6 +1119,14 @@
       if (findOpen || menuOpen || isRichPromptVisible(tab.id)) return;
       if (launcherShownOverWindow()) return;
       if (!keyboardFreeOrIn(host)) return;
+      // An owner can hold the keyboard by rule while DOM focus sits in the
+      // host (a survey over this terminal after a press into it). Ask
+      // before the blur below, which would drop the keyboard to the body
+      // for a refocus the owner then refuses: the owner's surface takes it.
+      if (keyboardHeld()) {
+        handKeyboardToOwner();
+        return;
+      }
       const holder = document.activeElement;
       // ghostty-web focuses the host element it opened in, and focus() on
       // the element that is already document.activeElement is a DOM no-op,
@@ -1091,7 +1142,6 @@
       ) {
         holder.blur();
       }
-      // focusTerminal carries the remaining dialog and survey ownership guards.
       focusTerminal();
     });
   }
@@ -1494,7 +1544,7 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
-    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu);
+    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu, focusFromMiddlePress);
     // The masker logged and disabled itself; record it on the tab so the
     // toggle's check stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
@@ -1595,7 +1645,7 @@
     // carried-over cursor would make the server skip everything the
     // PREVIOUS xterm had seen, and that buffer died with term.dispose().
     void connect();
-    queueMicrotask(focusActiveTerminal);
+    queueMicrotask(focusLoadedTerminal);
   }
 
   function clearLiveness(): void {
@@ -2418,11 +2468,12 @@
   // Closing the inspector hands the keyboard back: to its owner when
   // something owns it (a survey over this terminal, which the floating
   // inspector does not cover), as the owner's surface takes it, else to the
-  // terminal.
+  // surface of this terminal that last took it, so a shown Rich Prompt's
+  // composer gets it back and not the terminal under it.
   function closeInspector(): void {
     tab.inspectorOpen = false;
     if (owner() !== null) handKeyboardToOwner();
-    else focusTerminal();
+    else focusLastKeyboardSurface();
   }
 
   // The launcher opens from this terminal, as its chord does from a focused
@@ -3449,6 +3500,7 @@
       if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
     },
     focusTerminal,
+    focusTerminalAfterWait,
   });
   const xtermLinks = xtermLinkHandlers(
     () => (backend === "xterm" ? (term as Terminal | null) : null),
@@ -3487,6 +3539,12 @@
       if (node.isConnected && first && mayFocus(first)) first.focus({ preventScroll: true });
     });
   }
+
+  // The bubble can close without the link menu asking: a press outside it,
+  // another menu opening in its place. The link menu's state goes with it.
+  $effect(() => {
+    if (!(menuOpen && tabMenu.source === "link")) untrack(() => links.dismiss());
+  });
 
   // Closes the link menu when its link's cells change or move on the screen
   // (output, a scroll, a resize) or a cover rises over the window, read ten
