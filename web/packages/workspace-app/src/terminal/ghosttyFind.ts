@@ -171,7 +171,8 @@ const animationFrames: FrameScheduler = {
   cancel: (id) => cancelAnimationFrame(id),
 };
 
-const FIND_HIGHLIGHT_LAYER = "search-active";
+/// The widget highlight layer that holds the active match.
+export const FIND_HIGHLIGHT_LAYER = "search-active";
 
 export type GhosttyFindOptions = {
   viewport: FindViewport;

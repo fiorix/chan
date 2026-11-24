@@ -179,7 +179,7 @@
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
-  import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
+  import { FIND_HIGHLIGHT_LAYER, GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
@@ -2970,7 +2970,7 @@
   function findMatchText(): string {
     if (!findOpen || backend !== "ghostty") return "";
     const ghosttyTerm = term as GhosttyTerminal | null;
-    const match = ghosttyTerm?.highlights.get("search-active")?.ranges[0];
+    const match = ghosttyTerm?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
     return match ? ghosttyTerm!.getRangeText(match) : "";
   }
 
