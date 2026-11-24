@@ -949,8 +949,10 @@ export class Terminal {
   // ==========================================================================
 
   /**
-   * Attach a custom keyboard event handler
-   * Returns true to prevent default handling
+   * Attach a custom keyboard event handler, called for each keydown before
+   * the widget encodes it. A key it returns true for is the embedder's: the
+   * widget sends nothing for it and leaves its default alone, so the
+   * embedder prevents the default wherever it acts on the key.
    */
   public attachCustomKeyEventHandler(
     customKeyEventHandler: (event: KeyboardEvent) => boolean

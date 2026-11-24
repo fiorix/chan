@@ -108,6 +108,10 @@ Construction options `lineHeight` (default `1`), `boxGlyphs` (default `false`) a
 
 For test instruments only, `testHooks: { scrollbarOpacity: number }` fixes paint opacity to the supplied value clamped to `[0, 1]` and suppresses automatic fades while supplied; omit it in production. An instrument may update that object and call `refresh()`, and observe full repaints with an ordinary paint layer. This hook controls painting rather than terminal content, event order or sizing.
 
+## Keys the embedder takes
+
+`attachCustomKeyEventHandler(handler)` sees each keydown before the widget encodes it. A key the handler returns true for is the embedder's: the widget sends nothing for it, does not prevent its default and does not stop its propagation, so a chord the embedder lets out reaches the page and the browser as if the terminal were not focused. The embedder prevents the default wherever it acts on such a key. The widget prevents the default only of keys it sends itself; the paste chord keeps its default so the native paste event fires.
+
 ## Links
 
 The link detector underlines what its two providers find: OSC 8 hyperlinks first, then URLs in the text (`http`, `https`, `mailto`, `ftp`, `ssh`, `git`, `tel`, `magnet`, `gemini`, `gopher`, `news`). A click on a link opens nothing by itself. `term.onLinkActivate(({ target, kind, range, event }) => ...)` reports it: `target` is the OSC 8 URI exactly as the program wrote it, or the matched URL, and can name another place than the text on the screen; `kind` is `"osc8"` or `"url"`; `range` holds the link's first and last cells, absolute rows with row zero at the oldest retained history row; `event` is the click, modifiers included. With no listener a click on a link does nothing; the widget calls `window.open` nowhere.
