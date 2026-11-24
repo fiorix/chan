@@ -11,6 +11,7 @@ type SelectionAPI = {
   setSelection(range: Range | null): void;
   getSelectionRange(): Range | null;
   getScrollbackText(): string;
+  getRangeText(range: Range): string;
   cellAt(x: number, y: number): { col: number; row: number; absoluteRow: number } | null;
 };
 
@@ -425,6 +426,53 @@ describe('copy operations and click extents', () => {
     expect(copy).not.toHaveBeenCalled();
   });
 
+  test('a range reads as its selection would, without selecting or copying', async () => {
+    let drawn = false;
+    const copy = vi.fn();
+    const rows = ['abcdefghij', 'klmnop', 'a界b', 'x\x7fy', '0123456789ABCD'];
+    const { term, clipboard } = await open(rows.join('\r\n'), 10, 3, copy, () => drawn);
+    expect(term.getScrollbackLength()).toBe(3);
+    const users = range(0, 5, 3, 5);
+    term.setSelection(users);
+    const cases: Array<[Range, string]> = [
+      [range(2, 0, 4, 0), 'cde'],
+      // Either direction, from history into the screen.
+      [range(1, 1, 8, 0), 'ij\nkl'],
+      // Either half of a wide glyph reads the whole glyph.
+      [range(2, 2, 2, 2), '界'],
+      [range(1, 2, 1, 2), '界'],
+      // An undrawn control is filtered and a core soft wrap joins.
+      [range(0, 3, 2, 3), 'xy'],
+      [range(8, 4, 1, 5), '89AB'],
+      // Columns and rows clamp to the retained grid.
+      [range(-4, 4, 99, 99), '0123456789ABCD'],
+    ];
+    for (const [read, text] of cases) {
+      expect(term.getRangeText(read), JSON.stringify(read)).toBe(text);
+      term.setSelection(read);
+      expect(term.getSelection(), 'the same text as a selection of it').toBe(text);
+      term.setSelection(users);
+    }
+    expect(term.getRangeText(range(0, 0, 9, 1))).toBe('abcdefghij\nklmnop');
+    drawn = true;
+    expect(term.getRangeText(range(0, 0, 9, 1)), 'the drawn-wrap policy is asked at each read').toBe('abcdefghijklmnop');
+    expect(term.getRangeText(range(0, 40, 9, 41)), 'wholly beyond the retained rows').toBe('');
+    expect(term.getRangeText(range(0, -3, 9, -1))).toBe('');
+    for (const invalid of [NaN, Infinity, 0.5]) {
+      expect(() => term.getRangeText(range(0, 0, invalid, 0))).toThrow(RangeError);
+      expect(() => term.getRangeText(range(0, invalid, 3, 0))).toThrow(RangeError);
+    }
+    expect(term.getSelectionRange()).toEqual(users);
+    expect(copy).not.toHaveBeenCalled();
+    expect(clipboard).not.toHaveBeenCalled();
+  });
+
+  test('the range reader takes the row fallback when the core cannot format', async () => {
+    const { term } = await open('ab界e\u0301👩‍💻xyz\x7fq', 10, 4);
+    vi.spyOn(term.wasmTerm!, 'plainText').mockReturnValue(null);
+    expect(term.getRangeText(range(1, 0, 9, 1))).toBe('b界e\u0301👩‍💻xyzq');
+  });
+
   test('the policy changes word and line extents and explicit copies after open', async () => {
     let drawn = true;
     const copy = vi.fn();
@@ -500,6 +548,8 @@ describe('hit testing and lifetime', () => {
     expect(term.hasSelection()).toBe(false);
     expect(term.copySelection()).toBe(false);
     expect(term.getScrollbackText()).toBe('');
+    expect(term.getRangeText(range(0, 0, 4, 0))).toBe('');
+    expect(term.getRangeText(range(NaN, 0, 4, 0))).toBe('');
     expect(term.cellAt(1, 1)).toBeNull();
   });
 });

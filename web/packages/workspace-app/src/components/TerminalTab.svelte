@@ -2962,9 +2962,21 @@
     await copyToClipboard(text);
   }
 
+  /// The active find match's text while the find bar is open on ghostty.
+  /// Find paints the match on the widget's `search-active` highlight layer
+  /// and leaves the selection to the user, so the match is read from the
+  /// layer's range. Empty with the bar closed, with no match, and on xterm,
+  /// whose addon selects its match.
+  function findMatchText(): string {
+    if (!findOpen || backend !== "ghostty") return "";
+    const ghosttyTerm = term as GhosttyTerminal | null;
+    const match = ghosttyTerm?.highlights.get("search-active")?.ranges[0];
+    return match ? ghosttyTerm!.getRangeText(match) : "";
+  }
+
   async function copySelectionOrScrollback(): Promise<void> {
     closeTabMenu();
-    const text = term?.getSelection() || scrollbackText();
+    const text = term?.getSelection() || findMatchText() || scrollbackText();
     if (!text) return;
     await copyToClipboard(text);
   }
@@ -2999,8 +3011,8 @@
   // the Copy command) copies the CURRENT SELECTION only. A bare copy chord
   // must never dump the whole scrollback - that is the explicit "Copy
   // Scrollback" menu action - so an empty selection is a no-op, matching
-  // every native terminal. The menu's "Copy" stays selection-or-scrollback
-  // because an explicit click wants a result.
+  // every native terminal. The menu's "Copy" falls back to the find match
+  // and then the scrollback because an explicit click wants a result.
   async function copySelectionToClipboard(): Promise<void> {
     const text = term?.getSelection() ?? "";
     if (!text) return;

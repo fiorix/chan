@@ -821,6 +821,14 @@ export class Terminal {
     return this.selectionManager?.cellAt(clientX, clientY) ?? null;
   }
 
+  /**
+   * The text a selection of `range` would copy; leaves selection untouched.
+   * Throws RangeError for non-integer coordinates while the terminal is open.
+   */
+  public getRangeText(range: SelectionRange): string {
+    return this.selectionManager?.getRangeText(range) ?? '';
+  }
+
   /** Copy-formatted retained history and screen; leaves selection untouched. */
   public getScrollbackText(): string {
     return this.selectionManager?.getScrollbackText() ?? '';

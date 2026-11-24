@@ -52,6 +52,14 @@ function isBlankCell(cell: VtCell | undefined): boolean {
   return !cell || cell.codepoint === 0 || cell.codepoint === 32;
 }
 
+function assertIntegerRange(range: SelectionRange): void {
+  for (const anchor of [range.start, range.end]) {
+    if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
+      throw new RangeError('Selection coordinates must be finite integers');
+    }
+  }
+}
+
 // ============================================================================
 // SelectionManager Class
 // ============================================================================
@@ -253,7 +261,20 @@ export class SelectionManager {
   /** Read complete clusters, joining wraps and filtering undrawn controls. */
   getSelection(): string {
     const range = this.getSelectionRange();
-    if (!range) return '';
+    return range ? this.rangeText(range) : '';
+  }
+
+  /**
+   * The text a selection of `range` would read, clamped and widened to whole
+   * glyphs the same way, without selecting it or copying.
+   */
+  getRangeText(range: SelectionRange): string {
+    assertIntegerRange(range);
+    const clamped = this.clampRange(range);
+    return clamped ? this.rangeText(clamped) : '';
+  }
+
+  private rangeText(range: SelectionRange): string {
     const drawn = this.terminal.options.joinDrawnWraps?.() ?? false;
     const textRange = {
       startCol: range.start.col, startRow: range.start.absoluteRow,
@@ -363,11 +384,7 @@ export class SelectionManager {
   /** Set inclusive absolute endpoints without copying; null clears. */
   setSelection(range: SelectionRange | null): void {
     if (range) {
-      for (const anchor of [range.start, range.end]) {
-        if (!Number.isInteger(anchor.col) || !Number.isInteger(anchor.absoluteRow)) {
-          throw new RangeError('Selection coordinates must be finite integers');
-        }
-      }
+      assertIntegerRange(range);
       range = this.clampRange(range);
     }
     if (!range) {

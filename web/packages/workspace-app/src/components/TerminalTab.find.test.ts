@@ -206,6 +206,68 @@ describe("find and user selection coexistence", () => {
   });
 });
 
+// Find paints its match and leaves the selection to the user, so the menu's
+// Copy and the Copy command read the match from its highlight.
+describe("Copy with a find match showing", () => {
+  function clipboardWrites() {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    return writeText;
+  }
+  afterEach(() => { delete (navigator as { clipboard?: unknown }).clipboard; });
+
+  async function copied(writeText: ReturnType<typeof clipboardWrites>, by: () => void): Promise<string[]> {
+    writeText.mockClear();
+    by();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+    return writeText.mock.calls.map(([text]) => text);
+  }
+  const command = () => fireCommand("terminal.copy");
+  const chord = () => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.copy", chord: true } }));
+  const SCROLLBACK = "a\nneedle b\nc\nneedle d\ne\nneedle f";
+
+  test("copies the match with nothing selected, the selection when there is one, and the scrollback once the bar closes", async () => {
+    const term = await renderGhostty();
+    const writeText = clipboardWrites();
+    const { input, frames } = await findNeedle(term);
+    expect(await copied(writeText, command), "the newest match").toEqual(["needle"]);
+    expect(term.getSelectionRange(), "the copy selects nothing").toBeNull();
+    expect(activeHighlight(term)).toEqual(match(5));
+
+    pressEnter(input);
+    await tick();
+    expect(activeHighlight(term)).toEqual(match(3));
+    typeQuery(input, "needle d");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toEqual({ start: { col: 0, absoluteRow: 3 }, end: { col: 7, absoluteRow: 3 } });
+    expect(await copied(writeText, command), "the match the bar shows now").toEqual(["needle d"]);
+    expect(await copied(writeText, chord), "the copy chord stays the selection's alone").toEqual([]);
+
+    term.setSelection({ start: { col: 0, absoluteRow: 1 }, end: { col: 7, absoluteRow: 1 } });
+    expect(await copied(writeText, command), "the user's selection wins").toEqual(["needle b"]);
+    expect(await copied(writeText, chord)).toEqual(["needle b"]);
+    term.clearSelection();
+
+    findInput()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+    expect(findInput()).toBeNull();
+    expect(await copied(writeText, command), "no bar, no match: the scrollback").toEqual([SCROLLBACK]);
+  });
+
+  test("copies the scrollback while the bar's query matches nothing", async () => {
+    const term = await renderGhostty();
+    const writeText = clipboardWrites();
+    const frames = holdFrames();
+    await openFindWithQuery("absent");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term)).toBeNull();
+    expect(await copied(writeText, command)).toEqual([SCROLLBACK]);
+  });
+});
+
 describe("terminal find command routing", () => {
   test("app.find.open opens the find bar on the focused terminal", async () => {
     await renderTerminal(terminalTab(), true);
