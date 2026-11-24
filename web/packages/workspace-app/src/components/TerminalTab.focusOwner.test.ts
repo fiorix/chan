@@ -329,8 +329,8 @@ describe("a seeded prompt, sent on the shell's first output", () => {
 });
 
 describe("a menu copy or paste that waits for the clipboard", () => {
-  async function fromMenu(label: string) {
-    const live = await liveTab({ active: true, focused: true });
+  async function fromMenu(label: string, fields: Partial<TerminalTabState> = {}) {
+    const live = await liveTab({ active: true, focused: true }, fields);
     await output(live.socket, "hello from the shell\r\n");
     await settle();
     await openBodyMenu(live.target);
@@ -389,6 +389,26 @@ describe("a menu copy or paste that waits for the clipboard", () => {
     await settle();
     expect(takes(), "the terminal took the keyboard").toBe(0);
     expect(document.activeElement, "the keyboard stays at large").toBe(document.body);
+  });
+
+  test("a paste that lands after the Rich Prompt took the keyboard leaves it in the composer", async () => {
+    const { tab, target, socket, takes } = await fromMenu("terminal.paste", {
+      richPromptDraftPath: draftPath("focus-owner-paste"),
+    });
+    expect(clipboard.read, "the paste reads the clipboard").not.toBeNull();
+    showRichPromptForTab(tab.id);
+    const content = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLElement>(".rich-prompt .cm-content");
+      expect(el, "the composer mounts").not.toBeNull();
+      return el!;
+    });
+    const view = EditorView.findFromDOM(content)!;
+    await vi.waitFor(() => expect(view.hasFocus, "the composer takes the keyboard as it mounts").toBe(true));
+    clipboard.read!("echo pasted");
+    await settle();
+    expect(inputs(socket).join(""), "the text still reaches the shell").toContain("echo pasted");
+    expect(takes(), "the terminal took the keyboard from its composer").toBe(0);
+    expect(view.hasFocus, "the composer keeps the keyboard").toBe(true);
   });
 });
 
