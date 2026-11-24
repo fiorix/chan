@@ -991,10 +991,14 @@
   // Agents print truecolor secondary text tuned for dark backgrounds
   // (#999999 hints and summaries, #b1b9f9 selections, #ffc107 warnings);
   // on the light theme those land below 3:1 against the white background
-  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has xterm
-  // darken only under-contrast foregrounds; 1 is the identity, keeping
-  // dark rendering untouched. xterm-only: ghostty-web has no equivalent
-  // option.
+  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has either
+  // renderer darken only under-contrast foregrounds; 1 is the identity,
+  // keeping dark rendering untouched. xterm.js takes the floor as an option
+  // of its own, the widget as a field of its theme. The widget measures a
+  // cell on the default background against the background it paints, so in
+  // a window built transparent, where that background is clear and the tint
+  // is the page's, its floor reaches only cells with a background of their
+  // own.
   function terminalMinimumContrastRatio(): number {
     // While the desktop shows through, the backdrop is whatever sits behind
     // the window, so a ratio measured against the theme background would be
@@ -1003,12 +1007,21 @@
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
+  /// The widget's theme: the colours plus the contrast floor, which it
+  /// takes only there.
+  function ghosttyTerminalTheme() {
+    return {
+      ...terminalTheme(),
+      minimumContrastRatio: terminalMinimumContrastRatio(),
+    };
+  }
+
   function applyTerminalTheme(): void {
     if (!term) return;
-    const theme = terminalTheme();
     if (backend === "ghostty") {
-      applyGhosttyTheme(term as GhosttyTerminal, theme);
+      applyGhosttyTheme(term as GhosttyTerminal, ghosttyTerminalTheme());
     } else {
+      const theme = terminalTheme();
       term.options.theme = theme;
       (term as Terminal).options.minimumContrastRatio =
         terminalMinimumContrastRatio();
@@ -1355,7 +1368,7 @@
         // Synchronous scrolling matches xterm.js and lets calibrated pixel
         // gestures accumulate directly in the widget's fractional viewport.
         smoothScrollDuration: 0,
-        theme: terminalTheme(),
+        theme: ghosttyTerminalTheme(),
       });
       term = ghosttyTerm;
       ghosttyTerm.onLinkActivate(onGhosttyLink);

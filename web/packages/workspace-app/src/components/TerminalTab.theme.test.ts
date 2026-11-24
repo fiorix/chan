@@ -18,6 +18,11 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
+import { TRANSPARENT_WINDOW_PARAM } from "../terminal/backgroundOpacity";
+import {
+  applyDesktopTerminalOpacity,
+  resetDesktopTerminalOpacityForTests,
+} from "../terminal/desktopTerminalOpacity.svelte";
 import { installTerminalDom, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
 
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
@@ -37,6 +42,7 @@ const ANSI_KEYS = [
   "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
 ];
 const startTheme = ui.theme;
+const startUrl = window.location.href;
 
 beforeEach(() => {
   ui.theme = "dark";
@@ -47,6 +53,8 @@ afterEach(() => {
   delete hybridSurfaceThemes.terminal;
   __testSetStandalonePreferences(null);
   ui.theme = startTheme;
+  resetDesktopTerminalOpacityForTests();
+  window.history.replaceState(null, "", startUrl);
 });
 
 async function mounted() {
@@ -100,6 +108,70 @@ describe("the widget palette", () => {
     const body = target.querySelector<HTMLElement>(".terminal-tab")!;
     expect(body.dataset.theme).toBe("light");
     expect(body.style.getPropertyValue("--terminal-background")).toBe("#fdf6e3");
+  });
+});
+
+/// The floor under a cell's ink against its background (WCAG AA on the
+/// light theme), as the widget holds it in its theme. 1 changes no ink.
+describe("the widget's contrast floor", () => {
+  function floor(term: { options: { theme: unknown } }): unknown {
+    return (term.options.theme as { minimumContrastRatio?: number }).minimumContrastRatio;
+  }
+
+  test("a terminal opened on the light theme has the floor, and loses it on a switch to dark", async () => {
+    hybridSurfaceThemes.terminal = "light";
+    const { term } = await mounted();
+    expect(floor(term), "opened light").toBe(4.5);
+
+    delete hybridSurfaceThemes.terminal;
+    flushSync();
+    await tick();
+    expect(ansi(term.options.theme), "switched to dark").toEqual(DARK_ANSI);
+    expect(floor(term), "switched to dark").toBe(1);
+  });
+
+  test("a terminal opened on the dark theme has none, and gains it on a switch to light", async () => {
+    const { term } = await mounted();
+    expect(floor(term), "opened dark").toBe(1);
+
+    hybridSurfaceThemes.terminal = "light";
+    flushSync();
+    await tick();
+    expect(ansi(term.options.theme), "switched to light").toEqual(LIGHT_ANSI);
+    expect(floor(term), "switched to light").toBe(4.5);
+  });
+
+  test("a custom palette of light contrast has the floor", async () => {
+    const noTerminalFields = {};
+    __testSetStandalonePreferences(
+      terminalPreferences(noTerminalFields, {
+        terminal_colors: {
+          mode: "custom",
+          custom: { background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f", contrast: "light" },
+        },
+      }),
+    );
+    const { term } = await mounted();
+    expect(floor(term)).toBe(4.5);
+  });
+
+  test("a see-through background has none on the light theme, until the desktop's opacity is back at 100", async () => {
+    window.history.replaceState(null, "", `?${TRANSPARENT_WINDOW_PARAM}=1`);
+    applyDesktopTerminalOpacity(90);
+    hybridSurfaceThemes.terminal = "light";
+    const { term } = await mounted();
+    expect(ansi(term.options.theme), "the light palette").toEqual(LIGHT_ANSI);
+    expect(floor(term), "the desktop shows through").toBe(1);
+
+    applyDesktopTerminalOpacity(100);
+    flushSync();
+    await tick();
+    expect(floor(term), "the tint is opaque").toBe(4.5);
+
+    applyDesktopTerminalOpacity(85);
+    flushSync();
+    await tick();
+    expect(floor(term), "see-through again").toBe(1);
   });
 });
 
