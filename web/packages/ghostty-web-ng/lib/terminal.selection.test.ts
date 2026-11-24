@@ -329,6 +329,22 @@ describe('public selection ranges', () => {
     expect(term.getSelection()).toBe(text.replaceAll('\r\n', '\n'));
   });
 
+  test('select takes viewport rows, with history and with the view scrolled back', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `row ${i}`).join('\r\n');
+    const { term } = await open(text);
+    expect(term.getScrollbackLength()).toBe(8);
+    term.select(0, 1, 5);
+    expect(term.getSelectionRange()).toEqual(range(0, 9, 4, 9));
+    expect(term.getSelection()).toBe('row 9');
+    term.viewport.scrollTo(3.5);
+    // A length past the last column carries into the next viewport row.
+    term.select(4, 0, 18);
+    expect(term.getSelectionRange()).toEqual(range(4, 5, 1, 6));
+    expect(term.getSelection()).toBe('5\nro');
+    term.selectLines(0, 0);
+    expect(term.getSelectionRange(), 'selectLines names the same row').toEqual(range(0, 5, 19, 5));
+  });
+
   test.each([1, 2])('widens either half (%s) of a wide glyph and preserves clusters', async (col) => {
     const { term } = await open('a界e\u0301👩‍💻z');
     term.setSelection(range(col, 0, col, 0));

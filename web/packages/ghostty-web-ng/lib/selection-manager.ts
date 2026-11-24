@@ -445,8 +445,8 @@ export class SelectionManager {
   }
 
   /**
-   * Select text at specific column and row with length
-   * xterm.js compatible API
+   * Select `length` cells from a column of a viewport row, carrying past the
+   * last column into the rows below it.
    */
   select(column: number, row: number, length: number): void {
     // The rows the old selection painted repaint without it
@@ -471,9 +471,8 @@ export class SelectionManager {
     endRow = Math.min(endRow, dims.rows - 1);
 
     // Convert viewport rows to absolute rows
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: column, absoluteRow: viewportY + row };
-    this.selectionEnd = { col: endCol, absoluteRow: viewportY + endRow };
+    this.selectionStart = { col: column, absoluteRow: this.viewportRowToAbsolute(row) };
+    this.selectionEnd = { col: endCol, absoluteRow: this.viewportRowToAbsolute(endRow) };
     this.requestRender();
     this.selectionChangedEmitter.fire();
   }
