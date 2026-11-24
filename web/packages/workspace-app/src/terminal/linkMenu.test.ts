@@ -42,6 +42,7 @@ function host(overrides: Partial<LinkMenuHost> = {}) {
     open: () => log.push("open"),
     close: () => log.push("close"),
     focusTerminal: () => log.push("focus"),
+    focusTerminalAfterWait: () => log.push("focus after wait"),
     ...overrides,
   };
   return { value, log };
@@ -85,13 +86,25 @@ describe("TerminalLinkMenu", () => {
     expect(calls.edited).toEqual(["/home/me/repo/notes.md"]);
   });
 
-  test("an open on its way closes the menu and hands the keyboard back to the terminal", async () => {
+  test("an open on its way closes the menu and hands the terminal the keyboard as after a wait", async () => {
     const { value, log } = host();
     const links = new TerminalLinkMenu(value);
     await links.onLink("/srv/notes.md", RANGE, click());
     await links.openInEditor();
     expect(links.menu).toBeNull();
-    expect(log).toEqual(["open", "close", "focus"]);
+    expect(log).toEqual(["open", "close", "focus after wait"]);
+  });
+
+  test("a menu dismissed while its open waits lands the open and touches neither the bubble nor the keyboard", async () => {
+    const { value, log } = host();
+    const links = new TerminalLinkMenu(value);
+    await links.onLink("./notes.md", RANGE, click());
+    const opening = links.openInEditor();
+    links.dismiss();
+    links.noteCwd();
+    await opening;
+    expect(calls.edited).toEqual(["/home/me/repo/notes.md"]);
+    expect(log).toEqual(["cwd?", "open"]);
   });
 
   test("the menu is stale once the link's rows or their place on the screen change", async () => {

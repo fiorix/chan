@@ -3,10 +3,11 @@
 // The terminal's focus calls that run after a wait, and the hand-backs that
 // run at once. A focus that waited (start() once the font and the core have
 // loaded, a seeded prompt sent on the shell's first output, a clipboard read
-// or write that landed) asks when it runs whether this is still the focused
-// pane's active tab, whether its Rich Prompt or a surface outside the
-// terminal took the keyboard meanwhile, and whether the keyboard's owner lets
-// the terminal have it. Closing the inspector hands the keyboard to the owner
+// or write that landed, the link menu's open once the shell's directory is
+// known) asks when it runs whether this is still the focused pane's active
+// tab, whether its Rich Prompt or a surface outside the terminal took the
+// keyboard meanwhile, and whether the keyboard's owner lets the terminal
+// have it. Closing the inspector hands the keyboard to the owner
 // when one holds it; Escape in the find bar and the body menu's launcher row
 // focus the terminal once, and nothing takes the keyboard back later from
 // the find bar or the launcher that took it. A TerminalTab is mounted on the
@@ -30,6 +31,12 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
+// A file link opens at once; the wait a test holds is the shell's directory.
+vi.mock("../terminal/linkActions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/linkActions")>()),
+  editorRefusalForWindow: () => null,
+  openTerminalFileInEditor: vi.fn(async () => null),
+}));
 // The clipboard round trips wait until the test lands them.
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
@@ -63,9 +70,11 @@ import type { SurveySpec } from "../api/client";
 import { commandTitle } from "../state/commands";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { shortcutLabel } from "../state/shortcuts";
+import { openTerminalFileInEditor } from "../terminal/linkActions";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { draftPath } from "../__tests__/drafts";
+import { engineClick, modelPointerCapture } from "../__tests__/pointer";
 import { ghosttyHasFocus, openedGhostty } from "../__tests__/ghosttyTab";
 import {
   attach,
@@ -409,6 +418,66 @@ describe("a menu copy or paste that waits for the clipboard", () => {
     expect(inputs(socket).join(""), "the text still reaches the shell").toContain("echo pasted");
     expect(takes(), "the terminal took the keyboard from its composer").toBe(0);
     expect(view.hasFocus, "the composer keeps the keyboard").toBe(true);
+  });
+});
+
+describe("the link menu's Open in editor, which waits for the shell's directory", () => {
+  const MENU = '[aria-label="terminal link menu"]';
+
+  /// A terminal showing a link to a relative path, its link menu open and
+  /// "Open in editor" pressed: the open waits for `reply`, the shell's
+  /// directory.
+  async function opening() {
+    const live = await liveTab({ active: true, focused: true });
+    await output(live.socket, "\x1b]8;;./notes.md\x1b\\notes\x1b]8;;\x1b\\");
+    await settle();
+    const term = await openedGhostty(live.target);
+    const canvas = term.element!.querySelector("canvas")!;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 19));
+    modelPointerCapture(canvas);
+    engineClick(canvas, 0, { clientX: 12, clientY: 9 });
+    const row = await vi.waitFor(() => {
+      const el = document.querySelector<HTMLButtonElement>(`${MENU} [data-terminal-link-action="open-editor"]`);
+      expect(el, "the link menu opens with its editor entry").not.toBeNull();
+      expect(document.activeElement, "the menu takes the keyboard onto its first entry").toBe(el);
+      return el!;
+    });
+    row.click();
+    await settle();
+    expect(openTerminalFileInEditor, "the open waits for the shell's directory").not.toHaveBeenCalled();
+    const reply = async () => {
+      await receive(live.socket, { type: "cwd", cwd: "/home/me/repo" });
+      await settle();
+      expect(openTerminalFileInEditor, "the open goes out once the directory is known").toHaveBeenCalledWith("/home/me/repo/notes.md");
+      expect(document.querySelector(MENU), "the menu is closed").toBeNull();
+    };
+    return { ...live, takes: countTakes(live.host), reply };
+  }
+
+  test("an open that lands with the terminal still in front gives it the keyboard back", async () => {
+    const { takes, reply, host } = await opening();
+    await reply();
+    expect(takes(), "the terminal takes the keyboard").toBe(1);
+    expect(host.contains(document.activeElement)).toBe(true);
+  });
+
+  test("an open that lands after the pane lost focus takes no keyboard", async () => {
+    const { props, takes, reply, host } = await opening();
+    props.focused = false;
+    await settle();
+    await reply();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
+    expect(host.contains(document.activeElement)).toBe(false);
+  });
+
+  test("a menu closed by a press outside it is over: its open lands and hands the terminal nothing", async () => {
+    const { takes, reply } = await opening();
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await settle();
+    expect(document.querySelector(MENU), "the press outside closes the menu").toBeNull();
+    expect(document.activeElement, "the keyboard is at large").toBe(document.body);
+    await reply();
+    expect(takes(), "the terminal took the keyboard").toBe(0);
   });
 });
 

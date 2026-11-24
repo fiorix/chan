@@ -3488,6 +3488,7 @@
       if (tabMenu.openForTabId === tab.id && tabMenu.source === "link") closeTabMenu();
     },
     focusTerminal,
+    focusTerminalAfterWait,
   });
   const xtermLinks = xtermLinkHandlers(
     () => (backend === "xterm" ? (term as Terminal | null) : null),
@@ -3526,6 +3527,12 @@
       if (node.isConnected && first && mayFocus(first)) first.focus({ preventScroll: true });
     });
   }
+
+  // The bubble can close without the link menu asking: a press outside it,
+  // another menu opening in its place. The link menu's state goes with it.
+  $effect(() => {
+    if (!(menuOpen && tabMenu.source === "link")) untrack(() => links.dismiss());
+  });
 
   // Closes the link menu when its link's cells change or move on the screen
   // (output, a scroll, a resize) or a cover rises over the window, read ten
