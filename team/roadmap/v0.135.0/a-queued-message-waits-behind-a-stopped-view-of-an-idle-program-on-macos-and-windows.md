@@ -1,6 +1,6 @@
 # A queued message waits behind a stopped view of an idle program on macOS and Windows
 
-Status: accepted by the owner on 2026-11-21 as a follow-up that does not hold the stream row ("sure follow up", `dev/v0133/decisions.md`), for v0.134.0. Not started. It builds on the acknowledged stream pacing merged for v0.133.0.
+Status: accepted by the owner on 2026-11-21 as a follow-up that does not hold the stream row ("sure follow up", `dev/v0133/decisions.md`), for v0.134.0. Not started. It builds on the acknowledged stream pacing merged for v0.133.0. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record: the stream row paces the PTY reader by the bytes a view acknowledges, and its write queue does not deliver while the reader waits for credit, since a held program is mid-output and not idle. Found while that fix was built. On Linux the reader first polls for output, so it waits for credit only with bytes to read. On macOS and Windows it asks for credit before it blocks in `read`, so it can wait with nothing to read, and the queue reads that wait as a hold.
 

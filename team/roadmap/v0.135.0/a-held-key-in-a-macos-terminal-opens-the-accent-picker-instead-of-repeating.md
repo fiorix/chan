@@ -1,6 +1,6 @@
 # A held key in a macOS terminal opens the accent picker instead of repeating
 
-Status: accepted for v0.134.0 by the owner on 2026-11-23; not started.
+Status: accepted for v0.134.0 by the owner on 2026-11-23; not started. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record: the owner's report of 2026-11-23: since v0.13x, holding a key in a chan terminal on macOS opens the press-and-hold accent picker (holding `a` offers `a` with a grave, an acute and the other accents), drawn far from the terminal cursor, where a terminal should repeat the key. Accents in the file editor are fine; in a terminal a held key should repeat, and a character with an accent can be pasted.
 

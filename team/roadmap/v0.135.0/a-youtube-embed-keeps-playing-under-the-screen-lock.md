@@ -1,6 +1,6 @@
 # A YouTube embed keeps playing under the screen lock
 
-Status: accepted by the owner on 2026-11-21 as a row of its own ("yes", `dev/v0133/decisions.md`), for v0.134.0. Not started.
+Status: accepted by the owner on 2026-11-21 as a row of its own ("yes", `dev/v0133/decisions.md`), for v0.134.0. Not started. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record: the screen lock row pauses every `<video>` and `<audio>` in the page when the lock comes up, by the owner's ruling ("yes media should pause with no auto-resume"). A cross-origin frame is out of the page's reach, so a YouTube embed left playing keeps its sound on a locked screen, though the lock paints over it. Found while that row was built, and left out of it because it changes every embed URL and needs a networked guest to prove.
 

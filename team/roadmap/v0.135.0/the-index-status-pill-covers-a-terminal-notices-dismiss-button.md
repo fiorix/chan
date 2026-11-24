@@ -1,6 +1,6 @@
 # The index status pill covers a terminal notice's Dismiss button
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/pillcover` at `123e03116`; check 211 read green interleaved with the base once the page starvation its own watcher caused was fixed (J127), and check 231 fixed; no reading of the range since. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/pillcover` at `123e03116`; check 211 read green interleaved with the base once the page starvation its own watcher caused was fixed (J127), and check 231 fixed; no reading of the range since. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record before the move: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started.
 

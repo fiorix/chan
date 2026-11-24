@@ -1,6 +1,6 @@
 # The retired terminal.ghostty key is accepted with a warning
 
-Status: accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, configuration retirement item 6, and its review `dev/team-ghostty-web-ng-plan-review.md`); not started, and not to be built before [the row that retires the key](chan-carries-xterm-js-as-a-second-terminal-backend.md) has shipped and its warning period has passed. It carries to the next version until then.
+Status: accepted for v0.134.0 by the owner on 2026-11-23 with the Ghostty-only plan (`dev/team-ghostty-web-ng-plan.md`, configuration retirement item 6, and its review `dev/team-ghostty-web-ng-plan-review.md`); not started, and not to be built before [the row that retires the key](chan-carries-xterm-js-as-a-second-terminal-backend.md) has shipped and its warning period has passed. It carries to the next version until then. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 ## What is there now
 

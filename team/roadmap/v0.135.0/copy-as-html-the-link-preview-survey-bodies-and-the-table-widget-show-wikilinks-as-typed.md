@@ -1,6 +1,6 @@
 # Copy as HTML, the link preview, survey bodies and the table widget show wikilinks as typed
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built in part and not merged: `v0132/wikiplaces` at `ccb9b1b8c`, stage 1 closed with `ci.yml` 44165859458 green and check 293's second round unread; the survey bodies' labels are the owner's question. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built in part and not merged: `v0132/wikiplaces` at `ccb9b1b8c`, stage 1 closed with `ci.yml` 44165859458 green and check 293's second round unread; the survey bodies' labels are the owner's question. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record before the move: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
 

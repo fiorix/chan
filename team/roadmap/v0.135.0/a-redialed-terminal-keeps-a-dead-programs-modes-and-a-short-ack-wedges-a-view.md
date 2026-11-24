@@ -1,6 +1,6 @@
 # A redialed terminal keeps a dead program's modes, and a short ack wedges a view
 
-Status: accepted for v0.134.0 by the owner on 2026-11-23, to be built with the Ghostty migration's M4; not started.
+Status: accepted for v0.134.0 by the owner on 2026-11-23, to be built with the Ghostty migration's M4; not started. Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record: two findings of a review of the terminal stream and wake changes v0.133.0 shipped without a cumulative read (in the development tree, `dev/ghostty-web-ng-team/reviews/review-base-1.md`, B3 and the server half of B1), by reading; not reproduced yet. The client half of B1 (a throwing consumer leaving the ack short) is fixed with the migration's write-path change.
 

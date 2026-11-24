@@ -1,6 +1,6 @@
 # The Rich Prompt says to try again over a terminal that has exited
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/exitedtry` at `277f73130`, its second fix round, with check 291's guest runs and one confirm reading owed. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap").
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); built and not merged: `v0132/exitedtry` at `277f73130`, its second fix round, with check 291's guest runs and one confirm reading owed. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version").
 
 Record before the move: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
 
