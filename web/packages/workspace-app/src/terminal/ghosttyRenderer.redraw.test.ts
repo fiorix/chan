@@ -13,7 +13,7 @@ import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, onTestFinished, test, vi } from "vitest";
 import { CellPictureContext, type CellPictures } from "../__tests__/cellPictureCanvas";
 import { DEFAULT_SECRET_MASK_SUFFIXES } from "./secretMasking";
-import { GhosttySecretMasker } from "./secretMaskingGhostty";
+import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 20;
@@ -111,6 +111,12 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
   let cols = COLS;
   let rows = ROWS;
   const selection = new Selection();
+  /// The masker's subscriptions to the content-change event, which the
+  /// widget fires after a write or a resize and this rig fires itself.
+  const changes = new Set<() => void>();
+  const changed = () => {
+    for (const listener of [...changes]) listener();
+  };
 
   /// A terminal over the core with a renderer of its own, wired as
   /// Terminal.open() and TerminalTab wire them.
@@ -131,7 +137,21 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
     const context = contexts.get(canvas)!;
     const { width, height } = renderer.getMetrics();
     context.cell = { width, height };
-    if (options.masking) new GhosttySecretMasker(term as never, DEFAULT_SECRET_MASK_SUFFIXES, "#6c6c70", true);
+    if (options.masking) {
+      // What the masker uses of an open widget, over this hand-wired
+      // renderer: its paint layers, and a refresh that is a full frame.
+      const maskable: GhosttyMaskTerminal = {
+        buffer: term.buffer,
+        getMetrics: () => renderer.getMetrics(),
+        addPaintLayer: (layer) => renderer.addPaintLayer(layer),
+        onChange(listener) {
+          changes.add(listener);
+          return { dispose: () => void changes.delete(listener) };
+        },
+        refresh: () => renderer.render(core, true, term.getViewportY(), 0),
+      };
+      new GhosttySecretMasker(maskable, DEFAULT_SECRET_MASK_SUFFIXES, "#6c6c70", true);
+    }
     return { term, renderer, context };
   };
 
@@ -144,6 +164,7 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
       cols = c;
       rows = r;
       core.resize(c, r);
+      changed();
     },
     picture(viewportY) {
       const fresh = paint(rig.theme);
@@ -187,8 +208,12 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
   core.write(setup);
   check("the first frame");
   for (const [i, step] of steps.entries()) {
-    if (typeof step === "string") core.write(step);
-    else step(rig);
+    if (typeof step === "string") {
+      core.write(step);
+      changed();
+    } else {
+      step(rig);
+    }
     check(`after step ${i}: ${typeof step === "string" ? JSON.stringify(step) : step.toString()}`);
   }
   rig.painter.renderer.dispose();

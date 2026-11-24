@@ -1546,7 +1546,7 @@
       // DOM renderer. See the helper for the WKWebView rationale.
       enableWebglRenderer();
     } else {
-      // After open(): the renderer the painter hooks exists from there.
+      // After open(): the widget retains a paint layer only once it is open.
       secretMasker = new GhosttySecretMasker(
         term as GhosttyTerminal,
         secretMaskSuffixes,
