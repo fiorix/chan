@@ -125,6 +125,12 @@ export class SelectionManager {
   // The row a read of the selection's text or a click's word or line looks
   // at, one row at a time.
   private readonly cells = new VtCells();
+  // The rows of a range's first and last cells, each in a view of its own.
+  // A view answers a repeated read of its row from what it holds until the
+  // core changes the row, so a paint that widens an unchanged selection
+  // reads no row; one shared view would lose each row to the other.
+  private readonly firstCells = new VtCells();
+  private readonly lastCells = new VtCells();
 
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
@@ -423,10 +429,12 @@ export class SelectionManager {
     const final = forwards ? b : a;
     // The spacer after a wide glyph belongs to that glyph; an empty spacer
     // at the right edge before a wrap belongs to neither endpoint glyph.
-    if (this.readAbsoluteRow(first.absoluteRow, history) && this.cells.at(first.col)?.width === 0 && this.cells.at(first.col - 1)?.width === 2) {
+    const firstCells = this.firstCells;
+    if (this.readAbsoluteRow(first.absoluteRow, history, firstCells) && firstCells.at(first.col)?.width === 0 && firstCells.at(first.col - 1)?.width === 2) {
       first.col--;
     }
-    if (this.readAbsoluteRow(final.absoluteRow, history) && this.cells.at(final.col)?.width === 2) {
+    const lastCells = this.lastCells;
+    if (this.readAbsoluteRow(final.absoluteRow, history, lastCells) && lastCells.at(final.col)?.width === 2) {
       final.col = Math.min(final.col + 1, cols - 1);
     }
     return { start: a, end: b };
@@ -1015,13 +1023,13 @@ export class SelectionManager {
   }
 
   /**
-   * Read absolute row `row` (history first, then the screen) into this.cells.
-   * False when there is no such row.
+   * Read absolute row `row` (history first, then the screen) into `into`,
+   * this.cells unless given. False when there is no such row.
    */
-  private readAbsoluteRow(row: number, scrollbackLength: number): boolean {
+  private readAbsoluteRow(row: number, scrollbackLength: number, into: VtCells = this.cells): boolean {
     return row < scrollbackLength
-      ? this.wasmTerm.readHistoryRow(row, this.cells)
-      : this.wasmTerm.readRow(row - scrollbackLength, this.cells);
+      ? this.wasmTerm.readHistoryRow(row, into)
+      : this.wasmTerm.readRow(row - scrollbackLength, into);
   }
 
   /**

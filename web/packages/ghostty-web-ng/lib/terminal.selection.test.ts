@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { GhosttyVt } from '../vt/ghosttyVt';
+import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -363,6 +363,41 @@ describe('public selection ranges', () => {
     pointer('pointerup', 9, 1);
     expect(term.getSelection()).toBe('ab界e\u0301👩‍💻xyzq');
     expect(clipboard).toHaveBeenCalledExactlyOnceWith('ab界e\u0301👩‍💻xyzq');
+  });
+
+  test('idle paints do not read a selection\'s endpoint rows again, and a write refreshes them', async () => {
+    const text = Array.from({ length: 12 }, (_, i) => `row ${i}`).join('\r\n');
+    const { term } = await open(text);
+    expect(term.getScrollbackLength()).toBe(8);
+    // Both endpoints in history above the view: a paint draws no selected row.
+    term.setSelection(range(1, 1, 3, 5));
+    const paint = () => term.renderer!.render(term.wasmTerm!, false, term.viewport.offset, 0);
+    paint();
+    const fill = vi.spyOn(VtCells.prototype, 'fill');
+    for (let i = 0; i < 5; i++) paint();
+    expect(fill, 'row reads from the core in five idle paints').toHaveBeenCalledTimes(0);
+    expect(term.getSelectionRange()).toEqual(range(1, 1, 3, 5));
+    expect(fill).toHaveBeenCalledTimes(0);
+    // Output changes what the endpoint cells may hold: the next read is fresh.
+    term.write('\x1b[4;1Hmore');
+    expect(term.getSelectionRange()).toEqual(range(1, 1, 3, 5));
+    const endpointReads = () => fill.mock.calls.filter(([, history, row]) => history && (row === 1 || row === 5)).length;
+    expect(endpointReads()).toBe(2);
+    for (let i = 0; i < 5; i++) paint();
+    expect(endpointReads()).toBe(2);
+  });
+
+  test('widening follows a glyph written under an endpoint after the range was read', async () => {
+    const { term } = await open('abcdef');
+    term.setSelection(range(1, 0, 4, 0));
+    expect(term.getSelectionRange()).toEqual(range(1, 0, 4, 0));
+    term.write('\x1b[1;4H\u754c');
+    expect(term.getSelectionRange(), 'the end is the wide glyph\'s first half').toEqual(range(1, 0, 4, 0));
+    term.setSelection(range(1, 0, 3, 0));
+    expect(term.getSelectionRange()).toEqual(range(1, 0, 4, 0));
+    term.write('\x1b[1;1H\u754c');
+    expect(term.getSelectionRange(), 'the start is the wide glyph\'s second half').toEqual(range(0, 0, 4, 0));
+    expect(term.getSelection()).toBe('\u754cc\u754c');
   });
 
   test('selection replacement and clear invalidate the old visible rows', async () => {
