@@ -5,6 +5,9 @@
 // positive PTY control. Chrome only; no native webview claim.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { draftsStore, listDrafts, waitFor } from "../lib/drafts.mjs";
 import { drainPointerInput } from "../lib/terminal-pointer.mjs";
 import {
   assertKeyboard, captureFocusTerminals, clearFocus, clickTerminal,
@@ -12,10 +15,26 @@ import {
   runFocusCheck, settleFocus, waitFocus,
 } from "../lib/terminal-focus.mjs";
 
+const DRAFT = "focus reload draft";
+
+// Wait until the draft made since `known` was read holds `text` in its
+// store, and answer the server's row for it. Opening a composer saves no
+// session: the page writes which terminal shows one, and on which draft, as
+// it unloads. Until the reload the saved session may name neither, so the
+// draft is the one part of the composer the server can be asked for.
+export async function waitComposerDraft(ctx, known, text) {
+  const draft = await waitFor("the composer's draft in the server's list", 20_000, async () =>
+    (await listDrafts(ctx)).drafts.find((row) => !known.has(row.primary.draft_id)) ?? null);
+  const stored = join(draftsStore(ctx, draft.name), draft.primary.path);
+  await waitFor("the typed text in the composer's draft", 20_000, () => readFileSync(stored, "utf8").includes(text));
+  return draft;
+}
+
 export default {
   name: "rich-prompt-reload-focus",
   run(ctx) {
-    return runFocusCheck(ctx, 344, async ({ page, windowId, open, attach, leg, restore }) => {
+    return runFocusCheck(ctx, 344, async ({ page, details, windowId, open, attach, leg, restore }) => {
+      const known = new Set((await listDrafts(ctx)).drafts.map((row) => row.primary.draft_id));
       const terminal = await open("composer");
       await clickTerminal(page, terminal.query);
       await enableFocusReports(terminal);
@@ -25,18 +44,9 @@ export default {
       finally { await page.keyboard.up("Alt"); await page.keyboard.up("Control"); }
       await waitFocus("the composer holds the keyboard before reload", () => readFocus(page, terminal.query),
         (read) => read.terminal.composerFocused);
-      await page.keyboard.type("focus reload draft");
-      const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-      await page.waitForFunction(async ({ windowId, session, token }) => {
-        const response = await fetch(`/api/session?w=${encodeURIComponent(windowId)}`, {
-          headers: token ? { authorization: `Bearer ${token}` } : {},
-        });
-        if (response.status === 204) return false;
-        if (!response.ok) throw new Error(`GET session: ${response.status}`);
-        const terminals = (node) => !node ? [] : node.k === "s" ? [...terminals(node.a), ...terminals(node.b)]
-          : [...(node.t ?? []), ...(node.bt ?? [])];
-        return terminals((await response.json()).layout).some((tab) => tab.tsid === session && tab.rpv === 1 && tab.rpd);
-      }, { timeout: 20_000, polling: 100 }, { windowId, session: terminal.row.session_id, token });
+      await page.keyboard.type(DRAFT);
+      const draft = await waitComposerDraft(ctx, known, DRAFT);
+      details.draft = { name: draft.name, path: draft.primary.path };
       await drainPointerInput(terminal.fixture);
 
       const held = [];
