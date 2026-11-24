@@ -330,6 +330,13 @@ impl Tunnel {
         }
     }
 
+    /// Whether the driver has stopped. A closed tunnel never carries
+    /// traffic again; only a new tunnel does. Reads no lock, so like
+    /// [`Self::status`] it never waits on a poll.
+    pub fn is_closed(&self) -> bool {
+        self.inner.driver.is_finished()
+    }
+
     /// The peer's AllowedIPs: the destinations `connect` carries. A
     /// caller holding several tunnels routes by them.
     pub fn allowed_ips(&self) -> &[Cidr] {
@@ -381,7 +388,7 @@ impl Drop for ShutDown {
 
 enum Event {
     Datagram(usize, SocketAddr),
-    ReceiveFailed(io::Error),
+    ReceiveFailed { error: io::Error, v4: bool },
     Kick,
     Tick,
     StackTimer,
@@ -394,6 +401,12 @@ thread_local! {
     /// Makes `Sockets::ensure` fail on this thread, since no real bind of
     /// an ephemeral wildcard port fails on demand.
     static REFUSE_BIND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Turns the next kick of the tunnel with this stack into a receive
+    /// error. Keyed by stack because both tunnels of a test pair share the
+    /// thread, and a kick is the one event whose loss changes nothing.
+    static RECEIVE_ERROR: std::cell::Cell<Option<(usize, io::ErrorKind)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[derive(Default)]
@@ -425,6 +438,14 @@ impl Sockets {
             self.v6 = Some(socket)
         }
         Ok(())
+    }
+
+    fn remove(&mut self, v4: bool) {
+        if v4 {
+            self.v4 = None
+        } else {
+            self.v6 = None
+        }
     }
 
     fn ensure(&mut self, endpoint: SocketAddr) -> io::Result<()> {
@@ -540,17 +561,30 @@ impl Driver {
             let event = tokio::select! {
                 received = Sockets::receive(&self.sockets.v4, &mut datagram) => match received {
                     Ok((len, from)) => Event::Datagram(len, from),
-                    Err(e) => Event::ReceiveFailed(e),
+                    Err(error) => Event::ReceiveFailed { error, v4: true },
                 },
                 received = Sockets::receive(&self.sockets.v6, &mut datagram6) => match received {
                     Ok((len, from)) => Event::Datagram(len, from),
-                    Err(e) => Event::ReceiveFailed(e),
+                    Err(error) => Event::ReceiveFailed { error, v4: false },
                 },
                 _ = self.shared.kicked() => Event::Kick,
                 _ = tick.tick() => Event::Tick,
                 _ = stack_timer => Event::StackTimer,
                 result = self.resolver.completed() => Event::Resolved(result),
                 _ = resolver::deadline(resolve_deadline) => Event::ResolveTimeout,
+            };
+            #[cfg(test)]
+            let event = match (event, RECEIVE_ERROR.get()) {
+                (Event::Kick, Some((stack, kind)))
+                    if stack == Arc::as_ptr(&self.shared) as usize =>
+                {
+                    RECEIVE_ERROR.set(None);
+                    Event::ReceiveFailed {
+                        error: kind.into(),
+                        v4: true,
+                    }
+                }
+                (event, _) => event,
             };
             match event {
                 Event::Datagram(len, from) => {
@@ -574,18 +608,30 @@ impl Driver {
                         }
                     }
                 }
-                Event::ReceiveFailed(e) => {
+                Event::ReceiveFailed { error, v4 } => {
                     // An ICMP unreachable for an earlier send surfaces here
                     // on some platforms; the socket itself is fine.
                     if matches!(
-                        e.kind(),
+                        error.kind(),
                         io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
                     ) {
-                        tracing::debug!(error = %e, "tunnel socket receive");
+                        tracing::debug!(%error, "tunnel socket receive");
                         continue;
                     }
-                    tracing::error!(error = %e, "tunnel socket failed; stopping the driver");
-                    return;
+                    // A network change can break the socket while the
+                    // session stays valid. The next send binds a new one;
+                    // waiting for the tick keeps a lasting error from
+                    // spinning this loop.
+                    tracing::warn!(%error, "tunnel socket receive failed; replacing the socket");
+                    self.sockets.remove(v4);
+                    tick.tick().await;
+                    self.tick(&mut work).await;
+                    // The peer learns the new source port only from an
+                    // authenticated packet, and an idle tunnel sends none.
+                    let live = self.wire.lock().tunn.time_since_last_handshake().is_some();
+                    if live {
+                        self.send_packet(&[], &mut work).await;
+                    }
                 }
                 Event::Tick => self.tick(&mut work).await,
                 Event::Resolved(result) => self.resolved(result).await,
@@ -1008,6 +1054,10 @@ impl Driver {
     }
 
     async fn send_to(&mut self, datagram: &[u8], to: SocketAddr) {
+        if let Err(e) = self.sockets.ensure(to) {
+            tracing::debug!(error = %e, endpoint = %to, "binding the tunnel socket");
+            return;
+        }
         let Some(socket) = self.sockets.get(to.is_ipv4()) else {
             return;
         };
@@ -1356,5 +1406,106 @@ mod tests {
             .expect_err("a read on a closed tunnel fails");
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         drop(server);
+    }
+
+    async fn round_trip(a: &Tunnel, listener: &mut Listener) {
+        let port = listener.port();
+        let (mut client, mut server) = timeout(WAIT, async {
+            tokio::try_join!(a.connect(b_port(port)), listener.accept())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let mut buf = [0u8; 4];
+        client.write_all(b"ping").await.unwrap();
+        timeout(WAIT, server.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"ping");
+        server.write_all(b"pong").await.unwrap();
+        timeout(WAIT, client.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"pong");
+    }
+
+    async fn inject_receive_error(tunnel: &Tunnel, kind: io::ErrorKind) {
+        RECEIVE_ERROR.set(Some((Arc::as_ptr(&tunnel.inner.shared) as usize, kind)));
+        tunnel.inner.shared.kick();
+        timeout(WAIT, async {
+            while RECEIVE_ERROR.get().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the driver takes the injected error");
+    }
+
+    /// The peer seeing a new source address proves the socket was replaced
+    /// and that the replacement carries the live session.
+    async fn assert_recovers_from_receive_error(kind: io::ErrorKind) {
+        let Pair { a, b, a_at, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        round_trip(&a, &mut listener).await;
+
+        inject_receive_error(&a, kind).await;
+
+        round_trip(&a, &mut listener).await;
+        assert!(!a.inner.shared.stack.lock().closed);
+        let moved = b.status().endpoint;
+        assert!(
+            moved.is_some() && moved != Some(a_at),
+            "the peer still sees the old socket: {moved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_error_addr_not_available_keeps_the_tunnel() {
+        assert_recovers_from_receive_error(io::ErrorKind::AddrNotAvailable).await;
+    }
+
+    #[tokio::test]
+    async fn receive_error_network_down_keeps_the_tunnel() {
+        assert_recovers_from_receive_error(io::ErrorKind::NetworkDown).await;
+    }
+
+    #[tokio::test]
+    async fn is_closed_reports_a_stopped_driver() {
+        let Pair { a, b: _b, .. } = pair().await;
+        assert!(!a.is_closed());
+
+        a.inner.driver.abort();
+        timeout(WAIT, async {
+            while !a.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("an aborted driver reads as closed");
+
+        let err = timeout(WAIT, a.connect(b_port(9)))
+            .await
+            .unwrap()
+            .expect_err("a closed tunnel carries nothing");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[tokio::test]
+    async fn persistent_receive_error_waits_a_tick_between_attempts() {
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        round_trip(&a, &mut listener).await;
+
+        let started = std::time::Instant::now();
+        let mut failures = 0u32;
+        while started.elapsed() < 4 * TICK {
+            inject_receive_error(&a, io::ErrorKind::NetworkDown).await;
+            failures += 1;
+        }
+        assert!(failures <= 6, "{failures} failures in four ticks");
+
+        round_trip(&a, &mut listener).await;
     }
 }
