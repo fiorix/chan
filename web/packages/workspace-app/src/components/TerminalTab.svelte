@@ -2601,7 +2601,13 @@
       return;
     }
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
-    if (!t?.hasFocusEvents()) return;
+    if (!t?.hasFocusEvents()) {
+      // The program did not hear of this change, so its last report no
+      // longer says where the keyboard is: the next change it does hear of
+      // is reported whichever way it goes.
+      ghosttyReportedFocus = null;
+      return;
+    }
     const hasFocus = e.type === "focusin";
     // A resume's blur/refocus and the browser's retained focus events can
     // report the same transition twice.

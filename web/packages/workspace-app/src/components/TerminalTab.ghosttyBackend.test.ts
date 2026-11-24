@@ -764,6 +764,40 @@ describe("focus reports", () => {
     ]);
   });
 
+  test("a change made while the mode was off does not swallow the next report", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    await output(socket, "\x1b[?1004h");
+    move(host, "focusin");
+    expect(reports(socket), "focus-in, reported").toEqual(["\x1b[I"]);
+
+    // The program stops listening, the terminal loses the keyboard unheard,
+    // and a program listens again: the next focus-in is news to it.
+    await output(socket, "\x1b[?1004l");
+    move(host, "focusout");
+    await output(socket, "\x1b[?1004h");
+    socket.sent.splice(0);
+    move(host, "focusin");
+    expect(reports(socket), "focus-in after the mode went off and on unfocused").toEqual(["\x1b[I"]);
+
+    // The same the other way round: the last report was a focus-out, the
+    // keyboard came back unheard, and the next focus-out is news.
+    move(host, "focusout");
+    expect(reports(socket)).toEqual(["\x1b[I", "\x1b[O"]);
+    await output(socket, "\x1b[?1004l");
+    move(host, "focusin");
+    await output(socket, "\x1b[?1004h");
+    socket.sent.splice(0);
+    move(host, "focusout");
+    expect(reports(socket), "focus-out after the mode went off and on focused").toEqual(["\x1b[O"]);
+
+    // With the mode on throughout, a repeated event is still one report.
+    move(host, "focusout");
+    move(host, "focusin");
+    move(host, "focusin");
+    expect(reports(socket)).toEqual(["\x1b[O", "\x1b[I"]);
+  });
+
   test("a resume reports each focus transition once despite retained browser events", async () => {
     const { target, socket } = await mountGhostty();
     const host = target.querySelector<HTMLElement>(".terminal-host")!;
