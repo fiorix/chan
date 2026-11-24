@@ -911,7 +911,7 @@ describe("a theme switch", () => {
     delete hybridSurfaceThemes.terminal;
   });
 
-  test("reaches the live terminal through the binding, not through the option ghostty-web ignores after open", async () => {
+  test("reaches the live terminal through the widget's theme update, which replaces the theme it held", async () => {
     ui.theme = "dark";
     const { term } = await mountGhostty();
     const openedWith = term.options.theme;
@@ -924,7 +924,8 @@ describe("a theme switch", () => {
     expect(switched?.[0]).toBe(term);
     expect(switched?.[1].red, "the light palette").toBe("#cf222e");
     expect(term.options.theme.red).toBe("#cf222e");
-    expect(term.options.theme, "the option is not reassigned").toBe(openedWith);
+    expect(term.options.theme, "the widget holds a new theme object").not.toBe(openedWith);
+    expect(openedWith.red, "the theme held at open is not rewritten in place").toBe("#ff6b6b");
 
     delete hybridSurfaceThemes.terminal;
     flushSync();

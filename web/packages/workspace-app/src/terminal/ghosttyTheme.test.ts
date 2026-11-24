@@ -362,6 +362,20 @@ describe("a theme switch on a live ghostty terminal", () => {
     expect(term.options.theme).toEqual(LIGHT);
   });
 
+  test("a switch goes through the widget's own theme update, which replaces the held theme and repaints at once", async () => {
+    const term = await openTerminal(DARK);
+    const held = term.options.theme;
+    const update = vi.spyOn(term, "setTheme");
+    expect(cellPixel(term, COLS - 1, 0), "an unstyled cell before").toBe(opaque(DARK.background!));
+
+    expect(applyGhosttyTheme(term, LIGHT)).toBe(true);
+    expect(update.mock.calls, "one public theme update").toEqual([[LIGHT]]);
+    expect(held, "the theme object held before the switch is not rewritten").toEqual(DARK);
+    expect(term.options.theme).toEqual(LIGHT);
+    // No frame has run: the update itself painted.
+    expect(cellPixel(term, COLS - 1, 0), "an unstyled cell after").toBe(opaque(LIGHT.background!));
+  });
+
   test("a terminal not yet open takes the theme when it opens", async () => {
     const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
     const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt, theme: { ...DARK } });
