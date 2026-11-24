@@ -43,6 +43,12 @@ import { createTerminalCore } from './terminal-core';
 import { SearchOwner } from './search';
 import type { ILink } from './types';
 
+/** Report an error as an uncaught one, without unwinding the caller. */
+function reportPaintError(error: unknown): void {
+  if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
+  else setTimeout(() => { throw error; });
+}
+
 // ============================================================================
 // Terminal Class
 // ============================================================================
@@ -631,8 +637,14 @@ export class Terminal {
     if (this.awaitingEcho) {
       this.awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
-        this.#searchOwner?.runDue();
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        // The core has taken the bytes and the observers have run, so a
+        // failed paint is reported rather than thrown at the writer.
+        try {
+          this.#searchOwner?.runDue();
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        } catch (error) {
+          reportPaintError(error);
+        }
       }
     }
 

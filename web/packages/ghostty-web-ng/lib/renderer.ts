@@ -341,12 +341,14 @@ export class CanvasRenderer {
     forceAll ||= this.repaintAll;
     this.repaintAll = false;
     let begun = false;
+    let layerErrors: unknown[] = [];
     try {
       const dirty = term.beginFrame();
       begun = true;
-      this.paintFrame(term, forceAll || dirty === ABI.GhosttyRenderStateDirty.FULL,
+      layerErrors = this.paintFrame(term, forceAll || dirty === ABI.GhosttyRenderStateDirty.FULL,
         viewportY, scrollbarOpacity, layers);
     } catch (error) {
+      // The rows may be half painted: the next frame paints them all.
       this.repaintAll = true;
       throw error;
     } finally {
@@ -357,15 +359,20 @@ export class CanvasRenderer {
         this.currentTerm = null;
       }
     }
+    // A layer's failure invalidates nothing. Its rows and the other layers
+    // are painted, and a forced repaint would call a layer that keeps
+    // failing again on every frame.
+    if (layerErrors.length > 0) throw layerErrors[0];
   }
 
+  /** Paints the frame and returns what its layers threw, in paint order. */
   private paintFrame(
     term: VtTerminal,
     forceAll: boolean,
     viewportY: number,
     scrollbarOpacity: number,
     layers: readonly PaintLayer[],
-  ): void {
+  ): unknown[] {
     // The canvas scale is absolute, not relative: a host that resets the
     // drawing state at an unchanged size leaves an identity transform
     // behind, and the next repaint must heal it without waiting for a
@@ -535,7 +542,7 @@ export class CanvasRenderer {
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
     this.lastCursorShown = cursorShown;
 
-    if (changedRows.length === 0) return;
+    if (changedRows.length === 0) return [];
     const frame: PaintFrame = Object.freeze({
       ctx: this.ctx,
       metrics: Object.freeze(this.getMetrics()),
@@ -567,7 +574,7 @@ export class CanvasRenderer {
         this.ctx.beginPath();
       }
     }
-    if (errors.length > 0) throw errors[0];
+    return errors;
   }
 
   /**

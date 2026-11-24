@@ -218,6 +218,67 @@ describe('paint layer lifetime', () => {
     expect(paint).toHaveBeenCalledOnce();
   });
 
+  test('a layer that keeps throwing fails once per repaint and forces none', async () => {
+    const term = await open();
+    const error = new Error('frame failed');
+    const failing = vi.fn(() => { throw error; });
+    const mask = vi.fn();
+    term.addPaintLayer({ order: 0, paint: failing });
+    term.addPaintLayer({ order: 'mask', paint: mask });
+    expect(() => tick()).toThrow(error);
+    expect(failing).toHaveBeenCalledOnce();
+    for (let i = 0; i < 5; i++) {
+      expect(() => tick(), `idle frame ${i}`).not.toThrow();
+      expect(fills, 'an idle frame repaints nothing').toEqual([]);
+    }
+    expect(failing).toHaveBeenCalledOnce();
+    expect(mask).toHaveBeenCalledOnce();
+    term.write('more');
+    expect(() => tick(), 'new rows reach the layer again').toThrow(error);
+    expect(texts.join('')).toContain('more');
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(mask).toHaveBeenCalledTimes(2);
+    expect(mask.mock.calls[1][0].full, 'the failure forced no full repaint').toBe(false);
+    expect(() => tick()).not.toThrow();
+    expect(failing).toHaveBeenCalledTimes(2);
+  });
+
+  test('a failure before the layers still repaints everything on the next frame', async () => {
+    const term = await open();
+    const seen = observe(term);
+    const core = term.wasmTerm!;
+    vi.spyOn(core, 'getCursor').mockImplementationOnce(() => { throw new Error('core read failed'); });
+    term.write('x');
+    expect(() => tick()).toThrow('core read failed');
+    expect(seen).toEqual([]);
+    tick();
+    expect(seen.at(-1)?.full).toBe(true);
+  });
+
+  test('the echo paint inside a write reports a layer error instead of throwing', async () => {
+    const term = await open();
+    const error = new Error('echo paint failed');
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    const mask = vi.fn();
+    term.addPaintLayer({ order: 0, paint() { throw error; } });
+    term.addPaintLayer({ order: 'mask', paint: mask });
+    expect(() => tick()).toThrow(error);
+    mask.mockClear();
+    const data = vi.fn();
+    term.onData(data);
+    const change = vi.fn();
+    term.onChange(change);
+    term.input('x', true);
+    expect(data).toHaveBeenCalledExactlyOnceWith('x');
+    expect(() => term.write('echoed')).not.toThrow();
+    expect(mask, 'the write painted its echo').toHaveBeenCalledOnce();
+    expect(reported).toEqual([error]);
+    expect(change).toHaveBeenCalledOnce();
+    expect(term.buffer.active.getLine(0)!.translateToString(true)).toBe('secretechoed');
+    expect(() => tick(), 'the echo paint left nothing to repaint').not.toThrow();
+  });
+
   test('clear invalidates the canvas and layers repaint on the next frame', async () => {
     const term = await open();
     const seen = observe(term);
