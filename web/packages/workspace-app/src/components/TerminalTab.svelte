@@ -1119,6 +1119,14 @@
       if (findOpen || menuOpen || isRichPromptVisible(tab.id)) return;
       if (launcherShownOverWindow()) return;
       if (!keyboardFreeOrIn(host)) return;
+      // An owner can hold the keyboard by rule while DOM focus sits in the
+      // host (a survey over this terminal after a press into it). Ask
+      // before the blur below, which would drop the keyboard to the body
+      // for a refocus the owner then refuses: the owner's surface takes it.
+      if (keyboardHeld()) {
+        handKeyboardToOwner();
+        return;
+      }
       const holder = document.activeElement;
       // ghostty-web focuses the host element it opened in, and focus() on
       // the element that is already document.activeElement is a DOM no-op,
@@ -1134,7 +1142,6 @@
       ) {
         holder.blur();
       }
-      // focusTerminal carries the remaining dialog and survey ownership guards.
       focusTerminal();
     });
   }

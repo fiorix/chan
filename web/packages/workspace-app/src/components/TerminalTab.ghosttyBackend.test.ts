@@ -53,6 +53,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { commandById } from "../state/commands";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
+import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import {
@@ -516,6 +517,32 @@ describe("focus recovery after a host resume", () => {
     expect(observed.events).not.toContain("focus");
     expect(document.activeElement, "the input keeps the focus").toBe(input);
     input.remove();
+  });
+
+  // A survey over this terminal owns the keyboard while DOM focus can sit in
+  // the host, after a press into the terminal under it. The resume asks who
+  // owns the keyboard before it blurs: the blur would drop the keyboard to
+  // the body, where the refocus the owner refuses leaves it.
+  test("under a survey with the host active, the resume hands the keyboard to the survey's card", async () => {
+    const { target, tab } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    showSurvey({ surveyId: "survey-resume", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] }, tab.id);
+    try {
+      const card = await vi.waitFor(() => {
+        const el = target.querySelector<HTMLElement>(".survey-card");
+        expect(document.activeElement, "the survey's card takes the keyboard as it shows").toBe(el);
+        return el!;
+      });
+      host.focus();
+      expect(document.activeElement, "the host is active under the survey").toBe(host);
+      observed.events.splice(0);
+
+      await resume();
+      expect(document.activeElement, "the survey's card has the keyboard").toBe(card);
+      expect(observed.events, "the terminal is not focused under the survey").not.toContain("focus");
+    } finally {
+      resetSurveysForTest();
+    }
   });
 
   // chan-desktop marks the page's root while the window's Computers launcher
