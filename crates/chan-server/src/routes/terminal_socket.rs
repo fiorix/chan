@@ -258,7 +258,7 @@ impl InputState {
         let progress = session.output_progress();
         // The first text frame read after a release starts the stall clock
         // wherever the socket reads it, also inside a send that was pending
-        // at the release, which the loop's release wake cannot reach. The
+        // at the release, where the loop does not see the release. The
         // wait starts before the frame counts, and the update follows the
         // frame's own ack, so an ack that advances restarts it instead.
         if self.stall.is_none() {

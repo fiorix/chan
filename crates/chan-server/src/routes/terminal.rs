@@ -1495,12 +1495,6 @@ async fn terminal_ws(
                 finish = Some((1013, "terminal view stalled"));
                 break;
             }
-            // A view released while this select waits may have no send
-            // credit and nothing else to wake it: the recovery check above
-            // runs at the release rather than at the next frame or event.
-            // The stall needs no wake, since the first frame read after the
-            // release starts it wherever it is read.
-            () = progress.released(), if !behind => {}
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
                 if socket.frame(&session, program_status_frame(&session, snapshot)).await.is_err() {
@@ -1589,7 +1583,7 @@ async fn terminal_ws(
 
 /// A view that needs recovery, waiting for its client to report having
 /// parsed what it was sent. The wait starts at a lag, when the socket loop
-/// sees it, or at the reader's release, when the loop wakes for it or the
+/// sees it, or at the reader's release, when the loop next passes or the
 /// socket reads its first client frame after it, wherever it reads it, so
 /// that frame starts the clock. A client that runs (it sends frames) and
 /// still reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its
