@@ -607,6 +607,32 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 7, total: 360, partial: false });
   });
 
+  test('a window taken inside the third listed page ends at the middle page, not the first', async () => {
+    const { term } = await create(threePaged, 200, 20, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(474, 0)]);
+    expect(coreRows(term, 'needle', 230).slice(221), 'the core lists the last page last').toEqual([478, 476, 474, 472, 470, 468, 466, 464, 462]);
+    // Placement stops right after the active match's entry, ahead of 472,
+    // and the next write takes the window from that list.
+    placementStopsAt(224);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(3);
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([474, 472], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(472, 0)]);
+    expect(search.state).toEqual({ index: 4, total: 230, partial: false });
+  });
+
   test('a window ended at the page above still serves a step on the side of the active match', async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
