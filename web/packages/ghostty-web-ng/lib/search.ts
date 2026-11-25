@@ -31,7 +31,7 @@ type Before = {
   ranges: HighlightRange[]; offset: number; total: number; complete: boolean; index: number; history: number;
   anchor: TerminalCoreTrackedCell | null;
 };
-type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell };
+type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell; before: Before | null };
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
 export class SearchOwner {
@@ -70,7 +70,8 @@ export class SearchOwner {
   // the last of them for the window taken from that list.
   private listHistory = 0;
   private listAnchor: TerminalCoreTrackedCell | null = null;
-  // The primary screen's active match while the alternate screen shows.
+  // The primary screen's active match, and the window to step from it,
+  // while the alternate screen shows.
   private parked: Parked | null = null;
   private backlogCell: TerminalCoreTrackedCell | null = null;
   private keptOnScreen = false;
@@ -159,10 +160,16 @@ export class SearchOwner {
     const switched = alternate !== this.alternateScreen;
     this.alternateScreen = alternate;
     if (!this.search) return;
-    // Reflow moves rows unevenly and the other screen has other rows, so
-    // only a write on the same screen keeps a list to step from.
-    if (switched || kind === 'resize') this.setBefore(null);
-    else if (this.kept && this.index !== null) this.setBefore(this.window(this.index));
+    // Reflow moves rows unevenly, so only a write keeps a list to step
+    // from. The primary screen's waits out the alternate screen with its
+    // active match, since the other screen leaves its rows alone.
+    if (kind === 'resize') {
+      this.setBefore(null);
+      this.parked?.before?.anchor?.free();
+      if (this.parked) this.parked.before = null;
+    } else if (this.kept && this.index !== null) {
+      this.setBefore(this.window(this.index));
+    }
     this.markList();
     this.dirty = true;
     // A resize resets the core's scan; after a write its listing has the
@@ -214,6 +221,7 @@ export class SearchOwner {
     this.forget();
     this.parked?.start.free();
     this.parked?.end.free();
+    this.parked?.before?.anchor?.free();
     this.parked = null;
     this.backlogCell?.free();
     this.backlogCell = null;
@@ -517,8 +525,9 @@ export class SearchOwner {
   // tracked cells, which the core keeps on the primary's rows.
   private park(): void {
     if (!this.kept || !this.keptStart || !this.keptEnd) return;
-    this.parked = { start: this.keptStart, end: this.keptEnd };
+    this.parked = { start: this.keptStart, end: this.keptEnd, before: this.before };
     this.keptStart = this.keptEnd = null;
+    this.before = null;
     this.forget();
   }
 
@@ -528,6 +537,7 @@ export class SearchOwner {
     this.parked = null;
     this.keptStart = parked.start;
     this.keptEnd = parked.end;
+    this.before = parked.before;
     this.kept = this.trackedRange();
     if (this.kept) this.highlightActive();
     else this.forget();
