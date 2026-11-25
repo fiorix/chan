@@ -1,6 +1,9 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="tmux-connect" data-shot-kind="clip">clip to capture<small>tmux -CC over ssh: the Allow banner, then each tmux window opening as a Chan window</small></div>
-  <figcaption>A tmux server's windows and panes, opened as Chan windows and panes.</figcaption>
+  <video data-loop controls muted playsinline preload="none" poster="/assets/manual/video-posters/tmux-connect.jpg" aria-label="Running tmux -CC in Chan Desktop: the control terminal is buried, the tmux window opens with its card on the Computers screen, its panes split vertically with htop, and dragging the pane divider resizes an attached plain tmux window in sync.">
+    <source src="/assets/manual/videos/tmux-connect.mp4" type="video/mp4" />
+    <a href="/assets/manual/videos/tmux-connect.mp4">Watch the tmux control mode clip.</a>
+  </video>
+  <figcaption>Running <code>tmux -CC</code> opens a Chan window and its card on the Computers screen; splitting and dragging the pane divider resizes a plain <code>tmux attach</code> window in sync.</figcaption>
 </figure>
 
 <section class="manual-block" id="can-do">
@@ -73,7 +76,8 @@ trust = ["ssh", "et"]</code></pre>
   <h2><a class="heading-anchor" href="#card">The connection's card</a></h2>
   <p>A connection is a card on the Computers screen, beside the local machine and your devservers. Its rows are the connection's windows.</p>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="tmux-card" data-shot-kind="still">screenshot to capture<small>Computers with a "tmux -CC from ssh" card and its window rows</small></div>
+    <img class="framed" src="/assets/manual/tmux-card.webp" alt="The Computers screen with the tmux -CC on this machine card in front, showing session dev on tmux 3.6 and its Terminal Window 3 row, with This machine peeking on the left showing the buried control terminal" loading="lazy" />
+    <figcaption>A local <code>tmux -CC</code> connection's card on the Computers screen, beside the buried control terminal on This machine.</figcaption>
   </figure>
   <div class="manual-table-wrap">
     <table class="manual-table">
