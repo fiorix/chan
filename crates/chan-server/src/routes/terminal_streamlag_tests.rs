@@ -10,6 +10,7 @@ use crate::terminal_sessions::{
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -29,6 +30,7 @@ const FLOOD_CHUNKS: usize = 1100;
 const CHUNK_BYTES: usize = 32;
 const CHILD_READY: &[u8] = b"__STREAM_READY__";
 const LOST_PLAIN_SUFFIX: &[u8] = b"\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
+const LOST_ALT_SUFFIX: &[u8] = b"\x18\x1b[?1047h\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
 
 /// Observe an actual pending binary write, without holding or changing it.
 pub(super) fn send_pending(id: &str, binary_bytes: usize) {
@@ -1470,6 +1472,292 @@ async fn a_redial_across_a_restart_gets_the_restart_reset() {
     );
 }
 
+/// What a terminal holds after parsing `bytes` of the state a redial must
+/// not leave stale: whether it is on the alternate screen, and which other
+/// DEC private modes are on. CAN, an escape or the end cuts a partial
+/// sequence short, a final other than `h` or `l` (a DECRQM query) changes
+/// nothing, and RIS resets the terminal, as in the client's core.
+fn parsed_modes(bytes: &[u8]) -> (bool, BTreeSet<u16>) {
+    let (mut alt_screen, mut modes) = (false, BTreeSet::new());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at..].starts_with(b"\x1bc") {
+            (alt_screen, modes) = (false, BTreeSet::new());
+            at += 2;
+            continue;
+        }
+        if !bytes[at..].starts_with(b"\x1b[?") {
+            at += 1;
+            continue;
+        }
+        let start = at + 3;
+        let end = start
+            + bytes[start..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
+                .count();
+        at = end;
+        let on = match bytes.get(end) {
+            Some(b'h') => true,
+            Some(b'l') => false,
+            _ => continue,
+        };
+        at = end + 1;
+        for param in bytes[start..end].split(|byte| *byte == b';') {
+            let Some(mode) = std::str::from_utf8(param)
+                .ok()
+                .and_then(|param| param.parse::<u16>().ok())
+            else {
+                continue;
+            };
+            match mode {
+                47 | 1047 | 1049 => alt_screen = on,
+                _ if on => {
+                    modes.insert(mode);
+                }
+                _ => {
+                    modes.remove(&mode);
+                }
+            }
+        }
+    }
+    (alt_screen, modes)
+}
+
+#[test]
+fn parsed_modes_reads_switches_cut_sequences_queries_and_resets() {
+    assert_eq!(
+        parsed_modes(b"\x1b[?1049;1000h\x1b[?1h"),
+        (true, BTreeSet::from([1, 1000]))
+    );
+    assert_eq!(
+        parsed_modes(b"\x1b[?1000h\x1b[?10\x18\x1b[?1l00l"),
+        (false, BTreeSet::from([1000])),
+        "CAN cuts the reset short and its digits are text"
+    );
+    assert_eq!(
+        parsed_modes(b"\x1b[?1049h\x1b[?1000h\x1b[?1047l\x1b[?1000$p"),
+        (false, BTreeSet::from([1000])),
+        "a query is not a reset"
+    );
+    assert_eq!(
+        parsed_modes(b"\x1b[?1049h\x1b[?1000h\x1bc"),
+        (false, BTreeSet::new())
+    );
+}
+
+/// A view that parsed `shown` and then its redial's `after` holds the
+/// alternate screen and the modes its program has now, and none of the
+/// state the program left while the socket was down.
+fn assert_redial_holds_the_program_state(
+    shown: &[u8],
+    after: &[u8],
+    alt_screen: bool,
+    modes: &[u16],
+    redial: &str,
+) {
+    let (view_alt_screen, view_modes) = parsed_modes(&[shown, after].concat());
+    assert_eq!(
+        (view_alt_screen, view_modes.into_iter().collect::<Vec<_>>()),
+        (alt_screen, modes.to_vec()),
+        "{redial} holds the program's alternate screen and modes, (alternate screen, modes \
+         on), and none its program left while the socket was down"
+    );
+}
+
+/// Redial a view of `rig` from `cursor` in `generation`, as the client does
+/// after its socket ends.
+async fn redial(rig: &Rig, cursor: u64, generation: u64) -> (Client, Value, Vec<u8>, Vec<u8>) {
+    dial_until_ready(
+        rig.address,
+        &format!(
+            "session={}&cols=80&rows=24&since={cursor}&generation={generation}",
+            rig.handle.id()
+        ),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_alternate_screen_redial_holds_no_mode_its_program_reset_while_away() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"\x1b[?1049h\x1b[?1000h";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // The program turns mouse tracking off while the socket is down and
+    // draws on its alternate screen. Nothing is lost.
+    let away = b"\x1b[?1000l\x1b[2;1Hthe program's alternate screen";
+    rig.output(away);
+    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_redial_holds_the_program_state(
+        shown,
+        &after,
+        true,
+        &[],
+        "a lossless alternate-screen redial",
+    );
+    assert_eq!(
+        number(&session, "replay_bytes"),
+        away.len() as u64,
+        "the redial replays the raw delta after its cursor"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after),
+        String::from_utf8_lossy(away),
+        "the delta continues the view's screen with nothing added: no alternate-screen \
+         attach prelude and no mode bytes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_alternate_screen_redial_holds_no_mode_its_program_reset_while_away() {
+    const RING: usize = 4096;
+    let _gate = pty_test_lock();
+    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
+    let shown = b"\x1b[?1049h\x1b[?1000h";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // The program turns mouse tracking off while the socket is down and
+    // stays on its alternate screen; the ring moves past the reset.
+    let lost = b"\x1b[?1000l";
+    rig.output(lost);
+    let screen = vec![b'a'; RING / 4];
+    for _ in 0..4 {
+        rig.output(&screen);
+    }
+    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_redial_holds_the_program_state(
+        shown,
+        &after,
+        true,
+        &[],
+        "an alternate-screen redial that lost bytes",
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        lost.len() as u64,
+        "the redial counts the lost reset"
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert_eq!(replay, RING, "the ring's tail is replayed");
+    assert_eq!(after[..replay], screen.repeat(4)[..]);
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_ALT_SUFFIX),
+        "the live recovery's alternate-screen suffix follows the replay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_alternate_screen_view_closed_for_its_short_ack_redials_with_no_dead_mode() {
+    let _gate = pty_test_lock();
+    // The program enters its alternate screen with mouse tracking, writes
+    // past the window until the reader releases the view, and turns the
+    // tracking off past it.
+    let (rig, mut view, generation, start, received) = released_view_running(
+        "stty -onlcr; read -r _; printf '\\033[?1049h\\033[?1000h'; seq -f %.0f 1 200000; \
+         printf '\\033[?1000l__STREAM_DONE__'; read -r _",
+    )
+    .await;
+    assert_eq!(
+        parsed_modes(&received),
+        (true, BTreeSet::from([1000])),
+        "fixture: the view parsed the switch to the alternate screen and mouse tracking"
+    );
+    let sent = received.len() as u64;
+    assert_short_ack_is_closed(&mut view, generation, start + sent - 1).await;
+    drop(view);
+    // The client redials from what it received, as it does after any close
+    // not preceded by an exit.
+    let (_redial, session, before, after) = redial(&rig, start + sent, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_redial_holds_the_program_state(
+        &received,
+        &after,
+        true,
+        &[],
+        "a redial after a stall close",
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert!(
+        number(&session, "missed_bytes") > 0,
+        "the ring moved past the view's cursor while it was released"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_ALT_SUFFIX),
+        "the live recovery's alternate-screen suffix follows the replay"
+    );
+    rig.handle.send_input(b"\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_normal_screen_lossless_redial_gets_its_delta_and_nothing_else() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"\x1b[?1h\x1b[?1000h";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // The program turns mouse tracking off while the socket is down and
+    // keeps application cursor keys. Nothing is lost.
+    let away = b"\x1b[?1000l$ back at the prompt\r\n";
+    rig.output(away);
+    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert!(before.is_empty(), "no reset for the same life");
+    assert_eq!(
+        number(&session, "replay_bytes"),
+        away.len() as u64,
+        "the redial replays the raw delta after its cursor"
+    );
+    assert_eq!(
+        after[..away.len()],
+        away[..],
+        "the delta is the program's bytes"
+    );
+    assert_redial_holds_the_program_state(
+        shown,
+        &after,
+        false,
+        &[1],
+        "a lossless normal-screen redial",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after),
+        String::from_utf8_lossy(away),
+        "a lossless redial adds no mode bytes after its delta, as a live recovery adds none"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_reads() {
     use std::fmt::Write as _;
@@ -1831,14 +2119,21 @@ async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u
 /// attached: it read what it was sent and reported none of it, so it held
 /// the reader until the bound, and the program then ran to its end past
 /// it. The program waits for a line before it exits. Returns the rig, the
-/// view, its generation, the position its session frame gave and the raw
-/// bytes it was sent.
+/// view, its generation, the position its session frame gave and the count
+/// of raw bytes it was sent.
 async fn released_view() -> (Rig, Client, u64, u64, u64) {
-    let rig = Rig::new(
-        64 * 1024,
+    let (rig, view, generation, start, received) = released_view_running(
         "stty -onlcr; read -r _; seq -f %.0f 1 200000; printf '__STREAM_DONE__'; read -r _",
     )
     .await;
+    (rig, view, generation, start, received.len() as u64)
+}
+
+/// [`released_view`] over a program `body` that reads a line, then writes
+/// past the window and ends its output with [`DONE_MARKER`]. Returns the
+/// raw bytes the view was sent after its attach.
+async fn released_view_running(body: &str) -> (Rig, Client, u64, u64, Vec<u8>) {
+    let rig = Rig::new(64 * 1024, body).await;
     let (mut view, initial) = rig.attach_acking().await;
     let generation = number(&initial, "generation");
     let start = number(&initial, "seq");
@@ -1850,13 +2145,13 @@ async fn released_view() -> (Rig, Client, u64, u64, u64) {
     rig.handle.send_input(b"\n");
     // The view reads what it is sent and reports none of it, so it holds
     // the reader until the release; only then can the program end.
-    let mut received = 0u64;
+    let mut received = Vec::new();
     let mut tail = Vec::new();
     bounded("the program ends past the released view", async {
         loop {
             tokio::select! {
                 frame = view.next() => match frame.expect("view open").expect("frame") {
-                    ClientMessage::Binary(bytes) => received += bytes.len() as u64,
+                    ClientMessage::Binary(bytes) => received.extend_from_slice(&bytes),
                     ClientMessage::Text(text) => {
                         let frame: Value = serde_json::from_str(&text).expect("control JSON");
                         assert_ne!(frame["type"], "error", "no lag line: {frame}");
@@ -1885,10 +2180,10 @@ async fn released_view() -> (Rig, Client, u64, u64, u64) {
         tokio::time::timeout(std::time::Duration::from_millis(300), view.next()).await
     {
         if let ClientMessage::Binary(bytes) = frame.expect("view open").expect("frame") {
-            received += bytes.len() as u64;
+            received.extend_from_slice(&bytes);
         }
     }
-    assert!(received > 0, "fixture: the view was sent output");
+    assert!(!received.is_empty(), "fixture: the view was sent output");
     (rig, view, generation, start, received)
 }
 

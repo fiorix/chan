@@ -5604,24 +5604,26 @@ mod tests {
         };
         assert_eq!(session["type"], "session");
         let mut replay = Vec::new();
-        for frame in &frames[1..frames.len() - 2] {
+        for frame in &frames[1..frames.len() - 1] {
             let WireFrame::Bytes(bytes) = frame else {
                 panic!("only replay bytes follow the session frame");
             };
             replay.extend_from_slice(bytes);
         }
-        assert_eq!(replay, chunks.concat());
         assert_eq!(
-            wire_shape(&frames[frames.len() - 2..]),
-            wire_shape(&[
-                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
-                WireFrame::Control(serde_json::json!({ "type": "ready" })),
-            ])
+            String::from_utf8_lossy(&replay),
+            String::from_utf8_lossy(&chunks.concat()),
+            "a resume of the live generation gets its delta and, as a live recovery, no mode \
+             reassert after it"
+        );
+        assert_eq!(
+            wire_shape(&frames[frames.len() - 1..]),
+            wire_shape(&[WireFrame::Control(serde_json::json!({ "type": "ready" }))])
         );
         assert_eq!(
             session["replay_bytes"].as_u64(),
             Some(replay.len() as u64),
-            "replay_bytes counts the ring bytes on the socket, excluding the mode reassert"
+            "replay_bytes counts the ring bytes on the socket"
         );
         state.terminal_sessions.close(id, CloseReason::Explicit);
         server.abort();
@@ -5687,9 +5689,10 @@ mod tests {
             wire_shape(&frames),
             wire_shape(&[
                 WireFrame::Control(serde_json::json!({ "type": "session" })),
-                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
                 WireFrame::Control(serde_json::json!({ "type": "ready" })),
-            ])
+            ]),
+            "a resume of the live generation at the ring end gets, as a live recovery, no \
+             mode reassert"
         );
         let WireFrame::Control(session) = &frames[0] else {
             unreachable!();
