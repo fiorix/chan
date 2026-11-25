@@ -60,8 +60,9 @@ const instantiate = WebAssembly.instantiate.bind(WebAssembly) as (
 type Page = Awaited<ReturnType<typeof openPage>>;
 let page: Page | null = null;
 
-/// A fresh page: every module the terminal loads, with nothing cached.
-async function openPage() {
+/// A fresh page: every module the terminal loads, with nothing cached, and
+/// the terminal settings `terminal` names.
+async function openPage(terminal: Parameters<typeof import("../__tests__/standalone").terminalPreferences>[0] = {}) {
   vi.resetModules();
   const svelte = await import("svelte");
   const harness = await import("../__tests__/terminalTab");
@@ -69,13 +70,14 @@ async function openPage() {
   const { terminalPreferences } = await import("../__tests__/standalone");
   const store = await import("../state/store.svelte");
   const tabs = await import("../state/tabs.svelte");
+  const confirm = await import("../state/confirm.svelte");
   const { api } = await import("../api/client");
   const { reloadWindow } = await import("../api/desktop");
   const { terminalStatusProps } = await import("../__tests__/terminalStatusProps.svelte");
   const { default: TerminalTab } = await import("./TerminalTab.svelte");
   harness.installTerminalDom();
   widget.installSoftwareCanvas();
-  store.__testSetStandalonePreferences(terminalPreferences());
+  store.__testSetStandalonePreferences(terminalPreferences(terminal));
   // The mocked modules outlive the page's module graph, and so do their
   // records and calls.
   xtermTerminals.splice(0);
@@ -86,9 +88,21 @@ async function openPage() {
     harness,
     store,
     tabs,
+    confirm,
     api,
     reloadWindow: vi.mocked(reloadWindow),
     mounts,
+    /// Hold the next load of the terminal's font; `release` answers it with
+    /// the face loaded.
+    holdNextFont() {
+      let release!: () => void;
+      let asked = false;
+      vi.mocked(document.fonts.load).mockImplementationOnce(() => {
+        asked = true;
+        return new Promise<FontFace[]>((resolve) => (release = () => resolve([{} as FontFace])));
+      });
+      return { asked: () => asked, release: () => release() };
+    },
     /// Mount a terminal for a seated tab in a focused pane.
     open(tab: import("../state/tabs.svelte").TerminalTab) {
       const mounted = widget.mountGhostty(TerminalTab, tab);
@@ -633,6 +647,106 @@ describe("a terminal closed or restarted while its core loads", () => {
     expect(takeShownLoadFailures()).toBe(0);
   });
 
+  test("restarting while the terminal's own instance is made opens one terminal, on the restarted load once its font loads", async () => {
+    serveCore();
+    let instances = 0;
+    let own: WebAssembly.Instance | null = null;
+    let settleOwn!: (instance: WebAssembly.Instance) => void;
+    const ownSettled = new Promise<WebAssembly.Instance>((resolve) => (settleOwn = resolve));
+    const made = vi.spyOn(WebAssembly, "instantiate").mockImplementation(((module: WebAssembly.Module) => {
+      instances += 1;
+      // The loader's check instance passes; the terminal's own, the second,
+      // is made at once and handed over when the case settles it.
+      if (instances !== 2) return instantiate(module, {});
+      void instantiate(module, {}).then((instance) => (own = instance));
+      return ownSettled;
+    }) as typeof WebAssembly.instantiate);
+    page = await openPage({ font: "source-code-pro" });
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+    await vi.waitFor(() => expect(own, "the terminal's own instance is being made").not.toBeNull());
+    const font = page.holdNextFont();
+
+    // Settled in the restart's turn: the start the instance was made for
+    // resumes after the restart's teardown, while the restarted start waits
+    // on its font.
+    settleOwn(own!);
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(page.harness.TerminalSocket.all, "the start the restart overtook dialed nothing").toHaveLength(0);
+    expect(terminalArea(target).querySelector("canvas"), "and opened nothing").toBeNull();
+    expect(font.asked(), "the restarted load waits on its font").toBe(true);
+
+    font.release();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the restarted terminal dialed its PTY").toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(page.harness.TerminalSocket.all, "one PTY").toHaveLength(1);
+    const url = new URL(page.harness.TerminalSocket.all[0]!.url);
+    expect(url.searchParams.get("ack"), "the PTY of a Ghostty terminal").toBe("1");
+    expect(terminalArea(target).querySelectorAll("canvas"), "one terminal").toHaveLength(1);
+    expect(areaWatchers(page, target), "wired once").toBe(1);
+    expect(made, "the check, the overtaken instance and the restarted terminal's").toHaveBeenCalledTimes(3);
+    expect(loadError(target)).toBeNull();
+    expect(xtermTerminals).toHaveLength(0);
+    expect(takeShownLoadFailures()).toBe(0);
+  });
+
+  test("closing a terminal with a live session while its core loads ends the session once and attaches nothing", async () => {
+    const core = serveCore();
+    const release = core.holdNext();
+    const made = vi.spyOn(WebAssembly, "instantiate");
+    page = await openPage();
+    const closeTerminal = vi.spyOn(page.api, "closeTerminal").mockResolvedValue(undefined);
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab({ terminalSessionId: SESSION })]);
+    page.open(tab!);
+    await vi.waitFor(() => expect(core.requests(), "the load is in flight").toBe(1));
+
+    expect(await page.tabs.closeTabsInPane(page.harness.TERMINAL_PANE, { force: true })).toBe(true);
+    page.svelte.unmount(page.mounts.pop()!);
+    release("serve");
+    await vi.waitFor(() => expect(made, "the loader checked the core").toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(closeTerminal.mock.calls, "the route ended the live session, once").toEqual([[SESSION]]);
+    expect(made, "no instance for the closed terminal").toHaveBeenCalledTimes(1);
+    expect(page.harness.TerminalSocket.all, "nothing attached to it").toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
+    expect(loadReports(), "nothing failed").toHaveLength(0);
+    expect(takeShownLoadFailures()).toBe(0);
+  });
+
+  test("restarting a terminal with a live session while its core loads ends that session and opens one terminal on a fresh PTY", async () => {
+    const core = serveCore();
+    const release = core.holdNext();
+    const made = vi.spyOn(WebAssembly, "instantiate");
+    page = await openPage();
+    const closeTerminal = vi.spyOn(page.api, "closeTerminal").mockResolvedValue(undefined);
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab({ terminalSessionId: SESSION })]);
+    const { target } = page.open(tab!);
+    await vi.waitFor(() => expect(core.requests(), "the load is in flight").toBe(1));
+
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
+    await vi.waitFor(() => expect(page!.confirm.confirmState.open, "a running shell asks first").toBe(true));
+    page.confirm.resolveConfirm(true);
+    await vi.waitFor(() => expect(closeTerminal, "the route ends the live session").toHaveBeenCalled());
+    expect(page.harness.TerminalSocket.all, "nothing dialed while the core loads").toHaveLength(0);
+    release("serve");
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the restarted terminal dialed its PTY").toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(closeTerminal.mock.calls, "the live session was ended once").toEqual([[SESSION]]);
+    expect(page.harness.TerminalSocket.all, "one PTY").toHaveLength(1);
+    const url = new URL(page.harness.TerminalSocket.all[0]!.url);
+    expect(url.searchParams.get("session"), "a fresh shell, not the ended session").toBeNull();
+    expect(url.searchParams.get("ack")).toBe("1");
+    expect(terminalArea(target).querySelectorAll("canvas"), "one terminal").toHaveLength(1);
+    expect(made, "the check and one instance for the terminal").toHaveBeenCalledTimes(2);
+    expect(areaWatchers(page, target), "wired once").toBe(1);
+    expect(loadError(target)).toBeNull();
+    expect(xtermTerminals).toHaveLength(0);
+    expect(takeShownLoadFailures()).toBe(0);
+  });
+
   // A view that failed to load never dialed, so no socket carries the close
   // frame; the session still ends with its tab.
   test("closing a terminal whose view failed to load ends its live session", async () => {
@@ -652,5 +766,44 @@ describe("a terminal closed or restarted while its core loads", () => {
     const routeCloses = closeTerminal.mock.calls.filter(([id]) => id === SESSION);
     expect(closeFrames.length + routeCloses.length, "the server is told once to end the session").toBe(1);
     takeShownLoadFailures();
+  });
+});
+
+describe("terminals that open while one load is in flight", () => {
+  test("they share the load: one fetch and one compile, then an instance, a terminal and a PTY each", async () => {
+    const core = serveCore();
+    const release = core.holdNext();
+    const compile = vi.spyOn(WebAssembly, "compile");
+    const made = vi.spyOn(WebAssembly, "instantiate");
+    page = await openPage();
+    const [first, second] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1" }),
+      page.harness.terminalTab({ id: "term-2" }),
+    ]);
+    const a = page.open(first!);
+    await vi.waitFor(() => expect(core.requests(), "the first terminal's load is in flight").toBe(1));
+    const b = page.place(second!, { active: true, focused: false });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(core.requests(), "the second terminal waits on the same load").toBe(1);
+    expect(page.harness.TerminalSocket.all, "nothing dialed while it loads").toHaveLength(0);
+
+    release("serve");
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "both terminals dialed").toHaveLength(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(page.harness.TerminalSocket.all, "one PTY each").toHaveLength(2);
+    for (const socket of page.harness.TerminalSocket.all) {
+      expect(new URL(socket.url).searchParams.get("ack"), "each the PTY of a Ghostty terminal").toBe("1");
+    }
+    for (const target of [a.target, b.target]) {
+      expect(terminalArea(target).querySelectorAll("canvas"), "a terminal in each area").toHaveLength(1);
+      expect(areaWatchers(page, target), "each wired once").toBe(1);
+      expect(loadError(target)).toBeNull();
+    }
+    expect(core.requests(), "one fetch").toBe(1);
+    expect(compile, "one compile").toHaveBeenCalledTimes(1);
+    expect(made, "the check and one instance each").toHaveBeenCalledTimes(3);
+    expect(b.target.contains(document.activeElement), "the unfocused pane's terminal takes no keyboard").toBe(false);
+    expect(xtermTerminals).toHaveLength(0);
+    expect(takeShownLoadFailures()).toBe(0);
   });
 });
