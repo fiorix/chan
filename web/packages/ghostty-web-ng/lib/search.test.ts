@@ -170,6 +170,11 @@ const paged = (needles: number, lines = 120) => Array.from({ length: lines }, ()
 // oldest first. Lines 221 to 230 hold no needle, so the middle page's
 // newest match, row 440, is in the history.
 const threePaged = Array.from({ length: 240 }, (_, i) => (i <= 220 || i >= 231 ? 'needle ' : 'plain ').padEnd(300, 'x')).join('\r\n');
+// The same three pages with a match on every line, and line 115 wrapping a
+// second needle across the boundary between the first listed page (rows up
+// to 230) and the middle one (from row 231), at 230:197 to 231:2.
+const threeStraddled = Array.from({ length: 240 }, (_, i) => i === 115
+  ? 'needle '.padEnd(197, 'y') + 'needle' + 'z'.repeat(97) : 'needle '.padEnd(300, 'x')).join('\r\n');
 // The first match the core itself lists, in its own order.
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
@@ -631,6 +636,36 @@ describe('widget search', () => {
     }
     expect(active(term)).toEqual([range(472, 0)]);
     expect(search.state).toEqual({ index: 4, total: 230, partial: false });
+  });
+
+  test('a window taken inside the third listed page also ends above the match wrapped across the first page boundary', async () => {
+    const { term } = await create(threeStraddled, 200, 20, 10_000_000);
+    const wrapped = range(230, 197, 231, 2);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 123; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 124, total: 241, partial: false });
+    const rows = coreRows(term, 'needle', 241);
+    expect(rows.slice(0, 116).every(row => row <= 230), 'the core lists the first page first').toBe(true);
+    expect(rows.slice(116, 231).every(row => row >= 232 && row <= 460), 'then the middle page').toBe(true);
+    expect(rows.slice(231), 'then the last page, newest first, then the wrapped match').toEqual([478, 476, 474, 472, 470, 468, 466, 464, 462, 230]);
+    // Placement stops inside the last page's entries, and the next write
+    // takes the window from that list.
+    placementStopsAt(236);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').not.toBeNull();
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([range(232, 0), wrapped], `frame ${i}: the press waits on its match or lands on its neighbour`).toContainEqual(active(term)?.[0]);
+      frame();
+    }
+    expect(active(term)).toEqual([wrapped]);
+    expect(search.state).toEqual({ index: 125, total: 241, partial: false });
   });
 
   // Line 115 wraps a needle across the boundary between the page above
