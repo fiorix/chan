@@ -296,12 +296,8 @@ export class SearchOwner {
 
   private markList(): void {
     this.listHistory = this.core.getScrollbackLength();
-    if (this.listHistory > 0) {
-      this.listAnchor = this.retrack(this.listAnchor, this.listHistory - 1, 0);
-    } else {
-      this.listAnchor?.free();
-      this.listAnchor = null;
-    }
+    // A list with no history has no history neighbour for a cell to measure.
+    if (this.listHistory > 0) this.listAnchor = this.retrack(this.listAnchor, this.listHistory - 1, 0);
   }
 
   private schedule(): void {
