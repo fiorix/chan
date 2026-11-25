@@ -166,6 +166,24 @@ describe("a failed nonroot filesystem level", () => {
     expect(target.querySelector(".spine-warning")).toBeNull();
   });
 
+  test("a second failure of a folder an answer over the listing cap holds without its files names its directory", async () => {
+    const release = holdSharedGraph();
+    coverNotes();
+    graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
+    graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
+    graphServer.tree = "folders";
+    failLevel("notes");
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
+    expect(reads("notes")).toBe(1);
+
+    release();
+    await settle();
+    expect.soft(reads("notes")).toBe(2);
+    expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+    expect.soft(target.querySelector(".placeholder.error")).toBeNull();
+    expect.soft(target.querySelector(".cy.dim")).toBeNull();
+  });
+
   test.each([
     ["timeout", timeout, "request timed out after 10000 ms"],
     ["dropped connection", () => new TypeError("Failed to fetch"), "Failed to fetch"],
