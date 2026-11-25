@@ -238,9 +238,9 @@
 
   /// The shared graph holds the whole tree once the index has answered,
   /// unless its answer is over the listing cap (the mark taken with the
-  /// view, or kept with a hidden tab's part of it): that one holds every
-  /// folder but of the files only those it holds for another reason, so a
-  /// child node there does not show a directory's level is drawn. The tab
+  /// view, or kept with a hidden tab's part of it): that one can hold a
+  /// folder without all of its files (`GraphTreeCoverage`), so a child node
+  /// there does not show a directory's level is drawn. The tab
   /// draws its filesystem spine only as deep as the opened directories
   /// reached at its last fetch, so one a double-click opens past that, with
   /// no level the drawn graph is known to hold, is read: a level per such
