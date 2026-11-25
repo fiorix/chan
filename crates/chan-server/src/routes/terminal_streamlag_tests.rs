@@ -2109,6 +2109,129 @@ async fn a_released_view_flooding_frames_is_closed_within_the_bound() {
     rig.handle.send_input(b"\n");
 }
 
+/// Wait until the watcher has seen one more output of the program's `T`.
+async fn next_tick(watcher: &mut AttachHandle) {
+    bounded("the program's tick reaches the watcher", async {
+        loop {
+            match watcher.rx.recv().await {
+                Ok(SessionEvent::Output(bytes)) if bytes.contains(&b'T') => return,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("session ended: {error}"),
+            }
+        }
+    })
+    .await;
+}
+
+/// A view the reader released while its socket's send is still pending: a
+/// window of output its client has not read holds that send, and the view
+/// holds the reader until the release. The program prints a `T` for each
+/// line it reads; the second tick past the view can only follow the
+/// release, whichever tick the reader held. Returns the rig, the view, its
+/// generation, the position its session frame gave and the pending send.
+async fn released_under_a_pending_send() -> (Rig, Client, u64, u64, PendingSend) {
+    let rig = Rig::new(
+        2 * BLOCKED_BYTES,
+        "while IFS= read -r line; do printf 'T'; done",
+    )
+    .await;
+    let (view, initial) = rig.attach_acking().await;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    let pending = rig.block_output().await;
+    for _ in 0..2 {
+        rig.handle.send_input(b"\n");
+        next_tick(&mut watcher).await;
+    }
+    (rig, view, generation, start, pending)
+}
+
+/// The client pings while its released view's send is pending, so the send
+/// reads the ping, and reads the frame that ends the send `hold` later.
+/// Says when the send ended.
+async fn ping_into_the_pending_send(
+    view: &mut Client,
+    hold: std::time::Duration,
+) -> tokio::time::Instant {
+    send(view, json!({"type": "ping"})).await;
+    tokio::time::sleep(hold).await;
+    finish_blocked_frame(view).await;
+    tokio::time::Instant::now()
+}
+
+/// The first frame read after a release starts the clock wherever the
+/// socket reads it, here inside the send that was pending at the release.
+/// The send outlasts the bound, so the close follows the send's end; a
+/// clock started there instead would close a whole bound later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ping_read_by_a_send_pending_at_the_release_starts_the_stall_clock() {
+    let _gate = pty_test_lock();
+    let (_rig, mut view, _generation, _start, _pending) = released_under_a_pending_send().await;
+    let hold = NO_PROGRESS_LIMIT + std::time::Duration::from_secs(2);
+    let sent_at = ping_into_the_pending_send(&mut view, hold).await;
+    let Some(closed_at) = read_until_closed(&mut view, sent_at + SHORT_ACK_SLACK).await else {
+        panic!(
+            "a released view whose client pinged once while its send was pending is \
+             closed once the bound from that ping has passed: still open \
+             {SHORT_ACK_SLACK:?} after the send ended"
+        );
+    };
+    // Timers never fire early, so a clock started at the send's end closes
+    // no sooner than a bound after it, and a second short of that tells
+    // the two apart on a loaded host.
+    let after_send = closed_at - sent_at;
+    assert!(
+        after_send < NO_PROGRESS_LIMIT - std::time::Duration::from_secs(1),
+        "the clock runs from the ping, not from the send's end: closed {after_send:?} \
+         after the send ended"
+    );
+}
+
+/// A ping read by the pending send gets the whole bound: the view is open
+/// a second short of it. An ack advance read after that ping is progress,
+/// so the wait restarts with no clock and the view stays open past the
+/// ping's bound, and the client's next frame starts the clock again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ack_advance_after_a_ping_read_by_a_pending_send_restarts_the_wait() {
+    let _gate = pty_test_lock();
+    let (_rig, mut view, generation, start, _pending) = released_under_a_pending_send().await;
+    let pinged_at = tokio::time::Instant::now();
+    ping_into_the_pending_send(&mut view, std::time::Duration::from_secs(1)).await;
+    let open_until = pinged_at + NO_PROGRESS_LIMIT - std::time::Duration::from_secs(1);
+    assert_eq!(
+        read_until_closed(&mut view, open_until).await,
+        None,
+        "the client gets the whole bound from its ping"
+    );
+    // Short of what the view was sent, so it keeps waiting for its client.
+    ack(&mut view, generation, start + BLOCKED_BYTES as u64 - 1).await;
+    let quiet_until = pinged_at + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(2);
+    assert_eq!(
+        read_until_closed(&mut view, quiet_until).await,
+        None,
+        "an ack advance after the ping restarts the wait with no clock"
+    );
+    let pinged_again_at = tokio::time::Instant::now();
+    send(&mut view, json!({"type": "ping"})).await;
+    let deadline = pinged_again_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK;
+    let Some(closed_at) = read_until_closed(&mut view, deadline).await else {
+        panic!(
+            "the frame after the advance starts the clock: still open \
+             {NO_PROGRESS_LIMIT:?} (+{SHORT_ACK_SLACK:?}) after it"
+        );
+    };
+    let waited = closed_at - pinged_again_at;
+    assert!(
+        waited >= NO_PROGRESS_LIMIT,
+        "the client gets the whole bound from its frame: closed after {waited:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lagged_view_whose_ack_stays_short_is_closed_within_the_bound() {
     let _gate = pty_test_lock();
