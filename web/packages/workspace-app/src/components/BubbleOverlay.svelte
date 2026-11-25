@@ -148,8 +148,8 @@
       if (current instanceof HTMLElement && current !== document.body) {
         // A per-terminal survey first shown from a hidden tab can observe the
         // previous tab or the clicked tab header. Only remember a target from
-        // inside the owning terminal; TerminalTab restores xterm itself when
-        // no eligible target exists.
+        // inside the owning terminal; TerminalTab refocuses its terminal
+        // itself when no eligible target exists.
         const owner = card?.closest(".terminal-tab");
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
@@ -313,7 +313,7 @@
   /* Per-terminal: cover only the owning terminal (the .terminal-tab is the
      position:relative context), so the survey sits over its own terminal and
      other terminals stay usable. Below the terminal menu bubble (z 25500) but
-     above the xterm canvas. */
+     above the terminal's canvas. */
   .survey-overlay.per-terminal {
     position: absolute;
     z-index: 24000;
