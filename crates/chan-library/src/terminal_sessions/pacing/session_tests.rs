@@ -1,7 +1,7 @@
 use super::super::tests::test_session_with_ring;
-#[cfg(unix)]
 use super::super::tests::{opts_with_command, test_config};
 use super::super::*;
+use super::EVENT_CREDIT;
 
 /// A WebSocket's attach: its lease is captured with the replay it resumes.
 pub(super) fn attach_acked(session: &Arc<Session>, since: Option<u64>) -> AttachHandle {
@@ -716,4 +716,387 @@ fn a_queued_message_waits_out_a_hold_that_ends_at_exit() {
 #[test]
 fn a_hold_keeps_a_queued_message_past_an_expired_generation_cap() {
     queued_message_waits_out_a_hold(HoldEnd::ViewGone, true);
+}
+
+/// The published stream's end and its event count.
+fn published(session: &Session) -> (u64, u64) {
+    let state = session.pacing.state.lock().expect("terminal pacing");
+    (state.seq, state.events)
+}
+
+/// Poll a setup condition for up to a minute; a timeout names the step.
+fn wait_until(step: &str, mut ready: impl FnMut() -> bool) {
+    let bound = std::time::Instant::now() + Duration::from_secs(60);
+    while !ready() {
+        assert!(std::time::Instant::now() < bound, "setup: {step}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait until the published stream has not moved for 300 ms, so nothing
+/// the program printed is still being read.
+fn settle(session: &Session) -> (u64, u64) {
+    const STILL: Duration = Duration::from_millis(300);
+    let mut last = published(session);
+    let mut since = std::time::Instant::now();
+    wait_until("the program's output settles", || {
+        let now = published(session);
+        if now != last {
+            (last, since) = (now, std::time::Instant::now());
+        }
+        since.elapsed() >= STILL
+    });
+    last
+}
+
+/// A real program behind one acknowledging view that advances only when
+/// the test says so, as a stopped page leaves its socket.
+struct HeldView {
+    registry: Registry,
+    session: Arc<Session>,
+    attached: AttachHandle,
+    progress: OutputProgress,
+}
+
+/// Spawn `program` and wait until it has printed `CHAN_READY` and gone
+/// quiet. Unix runs it in the login shell, Windows in Windows PowerShell.
+fn spawn_behind_a_view(ring: usize, program: &str) -> HeldView {
+    let registry = Registry::new(test_config(ring, 8, 60));
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut opts = opts_with_command(program);
+    #[cfg(windows)]
+    {
+        opts.profile = Some("windows-powershell".into());
+    }
+    let handle = registry.create(opts).expect("spawn the program");
+    let session = handle.session.clone();
+    let attached = attach_acked(&session, None);
+    drop(handle);
+    let progress = attached.output_progress().expect("lease");
+    wait_until("the program prints CHAN_READY", || {
+        let output = session.output.lock().expect("terminal output");
+        contains_subslice(&output.ring.snapshot_since(None).0.concat(), b"CHAN_READY")
+    });
+    settle(&session);
+    HeldView {
+        registry,
+        session,
+        attached,
+        progress,
+    }
+}
+
+impl HeldView {
+    /// Move the view to the end of the stream, as a page that has sent,
+    /// consumed and parsed everything so far leaves it.
+    fn catch_up(&self) {
+        let (seq, events) = published(&self.session);
+        let sent = self.progress.seq();
+        self.progress
+            .sent_output(usize::try_from(seq - sent).expect("a small stream"));
+        let consumed = self
+            .progress
+            .with_view(|view| view.events)
+            .expect("live view");
+        for _ in consumed..events {
+            self.progress.sent_event();
+        }
+        self.progress.acknowledge(seq);
+    }
+
+    /// How many events the view is behind the published stream.
+    fn events_behind(&self) -> u64 {
+        let consumed = self
+            .progress
+            .with_view(|view| view.events)
+            .expect("live view");
+        published(&self.session).1 - consumed
+    }
+
+    fn close(self) {
+        self.registry.close_all(CloseReason::Shutdown);
+    }
+}
+
+/// Queue a message at the program and drive the drainer by hand until it
+/// is delivered. The message is late by whatever the reader's wait holds
+/// it past the quiet period, which counts from the program's last visible
+/// output or from the enqueue, whichever is later. Prints and returns that
+/// delay in milliseconds.
+fn queued_delivery_delay(session: &Session, case: &str) -> i64 {
+    let last_output = session.last_output_at.load(Ordering::Relaxed);
+    let enqueued_at = now_unix_millis();
+    session
+        .enqueue_cs_write("queued at an idle program".into(), None)
+        .expect("queued");
+    let bound = std::time::Instant::now() + Duration::from_secs(30);
+    let delivered_at = loop {
+        let now = now_unix_millis();
+        session.try_drain_batch(now);
+        if session.write_queue.lock().expect("queue").is_empty() {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < bound,
+            "{case}: a queued message is never stuck"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        delivered_at - last_output >= WRITE_QUEUE_QUIET_MS,
+        "{case}: delivered {} ms after the last output, inside the quiet period",
+        delivered_at - last_output
+    );
+    let late = delivered_at - enqueued_at.max(last_output + WRITE_QUEUE_QUIET_MS);
+    println!(
+        "{case}: delivered {late} ms after the quiet period \
+         ({} ms after the last output, quiet period {WRITE_QUEUE_QUIET_MS} ms, \
+         hold bound {} ms)",
+        delivered_at - last_output,
+        NO_PROGRESS_LIMIT.as_millis()
+    );
+    late
+}
+
+/// Slack for a hand-driven drainer on a loaded runner, far below the
+/// view's bound that a wrongly held message waits out.
+const DRAIN_SLACK_MS: i64 = 1000;
+
+/// A program whose last output fills a view's window exactly and which then
+/// waits for input has nothing pending, so nothing holds it: a queued
+/// message is delivered at the quiet period, not at the view's bound.
+#[cfg(unix)]
+#[test]
+fn a_queued_message_reaches_an_idle_program_whose_output_filled_a_views_window() {
+    const RING: usize = 64 * 1024;
+    let window = RING / 2;
+    let held = spawn_behind_a_view(
+        RING,
+        &format!(
+            "stty -echo; printf CHAN_READY; read _; \
+             head -c {window} /dev/zero | tr '\\0' x; exec sleep 60"
+        ),
+    );
+    held.catch_up();
+    let (start, _) = published(&held.session);
+    held.attached.send_input(b"\n");
+    wait_until("the program fills the view's window", || {
+        published(&held.session).0 >= start + window as u64
+    });
+    let (end, _) = settle(&held.session);
+    assert_eq!(
+        end - start,
+        window as u64,
+        "setup: the view is exactly a full window behind"
+    );
+    let late = queued_delivery_delay(&held.session, "an idle program a full window behind");
+    held.close();
+    assert!(
+        late < DRAIN_SLACK_MS,
+        "an idle program a full window behind: delivered {late} ms after the \
+         quiet period; a program with nothing pending is not held"
+    );
+}
+
+/// The same with the event limit: the program's answer to a key is the
+/// event that leaves the view 512 events behind, and the program then
+/// waits for the next key with nothing pending.
+#[test]
+fn a_queued_message_reaches_an_idle_program_whose_output_left_a_view_512_events_behind() {
+    #[cfg(unix)]
+    let (program, key) = (
+        "stty -echo; printf CHAN_READY; while read _; do printf x; done",
+        b"\n",
+    );
+    #[cfg(windows)]
+    let (program, key) = (
+        "[Console]::Write('CHAN_READY'); \
+         while ($true) { [void][Console]::ReadKey($true); [Console]::Write('x') }",
+        b"k",
+    );
+    let held = spawn_behind_a_view(64 * 1024, program);
+    // One key first, to count the events its answer publishes: one read on
+    // a Unix PTY, whatever frames ConPTY renders on Windows.
+    held.catch_up();
+    let (before, events_before) = published(&held.session);
+    held.attached.send_input(key);
+    wait_until("the program answers a key", || {
+        published(&held.session).0 > before
+    });
+    let (answered, events_after) = settle(&held.session);
+    let per_key = events_after - events_before;
+    assert!(
+        (1..EVENT_CREDIT).contains(&per_key),
+        "setup: one key's answer published {per_key} events"
+    );
+    held.catch_up();
+    for _ in 0..EVENT_CREDIT - per_key {
+        held.session.broadcast(SessionEvent::QueueDepth(0));
+    }
+    held.attached.send_input(key);
+    wait_until("the program answers the second key", || {
+        published(&held.session).0 > answered
+    });
+    settle(&held.session);
+    let behind = held.events_behind();
+    assert_eq!(
+        behind, EVENT_CREDIT,
+        "setup: the answer leaves the view exactly {EVENT_CREDIT} events \
+         behind (the first key's answer published {per_key})"
+    );
+    let late = queued_delivery_delay(&held.session, "an idle program 512 events behind");
+    held.close();
+    assert!(
+        late < DRAIN_SLACK_MS,
+        "an idle program 512 events behind: delivered {late} ms after the \
+         quiet period; a program with nothing pending is not held"
+    );
+}
+
+/// A program that writes past a stopped view's window and then goes idle
+/// leaves the rest pending in the PTY, and the reader waits for the view
+/// with it. The message is late by up to the view's bound, never stuck and
+/// never later than the bound and a quiet period.
+#[cfg(unix)]
+#[test]
+fn a_final_write_pending_behind_a_stopped_view_holds_a_queued_message_at_most_the_bound() {
+    const RING: usize = 64 * 1024;
+    let window = RING / 2;
+    let dir = tempfile::tempdir().expect("marker dir");
+    let done = dir.path().join("done");
+    let held = spawn_behind_a_view(
+        RING,
+        &format!(
+            "stty -echo; printf CHAN_READY; read _; \
+             head -c {window} /dev/zero | tr '\\0' x; printf tail; \
+             : > '{}'; exec sleep 60",
+            done.display()
+        ),
+    );
+    held.catch_up();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &held.session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting_tx.send(now_unix_millis());
+        },
+    );
+    held.attached.send_input(b"\n");
+    let waited_at = waiting_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("setup: the reader waits for the view with the rest pending");
+    wait_until("the program finishes its last write", || done.exists());
+    let idle_at = now_unix_millis();
+    let case = "a final write pending behind a stopped view";
+    let late = queued_delivery_delay(&held.session, case);
+    let delivered_at = now_unix_millis();
+    held.close();
+    println!(
+        "{case}: the program was idle {} ms after the reader began to wait \
+         and got the message {} ms after it went idle",
+        idle_at - waited_at,
+        delivered_at - idle_at
+    );
+    let bound = NO_PROGRESS_LIMIT.as_millis() as i64 + WRITE_QUEUE_QUIET_MS + DRAIN_SLACK_MS;
+    assert!(
+        delivered_at - waited_at < bound,
+        "{case}: delivered {} ms after the wait began ({late} ms late), past \
+         the bound and a quiet period",
+        delivered_at - waited_at
+    );
+}
+
+/// A program whose output a view holds is mid-output, not idle: a queued
+/// message waits through the hold, however long it outlasts a quiet period,
+/// and is delivered a quiet period after the hold ends.
+fn a_held_program_gets_no_queued_message_until_the_hold_ends(program: &str, enter: &[u8]) {
+    // A small window, so the flood overruns it whatever ConPTY coalesces.
+    let held = spawn_behind_a_view(8 * 1024, program);
+    held.catch_up();
+    let HeldView {
+        registry,
+        session,
+        attached,
+        progress,
+    } = held;
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting_tx.send(());
+        },
+    );
+    attached.send_input(enter);
+    waiting_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("setup: the flood fills the view's window and the reader waits");
+    let queued = |session: &Session| session.write_queue.lock().expect("queue").len();
+    session
+        .enqueue_cs_write("queued while held".into(), None)
+        .expect("queued");
+    session.try_drain_batch(now_unix_millis() + 10 * WRITE_QUEUE_GEN_START_CAP_MS);
+    let during = queued(&session);
+    std::thread::sleep(Duration::from_millis((WRITE_QUEUE_QUIET_MS + 200) as u64));
+    session.try_drain_batch(now_unix_millis());
+    let after_a_quiet_period = queued(&session);
+    let ended = now_unix_millis();
+    drop(progress);
+    drop(attached);
+    let bound = std::time::Instant::now() + Duration::from_secs(60);
+    let delivered_at = loop {
+        let now = now_unix_millis();
+        session.try_drain_batch(now);
+        if queued(&session) == 0 || std::time::Instant::now() >= bound {
+            break now;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stuck = queued(&session) != 0;
+    registry.close_all(CloseReason::Shutdown);
+    println!(
+        "a held program: queued {during} during the hold and {after_a_quiet_period} \
+         a quiet period into it; delivered {} ms after the hold ended",
+        delivered_at - ended
+    );
+    assert_eq!(
+        during, 1,
+        "a program held behind a view is mid-output, not idle"
+    );
+    assert_eq!(
+        after_a_quiet_period, 1,
+        "a hold that outlasts a quiet period still holds the message"
+    );
+    assert!(
+        !stuck,
+        "a queued message is never stuck behind a finished hold"
+    );
+    assert!(
+        delivered_at - ended >= WRITE_QUEUE_QUIET_MS,
+        "delivered {} ms after the hold ended, inside the quiet period",
+        delivered_at - ended
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pty_program_held_by_a_view_gets_no_queued_message_until_the_hold_ends() {
+    a_held_program_gets_no_queued_message_until_the_hold_ends(
+        "stty -echo; printf CHAN_READY; read _; \
+         awk 'BEGIN { for (i = 1; i <= 20000; i++) print \"held output line \" i }'; \
+         exec sleep 60",
+        b"\n",
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_conpty_program_held_by_a_view_gets_no_queued_message_until_the_hold_ends() {
+    a_held_program_gets_no_queued_message_until_the_hold_ends(
+        "[Console]::Write('CHAN_READY'); [void][Console]::ReadLine(); \
+         foreach ($i in 1..20000) { [Console]::WriteLine('held output line ' + $i) }; \
+         Start-Sleep 60",
+        b"\r",
+    );
 }
