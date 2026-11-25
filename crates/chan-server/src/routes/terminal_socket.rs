@@ -27,6 +27,9 @@ pub(super) struct TerminalSocket {
     pub(super) stream: SplitStream<WebSocket>,
     pub(super) input: InputState,
     state: Arc<AppState>,
+    /// A wait outside the socket loop ran out its view's stall, so the
+    /// socket ends with the stall close.
+    stalled: bool,
 }
 
 pub(super) struct InputState {
@@ -72,6 +75,7 @@ impl TerminalSocket {
                 cwd: None,
             },
             state,
+            stalled: false,
         }
     }
 
@@ -115,7 +119,9 @@ impl TerminalSocket {
     /// How many raw bytes the client's window allows now, waiting for an
     /// acknowledgement when it is full. Input stays live during the wait. An
     /// end of the session ends the wait with an error: the socket drops and
-    /// the client redials into the outcome the server retained.
+    /// the client redials into the outcome the server retained. So does the
+    /// stall of a view released during the wait, which marks the socket for
+    /// the stall close: the wait never returns to the loop that polls it.
     pub(super) async fn output_credit(&mut self, session: &AttachHandle) -> Result<usize, ()> {
         let Some(progress) = session.output_progress() else {
             return Ok(usize::MAX);
@@ -134,10 +140,18 @@ impl TerminalSocket {
             ) {
                 return Err(());
             }
+            let stall_deadline = self.input.stall.as_ref().and_then(|stall| stall.deadline);
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => return Err(()),
                 changed = lifecycle.changed() => changed.map_err(|_| ())?,
+                // Above the client's frames, as in the socket loop.
+                () = tokio::time::sleep_until(
+                    stall_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if stall_deadline.is_some() => {
+                    self.stalled = true;
+                    return Err(());
+                }
                 result = self.input.next_cwd() => self.input.complete_cwd(result)?,
                 message = self.stream.next() => {
                     self.input.receive(&self.state, session, message)?;
@@ -204,6 +218,14 @@ impl TerminalSocket {
     pub(super) async fn finish(self, code: u16, reason: Utf8Bytes) {
         if let Ok(socket) = self.sink.reunite(self.stream) {
             finish_socket(socket, code, reason).await;
+        }
+    }
+
+    /// End the socket with `finish`, or with the stall close when a wait
+    /// outside the socket loop ran out its view's stall, or else drop it.
+    pub(super) async fn end(self, finish: Option<(u16, &'static str)>) {
+        if let Some((code, reason)) = finish.or(self.stalled.then_some(STALL_CLOSE)) {
+            self.finish(code, reason.into()).await;
         }
     }
 }

@@ -1330,6 +1330,7 @@ async fn terminal_ws(
     }
     let size = socket.input.size.unwrap_or(opts.size);
     let Ok(attached_at) = send_attach_prelude(&mut socket, &session, size, false).await else {
+        socket.end(None).await;
         return;
     };
     socket.observe(&session);
@@ -1396,6 +1397,9 @@ async fn terminal_ws(
             };
             drop(progress);
             session = next;
+            // A wait belongs to the view it started for. The new view's
+            // starts at its own release, also inside the prelude below.
+            socket.input.stall = None;
             // The subscription precedes this barrier: replies accepted before
             // the snapshot arrive before its queue reproof; newer requests are
             // represented on the new receiver.
@@ -1439,7 +1443,6 @@ async fn terminal_ws(
             tmux_consent_rx = session.tmux_consent_rx.clone();
             lifecycle_rx = session.lifecycle_rx.clone();
             recover = false;
-            socket.input.stall = None;
         }
         if let Some(exit) = &session.exit {
             send_exit(
@@ -1492,7 +1495,7 @@ async fn terminal_ws(
             () = tokio::time::sleep_until(
                 stall_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if stall_deadline.is_some() => {
-                finish = Some((1013, "terminal view stalled"));
+                finish = Some(STALL_CLOSE);
                 break;
             }
             update = program_status.next() => {
@@ -1576,10 +1579,12 @@ async fn terminal_ws(
     if let Some(epoch) = socket.input.focus {
         session.withdraw_focus(epoch);
     }
-    if let Some((code, reason)) = finish {
-        socket.finish(code, reason.into()).await;
-    }
+    socket.end(finish).await;
 }
+
+/// The close of a view whose stall ran out: 1013, try again later, which
+/// the client answers by redialing from its parsed cursor.
+const STALL_CLOSE: (u16, &str) = (1013, "terminal view stalled");
 
 /// A view that needs recovery, waiting for its client to report having
 /// parsed what it was sent. The wait starts at a lag, when the socket loop
@@ -1587,9 +1592,9 @@ async fn terminal_ws(
 /// socket reads its first client frame after it, wherever it reads it, so
 /// that frame starts the clock. A client that runs (it sends frames) and
 /// still reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its
-/// socket closes, and the client redials from its parsed cursor. A stopped
-/// page sends nothing and keeps waiting, to recover on this socket when it
-/// wakes.
+/// socket closes, from the loop or from a replay's wait for send credit,
+/// and the client redials from its parsed cursor. A stopped page sends
+/// nothing and keeps waiting, to recover on this socket when it wakes.
 struct Stall {
     /// The parsed position the wait started at; an advance restarts it.
     acked: Option<u64>,
