@@ -613,6 +613,62 @@ describe("a terminal whose view fails after the core loads", () => {
   });
 });
 
+// Find searches the terminal's screen, so with no terminal shown its bar
+// stays closed.
+describe("find with no terminal shown", () => {
+  /// The find bar's input, if the bar is open.
+  function findBar(target: HTMLElement): HTMLInputElement | null {
+    return target.querySelector<HTMLInputElement>(".terminal-find input.find");
+  }
+
+  async function askForFind(): Promise<void> {
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.find.open" } }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  test("over the error of a widget that could not open, the bar stays closed", async () => {
+    serveCore();
+    let instances = 0;
+    vi.spyOn(WebAssembly, "instantiate").mockImplementation((async (module: WebAssembly.Module) => {
+      instances += 1;
+      const instance = await instantiate(module, {});
+      // The loader's check instance passes, and so does the terminal's own;
+      // the widget's open() then fails to allocate its terminal in it.
+      if (instances !== 2) return instance;
+      const exports = { ...(instance.exports as Record<string, unknown>) };
+      exports.ghostty_terminal_new = () => {
+        throw new RangeError("Out of memory: terminal");
+      };
+      return { exports } as unknown as WebAssembly.Instance;
+    }) as typeof WebAssembly.instantiate);
+    page = await openPage();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+    await shownLoadError(target);
+
+    await askForFind();
+
+    expect(findBar(target), "no find bar over the error").toBeNull();
+    expect(loadError(target), "the error stays").not.toBeNull();
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
+  });
+
+  test("while the terminal waits on its font, the bar stays closed", async () => {
+    serveCore();
+    page = await openPage({ font: "source-code-pro" });
+    const font = page.holdNextFont();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+    await vi.waitFor(() => expect(font.asked(), "the terminal waits on its font").toBe(true));
+
+    await askForFind();
+
+    expect(findBar(target), "no find bar before the terminal").toBeNull();
+    font.release();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the terminal opened").toHaveLength(1));
+  });
+});
+
 describe("terminals that failed one load together", () => {
   test("one Retry answers a failed fetch the terminals shared: the others retry once the load passes", async () => {
     const core = serveCore();
