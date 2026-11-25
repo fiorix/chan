@@ -59,13 +59,14 @@
   // owns the keyboard: a link in any namespace (a bare URL the markdown links,
   // an SVG link by either spelling, an image map's area), a control, a
   // details, whose summary the browser supplies when the markup has none,
-  // media with controls, an element with a tabindex of its own, and a scroll
-  // container, which Chrome and Firefox put in the Tab order. The sanitizer
-  // strips `contenteditable` but keeps inline styles, so an element made
-  // editable by a `-webkit-user-modify` style is the one shape left in the
-  // Tab order: the property is non-standard, and focus that reaches such an
-  // element answers nothing and is let go at the next pulse.
-  // A negative tabindex still lets a press focus and follow them.
+  // media with controls, the embed frame the markdown makes of a video link,
+  // an element with a tabindex of its own, and a scroll container, which
+  // Chrome and Firefox put in the Tab order. The sanitizer strips
+  // `contenteditable` but keeps inline styles, so an element made editable
+  // by a `-webkit-user-modify` style is the one shape left in the Tab order:
+  // the property is non-standard, and focus that reaches such an element
+  // answers nothing and is let go at the next pulse. A negative tabindex
+  // still lets a press focus and follow them.
   const BODY_FOCUSABLE =
     "[*|href], button, input, select, textarea, iframe, details, summary, " +
     "audio[controls], video[controls], [tabindex]";
