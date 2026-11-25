@@ -626,15 +626,19 @@ export class SearchOwner {
   private window(index: number): Before {
     let from = Math.max(0, index - BEFORE_REACH);
     let to = Math.min(this.total, index + BEFORE_REACH + 1);
-    // With the count of the core's active-area entries unknown, a list the
-    // core lists pages ahead in can lack the matches of the page being
-    // placed that lie between its placed ones and the newest match of the
-    // page listed before it, and a match wrapped across the boundary below
-    // the first listed page, which the core lists after every page's
-    // entries. So the window ends at both newest matches, the page listed
-    // before's and the first page's, on the side away from the active
-    // match.
-    const edges = this.head === null && !this.complete ? [this.pageAbove, this.firstListed] : [];
+    // Unless the list placed so far is known to be the head of the whole
+    // one, a list the core lists pages ahead in can lack the matches of the
+    // page being placed that lie between its placed ones and the newest
+    // match of the page listed before it, and a match wrapped across the
+    // boundary below the first listed page, which the core lists after
+    // every page's entries. That holds with the count of the core's
+    // active-area entries unknown, and also once a press has read it and
+    // found the list not yet in position order, which leaves the index it
+    // placed before the read. So the window ends at both newest matches,
+    // the page listed before's and the first page's, on the side away from
+    // the active match.
+    const known = this.complete || (this.head !== null && this.ordered(false));
+    const edges = known ? [] : [this.pageAbove, this.firstListed];
     for (const edge of edges) {
       const split = edge ? this.indexOf(edge) : undefined;
       if (split === undefined || split <= 0) continue;
