@@ -18,6 +18,7 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import GraphPanel from "./GraphPanel.svelte";
+import { api } from "../api/client";
 import {
   canvas,
   fsg,
@@ -1008,9 +1009,9 @@ describe("the workspace tree", () => {
     };
   }
 
-  test("a double-click on a folder an answer over the listing cap holds without its files reads its level", async () => {
+  test.each(["folders", "depth"] as const)("a double-click on a folder an answer over the listing cap (%s) holds without its files reads its level", async (tree) => {
     serveFoldersWithoutFiles();
-    graphServer.tree = "folders";
+    graphServer.tree = tree;
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
     expect(graphServer.fsGraphCalls.map((call) => call.path)).not.toContain("a");
 
@@ -1035,6 +1036,60 @@ describe("the workspace tree", () => {
     expect(tab.expanded.a).toBe(true);
     expect(graphServer.fsGraphCalls.length, "the shared graph holds the folder's level").toBe(reads);
     expect(visibleIds()).toContain("directory:a/b");
+  });
+
+  test("a double-click while a first load over the listing cap still streams reads the level", async () => {
+    serveFoldersWithoutFiles();
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => (finish = resolve));
+    vi.mocked(api.graphStream).mockImplementationOnce(async (_scope, opts = {}) => {
+      graphServer.graphStreamCalls += 1;
+      await Promise.resolve();
+      const meta = { type: "meta" as const, scope: "workspace" as const, path: "", depth: 6 };
+      opts.onMeta?.(meta);
+      opts.onView?.({ nodes: [], edges: [] });
+      opts.onMeta?.({ ...meta, tree: "folders" });
+      opts.onView?.({ nodes: [...graphServer.view.nodes], edges: [...graphServer.view.edges] });
+      await finished;
+      return graphServer.view;
+    });
+    try {
+      const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+      expect(graphData.partial, "the load has not completed").toBe(true);
+      expect(visibleIds(), "its partial view is drawn").toContain("directory:a");
+      canvas.props!.onSelect("directory:a");
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the partial view's mark decides").toHaveLength(1);
+      expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
+    } finally {
+      finish();
+    }
+  });
+
+  test("a tab over an answer over the listing cap decides by the mark it took while the window's graph reloads", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let release!: () => void;
+    graphServer.streamGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      invalidateGraph();
+      await settle();
+      expect(graphServer.graphStreamCalls, "the shown tab asked again").toBe(2);
+      expect(graphData.tree, "the reload has said nothing yet").toBeNull();
+      expect(visibleIds(), "the tab still draws the answer it took").toContain("directory:a");
+      canvas.props!.onSelect("directory:a");
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the mark taken with the drawn view").toHaveLength(1);
+    } finally {
+      release();
+    }
   });
 
   test("a folder opened over an answer of the whole tree is read once a refresh comes back over the listing cap", async () => {

@@ -166,12 +166,12 @@ describe("a failed nonroot filesystem level", () => {
     expect(target.querySelector(".spine-warning")).toBeNull();
   });
 
-  test("a second failure of a folder an answer over the listing cap holds without its files names its directory", async () => {
+  test.each(["folders", "depth"] as const)("a second failure of a folder an answer over the listing cap (%s) holds without its files names its directory", async (tree) => {
     const release = holdSharedGraph();
     coverNotes();
     graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
     graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
-    graphServer.tree = "folders";
+    graphServer.tree = tree;
     failLevel("notes");
     const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
     expect(reads("notes")).toBe(1);
