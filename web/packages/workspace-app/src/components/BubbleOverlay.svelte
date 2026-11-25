@@ -66,9 +66,16 @@
   const BODY_FOCUSABLE =
     "[*|href], button, input, select, textarea, iframe, details, summary, " +
     "audio[controls], video[controls], [tabindex]";
+  // A Tab-order rule must never take the terminal tab down, so an element
+  // whose style the engine cannot compute (jsdom throws on MathML) is left
+  // to the selector.
   function scrolls(el: Element): boolean {
-    const { overflowX, overflowY } = getComputedStyle(el);
-    return [overflowX, overflowY].some((overflow) => overflow === "auto" || overflow === "scroll");
+    try {
+      const { overflowX, overflowY } = getComputedStyle(el);
+      return [overflowX, overflowY].some((overflow) => overflow === "auto" || overflow === "scroll");
+    } catch {
+      return false;
+    }
   }
   let body = $state<HTMLDivElement | null>(null);
   $effect(() => {
