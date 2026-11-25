@@ -1138,6 +1138,42 @@ describe("the workspace tree", () => {
     expect(filesOfA()).toEqual(["a/b/c.md", "a/b/y.md", "a/x.md"]);
   });
 
+  test("a tab whose spine lands after an answer over the listing cap reads each opened folder once", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true } }));
+    expect(graphData.partial, "the answer is in").toBe(false);
+    expect(graphData.tree).toBe("folders");
+    release();
+    await settle();
+    expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 1, a: 1 });
+    expect(visibleIds()).toContain("a/x.md");
+  });
+
+  test("taking an answer of the whole tree reads no opened folder", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.file("a/x.md")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "a/x.md", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/x.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+    // `a/x.md` is deleted: the next answer of the whole tree holds `a` empty.
+    graphServer.view = { nodes: [g.dir(""), g.dir("a")], edges: [g.edge("", "directory:a", "contains")] };
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.dir("a")], edges: [fsg.contains("", "a")] };
+    await refreshGraph();
+    await settle();
+    expect(levelReads("a"), "nor does the next").toBe(0);
+    expect(visibleIds()).toEqual(["", "directory:a"]);
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
