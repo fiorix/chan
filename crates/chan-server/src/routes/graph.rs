@@ -340,8 +340,10 @@ impl From<super::fs_graph::FsGraphError> for GraphBuildError {
 enum GraphStreamEvent {
     /// A stream opens with one, before the build reads anything. When the
     /// build's tree walk finds the answer's tree layer less than the whole
-    /// tree, a second one follows the walk, ahead of the first `nodes`
-    /// event, with `tree` set; a client keeps the last it reads.
+    /// tree, a second one follows the walk with `tree` set, ahead of the
+    /// first node. It is not always ahead of the first `nodes` event: the
+    /// keep-alive's empty `nodes` events can come before it while the build
+    /// reads and walks. A client keeps the last it reads.
     Meta {
         scope: GraphScope,
         path: String,
@@ -1293,14 +1295,15 @@ impl<'a> TreeMergeCtx<'a> {
     /// its parent by a `contains` edge.
     ///
     /// It stops at a folder already merged: one with a classified node and
-    /// its edge from its parent. Such an edge is pushed by this pass after
-    /// the folders above it, or by the filesystem layer, which joins each
-    /// folder to its parent down from its own root. In directory scope that
-    /// root is the scoped folder, which has no edge from its parent, so the
-    /// first entry the merge takes, in path order, joins it to the folders
-    /// above before any folder below it is reached. A folder is classified
-    /// only when its node is new or has no class yet, since merging keeps a
-    /// class it has.
+    /// its edge from its parent, since the folders above such a folder have
+    /// their nodes and edges already. That edge is pushed either by this
+    /// pass, after the folders above it, or by the filesystem layer, which
+    /// joins each folder it walks to its parent from the workspace root
+    /// down: its `emit_ancestor_chain` joins every folder above a scoped
+    /// path before its walk joins the folders below. A folder that layer
+    /// draws only as a symlink's target has no edge from its parent, so the
+    /// pass goes on above it. A folder is classified only when its node is
+    /// new or has no class yet, since merging keeps a class it has.
     fn ensure_directory_path(&mut self, path: &str) {
         let clean = path.trim_matches('/');
         let id = directory_node_id(clean);
