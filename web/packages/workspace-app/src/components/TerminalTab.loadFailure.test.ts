@@ -196,6 +196,26 @@ function actionHoldsKeyboard(error: HTMLElement): boolean {
   return [...error.querySelectorAll("button")].some((button) => button === document.activeElement);
 }
 
+/// Counts the listeners the page's terminals hold on the loader's next
+/// passing load: each one subscribed and not yet released. Installed after
+/// `openPage`, on the loader of that page's module graph.
+async function loadListeners(): Promise<() => number> {
+  const backend = await import("../terminal/backend");
+  const subscribe = backend.onGhosttyKitLoaded;
+  let held = 0;
+  vi.spyOn(backend, "onGhosttyKitLoaded").mockImplementation((listener) => {
+    const release = subscribe(listener);
+    let released = false;
+    held += 1;
+    return () => {
+      if (!released) held -= 1;
+      released = true;
+      release();
+    };
+  });
+  return () => held;
+}
+
 /// The tabs seated in the terminal's pane.
 function seated(p: Page): string[] {
   const pane = p.tabs.activeLayout().nodes[p.harness.TERMINAL_PANE] as { tabs: Array<{ id: string }> };
@@ -252,6 +272,7 @@ describe("a terminal whose core fails to load", () => {
     expect(areaWatchers(page, target), "nothing wired for a terminal").toBe(0);
     expect(loadReports(), "the failure is reported once").toHaveLength(1);
     await vi.waitFor(() => expect(document.activeElement, "the focused pane's action holds the keyboard").toBe(action(error, "Retry")));
+    expect(error.hasAttribute("tabindex"), "a card with Retry is no focus target of its own").toBe(false);
     // The tab around the error still works.
     expect(await page.harness.openTerminalMenu(tab!)).toEqual(expect.arrayContaining(["Details", "Close tab"]));
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
@@ -443,6 +464,7 @@ describe("what a terminal's load error says and offers", () => {
 
     await vi.waitFor(() => expect(document.activeElement, "the card itself holds the keyboard").toBe(error));
     expect(actionHoldsKeyboard(error), "no action holds it").toBe(false);
+    expect(error.getAttribute("tabindex"), "and it holds it outside the Tab order").toBe("-1");
 
     props.focused = false;
     page.svelte.flushSync();
@@ -708,6 +730,31 @@ describe("terminals that failed one load together", () => {
     expect(page.harness.TerminalSocket.all, "one PTY").toHaveLength(1);
     expect(core.requests()).toBe(2);
     expect(takeShownLoadFailures(), "two errors, then one again").toBe(3);
+  });
+
+  test("a terminal closed over its load error leaves the loader no listener of its own", async () => {
+    const core = serveCore();
+    core.failNext();
+    page = await openPage();
+    const listening = await loadListeners();
+    const [first, second] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1" }),
+      page.harness.terminalTab({ id: "term-2" }),
+    ]);
+    const a = page.open(first!);
+    const b = page.place(second!, { active: true, focused: false });
+    const errorA = await shownLoadError(a.target);
+    await shownLoadError(b.target);
+    expect(listening(), "each failed terminal waits on the next passing load").toBe(2);
+
+    // The pane drops the closed tab's view.
+    page.svelte.unmount(page.mounts.pop()!);
+    expect(listening(), "the closed terminal waits on nothing").toBe(1);
+
+    action(errorA, "Retry").click();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the open terminal dialed").toHaveLength(1));
+    expect(loadError(a.target), "and opened").toBeNull();
+    expect(takeShownLoadFailures(), "two errors shown").toBe(2);
   });
 });
 
