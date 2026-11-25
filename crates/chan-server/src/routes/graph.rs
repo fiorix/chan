@@ -1227,59 +1227,97 @@ impl<'a> TreeMergeCtx<'a> {
         }
     }
 
+    /// Merge the folder at `path` and every folder above it, each joined to
+    /// its parent by a `contains` edge.
+    ///
+    /// It stops at a folder already merged: one with a classified node and
+    /// its edge from its parent. Every edge the graph holds into a folder by
+    /// then was pushed with the folders above it, by this pass or by the
+    /// filesystem layer's walk down from its own root, so what is above that
+    /// folder is merged already. A folder is classified only when its node
+    /// is new or has no class yet, since merging keeps a class it has.
     fn ensure_directory_path(&mut self, path: &str) {
         let clean = path.trim_matches('/');
         let id = directory_node_id(clean);
+        let classified = matches!(
+            self.nodes.get(&id),
+            Some(GraphNodeView::Directory {
+                path_class: Some(_),
+                ..
+            })
+        );
+        let parent = (!clean.is_empty()).then(|| parent_directory(clean));
+        if classified {
+            let joined = match &parent {
+                None => true,
+                Some(parent) => self
+                    .edge_set
+                    .contains(&contains_edge_key(&directory_node_id(parent), &id)),
+            };
+            if joined {
+                return;
+            }
+        }
+        let path_class = if classified {
+            None
+        } else {
+            path_class_for_graph(self.workspace, clean)
+        };
         merge_directory_node(
             self.nodes,
             id.clone(),
             directory_label(clean),
             clean.to_string(),
-            path_class_for_graph(self.workspace, clean),
+            path_class,
             0,
             0,
         );
-        if clean.is_empty() {
+        let Some(parent) = parent else {
             return;
-        }
-        let parent = parent_directory(clean);
+        };
         self.ensure_directory_path(&parent);
         self.push_contains_edge(directory_node_id(&parent), id);
     }
 
+    /// Merge a node for the file at `path`. A node the graph holds already
+    /// keeps its kind and class and gains only the report bucket it lacks,
+    /// so nothing is classified for it.
     fn merge_tree_file_node(&mut self, path: &str) {
+        let media = is_media_graph_path(path);
+        match self.nodes.get_mut(path) {
+            Some(GraphNodeView::File { bucket, .. }) if !media => {
+                if bucket.is_none() {
+                    *bucket = self.report_buckets.get(path).cloned();
+                }
+                return;
+            }
+            Some(_) => return,
+            None => {}
+        }
+
         let id = path.to_string();
         let label = file_label(path);
         let path_class = path_class_for_graph(self.workspace, path);
-        if is_media_graph_path(path) {
-            self.nodes
-                .entry(id.clone())
-                .or_insert(GraphNodeView::Media {
-                    id,
-                    label,
-                    path: path.to_string(),
-                    path_class,
-                    missing: false,
-                });
-            return;
-        }
-
-        if let Some(GraphNodeView::File { bucket, .. }) = self.nodes.get_mut(&id) {
-            if bucket.is_none() {
-                *bucket = self.report_buckets.get(path).cloned();
+        let node = if media {
+            GraphNodeView::Media {
+                id: id.clone(),
+                label,
+                path: path.to_string(),
+                path_class,
+                missing: false,
             }
-            return;
-        }
-
-        self.nodes.entry(id.clone()).or_insert(GraphNodeView::File {
-            id,
-            label,
-            path: path.to_string(),
-            path_class,
-            node_kind: None,
-            bucket: self.report_buckets.get(path).cloned(),
-            missing: false,
-        });
+        } else {
+            GraphNodeView::File {
+                id: id.clone(),
+                label,
+                path: path.to_string(),
+                path_class,
+                node_kind: None,
+                bucket: self.report_buckets.get(path).cloned(),
+                missing: false,
+            }
+        };
+        self.nodes.insert(id, node);
     }
 
     fn merge_tree_entry(&mut self, path: &str, is_dir: bool) {
@@ -1302,6 +1340,10 @@ impl<'a> TreeMergeCtx<'a> {
     /// directory, in path order. A directory the workspace holds read-only
     /// is merged as a dead end, and nothing below it is. Returns those
     /// directories.
+    ///
+    /// Whether a directory is read-only is read from the class its merged
+    /// node carries, which is the class of that path on disk as the graph
+    /// reports it, so a dead end is never classified twice.
     fn merge_tree_entries<'e>(
         &mut self,
         entries: impl IntoIterator<Item = (&'e str, bool)>,
@@ -1316,8 +1358,11 @@ impl<'a> TreeMergeCtx<'a> {
             self.merge_tree_entry(entry_path, is_dir);
             if is_dir
                 && matches!(
-                    path_class_for_graph(self.workspace, entry_path),
-                    Some(class) if class.permission == PathPermission::ReadOnly
+                    self.nodes.get(&directory_node_id(entry_path)),
+                    Some(GraphNodeView::Directory {
+                        path_class: Some(class),
+                        ..
+                    }) if class.permission == PathPermission::ReadOnly
                 )
             {
                 blocked_dirs.push(entry_path.to_string());
@@ -1331,7 +1376,10 @@ impl<'a> TreeMergeCtx<'a> {
     /// would, when the walk lists that folder and no read-only directory
     /// at or above it makes it a dead end. A file the graph holds for no
     /// other reason gets no node, so the layer holds one node per walked
-    /// folder and per file the graph has, not one per file on disk.
+    /// folder and per file the graph has, not one per file on disk. A file
+    /// joined already, as the filesystem layer joins each file down to the
+    /// request's depth, costs lookups only: its folder is merged, its node
+    /// is kept and its edge is held.
     fn spine_held_files(
         &mut self,
         dirs: &std::collections::BTreeSet<String>,
