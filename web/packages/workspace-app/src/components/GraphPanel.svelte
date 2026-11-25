@@ -240,7 +240,9 @@
   /// directories reached at its last fetch, so one a double-click opens
   /// past that, with no level the drawn graph is known to hold, is read: a
   /// level per such directory, at most OPENED_CHILDREN_READS_PER_STEP,
-  /// shallowest first. A depth change reads through `raiseDepth`, which
+  /// shallowest first. One opened under a closed parent is read once the
+  /// parent opens, since until the parent's level lands the spine has no
+  /// node of it to read. A depth change reads through `raiseDepth`, which
   /// counts the budget over each read before it opens a level.
   function loadOpenedChildren(): void {
     const withChildren = new Set<string>();
@@ -251,7 +253,7 @@
     }
     const missing: string[] = [];
     for (const dir of Object.keys(expandedDirs)) {
-      if (!dir || !expandedDirs[dir] || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
+      if (!dir || !drawsChildren(dir) || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
       missing.push(dir);
     }
     if (missing.length === 0) return;
