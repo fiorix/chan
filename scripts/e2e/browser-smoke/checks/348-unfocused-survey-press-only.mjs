@@ -10,7 +10,14 @@
 // - strip-walk: the survey's body renders a bare URL and a link; from B's
 //   tab label, which keeps Tab's browser default, Shift+Tab walks back
 //   through the page until it passes the place of A's card, and never lands
-//   in it, its body's links included.
+//   in it, its body's links included. A step that lands in the card fails
+//   the leg and the walk goes on, so a red names every element it reached.
+// - shape-walk: the survey's body is raw HTML with three shapes no markdown
+//   makes: an SVG link written with xlink:href, a details with no summary
+//   and a scroll container with no focusable child. The same walk passes the
+//   card without landing in it. Then A is focused, and a Tab walk from its
+//   card reaches all three, so the engine puts each in the Tab order and the
+//   first walk's pass is the survey's hold.
 // - card-key: focus placed on A's option by script, as assistive technology
 //   can place it, and a 1 typed there answers nothing; selecting B's tab
 //   takes the keyboard back to B's terminal, where a 1 reaches B's PTY.
@@ -40,12 +47,22 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const WALK_LIMIT = 16;
 const BODY = "Pane B keeps the keyboard; this survey answers a press only.";
 const LINKED_BODY = "Pane B keeps the keyboard; see https://example.com/pull/348 or [the notes](https://example.com/notes).";
+/// Raw HTML the sanitizer keeps, with three shapes a browser puts in the Tab
+/// order and no markdown makes, each named by its data-shape, in body order.
+const SHAPES = ["svg-link", "details", "scroller"];
+const SHAPES_BODY = [
+  "Pane B keeps the keyboard; none of these shapes is in its Tab order.",
+  'A chart <svg width="24" height="24"><a data-shape="svg-link" xlink:href="https://example.com/svg/348"><text y="16">s</text></a></svg>',
+  '<details data-shape="details">no summary of its own</details>',
+  '<div data-shape="scroller" style="overflow:auto;height:2em">one<br>two<br>three<br>four<br>five</div>',
+].join("\n\n");
 /// A leg's survey body where the default does not serve it.
 const LEG_BODY = {
   "strip-walk": LINKED_BODY,
+  "shape-walk": SHAPES_BODY,
   "link-press": LINKED_BODY,
 };
-const LEG_COUNT = 5;
+const LEG_COUNT = 6;
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -88,6 +105,8 @@ async function state(page, targetTab, awayTab) {
       // element before it in document order.
       precedesCard: Boolean(card && active && active !== document.body &&
         (card.compareDocumentPosition(active) & Node.DOCUMENT_POSITION_PRECEDING)),
+      // The shape of the shapes body the keyboard is on, if any.
+      shape: card?.contains(active) ? active.closest("[data-shape]")?.getAttribute("data-shape") ?? null : null,
       surveyOpen: Boolean(card),
       tabIndexes: card
         ? [...card.querySelectorAll(".survey-option, .survey-followup, .survey-dismiss")].map((button) => button.tabIndex)
@@ -193,6 +212,33 @@ async function runEngine(ctx, backend, directory, save) {
     }
   }
 
+  /// The shapes body rendered in A's survey card as written: the SVG link
+  /// by xlink:href alone, the details with no summary of its own, and the
+  /// scroller overflowing its height with no element in it but line breaks.
+  async function expectBodyShapes(result) {
+    result.shapes = await page.evaluate((cardQuery) => {
+      const body = document.querySelector(`${cardQuery} .survey-body`);
+      const at = (shape) => body?.querySelector(`[data-shape="${shape}"]`) ?? null;
+      const link = at("svg-link");
+      const details = at("details");
+      const scroller = at("scroller");
+      const overflow = scroller ? getComputedStyle(scroller).overflowY : null;
+      return {
+        "svg-link": Boolean(link && link.namespaceURI === "http://www.w3.org/2000/svg" &&
+          link.hasAttributeNS("http://www.w3.org/1999/xlink", "href") && !link.hasAttribute("href")),
+        details: Boolean(details && !details.querySelector("summary")),
+        scroller: Boolean(scroller && overflow === "auto" && scroller.scrollHeight > scroller.clientHeight &&
+          !scroller.querySelector(":not(br)")),
+        overflow,
+        html: body?.innerHTML.slice(0, 800) ?? null,
+      };
+    }, `${terminalSelector(target.tab)} .survey-card`);
+    const missing = SHAPES.filter((shape) => !result.shapes[shape]);
+    if (missing.length) {
+      throw new Error(`precondition: the survey body renders ${missing.join(", ")} as written: ${JSON.stringify(result.shapes)}`);
+    }
+  }
+
   async function focusByScript(selector) {
     const focused = await page.evaluate((query) => {
       const element = document.querySelector(query);
@@ -201,6 +247,40 @@ async function runEngine(ctx, backend, directory, save) {
     }, selector);
     if (!focused) throw new Error(`precondition: script focus did not land on ${selector}`);
     await settle(page);
+  }
+
+  /// From B's tab label, Shift+Tab back through the page until the keyboard
+  /// passes the place of A's card. A step that lands in the card is a
+  /// failure, and the walk goes on past it to name every element it reaches.
+  async function walkBackPastCard(result) {
+    const label = `.pane[data-pane-id="${result.appeared.awayPane}"] .tabs [role="tab"]`;
+    await focusByScript(label);
+    result.start = await read();
+    if (!result.start.inAwayPane || result.start.focusedPane !== result.start.awayPane) {
+      throw new Error(`precondition: B's tab label holds the keyboard with B focused: ${JSON.stringify(result.start)}`);
+    }
+    result.walk = [];
+    let passed = false;
+    for (let step = 1; step <= WALK_LIMIT; step += 1) {
+      await chord(page, ["Shift"], "Tab");
+      await settle(page);
+      const at = await read();
+      result.walk.push({ step, element: at.element, shape: at.shape, inCard: at.keyboard === "survey", inTargetPane: at.inTargetPane, inAwayPane: at.inAwayPane, precedesCard: at.precedesCard, focusedPane: at.focusedPane });
+      if (at.focusedPane !== at.awayPane) {
+        result.failures.push(`Shift+Tab moved the focused pane to ${at.focusedPane} at step ${step} (${at.element})`);
+        break;
+      }
+      if (at.precedesCard) {
+        passed = true;
+        break;
+      }
+    }
+    result.landed = result.walk.filter((at) => at.inCard).map((at) => `step ${at.step}: ${at.shape ?? at.element}`);
+    if (result.landed.length) {
+      result.failures.push(`Shift+Tab from pane B's tab label reached pane A's survey card at ${result.landed.join(", ")}`);
+    }
+    result.passedCard = passed;
+    if (!passed && !result.failures.length) result.failures.push(`the walk did not pass the place of A's card within ${WALK_LIMIT} steps: ${JSON.stringify(result.walk)}`);
   }
 
   const legs = {
@@ -235,38 +315,42 @@ async function runEngine(ctx, backend, directory, save) {
 
     async "strip-walk"(result, handle, offsets) {
       await expectBodyLinks(result);
-      const label = `.pane[data-pane-id="${result.appeared.awayPane}"] .tabs [role="tab"]`;
-      await focusByScript(label);
-      result.start = await read();
-      if (!result.start.inAwayPane || result.start.focusedPane !== result.start.awayPane) {
-        throw new Error(`precondition: B's tab label holds the keyboard with B focused: ${JSON.stringify(result.start)}`);
-      }
-      result.walk = [];
-      let passed = false;
-      for (let step = 1; step <= WALK_LIMIT; step += 1) {
-        await chord(page, ["Shift"], "Tab");
-        await settle(page);
-        const at = await read();
-        result.walk.push({ step, element: at.element, inCard: at.keyboard === "survey", inTargetPane: at.inTargetPane, inAwayPane: at.inAwayPane, precedesCard: at.precedesCard, focusedPane: at.focusedPane });
-        if (at.keyboard === "survey") {
-          result.failures.push(`Shift+Tab from pane B's tab label reached pane A's survey card at step ${step} (${at.element})`);
-          break;
-        }
-        if (at.focusedPane !== at.awayPane) {
-          result.failures.push(`Shift+Tab moved the focused pane to ${at.focusedPane} at step ${step} (${at.element})`);
-          break;
-        }
-        if (at.precedesCard) {
-          passed = true;
-          break;
-        }
-      }
-      result.passedCard = passed;
-      if (!passed && !result.failures.length) result.failures.push(`the walk did not pass the place of A's card within ${WALK_LIMIT} steps: ${JSON.stringify(result.walk)}`);
+      await walkBackPastCard(result);
       result.screenshot = basename(await ctx.shot(`348-${backend}-strip-walk`, page));
       result.unsolicitedReply = await unsolicitedReply(handle, 500);
       if (result.unsolicitedReply) result.failures.push(`the walk answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
       expectNoBytes(result, "the walk", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
+    },
+
+    async "shape-walk"(result, handle, offsets) {
+      await expectBodyShapes(result);
+      await walkBackPastCard(result);
+      result.screenshot = basename(await ctx.shot(`348-${backend}-shape-walk`, page));
+
+      // The control: with A focused its survey takes the keyboard on its
+      // card, and Tab from the card reaches each shape in body order, then
+      // leaves the shapes. A shape this engine leaves out of the Tab order
+      // would pass the first walk with no hold at all.
+      await clickTab(page, names.target);
+      result.owned = await until("selecting A's tab gives its survey the keyboard", async () => {
+        const current = await read();
+        return current.focusedPane === current.targetPane && current.keyboard === "survey" ? current : null;
+      });
+      result.ownedWalk = [];
+      for (let step = 1; step <= SHAPES.length + 1; step += 1) {
+        await page.keyboard.press("Tab");
+        await settle(page);
+        const at = await read();
+        result.ownedWalk.push({ step, element: at.element, shape: at.shape, inCard: at.keyboard === "survey", focusedPane: at.focusedPane });
+        if (!at.shape) break;
+      }
+      result.reached = result.ownedWalk.map((at) => at.shape).filter(Boolean);
+      if (!same(result.reached, SHAPES)) {
+        result.failures.push(`control: with pane A focused, Tab from its card reached ${JSON.stringify(result.reached)}, expected ${JSON.stringify(SHAPES)}`);
+      }
+      result.unsolicitedReply = await unsolicitedReply(handle, 500);
+      if (result.unsolicitedReply) result.failures.push(`the walks answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
+      expectNoBytes(result, "the walks", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
     },
 
     async "card-key"(result, handle, offsets) {

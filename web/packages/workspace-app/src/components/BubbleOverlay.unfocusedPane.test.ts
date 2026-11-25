@@ -34,8 +34,9 @@ const LINKED = {
   bodyMarkdown: "Review https://example.com/pull/1 or [the notes](https://example.com/notes) first.",
 };
 /// A body of raw HTML the sanitizer keeps, with one element of each kind a
-/// browser can put in the Tab order, each named by its `data-kind`, and the
-/// embed the markdown makes of a video link, named by its tag.
+/// browser can put in the Tab order, each named by its `data-kind`, the
+/// embed the markdown makes of a video link, named by its tag, and an
+/// element written as `contenteditable`, which the rule has no term for.
 const EVERY_KIND = {
   ...SURVEY,
   bodyMarkdown: [
@@ -49,18 +50,23 @@ const EVERY_KIND = {
     'A chart <svg width="20" height="20">' +
       '<a data-kind="svg-xlink" xlink:href="https://example.com/s"><text y="10">s</text></a>' +
       '<a data-kind="svg-href" href="https://example.com/t"><text y="10">t</text></a></svg>',
+    'A formula <math><mi data-kind="mathml-link" href="https://example.com/m">x</mi></math>',
     'Media <audio data-kind="audio" controls src="https://example.com/a.mp3"></audio> ' +
       '<video data-kind="video" controls src="https://example.com/a.mp4"></video>',
     '<div data-kind="scroller" style="overflow-y: auto; height: 2em">a<br>b<br>c<br>d</div>',
     '<div data-kind="scroller-x" style="overflow-x: scroll; width: 4em; white-space: nowrap">a long line</div>',
     'A <span data-kind="tabindex" tabindex="0">note</span>.',
+    '<div data-editable contenteditable="true">edit</div>',
     "![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)",
   ].join("\n\n"),
 };
 const KINDS = [
   "link", "button", "input", "select", "textarea", "summary", "details", "area",
-  "svg-xlink", "svg-href", "audio", "video", "scroller", "scroller-x", "tabindex", "iframe",
+  "svg-xlink", "svg-href", "mathml-link", "audio", "video", "scroller", "scroller-x", "tabindex", "iframe",
 ];
+/// A body with an element jsdom computes no style for: its
+/// `getComputedStyle` throws on a MathML element.
+const FORMULA = { ...SURVEY, bodyMarkdown: "Sum <math><mi>x</mi></math> first." };
 
 beforeEach(async () => {
   await mountApp(demoData([]));
@@ -107,9 +113,15 @@ async function surveyOverUnfocusedPane(survey: typeof SURVEY = SURVEY): Promise<
   showSurvey(survey, TERMINAL);
   await settleLong();
   const card = pane(TOP).querySelector<HTMLElement>(".survey-card");
-  if (!card) throw new Error("no survey card over the top pane's terminal");
+  if (!card) throw new Error(`no survey card over the top pane's terminal${tabFailure(TOP) ? `; the tab failed: ${tabFailure(TOP)}` : ""}`);
   expect(layout.activePaneId, "the survey leaves the focused pane focused").toBe(BOTTOM);
   return card;
+}
+
+/// The text of the pane's tab failure surface, which replaces a tab that
+/// threw while drawing, or null while the tab is drawn.
+function tabFailure(id: string): string | null {
+  return pane(id).querySelector(".tab-failed")?.textContent?.replace(/\s+/g, " ").trim() ?? null;
 }
 
 function buttons(card: HTMLElement): HTMLButtonElement[] {
@@ -131,7 +143,8 @@ function named(el: Element): string {
 
 /// The tabindex attribute of each element of the every-kind body, by kind.
 /// jsdom gives media, a details and a scroller no tabIndex of their own,
-/// so the attribute is what shows whether the rule holds them.
+/// and a MathML element no tabIndex property at all, so the attribute is
+/// what shows whether the rule holds them.
 function kindTabIndexes(card: HTMLElement): Record<string, string | null> {
   return Object.fromEntries([...card.querySelectorAll(".survey-body [data-kind], .survey-body iframe")]
     .map((el) => [el.getAttribute("data-kind") ?? el.localName, el.getAttribute("tabindex")]));
@@ -209,6 +222,10 @@ describe("a survey over a terminal whose pane is not focused", () => {
   test("every kind of focusable its body keeps leaves the Tab order, and each returns with its pane", async () => {
     const card = await surveyOverUnfocusedPane(EVERY_KIND);
     expect(Object.keys(kindTabIndexes(card)), "the body renders one element of each kind").toEqual(KINDS);
+    const editable = card.querySelector(".survey-body [data-editable]");
+    expect(editable?.textContent, "the body renders the element written as contenteditable").toBe("edit");
+    expect(editable?.hasAttribute("contenteditable"), "the sanitizer strips contenteditable, which the rule has no term for")
+      .toBe(false);
     const held = Object.fromEntries(KINDS.map((kind) => [kind, "-1"]));
     expect(kindTabIndexes(card), "every kind out of the Tab order while the other pane is focused").toEqual(held);
     expect(tabbables(card), "nothing in the card reads as tabbable").toEqual([]);
@@ -221,6 +238,23 @@ describe("a survey over a terminal whose pane is not focused", () => {
     setActivePane(BOTTOM);
     await settleLong();
     expect(kindTabIndexes(card), "out again when the other pane is focused again").toEqual(held);
+  });
+
+  test("a body element whose style cannot be computed leaves its terminal tab drawn and its card up", async () => {
+    const card = await surveyOverUnfocusedPane(FORMULA);
+    expect(card.querySelector(".survey-body math mi")?.textContent, "the body renders its formula").toBe("x");
+    expect(tabFailure(TOP), "the terminal tab is drawn under the survey").toBeNull();
+    expect(buttons(card).map((b) => b.tabIndex), "out of the Tab order while the other pane is focused")
+      .toEqual([-1, -1, -1, -1]);
+
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+
+    setActivePane(BOTTOM);
+    await settleLong();
+    expect(tabFailure(TOP), "the tab stays drawn when its pane loses the focus").toBeNull();
+    expect(pane(TOP).querySelector(".survey-card"), "and the card stays up").toBe(card);
   });
 
   test.each([
