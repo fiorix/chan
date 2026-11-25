@@ -526,6 +526,31 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 3, total: 120, partial: false });
   });
 
+  test('a window taken after a page above longer than one placement batch also ends at that page', async () => {
+    const { term } = await create(paged(3), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 5; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(236, 0)]);
+    const rows = coreRows(term, 'needle', 360);
+    expect(rows.slice(0, 348).every(row => row <= 230), 'the core lists the page above first, past one batch').toBe(true);
+    expect(rows.slice(348, 354), 'then the screen page, newest first').toEqual([238, 238, 238, 236, 236, 236]);
+    placementStopsAt(354);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(6);
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([236, 234], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(234, 14)]);
+    expect(search.state).toEqual({ index: 7, total: 360, partial: false });
+  });
+
   test('a window ended at the page above still serves a step on the side of the active match', async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
