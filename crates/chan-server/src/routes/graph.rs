@@ -13,6 +13,21 @@
 //! and `/api/backlinks/{*path}` also expose `?stream=1` NDJSON forms
 //! so the UI can render partial relationship data while the full
 //! graph is still being composed.
+//!
+//! A graph load walks the workspace's tree once. The listing is bounded
+//! at `fs_ops::LIST_TREE_LIMIT` entries; over that cap its partial result
+//! is dropped and the directories alone are walked, bounded at the same
+//! number of directories, so the workspace scope's folder layer still
+//! holds every folder, joined only to the files the graph holds
+//! otherwise. Over both bounds the tree layer is the depth-bounded
+//! filesystem layer alone, as when nothing walked the folders. The
+//! answer says which in its `tree` (`TreeCoverage`).
+//!
+//! Memory: a load holds one cap's worth of walked paths at a time, the
+//! listing or the directories, never both. The over-cap answer itself can
+//! hold up to one cap of folders beside the files the graph holds
+//! otherwise, up to one cap of them indexed, so about two caps' worth of
+//! nodes and edges, where under the cap files and folders share one.
 
 use std::sync::Arc;
 
@@ -247,6 +262,35 @@ struct GraphViewResponse {
     /// from the graph of a workspace that has none.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     gated: bool,
+    /// What the tree layer holds, set only when it is less than every
+    /// folder and file in scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree: Option<TreeCoverage>,
+}
+
+/// What the tree layer of a workspace-scope answer holds when it is not
+/// every folder and file in scope, because the whole-tree listing is over
+/// its cap or failed. A workspace-scope answer without it holds the whole
+/// listing; a directory or file scope answer and the gated empty answer
+/// never carry it.
+///
+/// With either value a file the answer holds no node for may be on disk,
+/// so a client that needs a folder's files reads them from the filesystem
+/// graph instead of from the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TreeCoverage {
+    /// Every folder in scope, each joined to its parent, and of the files
+    /// only those the graph holds otherwise: the indexed ones, the link
+    /// targets on disk and those the filesystem layer reaches down to the
+    /// request's depth. The listing is over its cap and the folders alone
+    /// are not.
+    Folders,
+    /// The folders and files the filesystem layer reaches down to the
+    /// request's depth, and the files the graph holds otherwise, with no
+    /// folder below that depth. The folders alone are over the cap too, or
+    /// the listing failed.
+    Depth,
 }
 
 #[derive(Debug)]
@@ -294,6 +338,10 @@ impl From<super::fs_graph::FsGraphError> for GraphBuildError {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum GraphStreamEvent {
+    /// A stream opens with one, before the build reads anything. When the
+    /// build's tree walk finds the answer's tree layer less than the whole
+    /// tree, a second one follows the walk, ahead of the first `nodes`
+    /// event, with `tree` set; a client keeps the last it reads.
     Meta {
         scope: GraphScope,
         path: String,
@@ -302,6 +350,9 @@ enum GraphStreamEvent {
         /// whose only other event is `done`; absent otherwise.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         gated: bool,
+        /// The answer's [`TreeCoverage`], on the second `meta` only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tree: Option<TreeCoverage>,
     },
     Nodes {
         nodes: Vec<GraphNodeView>,
@@ -626,6 +677,16 @@ impl TreeWalk {
                 }
             }
             Err(_) => TreeWalk::Failed,
+        }
+    }
+
+    /// What the workspace scope's tree layer holds from this walk, when it
+    /// is less than the whole listing.
+    fn coverage(&self) -> Option<TreeCoverage> {
+        match self {
+            TreeWalk::Listed { .. } => None,
+            TreeWalk::OverCap { dirs: Some(_) } => Some(TreeCoverage::Folders),
+            TreeWalk::OverCap { dirs: None } | TreeWalk::Failed => Some(TreeCoverage::Depth),
         }
     }
 }
@@ -1836,6 +1897,7 @@ pub async fn api_graph(
             nodes: Vec::new(),
             edges: Vec::new(),
             gated: true,
+            tree: None,
         })
         .into_response();
     }
@@ -1986,6 +2048,7 @@ async fn empty_graph_stream_response(p: GraphParams) -> Response {
         path: p.path.clone(),
         depth: p.depth,
         gated: true,
+        tree: None,
     }))
 }
 
@@ -2044,6 +2107,7 @@ where
         path: p.path.clone(),
         depth: p.depth,
         gated: false,
+        tree: None,
     }) {
         return Err(GraphBuildError::Cancelled);
     }
@@ -2190,6 +2254,22 @@ fn build_graph_view(
     let graph_file_set: std::collections::BTreeSet<&str> =
         files.iter().map(String::as_str).collect();
     let walk = TreeWalk::of(&workspace);
+    let tree = match p.scope {
+        GraphScope::Workspace => walk.coverage(),
+        GraphScope::Directory | GraphScope::File => None,
+    };
+    if tree.is_some() {
+        emit_graph_event(
+            emit,
+            GraphStreamEvent::Meta {
+                scope: p.scope,
+                path: p.path.clone(),
+                depth: p.depth,
+                gated: false,
+                tree,
+            },
+        )?;
+    }
     let looked_up;
     let (disk_files, disk_dirs) = match &walk {
         TreeWalk::Listed { files, dirs } => (files, dirs),
@@ -2499,6 +2579,7 @@ fn build_graph_view(
         nodes: nodes.into_values().collect(),
         edges,
         gated: false,
+        tree,
     })
 }
 
@@ -4355,7 +4436,8 @@ mod tests {
     // layer holds every folder and not every file: the JSON form in its
     // `tree`, and the stream form in a `meta` ahead of its first node, the
     // last `meta` it sends. Under the cap neither says anything, and the
-    // stream sends its one `meta`.
+    // stream sends its one `meta`. A directory-scope answer, whose tree
+    // layer is its own subtree's listing, says nothing over the cap either.
     #[tokio::test]
     async fn over_the_listing_cap_the_answer_says_it_holds_every_folder_and_not_every_file() {
         let app = folder_layer_app();
@@ -4364,6 +4446,10 @@ mod tests {
         let (under, under_metas, under_ahead) = tree_marks(&app).await;
         let limit = over_the_listing_cap(&workspace);
         let (over, metas, ahead) = tree_marks(&app).await;
+        let directory: serde_json::Value = serde_json::from_str(
+            &graph_route_body(&app, "/api/graph?scope=directory&path=notes").await,
+        )
+        .unwrap();
         drop(limit);
 
         assert_eq!(
@@ -4385,6 +4471,11 @@ mod tests {
             "over the cap, the stream's last meta: {metas:?}"
         );
         assert!(ahead, "over the cap, a meta follows the first node batch");
+        assert_eq!(
+            directory["tree"],
+            serde_json::Value::Null,
+            "over the cap, the directory-scope answer's tree"
+        );
     }
 
     // With the folders over the cap too, the directories-only walk stops at
