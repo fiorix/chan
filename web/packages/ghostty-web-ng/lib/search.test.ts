@@ -633,6 +633,52 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 4, total: 230, partial: false });
   });
 
+  test.each([117, 118, 119])("after output, newer from the page above's newest waits for the screen page's oldest, placement stopped at entry %i", async cut => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 4; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(230, 0)]);
+    expect(coreRows(term, 'needle', 120).slice(115), 'the page above ends at 0 and the screen page follows').toEqual([0, 238, 236, 234, 232]);
+    // Placement stops inside the screen page's entries, so the placed list
+    // holds the page above's newest with an index but not 232 below it.
+    placementStopsAt(cut);
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([230, 232], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 4, total: 120, partial: false });
+  });
+
+  test("a window whose active match is the page above's newest serves no newer step across the unplaced screen page", async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 4; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(230, 0)]);
+    // Placement stops one entry short of the screen page's last, 232, and
+    // the next write takes the window from that list.
+    placementStopsAt(119);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'the write finds the index placed and takes a window').not.toBeNull();
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press returned before placement').toBeNull();
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([230, 232], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 4, total: 120, partial: false });
+  });
+
   test('a window ended at the page above still serves a step on the side of the active match', async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
@@ -1606,6 +1652,26 @@ describe('widget search', () => {
     expect(changed).not.toHaveBeenCalled();
     expect(search.state).toEqual({ index: 0, total: 0, partial: false });
     for (const result of tracked.mock.results) if (result.value) expect(result.value.point()).toBeNull();
+  });
+
+  test('a press that reads the count of the active-area entries frees the search it reads it from', async () => {
+    const searches = vi.spyOn(VtTerminal.prototype, 'createSearch');
+    const frees = vi.spyOn(VtSearch.prototype, 'free');
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    placementStopsAt(100);
+    term.write('x');
+    // From the oldest, older applies from no active match and reads the
+    // count the write made unknown.
+    search.step('needle', 'older');
+    expect(searches, 'the press made a second search').toHaveBeenCalledTimes(2);
+    expect(frees.mock.contexts, 'and freed it before returning').toContain(searches.mock.results[1].value);
+    expect(frees.mock.contexts).not.toContain(searches.mock.results[0].value);
+    search.close();
+    expect(frees.mock.contexts, 'the close frees the find search').toContain(searches.mock.results[0].value);
   });
 
   test('find frees the history cells of its windows when it replaces them and when it closes', async () => {
