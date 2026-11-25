@@ -457,6 +457,50 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 3, total: 120, partial: false });
   });
 
+  test("after output, a step from the last placed active-area entry waits for the next one", async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(234, 0)]);
+    const rows = coreRows(term, 'needle', 120);
+    expect(rows.slice(116), 'the active-area entries end with the screen page, newest first').toEqual([238, 236, 234, 232]);
+    // Placement stops one entry short of the end of the active-area entries.
+    placementStopsAt(119);
+    term.write('\x1b[m');
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([234, 232], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 4, total: 120, partial: false });
+  });
+
+  test('after output that makes the core list a page ahead, a press reads the new active-area count', async () => {
+    const { term } = await create(numbered(2000), 40, 6, 10_000_000);
+    batchPerFrame();
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(active(term), 'the core lists its active area in order, so find lands at once').toEqual([range(1999, 0, 1999, 5)]);
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0, 0, 5)]);
+    term.write('\r\n' + Array.from({ length: 60 }, (_, i) => `needle ${i} `.padEnd(300, 'x')).join('\r\n'));
+    const newest = range(2472, 0, 2472, 5);
+    expect(coreFirst(term, 'needle').startRow, 'the core now lists a match above the newest first').toBeLessThan(2472);
+    search.step('needle', 'older');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      if (active(term)) expect(active(term), `frame ${i}: the wrap lands only on the newest`).toEqual([newest]);
+      frame();
+    }
+    expect(active(term)).toEqual([newest]);
+    expect(search.state.index).toBe(1);
+  });
+
   test("after output, a window taken while the screen page's matches are placed behind the page above ends at the page above", async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
@@ -479,6 +523,29 @@ describe('widget search', () => {
       frame();
     }
     expect(active(term)).toEqual([range(234, 0)]);
+    expect(search.state).toEqual({ index: 3, total: 120, partial: false });
+  });
+
+  test('a window ended at the page above still serves a step on the side of the active match', async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 3; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(coreRows(term, 'needle', 121), 'the core lists the page above again after the active-area entries').toHaveLength(121);
+    // Placement stops right after the active-area entries; with their count
+    // unknown the next write's window still ends at the page above.
+    placementStopsAt(120);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(4);
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'newer');
+    expect(active(term), 'newer lands at once on its history neighbour in the window').toEqual([range(234, 0)]);
+    expect(search.state.index, 'before placement').toBeNull();
+    settle(search);
     expect(search.state).toEqual({ index: 3, total: 120, partial: false });
   });
 
