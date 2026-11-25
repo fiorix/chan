@@ -168,7 +168,7 @@ const paged = (needles: number, lines = 120) => Array.from({ length: lines }, ()
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
   raw.setNeedle(needle);
-  for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100) throw new Error('raw search did not complete');
+  for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100_000) throw new Error('raw search did not complete');
   const first = raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1)[0];
   raw.free();
   return first;
@@ -177,7 +177,7 @@ function coreFirst(term: Terminal, needle: string) {
 function coreRows(term: Terminal, needle: string, count: number) {
   const raw = term.core!.createSearch();
   raw.setNeedle(needle);
-  for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100) throw new Error('raw search did not complete');
+  for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100_000) throw new Error('raw search did not complete');
   const rows = raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, count).map(match => match.startRow);
   raw.free();
   return rows;
@@ -349,6 +349,45 @@ describe('widget search', () => {
       if (active(term)) expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
     }
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
+  test('a first step with a new query waits for the active-area matches and lands on the newest', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    expect(coreFirst(term, 'needle').startRow, 'unchanged core lists a match above the newest first').toBeLessThan(238);
+    batchPerFrame();
+    const search = searchOf(term);
+    search.step('needle', 'older');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      if (active(term)) expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
+      frame();
+    }
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+    expect(active(term)).toEqual([newest]);
+  });
+
+  test('a wrap to the newest during a restarted scan lands on the bottom-most match', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    const restart = vi.spyOn(VtSearch.prototype, 'restart');
+    term.write('\r\n' + paged(20, 7623));
+    const lastRow = term.getScrollbackLength() + term.rows - 1;
+    const newest = range(lastRow - 1, 133);
+    expect(coreFirst(term, 'needle').startRow, 'unchanged core lists a match above the newest first').toBeLessThan(newest.start.absoluteRow);
+    batchPerFrame();
+    frame();
+    expect(restart, 'the feed was predicted too expensive').toHaveBeenCalledOnce();
+    search.step('needle', 'older');
+    for (let i = 0; i < 3000 && search.state.partial; i++) {
+      if (active(term) && active(term)![0].start.absoluteRow !== 0) expect(active(term), `frame ${i}: the wrap lands only on the newest`).toEqual([newest]);
+      frame();
+    }
+    expect(active(term)).toEqual([newest]);
+    expect(search.state.index).toBe(1);
   });
 
   test("output during find's first activation wait leaves it waiting for the core's active-area matches", async () => {

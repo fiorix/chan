@@ -379,6 +379,27 @@ describe('widget themes', () => {
     expect(ink(0)).toEqual([51, 51, 51]);
   });
 
+  test('search colours in the theme a terminal opens with apply to its first search', async () => {
+    const { term, ctx } = await open({ ...DARK, searchMatchBackground: '#6a5a30', searchMatchForeground: '#fefefe', searchActiveMatchBackground: '#e0a040', searchActiveMatchForeground: '#101010' }, '\x1b[?25lneedle needle');
+    term.search.find('needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
+    expect(term.highlights.get('search-all')?.style).toEqual({ background: '#6a5a30', foreground: '#fefefe' });
+    expect(term.highlights.get('search-active')?.style).toEqual({ background: '#e0a040', foreground: '#101010' });
+    expect(cellPixel(ctx, 0).slice(0, 3), 'the first match paints in the theme colour').toEqual([0x6a, 0x5a, 0x30]);
+  });
+
+  test('search colours set by a theme change hold through the next write', async () => {
+    const { term } = await open(DARK, '\x1b[?25lneedle needle');
+    term.search.find('needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
+    setTheme(term, { ...DARK, searchMatchBackground: '#6a5a30', searchActiveMatchBackground: '#e0a040', searchActiveMatchForeground: '#101010' });
+    term.write(' more needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || term.search.state.total !== 3); i++) tick();
+    expect(term.search.state.total).toBe(3);
+    expect(term.highlights.get('search-all')?.style, 'the republished match layer').toEqual({ background: '#6a5a30' });
+    expect(term.highlights.get('search-active')?.style, 'the republished active layer').toEqual({ background: '#e0a040', foreground: '#101010' });
+  });
+
   test('wide clusters, boxes and decorations share adjusted ink; explicit underline and faint keep their rules', async () => {
     const { term, ctx } = await open(LIGHT, '\x1b[?25l\x1b[38;2;153;153;153;4;9;53m\u754ce\u0301\u2500\u2588\x1b[58;2;9;8;7mU\x1b[0;2;38;2;153;153;153m\u2588');
     ctx.texts.length = ctx.strokes.length = 0;
