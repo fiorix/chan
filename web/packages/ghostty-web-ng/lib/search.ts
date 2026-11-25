@@ -50,10 +50,14 @@ export class SearchOwner {
   private lastTotal = 0;
   private readCursor = 0;
   // Entries the core lists for its active area, ahead of its history, in
-  // the list being placed. It lists the active area's pages oldest page
-  // first, so the newest match is placed only once all of them are. Read
-  // at the first feed of a scan; zero, unknown, once a write fed it again.
-  private head = 0;
+  // the list being placed. Where the page above soft-wraps into the active
+  // area it lists that page's matches ahead of the screen page's, so until
+  // placement has passed these entries the list placed so far can lack
+  // matches newer than ones it holds. Read at the first feed of a scan;
+  // null, unknown, once a write fed it again, until a press reads it.
+  private head: number | null = null;
+  // Whether those entries list a page ahead of a newer one; null until read.
+  private inverted: boolean | null = null;
   // The scan starts from scratch at its next feed (a new needle, a restart,
   // a resize), which lists only the core's active area at first.
   private fresh = false;
@@ -186,7 +190,7 @@ export class SearchOwner {
     // A resize resets the core's scan; after a write its listing has the
     // history it holds behind a new active area of unknown length.
     if (kind === 'resize') this.fresh = true;
-    else if (!this.fresh) this.head = 0;
+    this.head = this.inverted = null;
     // The other screen's total says nothing about this one.
     this.lastTotal = switched ? 0 : Math.max(this.lastTotal, this.total);
     this.chunks = [];
@@ -245,7 +249,7 @@ export class SearchOwner {
     this.total = 0;
     this.lastTotal = 0;
     this.readCursor = 0;
-    this.head = 0;
+    this.head = this.inverted = null;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -295,6 +299,47 @@ export class SearchOwner {
     search.feed();
     this.markBacklog();
     this.head = search.state().total;
+    this.inverted = null;
+  }
+
+  /**
+   * Whether the list placed so far is the head of the whole list in
+   * position order: complete, past the core's active-area entries, or
+   * those entries list no page ahead of a newer one. With `measure` an
+   * unknown count of them is read from a scratch search's first feed,
+   * which lists the same active area alone, a cost only a press pays;
+   * without it an unknown count reads as passed.
+   */
+  private ordered(measure: boolean): boolean {
+    if (this.complete) return true;
+    if (this.head === null) {
+      if (!measure) return true;
+      this.head = this.activeCount();
+    }
+    if (this.readCursor >= this.head) return true;
+    this.inverted ??= this.listsAhead(this.head);
+    return !this.inverted;
+  }
+
+  private activeCount(): number {
+    const scratch = this.createSearch();
+    try {
+      scratch.setNeedle(this.needle);
+      scratch.feed();
+      return scratch.state().total;
+    } finally {
+      scratch.free();
+    }
+  }
+
+  // The first `head` entries are the page above's newest first, then the
+  // screen page's newest first, so their last is newer than their first
+  // exactly when both pages hold matches. An entry the core cannot place
+  // reads as listed ahead, which only makes a press wait.
+  private listsAhead(head: number): boolean {
+    const first = this.search!.matchAt(0);
+    const last = this.search!.matchAt(head - 1);
+    return !first || !last || order(last, highlight(first)) > 0;
   }
 
   private checked(): number {
@@ -365,13 +410,12 @@ export class SearchOwner {
     this.complete = state.complete && this.readCursor >= state.total;
     if (this.complete) this.lastTotal = 0;
     const range = this.keptRange();
-    const index = range ? this.indexOf(range) : undefined;
-    this.index = index ?? null;
+    this.index = range ? this.placedIndex(range) : null;
     if (range) {
       // The tracked cells hold the match however long placement takes; a
       // completed list without it is what loses it.
       this.kept = range;
-      if (index === undefined && this.complete) this.forget();
+      if (this.index === null && this.complete) this.forget();
     } else if (this.kept) {
       this.forget();
     }
@@ -428,6 +472,15 @@ export class SearchOwner {
     return { chunk: lo, offset, found: offset < ranges.length && order(range, ranges[offset]) === 0 };
   }
 
+  /**
+   * `range`'s index in the list placed so far; null when it is unplaced, or
+   * while that list is not yet a prefix of the whole one, where its place
+   * is not its index.
+   */
+  private placedIndex(range: MatchRange): number | null {
+    return this.ordered(false) ? this.indexOf(range) ?? null : null;
+  }
+
   private indexOf(range: MatchRange): number | undefined {
     if (this.total === 0) return undefined;
     const { chunk, offset, found } = this.locate(range);
@@ -463,16 +516,17 @@ export class SearchOwner {
         }
         if (next === null) break;
         this.waiting.shift();
-        this.index = this.indexOf(next) ?? null;
+        this.index = this.placedIndex(next);
         this.keep(next);
         selected = true;
         continue;
       }
       const total = this.total;
-      // From no active match older lands on the newest, which is placed
-      // only once the core's active-area matches are.
-      const lands = direction === 'newer' ? this.index !== null && this.index > 0
-        : this.index === null ? total > 0 && this.readCursor >= this.head : this.index < total - 1;
+      // A press lands among the placed matches once they are the head of
+      // the whole list in position order; from no active match older lands
+      // on the newest.
+      const lands = (direction === 'newer' ? this.index !== null && this.index > 0
+        : this.index === null ? total > 0 : this.index < total - 1) && this.ordered(true);
       const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
       if (!this.complete && !lands && !capped) break;
       this.waiting.shift();

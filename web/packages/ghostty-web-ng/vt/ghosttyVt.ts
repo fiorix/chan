@@ -1878,34 +1878,52 @@ export class VtSearch {
     const ranges: MatchRange[] = [];
     if (!this.live()) return { ranges, next: 0, total: 0 };
     const deadline = performance.now() + Math.max(0, budgetMs);
-    this.catchUp();
-    const total = this.count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
-    const S = LAYOUT.GhosttySelection;
-    if (total !== this.matchCount) {
-      if (total > this.matchCapacity) {
-        const capacity = Math.max(total, this.matchCapacity * 2, 256);
-        const buffer = this.wasm.alloc(capacity * S.size);
-        if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * S.size);
-        this.matchBuffer = buffer;
-        this.matchCapacity = capacity;
-      }
-      const B = LAYOUT.GhosttySelectionBuffer.fields;
-      const buf = this.scratch + SEARCH_SCRATCH.buffer;
-      const view = this.wasm.view();
-      view.setUint32(buf + B.ptr, this.matchBuffer, true);
-      view.setUint32(buf + B.cap, this.matchCapacity, true);
-      view.setUint32(buf + B.len, 0, true);
-      this.check('listing incremental matches', this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf));
-      this.matchCount = this.wasm.view().getUint32(buf + B.len, true);
-    }
-    let next = Math.min(start, this.matchCount);
-    const end = Math.min(next + 256, this.matchCount);
+    const count = this.listed();
+    let next = Math.min(start, count);
+    const end = Math.min(next + 256, count);
     while (next < end) {
-      const range = this.range(this.matchBuffer + next++ * S.size);
+      const range = this.range(this.matchBuffer + next++ * LAYOUT.GhosttySelection.size);
       if (range) ranges.push(range);
       if (performance.now() >= deadline) break;
     }
-    return { ranges, next, total: this.matchCount };
+    return { ranges, next, total: count };
+  }
+
+  /// The match at `index` of the snapshot `readMatches` reads, null past
+  /// its end or when the core cannot place the match on the screen. Feeds
+  /// first when the terminal changed, and copies the core's selection
+  /// buffer as `readMatches` does, so a read between batches of the same
+  /// snapshot copies nothing.
+  matchAt(index: number): MatchRange | null {
+    if (!Number.isSafeInteger(index) || index < 0) throw new RangeError('Invalid match offset');
+    if (!this.live() || index >= this.listed()) return null;
+    return this.range(this.matchBuffer + index * LAYOUT.GhosttySelection.size);
+  }
+
+  /// Brings the match snapshot up to date with the terminal and returns its
+  /// length, copying the core's whole selection buffer when its count
+  /// changed.
+  private listed(): number {
+    this.catchUp();
+    const total = this.count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
+    if (total === this.matchCount) return total;
+    const S = LAYOUT.GhosttySelection;
+    if (total > this.matchCapacity) {
+      const capacity = Math.max(total, this.matchCapacity * 2, 256);
+      const buffer = this.wasm.alloc(capacity * S.size);
+      if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * S.size);
+      this.matchBuffer = buffer;
+      this.matchCapacity = capacity;
+    }
+    const B = LAYOUT.GhosttySelectionBuffer.fields;
+    const buf = this.scratch + SEARCH_SCRATCH.buffer;
+    const view = this.wasm.view();
+    view.setUint32(buf + B.ptr, this.matchBuffer, true);
+    view.setUint32(buf + B.cap, this.matchCapacity, true);
+    view.setUint32(buf + B.len, 0, true);
+    this.check('listing incremental matches', this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf));
+    this.matchCount = this.wasm.view().getUint32(buf + B.len, true);
+    return this.matchCount;
   }
 
   /// The index of the match that starts at SCREEN row `row` and column
