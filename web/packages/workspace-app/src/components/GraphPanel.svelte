@@ -225,8 +225,10 @@
   /// Bumped to fetch the whole spine again when a directory is opened whose
   /// children the drawn graph does not hold and there is no spine to patch.
   let spineReload = $state(0);
-  /// Directories a fetch was already asked for, so one that is empty on
-  /// disk asks once.
+  /// Directories a patch read, or is about to read, the level of, so one
+  /// that is empty or gone on disk asks once. One the patch skips, since the
+  /// spine holds no node of it yet, is not asked, and asks again once
+  /// another read may have brought its node.
   const spineAsked = new Set<string>();
 
   /// The most directories one read asks for children before what they
@@ -1887,22 +1889,29 @@
         void loadSpine();
         return;
       }
+      let landed = false;
       try {
         // Parents first, so a directory an earlier level of this patch
         // brings is in the spine by the time its own turn comes.
         for (const dir of [...reading].sort(byDepth)) {
           // A directory is read only when the spine holds it: what the walk
           // never drew, a patch never draws either.
-          if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) continue;
+          if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) {
+            spineAsked.delete(dir);
+            continue;
+          }
           const level = await fetchSpineLevel(dir, seq);
           if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
           applySpineLevel(read, dir, level);
+          landed = true;
         }
       } catch {
         if (seq === spineSeq) void loadSpine();
         return;
       }
-      publishSpine(read);
+      // A patch that read nothing changed nothing, and a folder it skipped
+      // is asked again on every opening and answer taken.
+      if (landed) publishSpine(read);
     };
     spinePatches = spinePatches.then(run, run);
     return spinePatches;
