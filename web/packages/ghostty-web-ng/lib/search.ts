@@ -347,6 +347,33 @@ export class SearchOwner {
     return !first || !last || order(last, highlight(first)) > 0;
   }
 
+  /**
+   * The newest match, read from the core's listing, while the list placed
+   * so far is not the head of the whole one; null once it is, where its
+   * first entry is the newest. The active-area entries list their pages
+   * oldest first, each newest first, so the last page's entries are the
+   * ones not older than the last entry, and the first of them is the
+   * newest; a binary search finds it. An entry the core cannot place gives
+   * null, which leaves the press to the ordering rule.
+   */
+  private listedNewest(): MatchRange | null {
+    if (this.ordered(true)) return null;
+    const search = this.search!;
+    const last = search.matchAt(this.head! - 1);
+    if (!last) return null;
+    const oldest = highlight(last);
+    let lo = 0;
+    let hi = this.head! - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const range = search.matchAt(mid);
+      if (!range) return null;
+      if (order(range, oldest) >= 0) hi = mid;
+      else lo = mid + 1;
+    }
+    return search.matchAt(lo);
+  }
+
   private checked(): number {
     return this.held * this.core.getScrollbackLength() * this.core.cols;
   }
@@ -522,6 +549,17 @@ export class SearchOwner {
         this.waiting.shift();
         this.index = this.placedIndex(next);
         this.keep(next);
+        selected = true;
+        continue;
+      }
+      // From no active match older lands on the newest, read from the
+      // core's listing while the placed list is not yet the head of the
+      // whole one, so no count of placed entries decides it.
+      const newest = direction === 'older' && this.index === null ? this.listedNewest() : null;
+      if (newest) {
+        this.waiting.shift();
+        this.index = this.placedIndex(newest);
+        this.keep(newest);
         selected = true;
         continue;
       }
