@@ -121,7 +121,7 @@ describe("CommandDeck lazy confirmation", () => {
     await flush();
     const query = target.querySelector(".deck-input");
     const outside = document.createElement("div");
-    outside.innerHTML = '<input><textarea class="xterm-helper-textarea"></textarea><div contenteditable="true"></div><div role="dialog" aria-modal="true" tabindex="-1"></div>';
+    outside.innerHTML = '<input><textarea></textarea><div contenteditable="true"></div><div role="dialog" aria-modal="true" tabindex="-1"></div>';
     document.body.append(outside);
     try {
       const modal = outside.querySelector<HTMLElement>('[role="dialog"]')!;
