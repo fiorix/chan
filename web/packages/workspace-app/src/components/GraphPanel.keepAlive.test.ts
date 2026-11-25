@@ -36,7 +36,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { layout, reorderTab, type LeafNode } from "../state/tabs.svelte";
+import { layout, reorderTab, type GraphTab, type LeafNode } from "../state/tabs.svelte";
 
 installGraphDom();
 
@@ -302,6 +302,81 @@ describe("graph tabs in a pane", () => {
     await settle();
     expect(two!.nodes, "shown again, it draws the window's graph").toBe(one!.nodes);
     expect([...two!.visibleNodeIds].sort()).toEqual(drawn);
+  });
+
+  test("a double-click in a tab shown again over its kept part reads a level an answer over the listing cap leaves out", async () => {
+    // Over the cap: every folder, and of the files the note and the file it
+    // links to; `a/x.md` is on disk only.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.dir("notes"), g.file("notes/n.md"), g.file("a/b/c.md")],
+      edges: [
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "directory:a/b", "contains"),
+        g.edge("directory:a/b", "a/b/c.md", "contains"),
+        g.edge("", "directory:notes", "contains"),
+        g.edge("directory:notes", "notes/n.md", "contains"),
+        g.edge("notes/n.md", "a/b/c.md", "link"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.dir("notes"), fsg.file("a/x.md"), fsg.file("a/b/c.md"), fsg.file("notes/n.md")],
+      edges: [
+        fsg.contains("", "a"),
+        fsg.contains("a", "a/b"),
+        fsg.contains("a", "a/x.md"),
+        fsg.contains("a/b", "a/b/c.md"),
+        fsg.contains("", "notes"),
+        fsg.contains("notes", "notes/n.md"),
+      ],
+    };
+    graphServer.tree = "folders";
+    layout.nodes = {
+      [GRAPH_PANE]: {
+        kind: "leaf",
+        id: GRAPH_PANE,
+        tabs: [graphTab({ id: "one" }), graphTab({ id: "two", expanded: { "": true, notes: true } })],
+        activeTabId: "two",
+      },
+    };
+    layout.rootId = GRAPH_PANE;
+    layout.activePaneId = GRAPH_PANE;
+    const pane = layout.nodes[GRAPH_PANE] as LeafNode;
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane } }) as Record<string, unknown>);
+    await settle();
+    const [, two] = canvas.all;
+    const tab = pane.tabs[1] as GraphTab;
+    // The note's link shows `a/b` and its file under the closed `a`.
+    two!.onSelect("notes/n.md");
+    await settle(2);
+    expect([...two!.visibleNodeIds]).toEqual(expect.arrayContaining(["directory:a", "directory:a/b", "a/b/c.md"]));
+
+    // Hidden, then the window's graph is dropped and fetched again by the
+    // shown tab, held before its first event.
+    pane.activeTabId = "one";
+    await settle();
+    let release!: () => void;
+    graphServer.streamGate = new Promise<void>((resolve) => (release = resolve));
+    invalidateGraph();
+    await settle();
+    expect(graphServer.graphStreamCalls).toBe(2);
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(two!.nodes.map((n) => n.id), "shown again over the part it kept").toContain("directory:a/b");
+    const reads = (path: string) => graphServer.fsGraphCalls.filter((call) => call.path === path).length;
+    two!.onSelect("directory:a");
+    await settle(2);
+    two!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.a).toBe(true);
+    expect(reads("a"), "the kept part's mark decides").toBe(1);
+
+    release();
+    await settle();
+    expect(reads("a")).toBe(1);
+    expect([...two!.visibleNodeIds]).toContain("a/x.md");
   });
 
   test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {

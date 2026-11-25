@@ -191,9 +191,11 @@
   }
 
   /// Double-click a graph node: a directory opens or closes in place, as a
-  /// File Browser's does. The loaded graph holds the whole tree, so this
-  /// only flips the directory's flag in the opened set and the drawn set
-  /// follows; closing keeps what was opened below it for the next opening.
+  /// File Browser's does. This flips the directory's flag in the opened set
+  /// and the drawn set follows; an opened directory whose level the drawn
+  /// graph is not known to hold, as under an answer over the listing cap,
+  /// is read (`loadOpenedChildren`). Closing keeps what was opened below it
+  /// for the next opening.
   /// The preceding tap already set the selection, so this reads it. The
   /// window's session follows the tab's opened set as a whole, not each
   /// key, so this schedules its saves.
@@ -233,25 +235,32 @@
   const OPENED_CHILDREN_READS_PER_STEP = 64;
 
   /// The shared graph holds the whole tree once the index has answered,
-  /// unless its answer is over the listing cap (`taken.tree`): that one
-  /// holds every folder but of the files only those it holds for another
-  /// reason, so a child node there does not show a directory's level is
-  /// drawn. The tab draws its filesystem spine only as deep as the opened
-  /// directories reached at its last fetch, so one a double-click opens
-  /// past that, with no level the drawn graph is known to hold, is read: a
-  /// level per such directory, at most OPENED_CHILDREN_READS_PER_STEP,
-  /// shallowest first. A depth change reads through `raiseDepth`, which
-  /// counts the budget over each read before it opens a level.
-  function loadOpenedChildren(): void {
+  /// unless its answer is over the listing cap (the mark taken with the
+  /// view, or kept with a hidden tab's part of it): that one holds every
+  /// folder but of the files only those it holds for another reason, so a
+  /// child node there does not show a directory's level is drawn. The tab
+  /// draws its filesystem spine only as deep as the opened directories
+  /// reached at its last fetch, so one a double-click opens past that, with
+  /// no level the drawn graph is known to hold, is read: a level per such
+  /// directory, at most OPENED_CHILDREN_READS_PER_STEP, shallowest first.
+  /// One opened under a closed parent is read once the parent opens, since
+  /// until the parent's level lands the spine has no node of it to read.
+  /// Taking an answer over the cap reads by the same rule the directories
+  /// opened over an answer of the whole tree, and `leaveFailed` leaves a
+  /// directory whose read failed to its retry (`retrySpineFailures`). A
+  /// depth change reads through `raiseDepth`, which counts the budget over
+  /// each read before it opens a level.
+  function loadOpenedChildren(leaveFailed = false): void {
     const withChildren = new Set<string>();
-    if (taken?.tree == null) {
+    if ((kept ?? taken)?.tree == null) {
       for (const n of nodes) {
         if ((n.kind === "file" || n.kind === "folder") && n.path) withChildren.add(parentDir(n.path));
       }
     }
     const missing: string[] = [];
     for (const dir of Object.keys(expandedDirs)) {
-      if (!dir || !expandedDirs[dir] || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
+      if (!dir || !drawsChildren(dir) || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
+      if (leaveFailed && spineFailures.has(dir)) continue;
       missing.push(dir);
     }
     if (missing.length === 0) return;
@@ -588,8 +597,9 @@
   /// object, never a copy.
   let taken = $state.raw<{ view: GraphView; partial: boolean; tree: GraphTreeCoverage | null } | null>(null);
   /// What a hidden tab holds in place of `taken` once the window's graph has
-  /// moved on under it: the part of its view it draws from, and no more.
-  let kept = $state.raw<DrawnGraph | null>(null);
+  /// moved on under it: the part of its view it draws from, and no more, and
+  /// what the answer that view came from holds of the tree.
+  let kept = $state.raw<{ part: DrawnGraph; tree: GraphTreeCoverage | null } | null>(null);
   /// The tab's own filesystem spine (`loadSpine`), under the canvas's types.
   let spine = $state.raw<DrawnGraph>(NO_GRAPH);
   let spineLoading = $state(true);
@@ -606,7 +616,7 @@
   /// of the spine's own to add these are the shared graph's arrays
   /// themselves, the same in every tab of the window.
   const graph = $derived(
-    rootGone ? NO_GRAPH : (kept ?? withSpine(spine, taken?.view ?? null)),
+    rootGone ? NO_GRAPH : (kept?.part ?? withSpine(spine, taken?.view ?? null)),
   );
   const nodes = $derived(graph.nodes);
   const edges = $derived(graph.edges);
@@ -2036,6 +2046,8 @@
       // The store publishes an answer's mark no later than its view.
       taken = { view, partial, tree: graphData.tree };
       kept = null;
+      // A spine still loading reads every opened directory the tree draws.
+      if (taken.tree != null && spineRead !== null && !spineLoading && spineError === null) loadOpenedChildren(true);
     });
   });
 
@@ -2051,7 +2063,7 @@
     untrack(() => {
       if (taken === null || taken.view === view) return;
       const whole = !taken.partial && taken.view.nodes.length > 0;
-      kept = whole ? drawnPart(graph, scopedNodeIds, selectedId) : null;
+      kept = whole ? { part: drawnPart(graph, scopedNodeIds, selectedId), tree: taken.tree } : null;
       taken = null;
     });
   });
