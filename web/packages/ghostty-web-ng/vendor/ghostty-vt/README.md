@@ -4,14 +4,14 @@
 
 | Field   | Value                                                              |
 | ------- | ------------------------------------------------------------------ |
-| Source  | libghostty-vt 1.0.1 release, asset `ghostty-vt-1.0.1.wasm`         |
-| URL     | `https://release.files.ghostty.org/libghostty-vt/1.0.1/`           |
-| Tag     | `vt-1.0.1` in ghostty-org/ghostty                                  |
-| Commit  | `108cacb17ed8990840cd14abfce43d8ed8503ca1`                         |
-| Signed  | 2026-11-11T20:12:46Z (minisign trusted comment)                    |
+| Source  | libghostty-vt 1.0.2 release, asset `ghostty-vt-1.0.2.wasm`         |
+| URL     | `https://release.files.ghostty.org/libghostty-vt/1.0.2/`           |
+| Tag     | `vt-1.0.2` in ghostty-org/ghostty                                  |
+| Commit  | `573c4a21e02311ae87844af26b6a7a179f82858e`                         |
+| Signed  | 2026-11-24T18:26:37Z (minisign trusted comment)                    |
 | Build   | ReleaseFast                                                        |
-| SHA-256 | `2ee8434a58866aa3ce43cebbbf284d684f5f5b64c4f6040fa031cfe789e11646` |
-| Size    | 1,243,719 bytes                                                    |
+| SHA-256 | `96b619798ad941835cb29326182a46fd68a0aa948ee13c1b16e9bae9d1c84031` |
+| Size    | 1,228,525 bytes                                                    |
 | License | MIT, `LICENSE` beside it                                           |
 
 libghostty-vt's C ABI is stable from 1.0: a 1.x minor only adds functions, types, enum values and trailing fields of sized structs, nothing is removed, resized, reordered or re-typed, and a behavior change ships as a new function. Each release's wasm is published with its signature and a `SHA256SUMS` file at `release.files.ghostty.org`, Ghostty's release file host; the GitHub release assets are not the source of this file. The binding refuses a core whose major version is not 1 or that lacks the search feature when it loads, and the terminal falls back to xterm.js.
