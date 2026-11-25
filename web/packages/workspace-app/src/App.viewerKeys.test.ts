@@ -5,13 +5,7 @@
 // travels on to the app's window handler, so the app's chords work over an
 // open viewer.
 
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { pressInPage } from "./__tests__/keys";

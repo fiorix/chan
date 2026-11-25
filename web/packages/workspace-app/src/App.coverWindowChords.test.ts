@@ -17,12 +17,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
-
 const host = vi.hoisted(() => ({ desktop: false }));
 
 vi.mock("./api/desktop", async (importOriginal) => ({

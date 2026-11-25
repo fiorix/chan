@@ -3,13 +3,6 @@
 import { mount, tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("./__tests__/xterm")).webglAddonModule());
-
 import App from "./App.svelte";
 import { installDemoWorkspace } from "./demo/install";
 import { teardownDemoApp } from "./demo/teardown";

@@ -10,7 +10,7 @@ import { runTerminalFit } from "../terminal/resize";
 // Static top-level import avoids per-test dynamic import timeouts under
 // the full parallel suite (contended Svelte transform/import across
 // workers). The vi.mock calls are hoisted above all imports, so this
-// static import still sees the mocked xterm modules.
+// static import still sees the mocked modules.
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import Workspace from "./Workspace.svelte";
@@ -39,12 +39,6 @@ import {
   terminalTab,
 } from "../__tests__/terminalTab";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 vi.mock("../terminal/resize", async (importOriginal) => {

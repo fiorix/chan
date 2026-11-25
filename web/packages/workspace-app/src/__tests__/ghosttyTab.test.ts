@@ -6,12 +6,6 @@
 import { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("./terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("./terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("./ghosttyTab")).ghosttyBackendModule(importOriginal));
 

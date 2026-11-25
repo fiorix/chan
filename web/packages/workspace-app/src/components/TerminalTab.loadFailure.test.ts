@@ -31,11 +31,6 @@ vi.mock("@xterm/xterm", () => ({
     }
   },
 }));
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
   reloadWindow: vi.fn(async () => {}),
