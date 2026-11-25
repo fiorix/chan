@@ -123,25 +123,25 @@ describe("OSC 52 clipboard", () => {
   });
 
   test("decodes a base64 copy payload and writes it to the clipboard", () => {
-    expect(handleOsc52Clipboard("c;" + btoa("hello"))).toBe(true);
+    handleOsc52Clipboard("c;" + btoa("hello"));
     expect(writeMock).toHaveBeenCalledWith("hello");
   });
 
   test("decodes multibyte UTF-8 via TextDecoder, not raw atob", () => {
     const text = "héllo ☃";
     const payload = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
-    expect(handleOsc52Clipboard("c;" + payload)).toBe(true);
+    handleOsc52Clipboard("c;" + payload);
     expect(writeMock).toHaveBeenCalledWith(text);
   });
 
   test("consumes the read/query form without writing", () => {
-    expect(handleOsc52Clipboard("c;?")).toBe(true);
+    handleOsc52Clipboard("c;?");
     expect(writeMock).not.toHaveBeenCalled();
   });
 
   test("consumes malformed base64 without throwing", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(handleOsc52Clipboard("c;@@@")).toBe(true);
+    expect(() => handleOsc52Clipboard("c;@@@")).not.toThrow();
     expect(writeMock).not.toHaveBeenCalled();
     warn.mockRestore();
   });

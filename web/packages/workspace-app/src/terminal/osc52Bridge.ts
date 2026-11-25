@@ -33,14 +33,14 @@ import { writeClipboardText } from "../api/desktop";
 
 /// Honour an OSC 52 copy sequence: decode its base64 payload and write it to
 /// the system clipboard. The read/query form (`?`) is consumed but never
-/// echoed -- replying would leak the clipboard back into the PTY. Returns
-/// false for a body with no `;` after its selection param and true for any
-/// other; the clipboard write is fire-and-forget.
-export function handleOsc52Clipboard(data: string): boolean {
+/// echoed -- replying would leak the clipboard back into the PTY. A body with
+/// no `;` after its selection param is ignored; the clipboard write is
+/// fire-and-forget.
+export function handleOsc52Clipboard(data: string): void {
   const sep = data.indexOf(";");
-  if (sep < 0) return false; // not an OSC 52 we understand
+  if (sep < 0) return; // not an OSC 52 we understand
   const payload = data.slice(sep + 1); // selection param before ';' ignored
-  if (payload === "?") return true; // read/query form: consume, never echo
+  if (payload === "?") return; // read/query form: consume, never echo
   try {
     const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
     const text = new TextDecoder().decode(bytes);
@@ -50,7 +50,6 @@ export function handleOsc52Clipboard(data: string): boolean {
   } catch (err) {
     console.warn("OSC 52 malformed base64", err);
   }
-  return true;
 }
 
 /// Hold cap for a candidate spanning chunk boundaries. 1MB of base64
