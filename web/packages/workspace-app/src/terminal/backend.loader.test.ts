@@ -73,11 +73,12 @@ describe("loadGhosttyKit", () => {
     const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
     vi.stubGlobal("fetch", fetch);
     const compile = vi.spyOn(WebAssembly, "compile").mockRejectedValue(error);
-    const { loadGhosttyKit } = await import("./backend");
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
     const first = loadGhosttyKit();
     expect(loadGhosttyKit(), "concurrent spawns share the load").toBe(first);
     await expect(first).rejects.toBe(error);
     await expect(loadGhosttyKit()).rejects.toBe(error);
+    expect(ghosttyLoadIsFinal(error), "only a reload can get past a compiler rejection").toBe(true);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(compile).toHaveBeenCalledTimes(1);
   });
@@ -87,11 +88,12 @@ describe("loadGhosttyKit", () => {
     vi.stubGlobal("fetch", fetch);
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
     const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementation(refused);
-    const { loadGhosttyKit } = await import("./backend");
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
     const { GhosttyVtRefusal } = await import("@chan/ghostty-web-ng/vt");
     const first = loadGhosttyKit();
     await expect(first).rejects.toThrow(message);
     await expect(first, "the binding marks its refusal").rejects.toBeInstanceOf(GhosttyVtRefusal);
+    expect(ghosttyLoadIsFinal(await first.catch((refusal: unknown) => refusal)), "only a reload can get past a refusal").toBe(true);
     await expect(loadGhosttyKit(), "the refusal is kept").rejects.toThrow(message);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(compile).toHaveBeenCalledTimes(1);
@@ -111,16 +113,20 @@ describe("loadGhosttyKit", () => {
         return exports;
       }),
     );
-    const { loadGhosttyKit } = await import("./backend");
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
     const kit = loadGhosttyKit();
     await expect(kit, "the core is accepted").resolves.toHaveProperty("instantiate");
+    expect(
+      ghosttyLoadIsFinal(new RangeError("WebAssembly.instantiate(): Out of memory: Cannot allocate Wasm memory for new instance")),
+      "a terminal's own instance failing on the accepted core may pass at its Retry",
+    ).toBe(false);
     await expect((await kit).instantiate(), "the checked kit hands out terminals").resolves.toBeDefined();
     expect(dropped.length, "every instance was made without it").toBeGreaterThan(0);
     for (const run of dropped) expect(run, "the vendored core does export it").toBeTypeOf("function");
   });
 
-  // Anything else an instance can throw may pass: the spawn it fails falls
-  // back, and the next spawn checks again with a new instance of the module
+  // Anything else an instance can throw may pass: the spawn it fails shows
+  // Retry, and the next spawn checks again with a new instance of the module
   // compiled before.
   test.each([
     [
@@ -138,11 +144,12 @@ describe("loadGhosttyKit", () => {
     vi.stubGlobal("fetch", fetch);
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
     const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementationOnce(failing).mockImplementationOnce(failing);
-    const { loadGhosttyKit } = await import("./backend");
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
     const { GhosttyVtRefusal } = await import("@chan/ghostty-web-ng/vt");
     const first = loadGhosttyKit();
     await expect(first).rejects.toThrow(message);
     await expect(first, "no refusal").rejects.not.toBeInstanceOf(GhosttyVtRefusal);
+    expect(ghosttyLoadIsFinal(await first.catch((failure: unknown) => failure)), "the next spawn may pass").toBe(false);
     const second = loadGhosttyKit();
     expect(second, "the next spawn loads again").not.toBe(first);
     await expect(second).rejects.toThrow(message);
@@ -168,8 +175,10 @@ describe("loadGhosttyKit", () => {
     }
     vi.stubGlobal("fetch", fetch);
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
-    const { loadGhosttyKit } = await import("./backend");
-    await expect(loadGhosttyKit()).rejects.toThrow(failure === "status" ? "503 Unavailable" : "connection lost");
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
+    const failed = loadGhosttyKit();
+    await expect(failed).rejects.toThrow(failure === "status" ? "503 Unavailable" : "connection lost");
+    expect(ghosttyLoadIsFinal(await failed.catch((reason: unknown) => reason)), "the next spawn may pass").toBe(false);
     expect(compile).not.toHaveBeenCalled();
     const retry = loadGhosttyKit();
     await expect(retry).resolves.toHaveProperty("instantiate");
@@ -186,13 +195,15 @@ describe("onGhosttyKitLoaded", () => {
     fetch.mockRejectedValueOnce(new Error("connection lost"));
     vi.stubGlobal("fetch", fetch);
     vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
-    const { loadGhosttyKit, onGhosttyKitLoaded } = await import("./backend");
+    const { loadGhosttyKit, onGhosttyKitLoaded, ghosttyLoadIsFinal } = await import("./backend");
     const loaded = vi.fn();
     const removed = vi.fn();
     onGhosttyKitLoaded(loaded);
     onGhosttyKitLoaded(removed)();
 
-    await expect(loadGhosttyKit()).rejects.toThrow("connection lost");
+    const failed = loadGhosttyKit();
+    await expect(failed).rejects.toThrow("connection lost");
+    expect(ghosttyLoadIsFinal(await failed.catch((reason: unknown) => reason)), "the next load may pass").toBe(false);
     expect(loaded, "a failed load").not.toHaveBeenCalled();
     await loadGhosttyKit();
     expect(loaded, "the load that passed").toHaveBeenCalledTimes(1);
