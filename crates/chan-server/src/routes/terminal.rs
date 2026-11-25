@@ -1485,13 +1485,19 @@ async fn terminal_ws(
             changed = lifecycle_rx.changed() => {
                 if changed.is_err() { break; }
             }
-            // Above the client's frames, which a pinging client keeps ready.
+            // Above the client's frames, so a client whose frames are ready
+            // at every poll cannot hold the close off.
             () = tokio::time::sleep_until(
                 stall_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if stall_deadline.is_some() => {
                 finish = Some((1013, "terminal view stalled"));
                 break;
             }
+            // A view released while this select waits has no send credit and
+            // nothing else to wake it. Seen here, ahead of the client's
+            // frames, its stall exists before the client's first frame
+            // after the release, which then starts the clock.
+            () = progress.released(), if !behind => {}
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
                 if socket.frame(&session, program_status_frame(&session, snapshot)).await.is_err() {
@@ -1579,10 +1585,12 @@ async fn terminal_ws(
 }
 
 /// A view that needs recovery, waiting for its client to report having
-/// parsed what it was sent. A client that runs (it sends frames) and still
-/// reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its socket
-/// closes, and the client redials from its parsed cursor. A stopped page
-/// sends nothing and keeps waiting, to recover on this socket when it wakes.
+/// parsed what it was sent. The wait starts when the socket loop sees that
+/// state: at a lag, or at the reader's release, which wakes the loop. A
+/// client that runs (it sends frames) and still reports no progress for
+/// [`NO_PROGRESS_LIMIT`] is wedged: its socket closes, and the client
+/// redials from its parsed cursor. A stopped page sends nothing and keeps
+/// waiting, to recover on this socket when it wakes.
 struct Stall {
     /// The parsed position the wait started at; an advance restarts it.
     acked: Option<u64>,

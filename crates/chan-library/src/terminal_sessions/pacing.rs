@@ -23,6 +23,10 @@ pub(super) struct Pacing {
     window: u64,
     state: Mutex<State>,
     changed: Condvar,
+    /// Wakes the sockets waiting in [`OutputProgress::released`]. The
+    /// reader releases a view on its own thread, and a socket whose view
+    /// has no send credit has nothing else to wake it.
+    released: tokio::sync::Notify,
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +97,7 @@ impl Pacing {
                 ..State::default()
             }),
             changed: Condvar::new(),
+            released: tokio::sync::Notify::new(),
         })
     }
 
@@ -182,6 +187,7 @@ impl Pacing {
             if now >= until {
                 view.released = true;
                 view.blocked_since = None;
+                self.released.notify_waiters();
                 continue;
             }
             deadline = Some(deadline.map_or(until, |earliest| earliest.min(until)));
@@ -318,6 +324,17 @@ impl OutputProgress {
     /// Late acknowledgements keep its cursor accurate but cannot hold again.
     pub fn needs_replay(&self) -> bool {
         self.with_view(|view| view.released).unwrap_or(true)
+    }
+
+    /// Complete once [`Self::needs_replay`] holds, at once if it already
+    /// does, so a socket learns of the release when it happens rather than
+    /// at whatever wakes it next.
+    pub async fn released(&self) {
+        // Created before the check, so a release between the two wakes it.
+        let notified = self.0.pacing.released.notified();
+        if !self.needs_replay() {
+            notified.await;
+        }
     }
 }
 
