@@ -69,9 +69,14 @@ export default {
     page.on("requestfailed", onFailed);
     page.on("requestfinished", onFinished);
     writeFileSync(join(ctx.workspaceDir, FILE), "# Load 347\n");
+    // The cleanup below reads these, so they live outside the try.
     let terminal = null;
+    let sessions = null;
     // The window's sessions before the check opens its terminal.
     let baseline = null;
+    // Whether the check itself threw: a cleanup error then must not replace
+    // the check's error.
+    let checkFailed = false;
     try {
       await page.reload({ waitUntil: "domcontentloaded", timeout: WAIT_MS });
       await page.waitForSelector(".pane", { visible: true, timeout: WAIT_MS });
@@ -90,7 +95,7 @@ export default {
       // Every session the window gained since the baseline, whatever its
       // name: a second PTY for the same tab is registered under a name of
       // its own (Load347-2), and must still count.
-      const sessions = async () =>
+      sessions = async () =>
         (await rows()).filter((row) => row.window === windowId && !baseline.has(row.session_id));
 
       // What a terminal tab holds: its load error and actions, and what
@@ -409,23 +414,31 @@ export default {
       assert.deepEqual(details.continueErrors, [], "every intercepted request was answered");
       return details;
     } catch (error) {
+      checkFailed = true;
       error.smokeDetails = details;
       throw error;
     } finally {
-      page.off("request", onRequest);
-      page.off("requestfailed", onFailed);
-      page.off("requestfinished", onFinished);
-      await page.setRequestInterception(false).catch(() => {});
-      await page.setCacheEnabled(true).catch(() => {});
-      // Every session the window gained goes with the check: the retried
-      // terminal and, at a red, one opened in place of the error or a second
-      // PTY. A session closes by its name, which the registry keeps unique.
-      if (terminal) {
-        const found = baseline ? await sessions().catch(() => []) : [];
-        details.closed = [...new Set([NAME, ...found.map((row) => row.name).filter(Boolean)])];
-        for (const name of details.closed) await terminal(["close", "--tab-name", name]).catch(() => {});
+      try {
+        page.off("request", onRequest);
+        page.off("requestfailed", onFailed);
+        page.off("requestfinished", onFinished);
+        await page.setRequestInterception(false).catch(() => {});
+        await page.setCacheEnabled(true).catch(() => {});
+        // Every session the window gained goes with the check: the retried
+        // terminal and, at a red, one opened in place of the error or a second
+        // PTY. A session closes by its name, which the registry keeps unique.
+        if (terminal) {
+          const found = baseline && sessions ? await sessions().catch(() => []) : [];
+          details.closed = [...new Set([NAME, ...found.map((row) => row.name).filter(Boolean)])];
+          for (const name of details.closed) await terminal(["close", "--tab-name", name]).catch(() => {});
+        }
+        rmSync(join(ctx.workspaceDir, FILE), { force: true });
+      } catch (cleanupError) {
+        // After a pass the cleanup's failure is the result; after a red the
+        // check's own error stays the result and carries this one.
+        if (!checkFailed) throw cleanupError;
+        details.cleanupError = String(cleanupError?.stack ?? cleanupError);
       }
-      rmSync(join(ctx.workspaceDir, FILE), { force: true });
     }
   },
 };
