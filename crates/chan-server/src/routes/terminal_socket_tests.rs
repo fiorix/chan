@@ -11,6 +11,7 @@ fn input_state() -> InputState {
         focus: None,
         queue_details: false,
         frames: 0,
+        stall: None,
         replies: VecDeque::new(),
         reply_bytes: 0,
         cwd: None,

@@ -39,6 +39,9 @@ pub(super) struct InputState {
     /// them, so a count that moves shows the page runs; a stopped page's
     /// network stack can still answer protocol pings.
     pub(super) frames: u64,
+    /// The wait of a view that needs recovery, kept where the client's
+    /// frames are read.
+    pub(super) stall: Option<Stall>,
     replies: VecDeque<(usize, Message)>,
     reply_bytes: usize,
     cwd: Option<CwdFuture>,
@@ -63,6 +66,7 @@ impl TerminalSocket {
                 focus: None,
                 queue_details: false,
                 frames: 0,
+                stall: None,
                 replies: VecDeque::new(),
                 reply_bytes: 0,
                 cwd: None,
@@ -251,9 +255,28 @@ impl InputState {
             Message::Close(_) => return Err(()),
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => return Ok(()),
         };
+        let progress = session.output_progress();
+        // The first text frame read after a release starts the stall clock
+        // wherever the socket reads it, also inside a send that was pending
+        // at the release, which the loop's release wake cannot reach. The
+        // wait starts before the frame counts, and the update follows the
+        // frame's own ack, so an ack that advances restarts it instead.
+        if self.stall.is_none() {
+            if let Some(progress) = progress.as_ref().filter(|progress| progress.needs_replay()) {
+                self.stall = Some(Stall::new(progress.acked(), self.frames));
+            }
+        }
         self.frames += 1;
         self.client.observe(Some(session.id()), None);
-        match serde_json::from_str::<ClientFrame>(&text) {
+        let applied = self.apply(state, session, &text);
+        if let (Some(stall), Some(progress)) = (self.stall.as_mut(), progress) {
+            stall.update(progress.acked(), self.frames);
+        }
+        applied
+    }
+
+    fn apply(&mut self, state: &AppState, session: &AttachHandle, text: &str) -> Result<(), ()> {
+        match serde_json::from_str::<ClientFrame>(text) {
             Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {
                 let Some(data) = client_input_bytes(&frame) else {
                     return self.reply(ServerFrame::Error {

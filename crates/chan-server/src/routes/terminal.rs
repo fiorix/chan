@@ -1310,7 +1310,8 @@ async fn terminal_ws(
         opts.declared_size,
         opts.size_if_unset,
     );
-    // A client of an earlier life gets the reset a live socket gets at the
+    // A client whose generation is neither the live one nor the one a
+    // lossy restore continues gets the reset a live socket gets at the
     // restart: ahead of this life's session frame, outside its replay.
     if session.stale_generation
         && socket
@@ -1350,7 +1351,6 @@ async fn terminal_ws(
     }
     let mut lifecycle_rx = session.lifecycle_rx.clone();
     let mut recover = false;
-    let mut stall: Option<Stall> = None;
     let mut finish: Option<(u16, &'static str)> = None;
 
     loop {
@@ -1439,7 +1439,7 @@ async fn terminal_ws(
             tmux_consent_rx = session.tmux_consent_rx.clone();
             lifecycle_rx = session.lifecycle_rx.clone();
             recover = false;
-            stall = None;
+            socket.input.stall = None;
         }
         if let Some(exit) = &session.exit {
             send_exit(
@@ -1466,11 +1466,13 @@ async fn terminal_ws(
         }
         let stall_deadline = if behind {
             let (acked, frames) = (progress.acked(), socket.input.frames);
-            stall
+            socket
+                .input
+                .stall
                 .get_or_insert_with(|| Stall::new(acked, frames))
                 .update(acked, frames)
         } else {
-            stall = None;
+            socket.input.stall = None;
             None
         };
         let may_send = !behind && progress.send_credit() != Some(0);
@@ -1493,10 +1495,11 @@ async fn terminal_ws(
                 finish = Some((1013, "terminal view stalled"));
                 break;
             }
-            // A view released while this select waits has no send credit and
-            // nothing else to wake it. Seen here, ahead of the client's
-            // frames, its stall exists before the client's first frame
-            // after the release, which then starts the clock.
+            // A view released while this select waits may have no send
+            // credit and nothing else to wake it: the recovery check above
+            // runs at the release rather than at the next frame or event.
+            // The stall needs no wake, since the first frame read after the
+            // release starts it wherever it is read.
             () = progress.released(), if !behind => {}
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
@@ -1585,12 +1588,14 @@ async fn terminal_ws(
 }
 
 /// A view that needs recovery, waiting for its client to report having
-/// parsed what it was sent. The wait starts when the socket loop sees that
-/// state: at a lag, or at the reader's release, which wakes the loop. A
-/// client that runs (it sends frames) and still reports no progress for
-/// [`NO_PROGRESS_LIMIT`] is wedged: its socket closes, and the client
-/// redials from its parsed cursor. A stopped page sends nothing and keeps
-/// waiting, to recover on this socket when it wakes.
+/// parsed what it was sent. The wait starts at a lag, when the socket loop
+/// sees it, or at the reader's release, when the loop wakes for it or the
+/// socket reads its first client frame after it, wherever it reads it, so
+/// that frame starts the clock. A client that runs (it sends frames) and
+/// still reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its
+/// socket closes, and the client redials from its parsed cursor. A stopped
+/// page sends nothing and keeps waiting, to recover on this socket when it
+/// wakes.
 struct Stall {
     /// The parsed position the wait started at; an advance restarts it.
     acked: Option<u64>,

@@ -25,7 +25,8 @@ pub(super) struct Pacing {
     changed: Condvar,
     /// Wakes the sockets waiting in [`OutputProgress::released`]. The
     /// reader releases a view on its own thread, and a socket whose view
-    /// has no send credit has nothing else to wake it.
+    /// has no send credit has nothing else to wake it. One notification
+    /// wakes the waits of every view, and each checks its own.
     released: tokio::sync::Notify,
 }
 
@@ -326,13 +327,17 @@ impl OutputProgress {
         self.with_view(|view| view.released).unwrap_or(true)
     }
 
-    /// Complete once [`Self::needs_replay`] holds, at once if it already
-    /// does, so a socket learns of the release when it happens rather than
-    /// at whatever wakes it next.
+    /// Complete once [`Self::needs_replay`] holds for this attachment, at
+    /// once if it already does, so a socket learns of its release when it
+    /// happens rather than at whatever wakes it next. Another view's
+    /// release leaves it waiting.
     pub async fn released(&self) {
-        // Created before the check, so a release between the two wakes it.
-        let notified = self.0.pacing.released.notified();
-        if !self.needs_replay() {
+        loop {
+            // Created before the check, so a release between the two wakes it.
+            let notified = self.0.pacing.released.notified();
+            if self.needs_replay() {
+                return;
+            }
             notified.await;
         }
     }
