@@ -1,21 +1,4 @@
-import type { Terminal } from "@xterm/xterm";
-
 type CsiParam = number | number[];
-type FunctionIdentifier = {
-  prefix?: string;
-  intermediates?: string;
-  final: string;
-};
-type ParserLike = {
-  registerCsiHandler?: (
-    id: FunctionIdentifier,
-    callback: (params: CsiParam[]) => boolean | Promise<boolean>,
-  ) => { dispose(): void };
-  registerEscHandler?: (
-    id: FunctionIdentifier,
-    callback: () => boolean | Promise<boolean>,
-  ) => { dispose(): void };
-};
 
 const KITTY_REPORT_ALL_KEYS = 8;
 const XTERM_MODIFY_OTHER_KEYS = 4;
@@ -150,22 +133,6 @@ export type KeyboardProtocolCsi = {
   params: CsiParam[];
 };
 
-/// The CSI sequences the keyboard protocol state follows. `consume` is the
-/// xterm.js handler's answer: true for the ones xterm.js itself does not
-/// implement, false where its own handler must run too.
-const KEYBOARD_PROTOCOL_CSI: Array<{ id: FunctionIdentifier; consume: boolean }> = [
-  { id: { prefix: ">", final: "m" }, consume: true },
-  { id: { prefix: ">", final: "n" }, consume: true },
-  { id: { prefix: "?", final: "m" }, consume: true },
-  { id: { prefix: ">", final: "u" }, consume: true },
-  { id: { prefix: "<", final: "u" }, consume: true },
-  { id: { prefix: "=", final: "u" }, consume: true },
-  { id: { prefix: "?", final: "u" }, consume: true },
-  { id: { prefix: "?", final: "h" }, consume: false },
-  { id: { prefix: "?", final: "l" }, consume: false },
-  { id: { intermediates: "!", final: "p" }, consume: false },
-];
-
 /// Apply one CSI sequence to `protocol`: xterm's modifyOtherKeys
 /// (XTMODKEYS, its reset and its query), the kitty keyboard flags (push, pop,
 /// set, query), the screen switches the kitty flags are kept per, and DECSTR.
@@ -207,32 +174,6 @@ export function applyKeyboardProtocolCsi(
     default:
       return null;
   }
-}
-
-export function installKeyboardProtocolHandlers(
-  term: Terminal,
-  protocol: TerminalKeyboardProtocolState,
-  sendGeneratedInput: (data: string) => void,
-): void {
-  const parser = (term as Terminal & { parser?: ParserLike }).parser;
-  if (!parser?.registerCsiHandler) return;
-
-  for (const { id, consume } of KEYBOARD_PROTOCOL_CSI) {
-    parser.registerCsiHandler(id, (params) => {
-      const reply = applyKeyboardProtocolCsi(protocol, {
-        prefix: id.prefix ?? "",
-        intermediates: id.intermediates ?? "",
-        final: id.final,
-        params,
-      });
-      if (reply) sendGeneratedInput(reply);
-      return consume;
-    });
-  }
-  parser.registerEscHandler?.({ final: "c" }, () => {
-    resetTerminalKeyboardProtocolState(protocol);
-    return false;
-  });
 }
 
 export function applyXtermModifierKeys(
