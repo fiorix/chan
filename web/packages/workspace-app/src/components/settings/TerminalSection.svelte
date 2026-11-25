@@ -66,10 +66,9 @@
     entry: settingEntry(`terminal.colors.${key}`),
   }));
 
-  // Secret masking is editable here and applies on both backends. The
-  // suffix list stays display-only
-  // (normalize_terminal_secret_mask_suffixes drops, dedupes and
-  // truncates, so a chip editor would have to mirror all three).
+  // Secret masking is editable here. The suffix list stays display-only
+  // (normalize_terminal_secret_mask_suffixes drops, dedupes and truncates,
+  // so a chip editor would have to mirror all three).
   // Absent fields on a pre-field server display the SPA fallback.
   // These are the configured values, read by terminals at spawn:
   // already-open terminals keep the flag and suffixes they started
@@ -229,7 +228,7 @@
 <SettingField
   setting={SECRET_MASKING}
   pref="terminal.secret_masking"
-  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. Default stores no choice: masking is then on in a control terminal and off in every other window. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values on screen. The buffer stays copyable. New terminals only. Default stores no choice: masking is then on in a control terminal and off in every other window. The terminal menu has an ephemeral per-tab toggle."
 >
   <PillRadio
     name="settings-terminal-secret-masking"
