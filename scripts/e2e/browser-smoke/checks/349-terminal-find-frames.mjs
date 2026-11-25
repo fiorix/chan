@@ -28,10 +28,20 @@
 //               position order from the core's own.
 //   NEWEST   -- the stream again, find active from the newest match (the
 //               stream prunes it).
-//   WRAP     -- find steps to the oldest match, one echoed line follows,
-//               and older, pressed while the rescan that line started is
-//               partial (its instrument), must first land on the buffer's
-//               last "e", in the call or within five seconds.
+//   WRAP     -- twice, find steps to the oldest match with the count
+//               complete, and then, in one page task so that no frame runs
+//               between them, lines of the same shape are written to the
+//               terminal until the core lists the wanted shape, and older
+//               is pressed. The first reading wants the core to list a page
+//               ahead of the newest match (its first entry is not the
+//               buffer's last "e"), the second the screen in order (its
+//               first entry is that "e"). When the call returns the active
+//               match must be the buffer's last "e". A reading counts only
+//               when its instrument holds: the shape was reached, the
+//               count was partial and `search-all` was empty before the
+//               press (the write emptied the list and nothing placed it
+//               again). These lines bypass the shell; the next stream
+//               prunes them.
 //   OLDEST   -- find steps to the oldest match (newer from the newest
 //               wraps), and the stream again (it prunes that match too).
 //   PRESS    -- a fresh find, the active match 20,000 matches up from the
@@ -325,21 +335,61 @@ export default {
       details.legs.newest = { ...(await collect(a, await window_())), search: await search() };
 
       // WRAP
-      await term.evaluate((t) => t.search.step("e", "newer"));
-      details.wrapStart = await search();
-      await cs(["write", "--tab-name", TAB, "echo sev''en349\n"]);
-      await until("the echoed line", () => screenHas("seven349"));
-      details.wrap = await term.evaluate((t) => {
-        const before = t.search.state;
-        t.search.step("e", "older");
-        return { before, state: t.search.state };
-      });
-      details.wrap.after = await until("a landing after the wrap", async () => (await search()).active, 5_000).catch(() => null);
-      details.wrap.expected = await term.evaluate(() => window.__find349.lastBefore());
-      details.wrap.landed = onCell(details.wrap.after, details.wrap.expected);
-      if (!details.wrap.before.partial) failures.push("wrap instrument: the count was complete before the press, so the press read no rescan");
-      else if (!details.wrap.landed) failures.push(`wrap: older from the oldest after output landed on ${at(details.wrap.after)}, not the buffer's last "e" at ${at(details.wrap.expected)}`);
-      await until("a complete count after the wrap", async () => !(await search()).state.partial);
+      details.wrap = [];
+      let written = 0;
+      for (const shape of ["ahead", "order"]) {
+        await term.evaluate((t) => t.search.step("e", "newer"));
+        const start = await search();
+        const reading = await term.evaluate((t, [shape, tail, from]) => {
+          const f = window.__find349;
+          const coreFirst = () => {
+            const raw = t.core.createSearch();
+            try {
+              raw.setNeedle("e");
+              raw.feed();
+              return raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1)[0] ?? null;
+            } finally {
+              raw.free();
+            }
+          };
+          const isLast = (m, cell) => m != null && cell != null && m.startRow === cell.absoluteRow && m.startCol === cell.col;
+          // At least one line, so the press follows output.
+          let n = from;
+          let first = null;
+          let last = null;
+          for (let i = 0; i < 400; i++) {
+            t.write(`\r\n9:${String(++n).padStart(6, "0")} ${tail}`);
+            first = coreFirst();
+            last = f.lastBefore();
+            if ((shape === "order") === isLast(first, last)) break;
+          }
+          const before = { state: t.search.state, all: t.highlights.get("search-all")?.ranges?.length ?? 0, identity: f.identity() };
+          const started = performance.now();
+          t.search.step("e", "older");
+          const ms = performance.now() - started;
+          return {
+            shape, lines: n - from, coreFirst: first, last, reached: (shape === "order") === isLast(first, last), before, ms,
+            after: t.highlights.get("search-active")?.ranges?.[0] ?? null, state: t.search.state, expected: f.lastBefore(),
+          };
+        }, [shape, tail, written]);
+        written += reading.lines;
+        reading.start = start;
+        reading.landed = onCell(reading.after, reading.expected);
+        const instrument = [];
+        if (start.state.partial || start.state.index !== start.state.total) instrument.push(`find was index ${start.state.index} of ${start.state.total}${start.state.partial ? ", partial" : ""}, not the oldest of a complete count`);
+        if (!reading.reached) instrument.push(`after ${reading.lines} lines the core lists ${at(reading.coreFirst)} first against the buffer's last "e" at ${at(reading.last)}, not the ${shape === "order" ? "screen in order" : "page ahead"} the reading wants`);
+        if (!reading.before.state.partial) instrument.push("the count was complete before the press, so the press read no rescan");
+        if (reading.before.all !== 0) instrument.push(`search-all held ${reading.before.all} ranges before the press, so placement ran since the write`);
+        reading.instrument = instrument;
+        for (const message of instrument) failures.push(`wrap ${shape} instrument: ${message}`);
+        if (!instrument.length && !reading.landed) {
+          const from = reading.before.identity ? "the oldest" : "no active match (the lines pruned the oldest)";
+          failures.push(`wrap ${shape}: older from ${from} after output returned on ${at(reading.after)} as index ${reading.state.index}, not the buffer's last "e" at ${at(reading.expected)}`);
+        }
+        details.wrap.push(reading);
+        await until("a complete count after the wrap", async () => !(await search()).state.partial);
+      }
+      await term.evaluate((t) => t.write("\r\n"));
 
       // OLDEST
       await term.evaluate((t) => t.search.step("e", "newer"));
@@ -467,7 +517,7 @@ export default {
       writeFileSync(join(ctx.outDir, "349-find-frames.json"), JSON.stringify(details, null, 2) + "\n");
       console.log(`349 frames (recorded, not gating): ${JSON.stringify(details.frames)}`);
       const presses = details.presses.map((p) => `${p.direction}:${p.landed ? "neighbour" : "wrong"} ${p.ms.toFixed(2)} ms index-before=${p.indexBefore}`).join(" ");
-      const wrap = !details.wrap.before.partial ? "instrument" : details.wrap.landed ? "newest" : "wrong";
+      const wrap = details.wrap.map((w) => `${w.shape}:${w.instrument.length ? "instrument" : w.landed ? "newest" : "wrong"}`).join(",");
       console.log(`349 verdict: ${details.verdict} count=${scan.total}/${scan.buffer} newest=${scan.newest ? "bottom-most" : "wrong"} wrap=${wrap} press=${presses} reflow=${instrument.length ? "instrument" : reflowKept ? "kept" : "lost"} unplaced-at-1.5s=${details.reflowUnplacedAt1500}/4`);
       if (failures.length) throw new Error(`349 verdict: FAIL: ${failures.join("; ")}`);
       return { verdict: details.verdict, frames: details.frames, presses: details.presses, reflow: details.reflow };
