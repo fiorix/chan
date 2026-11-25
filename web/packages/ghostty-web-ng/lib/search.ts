@@ -16,10 +16,12 @@ const STEP_FLOOR_MS = 1;
 // Matches kept on each side of the active one from the list a write
 // discards; presses beyond them wait for placement.
 const BEFORE_REACH = 1024;
+// Ranges per chunk of the canonical list; an insert splits a chunk that
+// grows past twice this.
+const CHUNK = 256;
 const EMPTY: TerminalSearchState = Object.freeze({ index: 0, total: 0, partial: false });
 type Direction = 'older' | 'newer';
 type Waiting = { direction: Direction; at: number; newest?: boolean };
-type MatchIndex = Map<number, number | number[]>;
 // A window of the list placed before a write, in the rows of the moment it
 // was read: `ranges[0]` is entry `offset` of `total`, `index` the active
 // match's entry, `history` the history rows then.
@@ -30,15 +32,25 @@ type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell };
 export class SearchOwner {
   private search: VtSearch | null = null;
   private needle = '';
-  private matches: HighlightRange[][] = [];
+  // The canonical list in position order, newest (bottom-most) first, each
+  // complete range once. Chunked so growth never copies every known match
+  // in one animation frame and an insert moves one chunk: `starts[i]` is
+  // the list index of `chunks[i][0]`.
+  private chunks: HighlightRange[][] = [];
+  private starts: number[] = [];
   private total = 0;
   // The total before a change emptied the list. The count keeps it, as a
   // partial one, until the rebuilt list passes it or completes.
   private lastTotal = 0;
-  // Shard the index and chunk the list so growth never rehashes or copies
-  // every known match in one animation frame.
-  private indices: MatchIndex[] = Array.from({ length: 256 }, () => new Map());
   private readCursor = 0;
+  // Entries the core lists for its active area, ahead of its history, in
+  // the list being placed. It lists the active area's pages oldest page
+  // first, so the newest match is placed only once all of them are. Read
+  // at the first feed of a scan; zero, unknown, once a write fed it again.
+  private head = 0;
+  // The scan starts from scratch at its next feed (a new needle, a restart,
+  // a resize), which lists only the core's active area at first.
+  private fresh = false;
   private index: number | null = null;
   private complete = true;
   private waiting: Waiting[] = [];
@@ -57,7 +69,6 @@ export class SearchOwner {
   private restoreAt: number | null = null;
   private keptOnScreen = false;
   private dirty = false;
-  private resized = false;
   // Search work is waiting for the widget's next frame.
   private due = false;
   private readMs: number = COST_PRIORS.read;
@@ -102,8 +113,8 @@ export class SearchOwner {
     if (this.disposed) return;
     if (!query) return this.close();
     const deadline = performance.now() + PLACEMENT_BUDGET_MS;
-    if (this.prepare(query)) this.search!.feed();
-    else this.catchUp();
+    this.prepare(query);
+    this.catchUp();
     this.readResults(deadline);
     this.waiting.push({ direction, at: performance.now() });
     this.askedOver = this.selection();
@@ -148,12 +159,15 @@ export class SearchOwner {
     else if (this.kept && this.index !== null) this.before = this.window(this.index);
     this.listHistory = this.core.getScrollbackLength();
     this.dirty = true;
-    this.resized ||= kind === 'resize';
+    // A resize resets the core's scan; after a write its listing has the
+    // history it holds behind a new active area of unknown length.
+    if (kind === 'resize') this.fresh = true;
+    else if (!this.fresh) this.head = 0;
     // The other screen's total says nothing about this one.
     this.lastTotal = switched ? 0 : Math.max(this.lastTotal, this.total);
-    this.matches = [];
+    this.chunks = [];
+    this.starts = [];
     this.total = 0;
-    this.indices = Array.from({ length: 256 }, () => new Map());
     this.readCursor = 0;
     this.index = null;
     this.complete = false;
@@ -182,6 +196,7 @@ export class SearchOwner {
     this.search.setNeedle(query);
     this.needle = query;
     this.complete = false;
+    this.fresh = true;
     this.listHistory = this.core.getScrollbackLength();
     this.markBacklog();
     return true;
@@ -199,15 +214,16 @@ export class SearchOwner {
     this.backlogCell = null;
     this.highlights.clear('search-all');
     this.needle = '';
-    this.matches = [];
+    this.chunks = [];
+    this.starts = [];
     this.total = 0;
     this.lastTotal = 0;
-    this.indices = Array.from({ length: 256 }, () => new Map());
     this.readCursor = 0;
+    this.head = 0;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
-    this.dirty = this.resized = false;
+    this.dirty = this.fresh = false;
     this.readMs = COST_PRIORS.read;
     this.checkMs = COST_PRIORS.check;
     this.completeMs = COST_PRIORS.complete;
@@ -215,18 +231,17 @@ export class SearchOwner {
   }
 
   private catchUp(): void {
+    if (this.fresh) return this.feedFresh();
     if (!this.dirty) return;
     this.dirty = false;
     const search = this.search!;
-    const resized = this.resized;
-    this.resized = false;
     const point = this.backlogCell?.point();
     const rows = !this.backlogCell ? 0 : !point ? Infinity : Math.max(0, this.core.getScrollbackLength() - point.row);
     const cells = rows * this.core.cols;
     const checked = this.checked();
     const check = checked * this.checkMs;
     const complete = search.caughtUp();
-    if (!resized && Number.isFinite(rows)) {
+    if (Number.isFinite(rows)) {
       const read = cells * this.readMs;
       const completion = checked * this.completeMs;
       const restart = complete
@@ -236,8 +251,7 @@ export class SearchOwner {
         // Repeated output restarts must not renew the restoration deadline.
         if (this.kept && this.restoreAt === null) this.restoreAt = performance.now();
         search.restart();
-        this.markBacklog();
-        return;
+        return this.feedFresh();
       }
     }
     const started = performance.now();
@@ -246,9 +260,17 @@ export class SearchOwner {
     this.markBacklog();
     // Learn only complete-scan feeds large enough to exceed clock grain;
     // running scans skip the cost of dropping pruned matches.
-    if (resized || !Number.isFinite(rows) || took <= 0 || !complete) return;
+    if (!Number.isFinite(rows) || took <= 0 || !complete) return;
     if (rows >= LEARN_ROWS) this.readMs = learned(this.readMs, Math.max(0, took - check) / cells, COST_PRIORS.read);
     else if (checked >= LEARN_CHECK) this.checkMs = learned(this.checkMs, took / checked, COST_PRIORS.check);
+  }
+
+  private feedFresh(): void {
+    const search = this.search!;
+    this.fresh = this.dirty = false;
+    search.feed();
+    this.markBacklog();
+    this.head = search.state().total;
   }
 
   private checked(): number {
@@ -301,21 +323,11 @@ export class SearchOwner {
       const batch = search.readMatches(this.readCursor, deadline - performance.now());
       this.readCursor = batch.next;
       const added: HighlightRange[] = [];
-      // The canonical index persists across scan pumps, but never across a
-      // terminal mutation: rows and the core's result order may then change.
+      // The canonical list persists across scan pumps, but never across a
+      // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
-        if (this.indexOf(range) !== undefined) continue;
-        const key = startKey(range);
-        const indices = this.indexFor(range);
-        const previous = indices.get(key);
-        if (previous === undefined) indices.set(key, this.total);
-        else if (typeof previous === 'number') indices.set(key, [previous, this.total]);
-        else previous.push(this.total);
-        const painted = highlight(range);
-        if (this.total % 256 === 0) this.matches.push([]);
-        this.matches.at(-1)!.push(painted);
-        this.total++;
-        added.push(painted);
+        const painted = this.place(range);
+        if (painted) added.push(painted);
       }
       this.highlights.append('search-all', added, { background: '#806d36' });
       if (performance.now() >= deadline) break;
@@ -335,23 +347,72 @@ export class SearchOwner {
     }
   }
 
-  private indexFor(range: MatchRange): MatchIndex {
-    return this.indices[(Math.imul(range.startRow, 31) + range.startCol) & 255];
+  /** Adds `range` at its position unless that complete range is listed; returns its highlight when added. */
+  private place(range: MatchRange): HighlightRange | null {
+    const last = this.chunks.at(-1);
+    // The core lists newest first apart from its active area's pages, so
+    // nearly every range is older than everything placed.
+    if (!last || order(range, last[last.length - 1]) < 0) {
+      const painted = highlight(range);
+      if (!last || last.length >= CHUNK) {
+        this.chunks.push([painted]);
+        this.starts.push(this.total);
+      } else {
+        last.push(painted);
+      }
+      this.total++;
+      return painted;
+    }
+    const { chunk, offset, found } = this.locate(range);
+    if (found) return null;
+    const painted = highlight(range);
+    const ranges = this.chunks[chunk];
+    ranges.splice(offset, 0, painted);
+    for (let i = chunk + 1; i < this.starts.length; i++) this.starts[i]++;
+    if (ranges.length > 2 * CHUNK) {
+      this.chunks.splice(chunk + 1, 0, ranges.splice(CHUNK));
+      this.starts.splice(chunk + 1, 0, this.starts[chunk] + CHUNK);
+    }
+    this.total++;
+    return painted;
+  }
+
+  /** Where `range` belongs in a nonempty list: its chunk, its offset there, and whether that entry is the same range. */
+  private locate(range: MatchRange): { chunk: number; offset: number; found: boolean } {
+    let lo = 0;
+    let hi = this.chunks.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const ranges = this.chunks[mid];
+      if (order(range, ranges[ranges.length - 1]) >= 0) hi = mid;
+      else lo = mid + 1;
+    }
+    const ranges = this.chunks[lo];
+    let offset = 0;
+    let end = ranges.length;
+    while (offset < end) {
+      const mid = (offset + end) >> 1;
+      if (order(range, ranges[mid]) >= 0) end = mid;
+      else offset = mid + 1;
+    }
+    return { chunk: lo, offset, found: offset < ranges.length && order(range, ranges[offset]) === 0 };
   }
 
   private indexOf(range: MatchRange): number | undefined {
-    const found = this.indexFor(range).get(startKey(range));
-    if (found === undefined) return undefined;
-    const sameEnd = (index: number) => {
-      const end = this.at(index).end;
-      return end.absoluteRow === range.endRow && end.col === range.endCol;
-    };
-    if (typeof found === 'number') return sameEnd(found) ? found : undefined;
-    return found?.find(sameEnd);
+    if (this.total === 0) return undefined;
+    const { chunk, offset, found } = this.locate(range);
+    return found ? this.starts[chunk] + offset : undefined;
   }
 
   private at(index: number): HighlightRange {
-    return this.matches[Math.floor(index / 256)][index % 256];
+    let lo = 0;
+    let hi = this.starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.starts[mid] <= index) lo = mid;
+      else hi = mid - 1;
+    }
+    return this.chunks[lo][index - this.starts[lo]];
   }
 
   private applyWaiting(): boolean {
@@ -377,8 +438,10 @@ export class SearchOwner {
         continue;
       }
       const total = this.total;
+      // From no active match older lands on the newest, which is placed
+      // only once the core's active-area matches are.
       const lands = direction === 'newer' ? this.index !== null && this.index > 0
-        : this.index === null ? total > 0 : this.index < total - 1;
+        : this.index === null ? total > 0 && this.readCursor >= this.head : this.index < total - 1;
       const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
       if (!this.complete && !lands && !capped) break;
       this.waiting.shift();
@@ -520,9 +583,9 @@ function matchRange(range: HighlightRange): MatchRange {
 function highlight(range: MatchRange): HighlightRange {
   return { start: { absoluteRow: range.startRow, col: range.startCol }, end: { absoluteRow: range.endRow, col: range.endCol } };
 }
-function startKey(range: MatchRange): number {
-  // Core rows are u32 and columns u16, fitting exactly in a JS number.
-  return range.startRow * 0x1_0000 + range.startCol;
+// Positive when `a` comes after `b` in text order: nearer the prompt.
+function order(a: MatchRange, b: HighlightRange): number {
+  return a.startRow - b.start.absoluteRow || a.startCol - b.start.col || a.endRow - b.end.absoluteRow || a.endCol - b.end.col;
 }
 function learned(estimate: number, measured: number, floor: number): number {
   return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);
