@@ -41,12 +41,12 @@ The server splices meta tags into the shell's `<head>` so the SPA has its answer
 | `chan-settings-disabled` | nothing; the server refuses the writes itself  |
 | `chan-files`             | a standalone window also gets files and editor |
 | `chan-drafts`            | a standalone window also gets drafts           |
-| `chan-webgl-renderer`    | xterm.js draws with WebGL (1) or the DOM (0)   |
+| `chan-webgl-renderer`    | nothing; the terminal widget has one renderer  |
 | `chan-gpu`               | the welcome keeps to 2D animations on 0        |
 
 The tenant sets the first four from what it mounted and from the `--no-settings` flag; the last two carry answers the desktop computed.
 
-The two desktop values start as query parameters chan-desktop appends to a window URL. `chan-renderer` is appended whenever the desktop's GUI bootstrap has decided whether WebKit's accelerated path is usable: the Linux AppImage runs that decision, other Linux packages and FreeBSD send nothing, and every other platform sends WebGL. `chan-gpu` is always appended, from a render-node probe on Linux and FreeBSD and as true elsewhere. The serving tenant stamps the last recognized value into the meta, a devserver on another machine included, so the SPA never repeats driver detection or guesses from the operating system. In an ordinary browser the terminal keeps WebGL; in a native window a missing or invalid renderer meta means the DOM renderer. A localStorage key is the diagnostic hatch in both directions.
+The two desktop values start as query parameters chan-desktop appends to a window URL. `chan-renderer` is appended whenever the desktop's GUI bootstrap has decided whether WebKit's accelerated path is usable: the Linux AppImage runs that decision, other Linux packages and FreeBSD send nothing, and every other platform sends WebGL. `chan-gpu` is always appended, from a render-node probe on Linux and FreeBSD and as true elsewhere. The serving tenant stamps the last recognized value into the meta, a devserver on another machine included, so the SPA never repeats driver detection or guesses from the operating system.
 
 The window kind rides the URL too. `?kind=terminal` opens a standalone window and `?kind=control` the singleton control terminal that runs a devserver's connect script; a workspace window has no kind. `?w=` keys the window's session, `?t=` is the tenant bearer, `?lib=` names the owning library, `?h=` is the holder tag of the page that opened the window, and `?pane=` is the library's pane highlight colour. `state/windowCaps.ts` projects the kind and the `chan-files` and `chan-drafts` tags onto the capabilities the rest of the app gates on: a workspace, a file surface, drafts, terminals only, control. The tenant is the authority for the file and draft bits because it is what mounted those surfaces or did not, and the bits are separate because the draft store can fail to construct while the file surface works.
 
