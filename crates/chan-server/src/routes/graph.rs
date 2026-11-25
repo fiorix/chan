@@ -568,6 +568,56 @@ fn is_image_path(rel: &str) -> bool {
     )
 }
 
+/// The whole-tree walk of a graph load: every file and directory in the
+/// workspace's scope, bounded by the listing cap.
+fn list_whole_tree(
+    workspace: &chan_workspace::Workspace,
+) -> chan_workspace::Result<Vec<chan_workspace::TreeEntry>> {
+    #[cfg(test)]
+    tree_walks::record(workspace.root(), tree_walks::Walk::Listing);
+    workspace.list_tree_filtered_unified()
+}
+
+/// How many whole-tree walks graph loads have taken, per workspace root and
+/// kind of walk, so a test can read the walks of one load.
+#[cfg(test)]
+pub(crate) mod tree_walks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    /// A kind of whole-tree walk.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) enum Walk {
+        /// The listing of every file and directory in scope.
+        Listing,
+        /// The walk of the directories in scope alone, over the listing cap.
+        Directories,
+    }
+
+    static TAKEN: LazyLock<Mutex<HashMap<(PathBuf, Walk), usize>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) fn record(root: &Path, walk: Walk) {
+        *TAKEN
+            .lock()
+            .unwrap()
+            .entry((root.to_path_buf(), walk))
+            .or_default() += 1;
+    }
+
+    /// The walks of kind `walk` the graph loads of the workspace at `root`
+    /// have taken.
+    pub(crate) fn taken(root: &Path, walk: Walk) -> usize {
+        TAKEN
+            .lock()
+            .unwrap()
+            .get(&(root.to_path_buf(), walk))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 /// Collect every regular file under the workspace root, workspace-relative
 /// POSIX paths. Used as the link-resolution oracle: a markdown link
 /// pointing at any on-disk file (LICENSE, .rs source, .sh, ...)
@@ -581,7 +631,7 @@ fn is_image_path(rel: &str) -> bool {
 fn workspace_disk_files(
     workspace: &chan_workspace::Workspace,
 ) -> Option<std::collections::BTreeSet<String>> {
-    match workspace.list_tree_filtered_unified() {
+    match list_whole_tree(workspace) {
         Ok(entries) => Some(
             entries
                 .into_iter()
@@ -607,7 +657,7 @@ fn workspace_disk_files(
 fn workspace_disk_dirs(
     workspace: &chan_workspace::Workspace,
 ) -> Option<std::collections::BTreeSet<String>> {
-    match workspace.list_tree_filtered_unified() {
+    match list_whole_tree(workspace) {
         Ok(entries) => Some(
             entries
                 .into_iter()
@@ -1180,7 +1230,7 @@ fn merge_unified_tree_layer(
     // comment below ("same file coverage as the File Browser") holds
     // because the File Browser spine is itself filtered (bootstrap).
     let entries = match p.scope {
-        GraphScope::Workspace => workspace.list_tree_filtered_unified(),
+        GraphScope::Workspace => list_whole_tree(workspace),
         GraphScope::Directory | GraphScope::File => {
             workspace.list_tree_prefix_filtered_unified(path)
         }
@@ -3432,6 +3482,299 @@ mod tests {
                 .into()
         );
         assert_eq!(dirs, ["evidence/run1".to_string()].into());
+    }
+
+    /// The deepest folder of `folder_layer_app`. It and its parent sit
+    /// below the depth the shared graph asks of its depth-bounded
+    /// filesystem layer (6), so only the tree layer draws them.
+    const DEEP: &str = "deep/l2/l3/l4/l5/l6/l7/l8";
+
+    /// A workspace app whose folders run below the depth the shared graph
+    /// asks of its depth-bounded filesystem layer. Its indexed note links a
+    /// second indexed note and an image in the deepest folder, beside a file
+    /// nothing indexes or links, an empty folder, a folder the `.gitignore`
+    /// names and an excluded one.
+    fn folder_layer_app() -> GraphRouteApp {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let deep = root.path().join(DEEP);
+        put(
+            root.path(),
+            ".gitignore",
+            format!("{DEEP}/hidden/\n").as_bytes(),
+        );
+        put(
+            root.path(),
+            "notes/index.md",
+            format!("# Index\n\n[[{DEEP}/leaf.md]]\n![pic](../{DEEP}/pic.png)\n").as_bytes(),
+        );
+        put(&deep, "leaf.md", b"# Leaf\n");
+        put(&deep, "pic.png", b"png");
+        put(&deep, "raw.bin", &[1, 2, 3]);
+        put(&deep, "hidden/secret.md", b"# Hidden\n");
+        put(&deep, "node_modules/pkg/index.js", b"dep\n");
+        std::fs::create_dir(deep.join("empty")).unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.index_file("notes/index.md").unwrap();
+        workspace.index_file(&format!("{DEEP}/leaf.md")).unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace,
+            )
+        });
+        GraphRouteApp {
+            _cfg: cfg,
+            _root: root,
+            state,
+        }
+    }
+
+    /// Lower the whole-tree walk's cap of `workspace` below its entries, and
+    /// show the walk is over it.
+    fn over_the_listing_cap(
+        workspace: &chan_workspace::Workspace,
+    ) -> chan_workspace::workspace::listing_limit_test_hooks::LimitGuard {
+        let limit =
+            chan_workspace::workspace::listing_limit_test_hooks::lower_tree_walk(workspace, 3);
+        assert!(
+            matches!(
+                workspace.list_tree_filtered_unified(),
+                Err(chan_workspace::ChanError::ListingTooLarge { .. })
+            ),
+            "fixture: the walk is not over the lowered cap"
+        );
+        limit
+    }
+
+    /// The shared graph's load of `folder_layer_app`, the JSON form, under
+    /// the listing cap and then over it.
+    async fn folder_layer_answers() -> [(&'static str, serde_json::Value); 2] {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let under = graph_route_body(&app, "/api/graph").await;
+        let limit = over_the_listing_cap(&workspace);
+        let over = graph_route_body(&app, "/api/graph").await;
+        drop(limit);
+        [("under the cap", under), ("over the cap", over)]
+            .map(|(when, body)| (when, serde_json::from_str(&body).unwrap()))
+    }
+
+    /// The folder ids of `folder_layer_app`, written from its tree: the
+    /// root, `notes`, each folder down to `DEEP` and `DEEP/empty`. The
+    /// ignored and excluded folders are not among them.
+    fn folder_layer_folder_ids() -> std::collections::BTreeSet<String> {
+        let mut ids = std::collections::BTreeSet::from([
+            String::new(),
+            "directory:notes".to_string(),
+            format!("directory:{DEEP}/empty"),
+        ]);
+        let mut path = String::new();
+        for part in DEEP.split('/') {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            ids.insert(format!("directory:{path}"));
+        }
+        ids
+    }
+
+    /// The `(source, target)` of each `contains` edge in `answer`.
+    fn contains_edges(answer: &serde_json::Value) -> std::collections::BTreeSet<(String, String)> {
+        answer["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["kind"] == "contains")
+            .map(|edge| {
+                (
+                    edge["source"].as_str().unwrap().to_string(),
+                    edge["target"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The nodes of `answer` by id.
+    fn nodes_by_id(
+        answer: &serde_json::Value,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        answer["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| (node["id"].as_str().unwrap().to_string(), node.clone()))
+            .collect()
+    }
+
+    // One graph load walks the whole tree once, in each of its forms and
+    // scopes: the link resolver's file and directory sets and the folder
+    // layer share that walk. Over the listing cap the load also walks the
+    // directories alone, once; under it, never.
+    #[tokio::test]
+    async fn a_graph_load_walks_the_whole_tree_once() {
+        use super::tree_walks::{taken, Walk};
+
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let root = workspace.root().to_path_buf();
+        let walks = || (taken(&root, Walk::Listing), taken(&root, Walk::Directories));
+        assert!(
+            workspace.list_tree_filtered_unified().is_ok(),
+            "fixture: the walk is over the cap before it is lowered"
+        );
+        for (when, over_cap) in [("under the cap", false), ("over the cap", true)] {
+            let limit = over_cap.then(|| over_the_listing_cap(&workspace));
+            for uri in [
+                "/api/graph",
+                "/api/graph?stream=1",
+                "/api/graph?scope=directory&path=notes",
+            ] {
+                let (listings, directory_walks) = walks();
+                graph_route_body(&app, uri).await;
+                let (listings_after, directory_walks_after) = walks();
+                assert_eq!(
+                    listings_after - listings,
+                    1,
+                    "GET {uri} {when}: the whole-tree listings of one load"
+                );
+                assert_eq!(
+                    directory_walks_after - directory_walks,
+                    usize::from(over_cap),
+                    "GET {uri} {when}: the directories-only walks of one load"
+                );
+            }
+            drop(limit);
+        }
+    }
+
+    // Over the listing cap the shared graph holds the root and every folder
+    // in scope, and only those, as under it: the folders below the
+    // depth-bounded filesystem layer's reach included, the ignored and
+    // excluded ones left out. Each folder node is the one the graph holds
+    // under the cap, its counts included.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_every_folder_in_scope() {
+        let [(_, under), (_, over)] = folder_layer_answers().await;
+        let expected = folder_layer_folder_ids();
+        assert_eq!(expected.len(), 11, "fixture: the folders in scope");
+        let folders =
+            |answer: &serde_json::Value| -> std::collections::BTreeMap<String, serde_json::Value> {
+                nodes_by_id(answer)
+                    .into_iter()
+                    .filter(|(_, node)| node["kind"] == "directory")
+                    .collect()
+            };
+        let (under_folders, over_folders) = (folders(&under), folders(&over));
+        assert_eq!(
+            under_folders
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "under the cap, the folder nodes"
+        );
+        assert_eq!(
+            over_folders
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "over the cap, the folder nodes"
+        );
+        assert_eq!(
+            over_folders, under_folders,
+            "over the cap, a folder node differs from the one under the cap"
+        );
+    }
+
+    // Over the listing cap each folder but the root is joined to its parent
+    // by one `contains` edge, as under the cap, and no other `contains` edge
+    // runs between two folders.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_the_contains_edges_between_folders() {
+        let [under, over] = folder_layer_answers().await;
+        let folders = folder_layer_folder_ids();
+        let expected: std::collections::BTreeSet<(String, String)> = folders
+            .iter()
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                let path = id.strip_prefix("directory:").unwrap();
+                let parent = match path.rsplit_once('/') {
+                    Some((parent, _)) => format!("directory:{parent}"),
+                    None => String::new(),
+                };
+                (parent, id.clone())
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            10,
+            "fixture: one edge per folder but the root"
+        );
+        for (when, answer) in [under, over] {
+            let between_folders: std::collections::BTreeSet<(String, String)> =
+                contains_edges(&answer)
+                    .into_iter()
+                    .filter(|(source, target)| folders.contains(source) && folders.contains(target))
+                    .collect();
+            assert_eq!(
+                between_folders, expected,
+                "{when}, the contains edges between folders"
+            );
+        }
+    }
+
+    // Over the listing cap each file the shared graph holds (the two
+    // indexed notes and the linked image) stays in its folder by its
+    // `contains` edge, as under the cap. The walk over the cap lists no
+    // file, so a file the graph holds for no other reason (`raw.bin`, which
+    // nothing indexes or links) has a node only under the cap. Every other
+    // `contains` edge is the one under the cap: none is lost, none added.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_each_file_it_holds_in_its_folder() {
+        let [(_, under), (_, over)] = folder_layer_answers().await;
+        let held = [
+            ("directory:notes".to_string(), "notes/index.md".to_string()),
+            (format!("directory:{DEEP}"), format!("{DEEP}/leaf.md")),
+            (format!("directory:{DEEP}"), format!("{DEEP}/pic.png")),
+        ];
+        let raw = (format!("directory:{DEEP}"), format!("{DEEP}/raw.bin"));
+        let (under_edges, over_edges) = (contains_edges(&under), contains_edges(&over));
+        for edge in held.iter().chain([&raw]) {
+            assert!(
+                under_edges.contains(edge),
+                "fixture: under the cap, no contains edge {edge:?}"
+            );
+        }
+        for edge in &held {
+            assert!(
+                over_edges.contains(edge),
+                "over the cap, no contains edge {edge:?}"
+            );
+        }
+        let over_nodes = nodes_by_id(&over);
+        assert!(
+            !over_nodes.contains_key(&raw.1) && !over_edges.contains(&raw),
+            "over the cap, the graph holds a file the walk listed: {:?}",
+            over_nodes.get(&raw.1)
+        );
+        let expected_over: std::collections::BTreeSet<(String, String)> = under_edges
+            .iter()
+            .filter(|(_, target)| over_nodes.contains_key(target))
+            .cloned()
+            .collect();
+        assert_eq!(
+            over_edges, expected_over,
+            "over the cap, the contains edges are not those under the cap into the nodes it holds"
+        );
     }
 
     #[test]
