@@ -141,11 +141,13 @@ export default defineConfig({
     target: "es2022",
     sourcemap: false,
     // The SPA ships as one embedded bundle served from localhost by
-    // chan-server; aggressive code-splitting is a non-goal. The main
-    // chunk sits near 1.5 MB (CodeMirror + xterm + svelte), so the
-    // default 500 kB advisory would always fire. Keep a ceiling so
-    // real regressions still warn.
-    chunkSizeWarningLimit: 1600,
+    // chan-server; aggressive code-splitting is a non-goal. The entry
+    // chunk (the app with CodeMirror and Svelte) measures 1,609.7 kB and
+    // the largest chunk, Excalidraw's font subsetting code with its
+    // inlined wasm, loaded with a canvas, 1,821.0 kB, so the default
+    // 500 kB advisory would always fire. The ceiling sits just above the
+    // largest chunk so a regression in any chunk still warns.
+    chunkSizeWarningLimit: 1850,
     rollupOptions: {
       onwarn(warning, warn) {
         // Known-cosmetic: store.svelte.ts is imported dynamically as a
