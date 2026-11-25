@@ -591,8 +591,8 @@
   // the cut.
   let replayCut = false;
   // The keyboard protocol as it stood when the current replay began, which
-  // the reset write restores after its parser handlers have run and before
-  // the first ring byte is parsed.
+  // the reset write's callback restores once the protocol observer has read
+  // the reset and before the first ring byte is parsed.
   let keyboardProtocolBeforeReplay: TerminalKeyboardProtocolState | null = null;
   let pendingPromptSeed = "";
   let promptSeedSent = false;
@@ -603,7 +603,7 @@
     resolveTerminalColors(currentPreferences()?.terminal_colors),
   );
   // Whether chan-desktop built this window transparent, fixed for the page.
-  // The renderers then paint a transparent default background and the
+  // The terminal then paints a transparent default background and the
   // `.terminal-tab` CSS paints the tint at the live opacity.
   const transparentWindow = windowIsTransparent();
   // Whether the desktop shows through this terminal now: a transparent
@@ -1002,8 +1002,8 @@
   // Agents print truecolor secondary text tuned for dark backgrounds
   // (#999999 hints and summaries, #b1b9f9 selections, #ffc107 warnings);
   // on the light theme those land below 3:1 against the white background
-  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has either
-  // renderer darken only under-contrast foregrounds; 1 is the identity,
+  // and the palette cannot reach truecolor. 4.5 (WCAG AA) has the
+  // terminal darken only under-contrast foregrounds; 1 is the identity,
   // keeping dark rendering untouched. The widget takes the floor as a
   // field of its theme.
   function terminalMinimumContrastRatio(): number {
@@ -1192,7 +1192,7 @@
   function noteInterruptKey(e: KeyboardEvent): void {
     if (!isTerminalInterruptKey(e, resolvedEventKey(e))) return;
     interruptKeyPress = true;
-    // The renderers send the key's bytes within this event's dispatch.
+    // The terminal sends the key's bytes within this event's dispatch.
     setTimeout(() => {
       interruptKeyPress = false;
     }, 0);
@@ -1699,8 +1699,8 @@
           const sessionId = tab.terminalSessionId;
           const protocol = tab.keyboardProtocol;
           const beforeReplay = keyboardProtocolBeforeReplay;
-          // RIS resets the registered keyboard state too. Its write callback
-          // runs after those handlers and before the queued replay bytes.
+          // RIS resets the observed keyboard state too. Its write callback
+          // runs once the observer has read it, before the replay is written.
           writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
             if (term === terminal && tab.terminalSessionId === sessionId && protocol && beforeReplay) {
               copyTerminalKeyboardProtocolState(beforeReplay, protocol);
@@ -2284,7 +2284,7 @@
     if (typed) sendTypedInput(typed);
   }
 
-  /// Keys and dropped paths bypass the widgets' own input scroll. Mouse
+  /// Keys and dropped paths bypass the widget's own input scroll. Mouse
   /// reports and program replies keep the send path without this scroll.
   function sendTypedInput(data: string): void {
     if (ws?.readyState === WebSocket.OPEN) term?.scrollToBottom();
@@ -2657,8 +2657,8 @@
         });
         // A controlled restart reuses the session id but kills the old
         // shell and spawns a fresh one, so the negotiated keyboard
-        // protocol no longer applies: reset it in place (same object the
-        // installed parser handlers + key handler hold) so a fresh plain
+        // protocol no longer applies: reset it in place (the same object the
+        // protocol observer and the key handling hold) so a fresh plain
         // shell doesn't inherit the killed agent's modifyOtherKeys. An
         // agent respawn simply re-announces on startup.
         ensureTerminalKeyboardProtocol(tab, true);
@@ -3749,7 +3749,7 @@
   }
   /* A transparent window: the tint is painted once, here, at the live
      opacity, and the layers inside it stay clear so the alpha does not
-     stack. The renderers paint a transparent default background. */
+     stack. The terminal paints a transparent default background. */
   :global(:root[data-transparent-window]) .terminal-tab {
     background: color-mix(
       in srgb,

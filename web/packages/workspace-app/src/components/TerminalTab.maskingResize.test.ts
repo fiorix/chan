@@ -74,7 +74,7 @@ describe("a width change with secret masking on", () => {
   });
 
   test("requests a final rescan once the width stops changing, not at each change", async () => {
-    // scanViewport delegates to scanAll on Ghostty; count the app's final
+    // The masker's scanViewport delegates to scanAll; count the app's final
     // request separately from that delegation.
     let inViewport = false;
     const finalScan = vi.fn();

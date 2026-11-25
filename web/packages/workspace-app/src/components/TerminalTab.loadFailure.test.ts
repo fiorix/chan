@@ -278,7 +278,7 @@ describe("a terminal whose core fails to load", () => {
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 
-  test("Retry after a failed fetch opens the terminal on Ghostty, with one PTY and one set of wiring", async () => {
+  test("Retry after a failed fetch opens the terminal, with one PTY and one set of wiring", async () => {
     const core = serveCore();
     core.failNext();
     const compile = vi.spyOn(WebAssembly, "compile");

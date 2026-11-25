@@ -600,7 +600,7 @@ describe("the find stepping chords in the find input", () => {
   });
 });
 
-describe("terminal find on the ghostty backend", () => {
+describe("terminal find in a mounted tab", () => {
   test("the menu's Find row opens the bar, as app.find.open does", async () => {
     await renderGhostty(NEEDLES);
     document

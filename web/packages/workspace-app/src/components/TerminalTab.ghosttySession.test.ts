@@ -399,7 +399,7 @@ describe("the lossy recovery suffix on the Ghostty core", () => {
   });
 
   // The core honors ?47h (this case stays green on it); the product keeps
-  // ?1047h, the switch the guest suite exercises on both backends.
+  // ?1047h, the switch the guest suite exercises.
   test("the old ?47h head leaves the terminal on the alternate screen", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const { socket, term } = await openGhostty(tab!);
@@ -409,7 +409,7 @@ describe("the lossy recovery suffix on the Ghostty core", () => {
   });
 });
 
-describe("acknowledging parsed output on Ghostty", () => {
+describe("acknowledging parsed output", () => {
   function acks(socket: TerminalSocket) {
     return sentFrames(socket).filter((frame) => frame.type === "ack");
   }
@@ -484,7 +484,7 @@ describe("acknowledging parsed output on Ghostty", () => {
   });
 });
 
-describe("same-socket stream recovery on Ghostty", () => {
+describe("same-socket stream recovery", () => {
   function dialSince(socket: TerminalSocket): string | null {
     return new URL(socket.url, "http://localhost").searchParams.get("since");
   }

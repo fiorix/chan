@@ -179,7 +179,7 @@ describe("a control terminal whose masking starts on", () => {
   test.each([
     ["unset", {}],
     ["on", { secret_masking: true }],
-  ] as const)("with the preference %s it spawns on ghostty, masked", async (_name, masking) => {
+  ] as const)("with the preference %s it spawns masked", async (_name, masking) => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, ...masking }));
     const { target } = await mountGhostty();
@@ -187,7 +187,7 @@ describe("a control terminal whose masking starts on", () => {
     expect(ghosttyFixture.terminals, "one ghostty terminal built").toHaveLength(1);
   });
 
-  test("its own toggle turns masking off and leaves it on ghostty", async () => {
+  test("its own toggle turns masking off", async () => {
     ui.terminalControl = true;
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
@@ -196,22 +196,22 @@ describe("a control terminal whose masking starts on", () => {
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
-  test("with the preference off it starts unmasked on ghostty", async () => {
+  test("with the preference off it starts unmasked", async () => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
-  test("a terminal of any other window masks on ghostty with the preference on", async () => {
+  test("a terminal of any other window masks with the preference on", async () => {
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: true }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
   });
 });
 
-describe("choosing the backend", () => {
-  test("a terminal spawns on ghostty with chan's options", async () => {
+describe("the terminal's options", () => {
+  test("a terminal spawns with chan's options", async () => {
     const { term } = await mountGhostty();
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
   });
