@@ -7,9 +7,10 @@
 //   Shift+Tab in B's terminal is B's own (backtab, ESC [ Z, on B's PTY) and
 //   a 1 after it reaches B's PTY as byte 31; once A is focused its buttons
 //   are back in the Tab order.
-// - strip-walk: from B's tab label, which keeps Tab's browser default,
-//   Shift+Tab walks back through the page until it passes the place of A's
-//   card, and never lands in it.
+// - strip-walk: the survey's body renders a bare URL and a link; from B's
+//   tab label, which keeps Tab's browser default, Shift+Tab walks back
+//   through the page until it passes the place of A's card, and never lands
+//   in it, its body's links included.
 // - card-key: focus placed on A's option by script, as assistive technology
 //   can place it, and a 1 typed there answers nothing; selecting B's tab
 //   takes the keyboard back to B's terminal, where a 1 reaches B's PTY.
@@ -32,6 +33,11 @@ const bytes = (file, offset = 0) => existsSync(file)
   : [];
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const WALK_LIMIT = 16;
+const BODY = "Pane B keeps the keyboard; this survey answers a press only.";
+/// A leg's survey body where the default does not serve it.
+const LEG_BODY = {
+  "strip-walk": "Pane B keeps the keyboard; see https://example.com/pull/348 or [the notes](https://example.com/notes).",
+};
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -142,13 +148,13 @@ async function runEngine(ctx, backend, directory, save) {
   const surveys = [];
   const read = () => state(page, target.tab, away.tab);
 
-  async function raiseSurvey(label) {
+  async function raiseSurvey(label, body = BODY) {
     await ctx.waitWindowLive(windowId);
     const handle = { result: null, promise: null };
     handle.promise = cs([
       "survey", "--tab-name", names.target, "--timeout", "60",
       "--title", `Press only: ${label}`, "--option", "Alpha", "--option", "Beta",
-      "Pane B keeps the keyboard; this survey answers a press only.",
+      body,
     ]).then(
       ({ stdout, stderr }) => (handle.result = { code: 0, stdout: maskTokens(stdout.trim()), stderr: maskTokens(stderr.trim()) }),
       (error) => (handle.result = { code: error.code ?? "unknown", stdout: maskTokens(error.stdout ?? ""), stderr: maskTokens(error.stderr ?? String(error)) }),
@@ -210,6 +216,12 @@ async function runEngine(ctx, backend, directory, save) {
     },
 
     async "strip-walk"(result, handle, offsets) {
+      result.bodyLinks = await page.evaluate((card) =>
+        [...document.querySelectorAll(`${card} .survey-body a[href]`)].map((link) => link.textContent),
+      `${terminalSelector(target.tab)} .survey-card`);
+      if (!same(result.bodyLinks, ["https://example.com/pull/348", "the notes"])) {
+        throw new Error(`precondition: the survey body renders its two links: ${JSON.stringify(result.bodyLinks)}`);
+      }
       const label = `.pane[data-pane-id="${result.appeared.awayPane}"] .tabs [role="tab"]`;
       await focusByScript(label);
       result.start = await read();
@@ -292,7 +304,7 @@ async function runEngine(ctx, backend, directory, save) {
       await clickTerminal(page, away.tab);
       result.before = await read();
       const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
-      handle = await raiseSurvey(kind);
+      handle = await raiseSurvey(kind, LEG_BODY[kind]);
       result.appeared = await read();
       expectBackground(result, result.appeared, "appearance");
       await legs[kind](result, handle, offsets);
