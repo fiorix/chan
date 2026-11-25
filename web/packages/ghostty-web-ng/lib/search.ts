@@ -327,7 +327,7 @@ export class SearchOwner {
     if (this.complete) return true;
     if (this.head === null && !measure) return true;
     const head = this.activeEntries();
-    if (this.readCursor > head || head === 0) return true;
+    if (head === 0) return true;
     this.orderedAt ??= this.orderedFrom(head);
     return this.readCursor >= this.orderedAt;
   }
