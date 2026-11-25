@@ -293,11 +293,11 @@ describe("terminal find's escape flag decides who owns Cmd+F", () => {
   // What the flag on `terminal.find` actually does, as opposed to what a
   // renderer fixture can show.
   //
-  // Its consumer is the ghostty backend's key listener (ghosttyKeys.ts), which
-  // leaves a chord chan claims to chan's key handler and hands an unclaimed
-  // macOS Command chord to the browser and so to AppKit. These cases measure
-  // the claim and the listener's decision for the rest; the listener's
-  // wiring is TerminalTab.ghosttyBackend.test.ts's.
+  // Its consumer is the terminal's capture-phase key listener
+  // (ghosttyKeys.ts), which leaves a chord chan claims to chan's key handler
+  // and hands an unclaimed macOS Command chord to the browser and so to
+  // AppKit. These cases measure the claim and the listener's decision for the
+  // rest; the listener's wiring is TerminalTab.ghosttyBackend.test.ts's.
   beforeEach(() => {
     vi.stubGlobal("navigator", { userAgent: "Mac OS X" });
   });

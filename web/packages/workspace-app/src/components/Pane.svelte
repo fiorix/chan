@@ -2119,7 +2119,7 @@
         <!--
           This pane's terminals are drawn by Terminals.svelte, above the pane
           tree, and docked into this layer, so a split that rebuilds this pane
-          or a move to another pane keeps each terminal's xterm.js renderer,
+          or a move to another pane keeps each terminal's widget,
           its scrollback and its socket. They stay mounted across
           Hybrid Nav (pane mode) and side flips too: the active terminal is
           hidden by `class:active` flipping to false during pane mode or

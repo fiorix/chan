@@ -182,8 +182,8 @@ setGatewayCsrfTokenReader(isTauriDesktop() ? readGatewayCsrfToken : null);
 /// is fine -- it is gesture-permitted and shows no persistent button in
 /// Chrome. The menu treats a refused read as nothing to paste; `cs paste`
 /// requests throwing errors so its payload reader can try the web fallback
-/// and report a permission hint. Cmd+V rides xterm's native paste event
-/// instead of this reader.
+/// and report a permission hint. Cmd+V rides the terminal's native paste
+/// event instead of this reader.
 export async function readClipboardText(opts: { throwOnError?: boolean } = {}): Promise<string> {
   if (isTauriDesktop()) {
     try {

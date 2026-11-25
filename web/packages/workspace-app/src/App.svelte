@@ -1544,7 +1544,7 @@
       }
       return;
     }
-    // Terminal: leave the event alone so xterm forwards Ctrl+D
+    // Terminal: leave the event alone so the terminal sends Ctrl+D
     // (EOF) to the shell. The shell exit collapses the tab through
     // the existing terminal-session lifecycle.
     if (active.kind === "terminal") return;
