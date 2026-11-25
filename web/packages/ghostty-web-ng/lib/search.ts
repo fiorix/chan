@@ -17,6 +17,7 @@ const EMPTY: TerminalSearchState = Object.freeze({ index: 0, total: 0, partial: 
 type Direction = 'older' | 'newer';
 type Waiting = { direction: Direction; at: number; newest?: boolean };
 type MatchIndex = Map<number, number | number[]>;
+type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell };
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
 export class SearchOwner {
@@ -38,6 +39,8 @@ export class SearchOwner {
   private kept: MatchRange | null = null;
   private keptStart: TerminalCoreTrackedCell | null = null;
   private keptEnd: TerminalCoreTrackedCell | null = null;
+  // The primary screen's active match while the alternate screen shows.
+  private parked: Parked | null = null;
   private backlogCell: TerminalCoreTrackedCell | null = null;
   private restoreAt: number | null = null;
   private keptOnScreen = false;
@@ -138,6 +141,7 @@ export class SearchOwner {
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
+    if (switched && alternate) this.park();
     const range = switched ? null : this.keptRange();
     if (range) {
       this.kept = range;
@@ -147,6 +151,7 @@ export class SearchOwner {
     } else {
       const lost = this.kept !== null;
       this.forget();
+      if (switched && !alternate) this.unpark();
       if (switched || kind === 'resize' || lost) this.waiting = this.waiting.filter(step => step.newest);
     }
     this.schedule();
@@ -169,6 +174,9 @@ export class SearchOwner {
     this.search?.free();
     this.search = null;
     this.forget();
+    this.parked?.start.free();
+    this.parked?.end.free();
+    this.parked = null;
     this.backlogCell?.free();
     this.backlogCell = null;
     this.highlights.clear('search-all');
@@ -352,6 +360,26 @@ export class SearchOwner {
     return selected;
   }
 
+  // The primary screen's active match waits out the alternate screen in its
+  // tracked cells, which the core keeps on the primary's rows.
+  private park(): void {
+    if (!this.kept || !this.keptStart || !this.keptEnd) return;
+    this.parked = { start: this.keptStart, end: this.keptEnd };
+    this.keptStart = this.keptEnd = null;
+    this.forget();
+  }
+
+  private unpark(): void {
+    const parked = this.parked;
+    if (!parked) return;
+    this.parked = null;
+    this.keptStart = parked.start;
+    this.keptEnd = parked.end;
+    this.kept = this.trackedRange();
+    if (this.kept) this.highlightActive();
+    else this.forget();
+  }
+
   private keep(range: MatchRange): void {
     this.keptStart = this.retrack(this.keptStart, range.startRow, range.startCol);
     this.keptEnd = this.retrack(this.keptEnd, range.endRow, range.endCol);
@@ -361,7 +389,10 @@ export class SearchOwner {
   }
 
   private keptRange(): MatchRange | null {
-    if (!this.kept) return null;
+    return this.kept ? this.trackedRange() : null;
+  }
+
+  private trackedRange(): MatchRange | null {
     const start = this.keptStart?.point();
     const end = this.keptEnd?.point();
     return start && end ? { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col } : null;

@@ -638,7 +638,7 @@ describe('widget search', () => {
     expect(active(term)).toBeUndefined();
   });
 
-  test('a screen switch removes stale results synchronously and never restores the other screen active match', async () => {
+  test('a screen switch removes stale results synchronously and the switch back keeps only the primary match', async () => {
     const { term } = await create('needle');
     const search = searchOf(term);
     search.find('needle');
@@ -651,8 +651,8 @@ describe('widget search', () => {
     search.step('needle', 'older');
     term.write('\x1b[?1049l');
     settle(search);
-    expect(search.state).toEqual({ index: null, total: 1, partial: false });
-    expect(active(term)).toBeUndefined();
+    expect(search.state).toEqual({ index: 1, total: 1, partial: false });
+    expect(active(term)).toEqual([range(0, 0)]);
   });
 
   test('the primary screen active match returns with the primary screen after an alternate screen', async () => {
