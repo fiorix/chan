@@ -619,24 +619,28 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(0, 6, 0, 11)]);
   });
 
-  test('resize restoration waits at most one second and then leaves no active result', async () => {
-    const { term } = await create(long());
+  test('a resize keeps a deep active match highlighted until the rescan places it, past one second', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);
     search.find('needle');
     settle(search);
     search.step('needle', 'newer');
-    expect(active(term)).toEqual([range(5, 0)]);
+    expect(active(term)).toEqual([range(0, 0)]);
+    slowPlacement();
     term.resize(41, 6);
-    now = 1000;
     frame();
-    expect(active(term)).toBeUndefined();
+    frame();
+    expect(now, 'placement has run past one second').toBeGreaterThan(1000);
+    expect(search.state).toEqual({ index: null, total: 2000, partial: true });
+    expect(active(term), 'the tracked match stays highlighted').toEqual([range(0, 0)]);
     settle(search);
-    expect(search.state).toEqual({ index: null, total: 300, partial: false });
-    search.step('needle', 'older');
-    expect(search.state.index).toBe(1);
+    expect(search.state).toEqual({ index: 2000, total: 2000, partial: false });
+    expect(active(term)).toEqual([range(0, 0)]);
+    search.step('needle', 'newer');
+    expect(active(term), 'a step goes on from the kept match').toEqual([range(1, 0)]);
   });
 
-  test('a resize result first rediscovered at the deadline does not restore the active match', async () => {
+  test('a resize result first rediscovered after one second restores the active match', async () => {
     const { term } = await create('needle');
     const search = searchOf(term);
     search.find('needle');
@@ -644,8 +648,50 @@ describe('widget search', () => {
     term.resize(41, 6);
     now = 1000;
     settle(search);
-    expect(search.state).toEqual({ index: null, total: 1, partial: false });
-    expect(active(term)).toBeUndefined();
+    expect(search.state).toEqual({ index: 1, total: 1, partial: false });
+    expect(active(term)).toEqual([range(0, 0)]);
+  });
+
+  test('a press after a resize waits for the deep active match no longer than its own second', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    slowPlacement();
+    term.resize(41, 6);
+    frame();
+    search.step('needle', 'newer');
+    const pressed = now;
+    expect(search.state.index, 'the index waits for placement').toBeNull();
+    expect(active(term), 'the press waits on the kept match').toEqual([range(0, 0)]);
+    while (now - pressed < 1000) {
+      expect(active(term)).toEqual([range(0, 0)]);
+      frame();
+    }
+    // At its cap the press applies from no active match: newer lands on
+    // the oldest match placed by then.
+    const placed = all(term)!.length;
+    expect(placed).toBeLessThan(2000);
+    expect(active(term)).toEqual([range(2000 - placed, 0)]);
+  });
+
+  test('a press during a restarted scan steps from the list placed before the output', async () => {
+    const { term } = await create('needle\r\n'.repeat(300) + 'filler\r\n'.repeat(20_000), 200, 5, 60_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 10; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(289, 0)]);
+    const restart = vi.spyOn(VtSearch.prototype, 'restart');
+    term.write('filler\r\n'.repeat(16_000));
+    frame();
+    expect(restart).toHaveBeenCalledOnce();
+    expect(search.state.index, 'the rescan has not placed the kept match').toBeNull();
+    search.step('needle', 'older');
+    expect(active(term), 'the press lands on the neighbour at once').toEqual([range(288, 0)]);
+    settle(search);
+    expect(search.state).toEqual({ index: 12, total: 300, partial: false });
   });
 
   test('a delayed ordinary output feed keeps the active match without a restoration deadline', async () => {
