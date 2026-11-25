@@ -20,8 +20,6 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";
   import { SerializeAddon } from "@xterm/addon-serialize";
-  import { WebLinksAddon } from "@xterm/addon-web-links";
-  import { WebglAddon } from "@xterm/addon-webgl";
   import "@xterm/xterm/css/xterm.css";
   import { api, sessionWindowId, windowLibraryId, withTokenQuery } from "../api/client";
   import {
@@ -39,6 +37,7 @@
     isTauriDesktop,
     readClipboardText,
     readDroppedPaths,
+    reloadWindow,
     writeClipboardText,
     writePrimarySelection,
   } from "../api/desktop";
@@ -122,7 +121,7 @@
     appInputBlocked,
   } from "../state/store.svelte";
   import { middleEllipsis } from "../terminal/linkTarget";
-  import { TerminalLinkMenu, xtermLinkHandlers, type LinkRange } from "../terminal/linkMenu.svelte";
+  import { TerminalLinkMenu, type LinkRange } from "../terminal/linkMenu.svelte";
   import { terminalWsPath } from "../terminal/session";
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
@@ -156,7 +155,6 @@
     isTerminalInterruptKey,
     copyTerminalKeyboardProtocolState,
     handleTerminalMetaKey,
-    installKeyboardProtocolHandlers,
     terminalMetaKeyBytes,
     type TerminalKeyboardProtocolState,
   } from "../terminal/keymap";
@@ -168,12 +166,11 @@
     isTerminalPasteChord,
     terminalClipboardKeyHandlerResult,
   } from "../terminal/clipboardChord";
-  import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installTerminalPrimarySelection, isPrimarySelectionDesktop } from "../terminal/primarySelection";
-  import { installShiftSelectionBypass } from "../terminal/selectionBypass";
-  import { trackUserInput, type UserInputTracker } from "../terminal/xtermUserInput";
+  import type { UserInputTracker } from "../terminal/xtermUserInput";
   import {
+    ghosttyLoadIsFinal,
     loadGhosttyKit,
     type GhosttyKit,
     type TerminalBackend,
@@ -192,9 +189,6 @@
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
-    shouldUseWebglRenderer,
-    webglRendererOverride,
-    webglRendererSignal,
   } from "../terminal/renderer";
   import { watchDevicePixelRatio } from "../terminal/pixelRatio";
   import { resolveReadyTerminalFont } from "../terminal/font";
@@ -274,7 +268,8 @@
 
   function focusTerminal(): void {
     if (keyboardHeld()) return;
-    term?.focus();
+    if (term) term.focus();
+    else loadFailureAction?.focus();
   }
 
   /// Whether nothing outside `within` holds the keyboard: it is on the body,
@@ -304,7 +299,7 @@
   function focusActiveTerminal(): void {
     if (!active || !focused) return;
     if (isRichPromptVisible(tab.id)) return;
-    if (!term) {
+    if (!term && !loadFailure) {
       keyboardHolderAtLoadingAsk = document.activeElement;
       return;
     }
@@ -609,15 +604,6 @@
   });
   $effect(() => findAnnouncer.update(findCountText, !findCount?.partial));
   $effect(() => () => findAnnouncer.dispose());
-  /// Matches the search addon decorates and counts; past it its list stops.
-  const FIND_HIGHLIGHT_LIMIT = 1000;
-  /// Whether the xterm search addon holds a search the bar started: set as
-  /// the bar finds or steps, cleared by clearFind. The addon refreshes its
-  /// search 200 ms after each write it parses; a refresh pending when
-  /// clearFind dropped the addon's term still fires and reports no results,
-  /// which the bar must not show as its count: closed, reopened with its
-  /// query kept, or open with the query emptied.
-  let xtermFindLive = false;
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
@@ -639,7 +625,6 @@
   let promptSeedSent = false;
   let terminalCwdAbs: string | null = $state(null);
   let terminalCwdVirtual: string | null = $state(null);
-  let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
   const customTerminalColors = $derived(
     resolveTerminalColors(currentPreferences()?.terminal_colors),
@@ -673,18 +658,24 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend: set in start(), Ghostty unless its load failed and
-  // the terminal fell back to xterm.js. The ghostty backend
-  // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
-  // addons (search, serialize, web-links, WebGL) and xterm-internal
-  // hooks (OSC guards, keyboard-protocol tracking, Shift-selection
-  // bypass) stay on the xterm branch.
+  // Terminal backend: "ghostty" from start() on, for every terminal. The
+  // "xterm" paths (search, serialize, WebGL, OSC guards, keyboard-protocol
+  // tracking, Shift-selection bypass) are reached by no terminal.
   let backend = $state<TerminalBackend>("xterm");
+  // Why the terminal's core did not load, shown in the terminal's area in
+  // place of a terminal; null while it loads and once it opens. A final
+  // failure stays for the page's life (see backend.ts), so it offers a
+  // reload where any other offers a retry.
+  let loadFailure = $state<{ final: boolean; detail: string } | null>(null);
+  let loadFailureAction: HTMLButtonElement | undefined = $state();
+  // Counts start() calls and teardowns. A start() whose count is no longer
+  // the latest when a load settles was overtaken by a restart, a retry or a
+  // close and does nothing more.
+  let startAttempt = 0;
   // OSC 52 clipboard observer, non-null ONLY on the ghostty backend:
   // the ghostty VT core drops OSC 52 and ghostty-web exposes no hook for
   // it, so the clipboard copy rides this byte observer instead of xterm's
-  // registerOscHandler (see osc52Bridge.ts). The xterm backend keeps
-  // installTerminalReportGuards.
+  // registerOscHandler (see osc52Bridge.ts).
   let osc52Bridge: Osc52Bridge | null = null;
   let ghosttyStatusGuard: GhosttyStatusGuard | null = null;
   // Follows the program's keyboard protocol requests on the ghostty backend,
@@ -1255,73 +1246,15 @@
     }, 0);
   }
 
-  // The live WebGL context can be lost long after mount (GPU reset,
-  // display sleep, a DPR change when the window moves between Retina
-  // and non-Retina displays, tab backgrounding). WKWebView /
-  // WebKitGTK (chan-desktop) drop it far more readily than Chrome.
-  // Disposing the renderer and staying on the DOM renderer for the
-  // rest of the session would permanently re-introduce the
-  // box-drawing gap, so instead recreate the renderer on loss,
-  // bounded by a small retry budget so a genuinely dead GPU settles
-  // on the DOM renderer rather than thrashing recreate.
-  const WEBGL_MAX_CONTEXT_LOSS_RETRIES = 3;
   let attachReplayActive = false;
   let suppressAttachReplayGeneratedReplies = false;
 
-  function enableWebglRenderer(): void {
-    // xterm-backend only: the ghostty backend paints through its own
-    // canvas renderer, and the WebglAddon needs xterm internals.
-    if (!term || backend !== "xterm") return;
-    // The desktop carries its process-wide WebKit renderer decision in the
-    // served shell. A browser ignores that native signal, while a desktop
-    // without one stays on DOM so an unclassified host cannot paint a blank
-    // WebGL grid.
-    if (
-      !shouldUseWebglRenderer(
-        isTauriDesktop(),
-        webglRendererSignal(),
-        webglRendererOverride(),
-      )
-    ) {
-      return;
-    }
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-        if (term && webglContextLossRetries < WEBGL_MAX_CONTEXT_LOSS_RETRIES) {
-          webglContextLossRetries += 1;
-          // One [chan] line per budget slot consumed, so a tester
-          // watching the webview console (Cmd+Opt+I in chan-desktop)
-          // sees each loss + how many recreate attempts remain.
-          console.warn(
-            `[chan] xterm.js WebGL context lost; recreating renderer (attempt ${webglContextLossRetries}/${WEBGL_MAX_CONTEXT_LOSS_RETRIES}).`,
-          );
-          // The lost context is not usable synchronously inside the
-          // loss callback; recreate on the next frame.
-          requestAnimationFrame(() => enableWebglRenderer());
-        } else {
-          console.warn(
-            "[chan] xterm.js WebGL context lost; budget exhausted, staying on the DOM renderer.",
-          );
-        }
-      });
-      (term as Terminal).loadAddon(webgl);
-      // Repaint so a recreated renderer redraws the visible rows and
-      // clears any garbled glyphs left behind by the lost context.
-      refreshTerminalRenderer();
-    } catch (err) {
-      // Tauri webviews effectively always have WebGL; surface the
-      // failure for the rare regression case but don't break mount.
-      console.warn(
-        "[chan] xterm.js WebGL renderer unavailable; falling back to DOM:",
-        err,
-      );
-    }
-  }
-
   async function start(): Promise<void> {
     if (!host || term) return;
+    const attempt = ++startAttempt;
+    // A teardown, a restart, a retry or a close since this call began.
+    const overtaken = () => attempt !== startAttempt || !host || term !== null;
+    loadFailure = null;
     const terminalPrefs = currentPreferences()?.terminal;
     const rendererFontSize = terminalPrefs?.font_size ?? 14;
     // Scrollback honors the Settings MB budget. Read once here so a
@@ -1359,7 +1292,7 @@
       rendererFontSize,
       typeof document === "undefined" ? undefined : document.fonts,
     );
-    if (!host || term) return;
+    if (overtaken()) return;
     const fontFamily = readyFont.fontFamily;
     if (readyFont.status === "fallback") {
       console.warn(
@@ -1367,29 +1300,35 @@
         readyFont.error,
       );
     }
-    // Every terminal opens on Ghostty.
-    // The kit lazy-loads on the first spawn and each terminal gets its own
-    // WASM instance (see backend.ts). A failed load falls back to xterm.js
-    // rather than breaking the spawn.
+    // Every terminal opens on Ghostty. The kit lazy-loads on the first spawn
+    // and each terminal gets its own WASM instance (see backend.ts). A load
+    // that fails shows why in the terminal's area, with the action that can
+    // get past it, and opens no terminal: the PTY is dialed only once one is
+    // open, so a fresh tab spawns none and a live session is left running.
     backend = "ghostty";
-    let ghosttyKit: GhosttyKit | null = null;
-    let ghosttyInstance: GhosttyVt | null = null;
+    let ghosttyKit: GhosttyKit;
+    let ghosttyInstance: GhosttyVt;
     try {
       ghosttyKit = await loadGhosttyKit();
+      // A terminal that is gone needs no instance.
+      if (overtaken()) return;
       ghosttyInstance = await ghosttyKit.instantiate({
         cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
         onResizeReply: sendGeneratedTerminalInput,
       });
     } catch (err) {
-      console.warn(
-        "[chan] ghostty-web failed to load; falling back to xterm.js:",
-        err,
-      );
-      backend = "xterm";
+      if (overtaken()) return;
+      console.warn("[chan] ghostty-web failed to load:", err);
+      loadFailure = {
+        final: ghosttyLoadIsFinal(err),
+        detail: err instanceof Error ? err.message : String(err),
+      };
+      // The focused pane's terminal would take the keyboard once open; its
+      // action takes it instead, once rendered.
+      void tick().then(focusLoadedTerminal);
+      return;
     }
-    // The wasm fetch yields: a teardown (or a restart racing it) may
-    // have disposed this component while the load was in flight.
-    if (!host || term) return;
+    if (attempt !== startAttempt || !host || term) return;
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -1406,146 +1345,105 @@
       tab,
       !tab.terminalSessionId,
     );
-    if (backend === "ghostty" && ghosttyKit && ghosttyInstance) {
-      // Ghostty backend: Ghostty's WASM VT parser + its own canvas
-      // renderer (no xterm addons exist for it).
-      const terminalHost = host;
-      const ghosttyTerm = new ghosttyKit.Terminal({
-        copy: (text: string) => {
-          void copyToClipboard(text);
-          if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
+    // Ghostty backend: Ghostty's WASM VT parser + its own canvas
+    // renderer (no xterm addons exist for it).
+    const terminalHost = host;
+    const ghosttyTerm = new ghosttyKit.Terminal({
+      copy: (text: string) => {
+        void copyToClipboard(text);
+        if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
+      },
+      joinDrawnWraps: runsMuse,
+      lineHeight: 1.2,
+      boxGlyphs: true,
+      scrollbar: "overlay",
+      cursorBlink: false,
+      cursorStyle: "block",
+      fontFamily,
+      fontSize: rendererFontSize,
+      ghostty: ghosttyInstance,
+      scrollback: scrollbackLines,
+      // Synchronous scrolling matches xterm.js and lets calibrated pixel
+      // gestures accumulate directly in the widget's fractional viewport.
+      smoothScrollDuration: 0,
+      theme: ghosttyTerminalTheme(),
+    });
+    term = ghosttyTerm;
+    ghosttyTerm.onLinkActivate(onGhosttyLink);
+    // Ghostty's auto-hiding scrollbar is painted onto the content without
+    // clearing it, so the columns under
+    // it stay readable and there is no gutter to hold back. Reserving width
+    // here could not help in any case: the overlay is anchored to the canvas,
+    // not to the host, so a narrower grid just moves the content it covers.
+    // This FitLike keeps upstream's measurement and clamp behavior over the
+    // whole content box.
+    const proposeGhosttyGrid = () => {
+      const metrics = ghosttyTerm.renderer?.getMetrics();
+      if (!metrics) return null;
+      const style = window.getComputedStyle(terminalHost);
+      return proposeGhosttyDimensions(
+        {
+          width: terminalHost.clientWidth,
+          height: terminalHost.clientHeight,
         },
-        joinDrawnWraps: runsMuse,
-        lineHeight: 1.2,
-        boxGlyphs: true,
-        scrollbar: "overlay",
-        cursorBlink: false,
-        cursorStyle: "block",
-        fontFamily,
-        fontSize: rendererFontSize,
-        ghostty: ghosttyInstance,
-        scrollback: scrollbackLines,
-        // Synchronous scrolling matches xterm.js and lets calibrated pixel
-        // gestures accumulate directly in the widget's fractional viewport.
-        smoothScrollDuration: 0,
-        theme: ghosttyTerminalTheme(),
-      });
-      term = ghosttyTerm;
-      ghosttyTerm.onLinkActivate(onGhosttyLink);
-      // Ghostty's auto-hiding scrollbar is painted onto the content without
-      // clearing it, so the columns under
-      // it stay readable and there is no gutter to hold back. Reserving width
-      // here could not help in any case: the overlay is anchored to the canvas,
-      // not to the host, so a narrower grid just moves the content it covers.
-      // This FitLike keeps upstream's measurement and clamp behavior over the
-      // whole content box.
-      const proposeGhosttyGrid = () => {
-        const metrics = ghosttyTerm.renderer?.getMetrics();
-        if (!metrics) return null;
-        const style = window.getComputedStyle(terminalHost);
-        return proposeGhosttyDimensions(
-          {
-            width: terminalHost.clientWidth,
-            height: terminalHost.clientHeight,
-          },
-          {
-            top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
-            right:
-              Number.parseInt(style.getPropertyValue("padding-right")) || 0,
-            bottom:
-              Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
-            left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
-          },
-          metrics,
-        );
-      };
-      fit = {
-        proposeDimensions: proposeGhosttyGrid,
-        fit() {
-          const proposed = proposeGhosttyGrid();
-          if (
-            !proposed ||
-            (proposed.cols === ghosttyTerm.cols &&
-              proposed.rows === ghosttyTerm.rows)
-          ) {
-            return;
-          }
-          ghosttyTerm.resize(proposed.cols, proposed.rows);
+        {
+          top: Number.parseInt(style.getPropertyValue("padding-top")) || 0,
+          right:
+            Number.parseInt(style.getPropertyValue("padding-right")) || 0,
+          bottom:
+            Number.parseInt(style.getPropertyValue("padding-bottom")) || 0,
+          left: Number.parseInt(style.getPropertyValue("padding-left")) || 0,
         },
-      };
-      // OSC 52 rides the byte observer: the ghostty VT core drops the
-      // sequence and ghostty-web exposes no registerOscHandler
-      // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
-      osc52Bridge = new Osc52Bridge();
-      ghosttyStatusGuard = new GhosttyStatusGuard();
-      // The widget owns output following; the adapter calibrates macOS
-      // pixel travel and gives find the current view.
-      const viewport = new GhosttyViewportController(ghosttyTerm, {
-        os: currentOS,
-        hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),
-        isAlternateScreen: () =>
-          ghosttyTerm.buffer.active === ghosttyTerm.buffer.alternate,
-        cellHeight: () => ghosttyTerm.renderer?.getMetrics().height ?? 0,
-      });
-      ghosttyViewport = viewport;
-      keyboardProtocolObserver = new KeyboardProtocolObserver(
-        keyboardProtocol,
-        sendGeneratedTerminalInput,
+        metrics,
       );
-      const protocolObserver = keyboardProtocolObserver;
-      // Sync-callback writer for the origin tracker (see termWriter).
-      termWriter = {
-        write: (bytes, done) => {
-          protocolObserver.push(bytes);
-          viewport.write(bytes);
-          done?.();
-        },
-      };
-      // Wheel reporting shim: ghostty-web's capture-phase viewport
-      // scroller stopPropagation()s the wheel before its own
-      // InputHandler can report it, so SGR wheel-over-TUI reporting
-      // never fires upstream (clicks do work). See handleGhosttyWheel.
-      term.attachCustomWheelEventHandler(handleGhosttyWheel);
-    } else {
-      term = new Terminal({
-        // xterm gates registerDecoration (plus the markers / unicode
-        // namespaces) behind this flag; the search addon's decorated
-        // find throws without it and the find bar matches nothing.
-        allowProposedApi: true,
-        allowTransparency: transparentWindow,
-        cursorBlink: false,
-        cursorStyle: "block",
-        fontFamily,
-        fontSize: rendererFontSize,
-        lineHeight: 1.2,
-        macOptionIsMeta: true,
-        minimumContrastRatio: terminalMinimumContrastRatio(),
-        scrollback: scrollbackLines,
-        tabStopWidth: 8,
-        theme: terminalTheme(),
-        // An OSC 8 link goes to the link menu, which judges its target.
-        linkHandler: xtermLinks.linkHandler,
-      });
-      installTerminalReportGuards(term);
-      installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
-      const xtermFit = new FitAddon();
-      fit = xtermFit;
-      search = new SearchAddon({ highlightLimit: FIND_HIGHLIGHT_LIMIT });
-      serialize = new SerializeAddon();
-      term.loadAddon(xtermFit);
-      term.loadAddon(search);
-      // Fires on every decorated find and on the addon's refresh after
-      // output. Addon doubles without the event leave the count blank.
-      search.onDidChangeResults?.((e) => {
-        if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
-      });
-      term.loadAddon(serialize);
-      // A URL in the text goes to the link menu too, never to the addon's
-      // default window.open, which under WKWebView does nothing or opens
-      // inside the app shell.
-      term.loadAddon(new WebLinksAddon(xtermLinks.webLink.handler, xtermLinks.webLink.options));
-      termWriter = term;
-    }
+    };
+    fit = {
+      proposeDimensions: proposeGhosttyGrid,
+      fit() {
+        const proposed = proposeGhosttyGrid();
+        if (
+          !proposed ||
+          (proposed.cols === ghosttyTerm.cols &&
+            proposed.rows === ghosttyTerm.rows)
+        ) {
+          return;
+        }
+        ghosttyTerm.resize(proposed.cols, proposed.rows);
+      },
+    };
+    // OSC 52 rides the byte observer: the ghostty VT core drops the
+    // sequence and ghostty-web exposes no registerOscHandler
+    // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
+    osc52Bridge = new Osc52Bridge();
+    ghosttyStatusGuard = new GhosttyStatusGuard();
+    // The widget owns output following; the adapter calibrates macOS
+    // pixel travel and gives find the current view.
+    const viewport = new GhosttyViewportController(ghosttyTerm, {
+      os: currentOS,
+      hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),
+      isAlternateScreen: () =>
+        ghosttyTerm.buffer.active === ghosttyTerm.buffer.alternate,
+      cellHeight: () => ghosttyTerm.renderer?.getMetrics().height ?? 0,
+    });
+    ghosttyViewport = viewport;
+    keyboardProtocolObserver = new KeyboardProtocolObserver(
+      keyboardProtocol,
+      sendGeneratedTerminalInput,
+    );
+    const protocolObserver = keyboardProtocolObserver;
+    // Sync-callback writer for the origin tracker (see termWriter).
+    termWriter = {
+      write: (bytes, done) => {
+        protocolObserver.push(bytes);
+        viewport.write(bytes);
+        done?.();
+      },
+    };
+    // Wheel reporting shim: ghostty-web's capture-phase viewport
+    // scroller stopPropagation()s the wheel before its own
+    // InputHandler can report it, so SGR wheel-over-TUI reporting
+    // never fires upstream (clicks do work). See handleGhosttyWheel.
+    term.attachCustomWheelEventHandler(handleGhosttyWheel);
     // Neither backend's open() takes the keyboard; a terminal in the focused
     // pane is focused once start() has wired it, below.
     term.open(host);
@@ -1574,47 +1472,14 @@
       failTerminalSecretMasking(tab);
       setTransientStatus("Secret masking stopped working in this terminal");
     };
-    if (backend === "xterm") {
-      secretMasker = new TerminalSecretMasker(
-        term as Terminal,
-        secretMaskSuffixes,
-        terminalSecretMaskColor(),
-        effectiveSecretMasking,
-        onSecretMaskingFailure,
-      );
-      // Hold Shift to force a native selection while a TUI holds mouse
-      // tracking, on every platform (xterm.js ignores Shift on macOS).
-      // Must run after open(): the SelectionService it wraps is created
-      // there. Unneeded under ghostty: its SelectionManager starts a
-      // selection on every drag regardless of mouse-tracking state.
-      installShiftSelectionBypass(term as Terminal);
-      userInput = trackUserInput(term as Terminal);
-      // The WebGL renderer makes xterm.js's built-in customGlyphs path
-      // fire: under the default DOM renderer, box-drawing +
-      // block-element characters fall through to the system font which
-      // (with lineHeight: 1.2) renders with vertical gaps between
-      // cells. The WebglAddon draws pixel-perfect glyphs into the cell
-      // rectangle including the line-height padding, so ASCII tables +
-      // pixel-art mascots render gap-free.
-      //
-      // WebGL initialisation throws on contexts where the browser
-      // declined to allocate a WebGL context (rare on chan-desktop's
-      // WKWebView / WebView2, but possible inside headless test
-      // harnesses or odd Linux GPU setups), and the live context can
-      // later be LOST. enableWebglRenderer() handles both: try/catch on
-      // init, then recreate-on-loss (bounded) before settling on the
-      // DOM renderer. See the helper for the WKWebView rationale.
-      enableWebglRenderer();
-    } else {
-      // After open(): the widget retains a paint layer only once it is open.
-      secretMasker = new GhosttySecretMasker(
-        term as GhosttyTerminal,
-        secretMaskSuffixes,
-        terminalSecretMaskColor(),
-        effectiveSecretMasking,
-        onSecretMaskingFailure,
-      );
-    }
+    // After open(): the widget retains a paint layer only once it is open.
+    secretMasker = new GhosttySecretMasker(
+      term as GhosttyTerminal,
+      secretMaskSuffixes,
+      terminalSecretMaskColor(),
+      effectiveSecretMasking,
+      onSecretMaskingFailure,
+    );
     refreshTerminalRenderer();
     installHostResumeListeners();
     // The custom-key-handler contracts are INVERTED between the
@@ -1632,9 +1497,6 @@
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
     term.onData(backend === "ghostty" ? handleGhosttyData : handleXtermData);
-    // xterm.js hands an X10 mouse report to onBinary, not onData; ghostty-web
-    // has no such event.
-    if (backend === "xterm") (term as Terminal).onBinary(handleXtermBinary);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
       publishLocalSize(cols, rows);
@@ -2643,14 +2505,6 @@
     routeXtermData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
   }
 
-  /// An X10 mouse report, each character one byte. xterm.js fires no
-  /// user-input mark for it, so it bypasses `routeXtermData`, which would hold
-  /// an unmarked chunk to this PTY during a live write: the click is the
-  /// user's and reaches the group.
-  function handleXtermBinary(data: string): void {
-    sendUserInput(data, true);
-  }
-
   /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and
   /// CSI O itself when its input gains and loses focus; ghostty-web tracks
   /// the mode and sends nothing, so the report is made here, at the element
@@ -2865,6 +2719,9 @@
   }
 
   function teardown(): void {
+    // A start() still loading settles to nothing.
+    startAttempt += 1;
+    loadFailure = null;
     if (sessionSaveTimer) {
       clearTimeout(sessionSaveTimer);
       sessionSaveTimer = null;
@@ -2920,6 +2777,12 @@
     serialize = null;
   }
 
+  /// The load error's Retry: load again, from whatever the loader kept.
+  function retryLoad(): void {
+    loadFailure = null;
+    void start();
+  }
+
   async function restart(): Promise<void> {
     closeTabMenu();
     if (tab.terminalSessionId) {
@@ -2969,7 +2832,11 @@
 
   function explicitCloseSession(): void {
     if (tab.terminalSessionId) {
-      send({ type: "close" });
+      // A terminal whose view did not load never dialed, so no socket
+      // carries the close frame to its live session; the route ends it.
+      if (!send({ type: "close" }) && !term) {
+        void api.closeTerminal(tab.terminalSessionId).catch(() => {});
+      }
       clearTerminalMetadataSink();
       clearTerminalSession(tab);
       scheduleTerminalSessionSave();
@@ -3259,26 +3126,8 @@
   /// On ghostty this also frees the search and stops its scan.
   function clearFind(): void {
     search?.clearDecorations();
-    xtermFindLive = false;
     ghosttyFind?.close();
     findCount = null;
-  }
-
-  /// The addon lists matches top-down, so its index is turned into a count
-  /// from the newest match, where typing lands. At the highlight limit the
-  /// list holds the oldest thousand: the total is a floor, and a selected
-  /// match's place among them says nothing about its distance from the
-  /// newest, so the index is dropped rather than shown wrong.
-  function xtermFindCount(resultIndex: number, resultCount: number): FindCount {
-    if (resultCount >= FIND_HIGHLIGHT_LIMIT) {
-      return { index: null, total: FIND_HIGHLIGHT_LIMIT, partial: true };
-    }
-    if (resultCount === 0) return { index: 0, total: 0, partial: false };
-    return {
-      index: resultIndex < 0 ? null : resultCount - resultIndex,
-      total: resultCount,
-      partial: false,
-    };
   }
 
   /// The query changed: select the newest match, the bottom-most in the
@@ -3298,7 +3147,6 @@
     }
     if (!search) return;
     term?.clearSelection();
-    xtermFindLive = true;
     search.findPrevious(findQuery, findOptions());
   }
 
@@ -3315,7 +3163,6 @@
       return;
     }
     if (!search) return;
-    xtermFindLive = true;
     if (direction === "older") search.findPrevious(findQuery, findOptions());
     else search.findNext(findQuery, findOptions());
   }
@@ -3536,10 +3383,6 @@
     focusTerminal,
     focusTerminalAfterWait,
   });
-  const xtermLinks = xtermLinkHandlers(
-    () => (backend === "xterm" ? (term as Terminal | null) : null),
-    (target, range, event) => void links.onLink(target, range, event),
-  );
   const linkMenuOpen = $derived(menuOpen && tabMenu.source === "link" && links.menu !== null);
   /// The longest target the menu shows whole; a longer one keeps both ends.
   const LINK_TARGET_SHOWN = 72;
@@ -3979,6 +3822,28 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
+    {#if loadFailure}
+      <!-- Over the terminal's area only: the inspector, when open, keeps its
+           column. -->
+      <div
+        class="terminal-load-failure"
+        role="alert"
+        style:right={tab.inspectorOpen ? `${tab.inspectorWidth ?? 280}px` : "0"}
+      >
+        <p class="terminal-load-failure-title">The terminal could not start.</p>
+        <p>
+          {loadFailure.final
+            ? "The terminal engine cannot run in this window. Reload the window to try again."
+            : "Loading the terminal engine failed."}
+        </p>
+        <p class="terminal-load-failure-detail">{loadFailure.detail}</p>
+        {#if loadFailure.final}
+          <button type="button" bind:this={loadFailureAction} onclick={() => void reloadWindow()}>Reload window</button>
+        {:else}
+          <button type="button" bind:this={loadFailureAction} onclick={retryLoad}>Retry</button>
+        {/if}
+      </div>
+    {/if}
     <TerminalConnectionNotice
       notice={terminalConnection.state.notice && status === "connected" && active && !ui.disconnectBlocking}
       {findOpen}
@@ -4218,6 +4083,51 @@
   }
   .cli-reload-notice button:hover { border-color: var(--btn-hover); }
   .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; position: relative; isolation: isolate; }
+  .terminal-load-failure {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    /* Above the empty terminal area, as the connection pill is. */
+    z-index: 20;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px 20px;
+    overflow: auto;
+    background: var(--terminal-background, var(--bg));
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .terminal-load-failure p {
+    margin: 0;
+    max-width: 36rem;
+  }
+  .terminal-load-failure-title {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .terminal-load-failure-detail {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .terminal-load-failure button {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--btn-bg);
+    color: var(--text);
+    font: inherit;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  .terminal-load-failure button:hover {
+    border-color: var(--btn-hover);
+  }
   .program-inspector, .queue-inspector { padding: 10px; overflow-wrap: anywhere; }
   .program-inspector h3, .queue-inspector h3 { margin: 0 0 10px; font-size: 13px; }
   .queue-inspector ol { margin: 0; padding-left: 24px; }

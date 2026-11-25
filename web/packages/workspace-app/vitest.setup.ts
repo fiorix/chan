@@ -110,28 +110,28 @@ afterAll(() => {
   failOnTerminalInitFailures();
 });
 
-// TerminalTab reports a Ghostty load that failed on the console and falls
-// back to xterm.js, so a test that opens a terminal without the shared widget
-// fixture would pass against a terminal it never chose. Two records catch it,
-// and either fails the test it came from once the test's own teardown has
-// run (a setup file's `afterEach` runs last); one that arrives after the last
-// test fails the file, once its timers are released:
+// TerminalTab reports a Ghostty load that failed on the console and shows the
+// failure in the terminal's area, so a test that opens a terminal without the
+// shared widget fixture would pass against a terminal that never opened.
+// Three records catch it, and any of them fails the test it came from once
+// the test's own teardown has run (a setup file's `afterEach` runs last); one
+// that arrives after the last test fails the file, once its timers are
+// released:
 //
 // - the report, matched by its prefix, while the test has not replaced
 //   console.warn;
-// - the stand-in xterm a fallback opened with no load paying for it, counted
-//   by the stand-in itself (src/__tests__/xterm.ts), which no console
-//   replacement hides;
 // - the load error a terminal shows in its own area (TerminalTab's
 //   `.terminal-load-failure`), counted from the DOM, which no console
-//   replacement hides either. A file that makes a load fail on purpose takes
-//   the count its case expects with `takeShownLoadFailures`.
+//   replacement hides. A file that makes a load fail on purpose takes the
+//   count its case expects with `takeShownLoadFailures`;
+// - a stand-in xterm constructed with no load paying for it, counted by the
+//   stand-in itself (src/__tests__/xterm.ts).
 //
 // The one report let through is a load failed with XtermStandInRequested,
 // matched by its class: a file on the transitional stand-in route in
-// src/__tests__/xterm.ts asks for that failure to run its terminals on the
-// xterm stand-in. It is counted and not printed, as every such file gives one
-// per terminal. The exception goes with the route.
+// src/__tests__/xterm.ts asks for that failure. It is counted and not
+// printed, as every such file gives one per terminal. The exception goes
+// with the route.
 const TERMINAL_INIT_FAILURE = "[chan] ghostty-web failed to load";
 const terminalInitFailures: string[] = [];
 let standInReports = 0;

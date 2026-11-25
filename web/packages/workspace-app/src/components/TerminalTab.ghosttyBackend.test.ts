@@ -47,9 +47,9 @@ import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { Osc52Bridge } from "../terminal/osc52Bridge";
 import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
-import { requestXtermStandIn } from "../__tests__/xterm";
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
+import { takeShownLoadFailures } from "../../vitest.setup";
 import { terminalPreferences } from "../__tests__/standalone";
 import { commandById } from "../state/commands";
 import { shouldEscapeTerminal } from "../state/shortcuts";
@@ -114,9 +114,9 @@ beforeEach(() => {
   __testSetStandalonePreferences(terminalPreferences({ font_size: 15 }));
 });
 
-const fallbackMounts: Array<Record<string, unknown>> = [];
+const failedMounts: Array<Record<string, unknown>> = [];
 afterEach(() => {
-  for (const component of fallbackMounts.splice(0)) unmount(component);
+  for (const component of failedMounts.splice(0)) unmount(component);
   resetTerminals();
   __testSetStandalonePreferences(null);
   clipboard.writeText.mockClear();
@@ -224,20 +224,20 @@ describe("choosing the backend", () => {
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
   });
 
-  test("a kit that fails to load falls back to xterm", async () => {
-    // Deliberate loader-failure exception while the app still falls back to
-    // xterm; replace this case when terminal load failures have their own UI.
-    // The failure is the route's, which asks for the fallback the case reads.
-    vi.mocked(loadGhosttyKit).mockImplementationOnce(requestXtermStandIn);
+  test("a kit that fails to load shows the terminal's load error and opens no terminal", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(loadGhosttyKit).mockRejectedValueOnce(new TypeError("Failed to fetch"));
     const [tab] = seatTerminals([terminalTab()]);
     const target = document.createElement("div");
     document.body.append(target);
-    fallbackMounts.push(mount(TerminalTab, {
+    failedMounts.push(mount(TerminalTab, {
       target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
     }));
-    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
-    expect(ghosttyFixture.terminals).toHaveLength(0);
-    expect(xterm.terminals).toHaveLength(1);
+    await vi.waitFor(() => expect(target.querySelector(".terminal-main [role=alert]"), "the load error").not.toBeNull());
+    expect(ghosttyFixture.terminals, "no widget").toHaveLength(0);
+    expect(xterm.terminals, "no xterm built").toHaveLength(0);
+    expect(TerminalSocket.all, "no PTY dialed").toHaveLength(0);
+    expect(takeShownLoadFailures(), "the error the case made").toBe(1);
   });
 
   test("the xterm-only pieces stay off ghostty", async () => {
