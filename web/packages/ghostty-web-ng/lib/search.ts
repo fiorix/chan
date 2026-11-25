@@ -66,7 +66,6 @@ export class SearchOwner {
   // The primary screen's active match while the alternate screen shows.
   private parked: Parked | null = null;
   private backlogCell: TerminalCoreTrackedCell | null = null;
-  private restoreAt: number | null = null;
   private keptOnScreen = false;
   private dirty = false;
   // Search work is waiting for the widget's next frame.
@@ -176,7 +175,6 @@ export class SearchOwner {
     const range = switched ? null : this.keptRange();
     if (range) {
       this.kept = range;
-      if (kind === 'resize') this.restoreAt = performance.now();
       this.highlightActive();
       if (kind === 'resize' && this.keptOnScreen) this.viewport.reveal(range.startRow);
     } else {
@@ -248,8 +246,6 @@ export class SearchOwner {
         ? check + read > FRAME_BUDGET_MS && completion < check + read
         : read >= SCAN_BUDGET_MS && read + completion > FRAME_BUDGET_MS;
       if (restart) {
-        // Repeated output restarts must not renew the restoration deadline.
-        if (this.kept && this.restoreAt === null) this.restoreAt = performance.now();
         search.restart();
         return this.feedFresh();
       }
@@ -311,7 +307,7 @@ export class SearchOwner {
       : started + SCAN_BUDGET_MS);
     const reveal = this.applyWaiting();
     // Schedule before notifying: a subscriber can close or replace the query.
-    if (!this.complete || this.waiting.length > 0 || this.restoreAt !== null) this.schedule();
+    if (!this.complete || this.waiting.length > 0) this.schedule();
     this.show(reveal && this.askStands());
   }
 
@@ -338,10 +334,10 @@ export class SearchOwner {
     const index = range ? this.indexOf(range) : undefined;
     this.index = index ?? null;
     if (range) {
+      // The tracked cells hold the match however long placement takes; a
+      // completed list without it is what loses it.
       this.kept = range;
-      if (this.restoreAt !== null && performance.now() - this.restoreAt >= WAIT_CAP_MS) this.forget();
-      else if (index !== undefined) this.restoreAt = null;
-      else if (this.complete) this.forget();
+      if (index === undefined && this.complete) this.forget();
     } else if (this.kept) {
       this.forget();
     }
@@ -416,15 +412,15 @@ export class SearchOwner {
   }
 
   private applyWaiting(): boolean {
-    if (this.restoreAt !== null) return false;
     let selected = false;
     while (this.waiting.length) {
       const { direction, at } = this.waiting[0];
       if (this.kept !== null && this.index === null) {
-        // Output has left the active match's index unplaced. Applied from
-        // no active match the press would start over from the newest or
-        // oldest match, so it steps from the list placed before the output
-        // where it can, and otherwise waits for placement up to its cap.
+        // Output, a restarted scan or a resize has left the active match's
+        // index unplaced. Applied from no active match the press would
+        // start over from the newest or oldest match, so it steps from the
+        // list placed before the output where it can (a resize keeps none),
+        // and otherwise waits for placement up to its cap.
         const next = this.stepBefore(direction);
         if (next === 'newest' || (next === null && performance.now() - at >= WAIT_CAP_MS)) {
           this.forget();
@@ -514,7 +510,6 @@ export class SearchOwner {
     this.keptStart = this.retrack(this.keptStart, range.startRow, range.startCol);
     this.keptEnd = this.retrack(this.keptEnd, range.endRow, range.endCol);
     this.kept = this.keptStart && this.keptEnd ? range : null;
-    this.restoreAt = null;
     if (!this.kept) this.forget();
   }
 
@@ -540,7 +535,6 @@ export class SearchOwner {
     this.keptStart = this.keptEnd = null;
     this.kept = null;
     this.index = null;
-    this.restoreAt = null;
     this.before = null;
     this.highlights.clear('search-active');
   }
