@@ -128,7 +128,7 @@ const irregular = (n: number) => Array.from({ length: n }, (_, i) =>
   i % 7 === 0 || i % 7 === 3 ? `${' '.repeat(i % 5)}needle ${i}` : `line ${i}`).join('\r\n');
 // The active ranges of the next `count` older steps, stepping back after.
 function olderRanges(term: Terminal, search: Search, count: number) {
-  const out: (Range[] | undefined)[] = [];
+  const out: ReturnType<typeof active>[] = [];
   for (let i = 0; i < count; i++) {
     search.step('needle', 'older');
     out.push(active(term));
