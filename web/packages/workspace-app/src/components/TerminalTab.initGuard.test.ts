@@ -23,7 +23,6 @@ import { failOnTerminalInitFailures } from "../../vitest.setup";
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { installTerminalDom, resetTerminals, seatTerminals, TERMINAL_PANE, terminalTab } from "../__tests__/terminalTab";
-import { xterm } from "../__tests__/xterm";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 installTerminalDom();
@@ -80,9 +79,9 @@ test("the expected failure above ran its body to the end, so the guard's hook fa
 
 test("a terminal opened without the shared widget fixture fails its test under a silenced console", async () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
-  await mountFailingTerminal();
+  const target = await mountFailingTerminal();
 
-  expect(xterm.terminals, "no stand-in opened in its place").toHaveLength(0);
+  expect(target.querySelector(".terminal-host")!.children, "nothing opened in its place").toHaveLength(0);
   expect(() => failOnTerminalInitFailures()).toThrowError(
     /failed to initialize: .*In .*TerminalTab\.initGuard\.test\.ts\. 1 showed the terminal load error$/,
   );

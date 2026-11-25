@@ -5,7 +5,7 @@
 // true, as a server or a stored record from before its retirement could,
 // opens the same widget as one without it. A TerminalTab is mounted through
 // the shared fixture, whose loader serves the vendored core, and the
-// terminal it opens is read back: the widget, and no xterm.js.
+// terminal it opens is read back: one widget.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -23,7 +23,6 @@ import {
   resetTerminals,
   seatTerminals,
   terminalTab,
-  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -54,6 +53,5 @@ describe("the engine of a terminal", () => {
     await mountTerminal(TerminalTab, tab!);
 
     await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(1));
-    expect(xterm.terminals).toHaveLength(0);
   });
 });

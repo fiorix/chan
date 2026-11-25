@@ -28,7 +28,6 @@ import {
   sentFrames,
   TerminalSocket,
   terminalTab,
-  xterm,
 } from "./terminalTab";
 
 installTerminalDom();
@@ -49,12 +48,11 @@ async function opened() {
 const inputs = (socket: TerminalSocket) =>
   sentFrames(socket).filter((frame) => frame.type === "input").map((frame) => frame.data);
 
-test("the checked mount returns the fixture's widget, open in the tab, and no stand-in", async () => {
+test("the checked mount returns the fixture's widget, open in the tab", async () => {
   const { target, term } = await opened();
   expect(term).toBeInstanceOf(Terminal);
   expect(term.element && target.contains(term.element)).toBe(true);
   expect(ghosttyFixture.terminals).toEqual([term]);
-  expect(xterm.terminals).toHaveLength(0);
 });
 
 // The widget dials once it has loaded and opened, so the mount waits for the

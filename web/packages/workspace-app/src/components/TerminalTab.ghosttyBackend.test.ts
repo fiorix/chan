@@ -65,7 +65,6 @@ import {
   terminalTab,
   TERMINAL_PANE,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -170,7 +169,7 @@ const MASKING_ROW = "Secret masking (this terminal)";
 async function spawned(target: HTMLElement): Promise<{ engine: string; masking: boolean; kitLoads: number }> {
   await openBodyMenu(target);
   return {
-    engine: ghosttyFixture.terminals.length > 0 ? "ghostty" : xterm.terminals.length > 0 ? "xterm" : "",
+    engine: ghosttyFixture.terminals.length > 0 ? "ghostty" : "",
     masking: menuRow(MASKING_ROW).getAttribute("aria-checked") === "true",
     kitLoads: vi.mocked(loadGhosttyKit).mock.calls.length,
   };
@@ -214,7 +213,6 @@ describe("a control terminal whose masking starts on", () => {
 describe("choosing the backend", () => {
   test("a terminal spawns on ghostty with chan's options", async () => {
     const { term } = await mountGhostty();
-    expect(xterm.terminals, "no xterm built").toHaveLength(0);
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
   });
 
@@ -229,14 +227,9 @@ describe("choosing the backend", () => {
     }));
     await vi.waitFor(() => expect(target.querySelector(".terminal-main [role=alert]"), "the load error").not.toBeNull());
     expect(ghosttyFixture.terminals, "no widget").toHaveLength(0);
-    expect(xterm.terminals, "no xterm built").toHaveLength(0);
+    expect(target.querySelector(".terminal-host")!.children, "nothing opened in the terminal's area").toHaveLength(0);
     expect(TerminalSocket.all, "no PTY dialed").toHaveLength(0);
     expect(takeShownLoadFailures(), "the error the case made").toBe(1);
-  });
-
-  test("the xterm-only pieces stay off ghostty", async () => {
-    await mountGhostty();
-    expect(xterm.webgl).toHaveLength(0);
   });
 
   test("the component reaches ghostty-web only through the lazy kit loader", async () => {
