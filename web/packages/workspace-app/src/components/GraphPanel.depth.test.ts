@@ -1271,6 +1271,42 @@ describe("the workspace tree", () => {
     expect(visibleIds()).toEqual(["", "directory:a"]);
   });
 
+  test("an empty folder opened below a folder the spine never read is read once an answer over the listing cap is taken", async () => {
+    // Under the cap: `a` holds `a/x.md` and the empty `a/b`.
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    await doubleClick("directory:a/b");
+    expect({ a: tab.expanded.a, "a/b": tab.expanded["a/b"] }).toEqual({ a: true, "a/b": true });
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }, "the whole tree holds a's level, the spine no node of a/b").toEqual({ a: 0, "a/b": 0 });
+
+    // `a/b/y.md` is written, and the next answer is over the cap.
+    graphServer.fs.nodes.push(fsg.file("a/b/y.md"));
+    graphServer.fs.edges.push(fsg.contains("a/b", "a/b/y.md"));
+    graphReloadSignal.paths = ["a/b/y.md"];
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle();
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+    };
+    graphServer.tree = "folders";
+    await refreshGraph();
+    await settle(20);
+    expect(graphData.tree).toBe("folders");
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }, "each opened level read once").toEqual({ a: 1, "a/b": 1 });
+    expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+
+    await doubleClick("directory:a/b");
+    await doubleClick("directory:a/b");
+    expect(tab.expanded["a/b"], "closed and opened again").toBe(true);
+    expect(levelReads("a/b"), "a level read stays read").toBe(1);
+    expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
