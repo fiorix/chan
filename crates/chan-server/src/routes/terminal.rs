@@ -1590,7 +1590,8 @@ async fn terminal_ws(
 }
 
 /// The close of a view whose stall ran out: 1013, try again later, which
-/// the client answers by redialing from its parsed cursor.
+/// the client answers by redialing. A redial that echoes its parsed cursor
+/// continues its view.
 const STALL_CLOSE: (u16, &str) = (1013, "terminal view stalled");
 
 /// A view waiting for its client to report having parsed what it was
