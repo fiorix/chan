@@ -91,6 +91,7 @@
     setTerminalProgramStatus,
     setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane,
     setTabInspectorOpen,
+    tabLabel,
     resolvePendingPrompt,
     failPendingPrompt,
     setTerminalSession,
@@ -125,6 +126,7 @@
   import { terminalWsPath } from "../terminal/session";
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
+  import FailureCard from "./FailureCard.svelte";
   import Inspector from "./Inspector.svelte";
   import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
@@ -269,7 +271,7 @@
   function focusTerminal(): void {
     if (keyboardHeld()) return;
     if (term) term.focus();
-    else loadFailureAction?.focus();
+    else loadFailureCard?.focusRetry();
   }
 
   /// Whether nothing outside `within` holds the keyboard: it is on the body,
@@ -662,12 +664,12 @@
   // "xterm" paths (search, serialize, WebGL, OSC guards, keyboard-protocol
   // tracking, Shift-selection bypass) are reached by no terminal.
   let backend = $state<TerminalBackend>("xterm");
-  // Why the terminal's core did not load, shown in the terminal's area in
-  // place of a terminal; null while it loads and once it opens. A final
-  // failure stays for the page's life (see backend.ts), so it offers a
-  // reload where any other offers a retry.
-  let loadFailure = $state<{ final: boolean; detail: string } | null>(null);
-  let loadFailureAction: HTMLButtonElement | undefined = $state();
+  // Why the terminal's view did not load, shown in the terminal's place;
+  // null while it loads and once it opens. A final failure stays for the
+  // page's life (see backend.ts), so it offers a reload and no retry.
+  let loadFailure = $state<{ final: boolean; error: unknown } | null>(null);
+  let loadFailureArea: HTMLElement | undefined = $state();
+  let loadFailureCard: ReturnType<typeof FailureCard> | undefined = $state();
   // Counts start() calls and teardowns. A start() whose count is no longer
   // the latest when a load settles was overtaken by a restart, a retry or a
   // close and does nothing more.
@@ -853,7 +855,10 @@
     // Relinquish keyboard focus when this terminal stops being the active
     // tab, so a newly opened editor (e.g. `cs open {path}`) actually gets the
     // keystrokes instead of the xterm textarea keeping `document.activeElement`.
+    // The load error's actions give it up the same way: under WebKit a hidden
+    // tab keeps DOM focus, and a Space typed elsewhere would press Retry.
     term?.blur();
+    untrack(releaseLoadFailureKeyboard);
     recoverTerminalRendererAfterHostResume();
     sendFocusState();
   });
@@ -1319,12 +1324,10 @@
     } catch (err) {
       if (overtaken()) return;
       console.warn("[chan] ghostty-web failed to load:", err);
-      loadFailure = {
-        final: ghosttyLoadIsFinal(err),
-        detail: err instanceof Error ? err.message : String(err),
-      };
+      loadFailure = { final: ghosttyLoadIsFinal(err), error: err };
       // The focused pane's terminal would take the keyboard once open; its
-      // action takes it instead, once rendered.
+      // Retry takes it instead, once rendered. A final failure's card takes
+      // nothing (see FailureCard's focusRetry).
       void tick().then(focusLoadedTerminal);
       return;
     }
@@ -2783,6 +2786,21 @@
     void start();
   }
 
+  /// What the load error says still holds, and what its action does about
+  /// it. Neither the loader nor the engine says why a final failure stays,
+  /// so no cause is named.
+  function loadFailureHint(final: boolean): string {
+    const shell = tab.terminalSessionId
+      ? `Its shell is still running, and ${final ? "the reload" : "Retry"} attaches to it.`
+      : "No shell was started.";
+    return final ? `This page will not load the terminal again; reload the window to try once more. ${shell}` : shell;
+  }
+
+  function releaseLoadFailureKeyboard(): void {
+    const holder = document.activeElement;
+    if (holder instanceof HTMLElement && loadFailureArea?.contains(holder)) holder.blur();
+  }
+
   async function restart(): Promise<void> {
     closeTabMenu();
     if (tab.terminalSessionId) {
@@ -3820,28 +3838,25 @@
       class="terminal-host"
       data-file-drop-zone
       ondrop={onTerminalFileDrop}
+      hidden={loadFailure !== null}
       bind:this={host}
     ></div>
     {#if loadFailure}
-      <!-- Over the terminal's area only: the inspector, when open, keeps its
-           column. -->
-      <div
-        class="terminal-load-failure"
-        role="alert"
-        style:right={tab.inspectorOpen ? `${tab.inspectorWidth ?? 280}px` : "0"}
-      >
-        <p class="terminal-load-failure-title">The terminal could not start.</p>
-        <p>
-          {loadFailure.final
-            ? "The terminal engine cannot run in this window. Reload the window to try again."
-            : "Loading the terminal engine failed."}
-        </p>
-        <p class="terminal-load-failure-detail">{loadFailure.detail}</p>
-        {#if loadFailure.final}
-          <button type="button" bind:this={loadFailureAction} onclick={() => void reloadWindow()}>Reload window</button>
-        {:else}
-          <button type="button" bind:this={loadFailureAction} onclick={retryLoad}>Retry</button>
-        {/if}
+      <!-- In the terminal's place in the row: beside an open inspector the
+           card centres in the terminal's column. -->
+      <div class="terminal-load-failure" bind:this={loadFailureArea}>
+        <FailureCard
+          bind:this={loadFailureCard}
+          title="The terminal view could not load."
+          error={loadFailure.error}
+          hint={loadFailureHint(loadFailure.final)}
+          onRetry={loadFailure.final ? undefined : retryLoad}
+          retryLabel="Retry"
+          reloadLabel={commandTitle("app.window.reload")}
+          onReload={() => void reloadWindow()}
+          closeLabel={tabLabel(tab)}
+          onClose={() => void closeTab(paneId, tab.id)}
+        />
       </div>
     {/if}
     <TerminalConnectionNotice
@@ -4083,50 +4098,16 @@
   }
   .cli-reload-notice button:hover { border-color: var(--btn-hover); }
   .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; position: relative; isolation: isolate; }
+  /* The load error takes the hidden host's place in the row, so the
+     inspector keeps its column and the card centres in the terminal's. It
+     paints nothing around the card, which leaves a transparent window's
+     tint to the tab, painted once. */
   .terminal-load-failure {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    /* Above the empty terminal area, as the connection pill is. */
-    z-index: 20;
-    box-sizing: border-box;
+    flex: 1;
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 8px;
-    padding: 16px 20px;
+    min-width: 0;
+    min-height: 0;
     overflow: auto;
-    background: var(--terminal-background, var(--bg));
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.4;
-  }
-  .terminal-load-failure p {
-    margin: 0;
-    max-width: 36rem;
-  }
-  .terminal-load-failure-title {
-    color: var(--text);
-    font-weight: 600;
-  }
-  .terminal-load-failure-detail {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    overflow-wrap: anywhere;
-  }
-  .terminal-load-failure button {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--btn-bg);
-    color: var(--text);
-    font: inherit;
-    padding: 4px 10px;
-    cursor: pointer;
-  }
-  .terminal-load-failure button:hover {
-    border-color: var(--btn-hover);
   }
   .program-inspector, .queue-inspector { padding: 10px; overflow-wrap: anywhere; }
   .program-inspector h3, .queue-inspector h3 { margin: 0 0 10px; font-size: 13px; }

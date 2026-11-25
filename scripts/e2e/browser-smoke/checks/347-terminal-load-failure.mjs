@@ -1,7 +1,7 @@
-// A terminal whose core fails to load shows its own error with Retry, opens
-// no other terminal in its place and spawns no PTY, while the window around
-// it keeps working; Retry, once the core loads again, opens one Ghostty
-// terminal on one PTY.
+// A terminal whose core fails to load shows its own error, saying no shell was
+// started, with Retry, Reload window and Close; it opens no other terminal in
+// its place and spawns no PTY, while the window around it keeps working;
+// Retry, once the core loads again, opens one Ghostty terminal on one PTY.
 //
 // The failure is the network's: request interception aborts the page's
 // requests for the core's wasm asset while the check holds it failed, and
@@ -106,7 +106,9 @@ export default {
       await ctx.shot("347-load-error");
       failed.coreRequests = details.coreRequests.length;
       assert.ok(failed.coreRequests >= 1 && details.coreRequests.every((r) => r.failed), "the page asked for the core and every request failed");
-      assert.deepEqual(failed.state.actions, ["Retry"], "a failed fetch offers Retry");
+      assert.deepEqual(failed.state.actions, ["Retry", "Reload window", `Close ${NAME}`], "a failed fetch offers Retry, a reload and Close");
+      assert.ok(failed.state.error.includes("The terminal view could not load."), "the error says what failed");
+      assert.ok(failed.state.error.includes("No shell was started."), "and that no shell was started");
       assert.deepEqual(failed.state.area, [], "nothing opened in the terminal's area");
       await sleep(1_000);
       failed.sessions = await sessions();
