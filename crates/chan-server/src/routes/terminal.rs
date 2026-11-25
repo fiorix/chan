@@ -1602,9 +1602,8 @@ const STALL_CLOSE: (u16, &str) = (1013, "terminal view stalled");
 /// it, so that frame starts the clock. A client that runs (it sends
 /// frames) and still reports no progress for [`NO_PROGRESS_LIMIT`] is
 /// wedged: its socket closes, from the loop or from a replay's wait for
-/// send credit, and the client redials from its parsed cursor. A stopped
-/// page sends nothing and keeps waiting, and its view goes on over this
-/// socket when it wakes.
+/// send credit, and the client redials. A stopped page sends nothing and
+/// keeps waiting, and its view goes on over this socket when it wakes.
 struct Stall {
     /// The parsed position the wait started at; an advance restarts it.
     acked: Option<u64>,

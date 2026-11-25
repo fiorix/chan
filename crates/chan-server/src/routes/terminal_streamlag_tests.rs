@@ -2235,7 +2235,7 @@ async fn a_view_that_reads_without_acknowledging_is_bounded_and_resumes_with_a_c
 const SHORT_ACK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The close a socket ends a stalled view with: 1013, try again later,
-/// which the client answers by redialing from its parsed cursor.
+/// which the client answers by redialing.
 fn assert_stall_close(frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>) {
     let frame = frame.expect("a stalled view's close carries a code");
     assert_eq!(
@@ -2248,7 +2248,7 @@ fn assert_stall_close(frame: Option<&tokio_tungstenite::tungstenite::protocol::C
 
 /// Report `short`, a position before what the view was sent, then ping as
 /// a live page does, and read until the server ends the socket. The
-/// client redials from its cursor when it does.
+/// client redials when it does.
 async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u64) {
     ack(view, generation, short).await;
     let acked_at = tokio::time::Instant::now();
