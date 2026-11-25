@@ -1630,6 +1630,9 @@
       if (visible) takeSpineChanges();
       else graphDirty = true;
     }
+    // Its list of directories was taken when it began, and an answer over
+    // the listing cap taken since read none: one opened since is read now.
+    if (landed && seq === spineSeq && (kept ?? taken)?.tree != null) loadOpenedChildren(true);
   }
 
   /// The root and every opened directory whose own directories are opened
@@ -2062,7 +2065,7 @@
       // The store publishes an answer's mark no later than its view.
       taken = { view, partial, tree: graphData.tree };
       kept = null;
-      // A spine still loading reads every opened directory the tree draws.
+      // A spine still loading reads them once it lands (`loadSpine`).
       if (taken.tree != null && spineRead !== null && !spineLoading && spineError === null) loadOpenedChildren(true);
     });
   });
