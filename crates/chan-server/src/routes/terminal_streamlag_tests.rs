@@ -2187,11 +2187,23 @@ async fn released_view_running(body: &str) -> (Rig, Client, u64, u64, Vec<u8>) {
     (rig, view, generation, start, received)
 }
 
+/// The client's first frame since the release is an ack that advances and
+/// stays short. An advance is progress, so that frame starts no clock and a
+/// client quiet after it stays open past the bound; its next frame does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_released_view_whose_ack_stays_short_is_closed_within_the_bound() {
     let _gate = pty_test_lock();
     let (rig, mut view, generation, start, received) = released_view().await;
-    assert_short_ack_is_closed(&mut view, generation, start + received - 1).await;
+    let short = start + received - 1;
+    ack(&mut view, generation, short).await;
+    let quiet_until =
+        tokio::time::Instant::now() + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(2);
+    assert_eq!(
+        read_until_closed(&mut view, quiet_until).await,
+        None,
+        "an advancing ack read as the first frame after the release starts no clock"
+    );
+    assert_short_ack_is_closed(&mut view, generation, short).await;
     rig.handle.send_input(b"\n");
 }
 
@@ -2228,8 +2240,8 @@ async fn read_until_closed(
 
 /// The view's client reports everything it was sent, and the view recovers
 /// on its socket: a session frame whose count closes the gap between that
-/// position and the server's.
-async fn assert_recovers_on_its_socket(view: &mut Client, generation: u64, sent: u64) {
+/// position and the server's. Returns that frame.
+async fn assert_recovers_on_its_socket(view: &mut Client, generation: u64, sent: u64) -> Value {
     ack(view, generation, sent).await;
     let recovery = loop {
         match next(view).await {
@@ -2253,6 +2265,7 @@ async fn assert_recovers_on_its_socket(view: &mut Client, generation: u64, sent:
         number(&recovery, "seq"),
         "the count closes the gap between the view's cursor and the server's"
     );
+    recovery
 }
 
 /// A released view's client that sends one frame shows it runs, and that
@@ -2686,6 +2699,65 @@ async fn a_recovery_waiting_for_credit_is_not_closed_by_the_wait_it_recovered_fr
          past the bound"
     );
     rig.handle.send_input(b"\n");
+}
+
+/// A lagged view recovers on its socket into a replay larger than the
+/// window, and the reader releases the new view while that replay waits for
+/// credit. The wait runs inside the socket loop's recovery, which it ends:
+/// the socket still ends with the stall close the bound after the client's
+/// ping, not with a dropped connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovery_released_while_its_replay_waits_for_credit_is_closed_the_bound_after_its_ping()
+{
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do printf 'T'; done").await;
+    let (mut view, initial) = rig.attach_acking().await;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    let _pending = rig.block_output().await;
+    rig.flood();
+    finish_blocked_frame(&mut view).await;
+    // The flood overran the view's broadcast while its send was pending.
+    let recovery =
+        assert_recovers_on_its_socket(&mut view, generation, start + BLOCKED_BYTES as u64).await;
+    let window = number(&recovery, "ack_window");
+    assert!(
+        number(&recovery, "replay_bytes") > window,
+        "fixture: the recovery's replay exceeds the window"
+    );
+    assert_eq!(
+        read_replay_until_quiet(&mut view).await,
+        window,
+        "fixture: the recovery waits for credit at the window"
+    );
+    // The program prints a `T` for each line it reads; the second tick
+    // past the new view can only follow its release, whichever tick the
+    // reader held.
+    for _ in 0..2 {
+        rig.handle.send_input(b"\n");
+        next_tick(&mut watcher).await;
+    }
+    let pinged_at = tokio::time::Instant::now();
+    send(&mut view, json!({"type": "ping"})).await;
+    let closed_at =
+        read_until_closed(&mut view, pinged_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK).await;
+    let Some(closed_at) = closed_at else {
+        panic!(
+            "a recovery released while its replay waits for credit, whose client pinged \
+             once, is closed within {NO_PROGRESS_LIMIT:?} (+{SHORT_ACK_SLACK:?}) of that \
+             ping: still open"
+        );
+    };
+    let waited = closed_at - pinged_at;
+    assert!(
+        waited >= NO_PROGRESS_LIMIT,
+        "the client gets the whole bound from its frame: closed after {waited:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
