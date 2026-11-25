@@ -9,10 +9,10 @@
 // keeps its kit for the page's life, so each case opens a page of its own: a
 // fresh module graph, with the socket stand-in and the software canvas.
 //
-// What each case reads is what the user and the server would see: the error
-// and its action, the sockets dialed (each one a PTY spawned or attached),
-// the instances made, the canvases in the terminal's area and the console
-// report.
+// What each case reads is what the user and the server would see: the error,
+// what it says and its actions, where the keyboard is, the sockets dialed
+// (each one a PTY spawned or attached), the instances made, the canvases in
+// the terminal's area and the console report.
 
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } from "vitest";
@@ -32,6 +32,13 @@ vi.mock("../api/desktop", async (importOriginal) => ({
 
 const CORE = readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm");
 const SESSION = "sess-live";
+
+// What the error says: what failed, then what still holds and the way past it.
+const FAILED = "The terminal view could not load.";
+const NO_SHELL = "No shell was started.";
+const SHELL_RUNS = "Its shell is still running, and Retry attaches to it.";
+const FINAL = "This page will not load the terminal again; reload the window to try once more.";
+const FINAL_SHELL_RUNS = "Its shell is still running, and the reload attaches to it.";
 
 /// The engine's own, kept before any case spies on them.
 const instantiate = WebAssembly.instantiate.bind(WebAssembly) as (
@@ -53,10 +60,13 @@ async function openPage() {
   const tabs = await import("../state/tabs.svelte");
   const { api } = await import("../api/client");
   const { reloadWindow } = await import("../api/desktop");
+  const { terminalStatusProps } = await import("../__tests__/terminalStatusProps.svelte");
   const { default: TerminalTab } = await import("./TerminalTab.svelte");
   harness.installTerminalDom();
   widget.installSoftwareCanvas();
   store.__testSetStandalonePreferences(terminalPreferences());
+  // The mocked module outlives the page's module graph, and so do its calls.
+  vi.mocked(reloadWindow).mockClear();
   const mounts: Array<Record<string, unknown>> = [];
   return {
     svelte,
@@ -71,6 +81,16 @@ async function openPage() {
       const mounted = widget.mountGhostty(TerminalTab, tab);
       mounts.push(mounted.component);
       return mounted;
+    },
+    /// Mount a terminal whose placement a case changes, as the pane tree
+    /// changes it: `focused` is the pane's focus on its active tab.
+    place(tab: import("../state/tabs.svelte").TerminalTab, place: { active: boolean; focused: boolean }) {
+      const props = terminalStatusProps(tab);
+      Object.assign(props, place);
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounts.push(svelte.mount(TerminalTab, { target, props }) as Record<string, unknown>);
+      return { target, props };
     },
   };
 }
@@ -141,6 +161,33 @@ function action(error: HTMLElement, name: string): HTMLButtonElement {
   return button;
 }
 
+/// The ways out the error offers a terminal tab: Retry when the next load can
+/// pass, Reload window always, and Close.
+function waysOut(p: Page, tab: import("../state/tabs.svelte").TerminalTab, retry: boolean): string[] {
+  return [...(retry ? ["Retry"] : []), "Reload window", `Close ${p.tabs.tabLabel(tab)}`];
+}
+
+/// What a screen reader reads after an action's name: the text of the
+/// elements its aria-describedby names.
+function description(button: HTMLElement): string {
+  return (button.getAttribute("aria-describedby") ?? "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent?.trim() ?? `<no element ${id}>`)
+    .join(" ");
+}
+
+/// Whether the keyboard is on an element inside the error.
+function errorHoldsKeyboard(error: HTMLElement): boolean {
+  return document.activeElement !== null && error.contains(document.activeElement);
+}
+
+/// The tabs seated in the terminal's pane.
+function seated(p: Page): string[] {
+  const pane = p.tabs.activeLayout().nodes[p.harness.TERMINAL_PANE] as { tabs: Array<{ id: string }> };
+  return pane.tabs.map((tab) => tab.id);
+}
+
 function terminalArea(target: HTMLElement): HTMLElement {
   return target.querySelector<HTMLElement>(".terminal-host")!;
 }
@@ -183,7 +230,7 @@ describe("a terminal whose core fails to load", () => {
     const { target } = page.open(tab!);
 
     const error = await shownLoadError(target);
-    expect(actions(error), "the next load can pass").toEqual(["Retry"]);
+    expect(actions(error), "the next load can pass").toEqual(waysOut(page, tab!, true));
     expect(error.textContent, "the error says why").toContain("Failed to fetch");
     expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
     expect(terminalArea(target).querySelector("canvas"), "no terminal in its area").toBeNull();
@@ -226,6 +273,8 @@ describe("a terminal whose core fails to load", () => {
     const [tab] = page.harness.seatTerminals([page.harness.terminalTab({ terminalSessionId: SESSION })]);
     const { target } = page.open(tab!);
     const error = await shownLoadError(target);
+    expect(error.textContent, "the error says the shell still runs and Retry attaches to it").toContain(SHELL_RUNS);
+    expect(error.textContent).not.toContain(NO_SHELL);
     expect(page.harness.TerminalSocket.all, "nothing dialed while the view failed").toHaveLength(0);
     expect(tab!.terminalSessionId, "the tab keeps its session").toBe(SESSION);
 
@@ -247,7 +296,7 @@ describe("a terminal whose core fails to load", () => {
     ]);
     const { target } = page.open(first!);
     const error = await shownLoadError(target);
-    expect(actions(error), "only a reload can help").toEqual(["Reload window"]);
+    expect(actions(error), "only a reload can help").toEqual(waysOut(page, first!, false));
     expect(error.textContent, "the error says why").toContain("unsupported SIMD");
     expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
@@ -256,7 +305,7 @@ describe("a terminal whose core fails to load", () => {
     expect(page.reloadWindow, "the window reloads").toHaveBeenCalledTimes(1);
 
     const next = page.open(second!);
-    expect(actions(await shownLoadError(next.target)), "the next terminal").toEqual(["Reload window"]);
+    expect(actions(await shownLoadError(next.target)), "the next terminal").toEqual(waysOut(page, second!, false));
     expect(core.requests(), "the failure was kept").toBe(1);
     expect(page.harness.xterm.terminals).toHaveLength(0);
     expect(takeShownLoadFailures(), "two errors shown").toBe(2);
@@ -278,7 +327,7 @@ describe("a terminal whose core fails to load", () => {
     const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
     const { target } = page.open(tab!);
     const error = await shownLoadError(target);
-    expect(actions(error), "the next instance can pass").toEqual(["Retry"]);
+    expect(actions(error), "the next instance can pass").toEqual(waysOut(page, tab!, true));
     expect(error.textContent).toContain("Out of memory");
     expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
@@ -300,10 +349,89 @@ describe("a terminal whose core fails to load", () => {
     const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
     const { target } = page.open(tab!);
     const error = await shownLoadError(target);
-    expect(actions(error), "only a corrected build can help").toEqual(["Reload window"]);
+    expect(actions(error), "only a corrected build can help").toEqual(waysOut(page, tab!, false));
     expect(error.textContent, "the error names the core").toContain("libghostty-vt 2.x");
     expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
+  });
+});
+
+describe("what a terminal's load error says and offers", () => {
+  test("a fresh tab's error is the tab's failure card: what failed, that no shell was started, and Retry, Reload window and Close", async () => {
+    const core = serveCore();
+    core.failNext(new TypeError("Failed to fetch"));
+    page = await openPage();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+    const error = await shownLoadError(target);
+
+    expect(error.classList.contains("pane-failed"), "the card every failed tab body shows").toBe(true);
+    expect(actions(error)).toEqual(waysOut(page, tab!, true));
+    const text = error.textContent ?? "";
+    expect(text, "what failed").toContain(FAILED);
+    expect(text, "no shell to lose").toContain(NO_SHELL);
+    expect(text, "no cause the page does not know").not.toContain("engine");
+    const retry = action(error, "Retry");
+    expect(description(retry), "the action names what it answers").toBe(`${FAILED} Failed to fetch ${NO_SHELL}`);
+    expect(description(action(error, "Reload window"))).toBe(description(retry));
+
+    action(error, "Reload window").click();
+    expect(page.reloadWindow, "Reload window reloads the window").toHaveBeenCalledTimes(1);
+    expect(core.requests(), "and loads nothing in this page").toBe(1);
+    expect(page.harness.TerminalSocket.all).toHaveLength(0);
+
+    action(error, `Close ${page.tabs.tabLabel(tab!)}`).click();
+    await vi.waitFor(() => expect(seated(page!), "Close closes the tab").not.toContain(tab!.id));
+    expect(page.harness.TerminalSocket.all, "and dials nothing").toHaveLength(0);
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
+  });
+
+  test("a final failure says this page will not load the terminal again, and its Reload window waits to be chosen", async () => {
+    serveCore();
+    vi.spyOn(WebAssembly, "compile").mockRejectedValue(new WebAssembly.CompileError("unsupported SIMD"));
+    page = await openPage();
+    const [fresh, live] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1" }),
+      page.harness.terminalTab({ id: "term-2", terminalSessionId: SESSION }),
+    ]);
+    const { target } = page.open(fresh!);
+    const error = await shownLoadError(target);
+    expect(actions(error)).toEqual(waysOut(page, fresh!, false));
+    expect(error.textContent).toContain(FAILED);
+    expect(error.textContent).toContain(`${FINAL} ${NO_SHELL}`);
+    expect(error.textContent, "no cause the page does not know").not.toContain("engine");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(errorHoldsKeyboard(error), "a typed-ahead Enter or Space must not reload the window").toBe(false);
+    expect(description(action(error, "Reload window"))).toBe(`${FAILED} unsupported SIMD ${FINAL} ${NO_SHELL}`);
+
+    const next = await shownLoadError(page.open(live!).target);
+    expect(next.textContent, "a live session's reload attaches to it").toContain(`${FINAL} ${FINAL_SHELL_RUNS}`);
+    expect(page.reloadWindow).not.toHaveBeenCalled();
+    expect(takeShownLoadFailures(), "two errors shown").toBe(2);
+  });
+
+  test("the error's action gives up the keyboard when its tab stops being the focused pane's active tab", async () => {
+    const core = serveCore();
+    core.failNext();
+    page = await openPage();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target, props } = page.place(tab!, { active: true, focused: true });
+    const error = await shownLoadError(target);
+    await vi.waitFor(() => expect(document.activeElement, "the focused pane's Retry holds the keyboard").toBe(action(error, "Retry")));
+
+    props.focused = false;
+    page.svelte.flushSync();
+    expect(errorHoldsKeyboard(error), "another pane took focus").toBe(false);
+
+    props.focused = true;
+    page.svelte.flushSync();
+    await vi.waitFor(() => expect(document.activeElement, "the pane's focus is back").toBe(action(error, "Retry")));
+
+    props.active = false;
+    props.focused = false;
+    page.svelte.flushSync();
+    expect(errorHoldsKeyboard(error), "another tab of the pane is shown").toBe(false);
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 });
