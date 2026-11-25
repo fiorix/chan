@@ -79,14 +79,6 @@ test("a reset lets go of a hold its case never released", async () => {
   expect(ghosttyFixture.terminals).toEqual([term]);
 });
 
-test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {
-  const [tab] = seatTerminals([terminalTab()]);
-  const mounted = await mountTerminal(TerminalTab, tab!);
-  expect(() => mounted.term).toThrow(/mountGhosttyTerminal/);
-  expect({ ...mounted }, "a spread reads nothing").not.toHaveProperty("term");
-  expect(ghosttyFixture.terminals).toHaveLength(1);
-});
-
 test("typed input reaches the PTY", async () => {
   const { term, socket } = await opened();
   typeInGhostty(term, "ls\r");

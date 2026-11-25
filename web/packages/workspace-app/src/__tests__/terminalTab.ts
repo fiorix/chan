@@ -1,8 +1,7 @@
 // Mounting TerminalTab in jsdom over a stand-in WebSocket. A file that
 // declares the shared fixture in `./ghosttyTab` mounts it on the real widget
-// over the vendored core. The xterm modules TerminalTab still imports are
-// replaced with the recorders in `./xterm`, re-exported here. A terminal
-// opened without the fixture fails its test (the guard in vitest.setup.ts).
+// over the vendored core. A terminal opened without the fixture fails its
+// test (the guard in vitest.setup.ts).
 // This module imports no component: a test file declares its mocks, imports
 // TerminalTab itself and hands it to mountTerminal.
 
@@ -12,21 +11,10 @@ import { expect, vi } from "vitest";
 
 import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { FakeTerminal, xterm } from "./xterm";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { resetLayout } from "./tabs";
 
 export { terminalTab } from "./tabs";
-export {
-  FakeTerminal,
-  fitAddonModule,
-  searchAddonModule,
-  serializeAddonModule,
-  webglAddonModule,
-  webLinksAddonModule,
-  xterm,
-  xtermModule,
-} from "./xterm";
 
 /// The terminal WebSocket, recording what the component sends. A socket is
 /// open when made, unless `TerminalSocket.connecting` is set: then it stays
@@ -145,8 +133,8 @@ function installFrames(): void {
 export const resizeObservers: Array<{ callback: () => void; targets: Element[] }> = [];
 
 /// The DOM a mounted TerminalTab reads: observers, sockets, frames, canvas,
-/// font loading and media queries. Frames run at once for the stand-in and
-/// one task later under the shared fixture; the fixture serves the widget's
+/// font loading and media queries. Frames run at once, or one task later in
+/// a file that declared the shared fixture; the fixture serves the widget's
 /// canvases itself.
 export function installTerminalDom(): void {
   globalThis.ResizeObserver = class {
@@ -201,16 +189,19 @@ export function ghosttyFixtureDeclared(): boolean {
   return ghostty !== null;
 }
 
-/// Mount `TerminalTab` for a seated tab and wait for its terminal and its
-/// socket: the widget under the shared fixture, the stand-in otherwise.
-/// `term` is the stand-in. Under the fixture reading it throws: a file that
-/// reads the widget mounts it with `mountGhosttyTerminal` in `./ghosttyTab`,
-/// which refuses a file that did not declare the fixture.
+/// Mount `TerminalTab` for a seated tab and wait for its widget and its
+/// socket. Throws before mounting unless the file declared the shared
+/// fixture; a test that reads the widget mounts it with
+/// `mountGhosttyTerminal` in `./ghosttyTab`, which returns it.
 export async function mountTerminal(
   TerminalTab: Component<any>,
   tab: TerminalTabState,
   props: { focused?: boolean; active?: boolean; side?: "a" | "b" } = {},
-): Promise<{ target: HTMLElement; component: Record<string, unknown>; term: FakeTerminal }> {
+): Promise<{ target: HTMLElement; component: Record<string, unknown> }> {
+  const fixture = ghostty;
+  if (!fixture) {
+    throw new Error('mountTerminal needs the shared fixture: vi.mock "../terminal/backend" with ghosttyBackendModule');
+  }
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
@@ -226,25 +217,11 @@ export async function mountTerminal(
   mounted.push(component);
   await tick();
   await tick();
-  if (ghostty) {
-    // The widget dials only once it has loaded and opened, so its own wait
-    // bounds the load, and the socket follows.
-    await ghostty.opened(target);
-    await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
-    expect(xterm.terminals, "the shared fixture opened no stand-in xterm").toHaveLength(0);
-    // Not enumerable, so a caller that spreads the result reads nothing.
-    const opened: { target: HTMLElement; component: Record<string, unknown> } = { target, component };
-    return Object.defineProperty(opened, "term", {
-      get(): never {
-        throw new Error("this terminal is the widget: mount it with mountGhosttyTerminal in ./ghosttyTab to read it");
-      },
-    }) as typeof opened & { term: FakeTerminal };
-  }
+  // The widget dials only once it has loaded and opened, so its own wait
+  // bounds the load, and the socket follows.
+  await fixture.opened(target);
   await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
-  await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
-  const term = xterm.terminals.at(-1);
-  if (!(term instanceof FakeTerminal)) throw new Error("the stand-in xterm opened no FakeTerminal");
-  return { target, component, term };
+  return { target, component };
 }
 
 export function openSocket(): TerminalSocket {
@@ -339,16 +316,6 @@ export function resetTerminals(): void {
   for (const component of mounted.splice(0)) unmount(component);
   TerminalSocket.all.splice(0);
   TerminalSocket.connecting = false;
-  xterm.terminals.splice(0);
-  xterm.serializeCalls.splice(0);
-  xterm.serialized = "";
-  xterm.fit.calls = 0;
-  xterm.fit.failure = null;
-  xterm.fit.size = null;
-  xterm.webgl.splice(0);
-  xterm.webLinks.splice(0);
-  xterm.webglThrows = false;
-  xterm.textareaFocus = false;
   ghostty?.reset();
   resizeObservers.splice(0);
   installFrames();

@@ -22,7 +22,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { failOnTerminalInitFailures } from "../../vitest.setup";
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
-import { installTerminalDom, resetTerminals, seatTerminals, TERMINAL_PANE, terminalTab } from "../__tests__/terminalTab";
+import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, TERMINAL_PANE, terminalTab } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 installTerminalDom();
@@ -90,5 +90,11 @@ test("a terminal opened without the shared widget fixture fails its test under a
 test("the widget's checked mount refuses a file that did not declare the fixture", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await expect(mountGhosttyTerminal(TerminalTab, tab!)).rejects.toThrow(/needs the shared fixture/);
+  expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
+});
+
+test("the shared mount refuses a file that did not declare the fixture", async () => {
+  const [tab] = seatTerminals([terminalTab()]);
+  await expect(mountTerminal(TerminalTab, tab!)).rejects.toThrow(/mountTerminal needs the shared fixture/);
   expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
 });
