@@ -65,6 +65,14 @@ export interface ITheme {
   cursorAccent?: string;
   selectionBackground?: string;
   selectionForeground?: string;
+  /** Find's match background; default `#806d36`. */
+  searchMatchBackground?: string;
+  /** Find's match foreground; unset, a match keeps its glyph's own ink, under the contrast floor. */
+  searchMatchForeground?: string;
+  /** Find's active match background; default `#ffb454`. */
+  searchActiveMatchBackground?: string;
+  /** Find's active match foreground; default `#000000`. */
+  searchActiveMatchForeground?: string;
 
   // ANSI colors (0-15)
   black?: string;

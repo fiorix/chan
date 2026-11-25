@@ -137,6 +137,22 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  test("matchAt reads one entry of the snapshot readMatches reads, feeding first after a write", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    expect([0, 1, 2, 3].map((i) => s.matchAt(i))).toEqual(ERRORS);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS);
+    expect(s.matchAt(4), "past the end").toBeNull();
+    expect(() => s.matchAt(-1)).toThrow(RangeError);
+    expect(() => s.matchAt(0.5)).toThrow(RangeError);
+    t.write("line 12 ERROR here");
+    expect(s.matchAt(0), "the write's match, read after a feed").toEqual(range(12, 8, 12, 12));
+    expect(s.readMatches(0, 1000).ranges[0]).toEqual(range(12, 8, 12, 12));
+    s.free();
+  });
+
   test("the same needle keeps the results and another one restarts the scan", async () => {
     const t = await errorTerminal();
     const s = t.createSearch();
@@ -431,6 +447,7 @@ describe("a search over the binding's terminal", () => {
     t.free();
     expect(s.state()).toEqual({ total: 0, index: null, active: null, complete: true });
     expect(s.matchesBetween(0, 9, 10)).toEqual([]);
+    expect(s.matchAt(0)).toBeNull();
     expect(s.selectNext()).toBe(false);
     expect(s.selectPrev()).toBe(false);
     expect(s.step(1, () => 0)).toBe("complete");
