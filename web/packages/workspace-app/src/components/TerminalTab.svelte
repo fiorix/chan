@@ -1323,15 +1323,50 @@
       });
     } catch (err) {
       if (overtaken()) return;
-      console.warn("[chan] ghostty-web failed to load:", err);
-      loadFailure = { final: ghosttyLoadIsFinal(err), error: err };
-      // The focused pane's terminal would take the keyboard once open; its
-      // Retry takes it instead, once rendered. A final failure's card takes
-      // nothing (see FailureCard's focusRetry).
-      void tick().then(focusLoadedTerminal);
+      showLoadFailure(err, ghosttyLoadIsFinal(err));
       return;
     }
     if (attempt !== startAttempt || !host || term) return;
+    try {
+      openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, secretMaskSuffixes });
+    } catch (err) {
+      // What was built and wired goes as at a restart, and the error takes
+      // the terminal's place: the next instance may open.
+      teardown();
+      showLoadFailure(err, false);
+      return;
+    }
+    // This xterm is brand-new and EMPTY, so the attach below carries no
+    // byte cursor and the server replays the session's full ring. A
+    // carried-over cursor would make the server skip everything the
+    // PREVIOUS xterm had seen, and that buffer died with term.dispose().
+    void connect();
+    queueMicrotask(focusLoadedTerminal);
+  }
+
+  /// Show why the terminal's view did not load in its place, and report it.
+  function showLoadFailure(err: unknown, final: boolean): void {
+    console.warn("[chan] ghostty-web failed to load:", err);
+    loadFailure = { final, error: err };
+    // The focused pane's terminal would take the keyboard once open; its
+    // Retry takes it instead, once rendered. A final failure's card takes
+    // nothing (see FailureCard's focusRetry).
+    void tick().then(focusLoadedTerminal);
+  }
+
+  /// Construct the terminal over its own instance, open it in `host` (the
+  /// bound host, checked by the caller) and wire it. Throws when the widget
+  /// cannot be constructed or opened, leaving what it wired to teardown().
+  function openTerminal(
+    host: HTMLElement,
+    ghosttyKit: GhosttyKit,
+    ghosttyInstance: GhosttyVt,
+    { fontFamily, rendererFontSize, secretMaskSuffixes }: {
+      fontFamily: string;
+      rendererFontSize: number;
+      secretMaskSuffixes: readonly string[];
+    },
+  ): void {
     // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
@@ -1530,12 +1565,6 @@
           statusDetail = detail;
         });
     hostGridKnown = gridMeasured;
-    // This xterm is brand-new and EMPTY, so the attach below carries no
-    // byte cursor and the server replays the session's full ring. A
-    // carried-over cursor would make the server skip everything the
-    // PREVIOUS xterm had seen, and that buffer died with term.dispose().
-    void connect();
-    queueMicrotask(focusLoadedTerminal);
   }
 
   function clearLiveness(): void {
