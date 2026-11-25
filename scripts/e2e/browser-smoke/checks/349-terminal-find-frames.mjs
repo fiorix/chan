@@ -28,6 +28,10 @@
 //               position order from the core's own.
 //   NEWEST   -- the stream again, find active from the newest match (the
 //               stream prunes it).
+//   WRAP     -- find steps to the oldest match, one echoed line follows,
+//               and older, pressed while the rescan that line started is
+//               partial (its instrument), must first land on the buffer's
+//               last "e", in the call or within five seconds.
 //   OLDEST   -- find steps to the oldest match (newer from the newest
 //               wraps), and the stream again (it prunes that match too).
 //   PRESS    -- a fresh find, the active match 20,000 matches up from the
@@ -320,6 +324,23 @@ export default {
       await until("a complete count after the stream", async () => !(await search()).state.partial);
       details.legs.newest = { ...(await collect(a, await window_())), search: await search() };
 
+      // WRAP
+      await term.evaluate((t) => t.search.step("e", "newer"));
+      details.wrapStart = await search();
+      await cs(["write", "--tab-name", TAB, "echo sev''en349\n"]);
+      await until("the echoed line", () => screenHas("seven349"));
+      details.wrap = await term.evaluate((t) => {
+        const before = t.search.state;
+        t.search.step("e", "older");
+        return { before, state: t.search.state };
+      });
+      details.wrap.after = await until("a landing after the wrap", async () => (await search()).active, 5_000).catch(() => null);
+      details.wrap.expected = await term.evaluate(() => window.__find349.lastBefore());
+      details.wrap.landed = onCell(details.wrap.after, details.wrap.expected);
+      if (!details.wrap.before.partial) failures.push("wrap instrument: the count was complete before the press, so the press read no rescan");
+      else if (!details.wrap.landed) failures.push(`wrap: older from the oldest after output landed on ${at(details.wrap.after)}, not the buffer's last "e" at ${at(details.wrap.expected)}`);
+      await until("a complete count after the wrap", async () => !(await search()).state.partial);
+
       // OLDEST
       await term.evaluate((t) => t.search.step("e", "newer"));
       details.oldestStart = await search();
@@ -446,7 +467,8 @@ export default {
       writeFileSync(join(ctx.outDir, "349-find-frames.json"), JSON.stringify(details, null, 2) + "\n");
       console.log(`349 frames (recorded, not gating): ${JSON.stringify(details.frames)}`);
       const presses = details.presses.map((p) => `${p.direction}:${p.landed ? "neighbour" : "wrong"} ${p.ms.toFixed(2)} ms index-before=${p.indexBefore}`).join(" ");
-      console.log(`349 verdict: ${details.verdict} count=${scan.total}/${scan.buffer} newest=${scan.newest ? "bottom-most" : "wrong"} press=${presses} reflow=${instrument.length ? "instrument" : reflowKept ? "kept" : "lost"} unplaced-at-1.5s=${details.reflowUnplacedAt1500}/4`);
+      const wrap = !details.wrap.before.partial ? "instrument" : details.wrap.landed ? "newest" : "wrong";
+      console.log(`349 verdict: ${details.verdict} count=${scan.total}/${scan.buffer} newest=${scan.newest ? "bottom-most" : "wrong"} wrap=${wrap} press=${presses} reflow=${instrument.length ? "instrument" : reflowKept ? "kept" : "lost"} unplaced-at-1.5s=${details.reflowUnplacedAt1500}/4`);
       if (failures.length) throw new Error(`349 verdict: FAIL: ${failures.join("; ")}`);
       return { verdict: details.verdict, frames: details.frames, presses: details.presses, reflow: details.reflow };
     } finally {
