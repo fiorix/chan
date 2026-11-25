@@ -2888,9 +2888,11 @@
 
   function explicitCloseSession(): void {
     if (tab.terminalSessionId) {
-      // A terminal whose view did not load never dialed, so no socket
-      // carries the close frame to its live session; the route ends it.
-      if (!send({ type: "close" }) && !term) {
+      // The close frame needs an open socket. A view that did not load never
+      // dialed, and a loaded one can still be dialing, or waiting to redial
+      // after a drop; with no socket to carry the frame, the route ends the
+      // live session.
+      if (!send({ type: "close" })) {
         void api.closeTerminal(tab.terminalSessionId).catch(() => {});
       }
       clearTerminalMetadataSink();
