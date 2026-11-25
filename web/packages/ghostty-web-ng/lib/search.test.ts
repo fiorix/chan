@@ -129,17 +129,17 @@ function batchPerFrame() {
     return batch;
   });
 }
-// Placement stopped once at list entry `at` with its slice spent, as a
-// deadline falling there stops it.
-function placementStopsAt(at: number) {
+// Placement stopped once at each list entry of `at` in turn, with its
+// slice spent, as a deadline falling there stops it.
+function placementStopsAt(...at: number[]) {
   const read = VtSearch.prototype.readMatches;
-  let armed = true;
   vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, start: number, budget: number) {
     const batch = read.call(this, start, budget);
-    if (!armed || start > at || batch.next <= at) return batch;
-    armed = false;
+    const cut = at[0];
+    if (cut === undefined || start > cut || batch.next <= cut) return batch;
+    at.shift();
     now += 5;
-    return { ranges: batch.ranges.slice(0, at - start), next: at, total: batch.total };
+    return { ranges: batch.ranges.slice(0, cut - start), next: cut, total: batch.total };
   });
 }
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
@@ -666,6 +666,35 @@ describe('widget search', () => {
     }
     expect(active(term)).toEqual([wrapped]);
     expect(search.state).toEqual({ index: 125, total: 241, partial: false });
+  });
+
+  test.each([
+    { name: 'two', input: () => paged(1), rows: 5, steps: 1, from: 236, cut: 118, want: 234, index: 3, total: 120 },
+    { name: 'three', input: () => threePaged, rows: 20, steps: 2, from: 474, cut: 224, want: 472, index: 4, total: 230 },
+  ])('a write after a press that read the active-area count takes a window ended at the page above, $name listed pages', async ({ input, rows, steps, from, cut, want, index, total }) => {
+    const { term } = await create(input(), 200, rows, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < steps; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(from, 0)]);
+    // Placement stops right after the active match's entry. A press then
+    // places nothing more, reads the count of the active-area entries and
+    // waits; the next write takes the window from that list, and the frame
+    // after it places nothing.
+    placementStopsAt(cut, cut, 0);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(index - 1);
+    search.step('needle', 'older');
+    expect(active(term), 'the press waits').toEqual([range(from, 0)]);
+    term.write('\x1b[m');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([from, want], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(want, 0)]);
+    expect(search.state).toEqual({ index, total, partial: false });
   });
 
   // Line 115 wraps a needle across the boundary between the page above
