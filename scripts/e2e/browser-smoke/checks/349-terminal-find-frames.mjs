@@ -9,7 +9,9 @@
 // "e" in two segments, one at its start and one at 0.8 of the width, which
 // sits on the line's first row at the full width and on its second at 0.7
 // of it. "e" is a dense query, and a match is identified by its line and
-// its offset there.
+// its offset there. The streams print the line's tail from a shell
+// variable, so every command line is short and keeps its rows at both
+// widths.
 //
 //   FILL     -- at scrollback_mb 50 a ghostty terminal prints 60,000 such
 //               lines, more than the history holds, so it is full and
@@ -21,6 +23,9 @@
 //               text, `search-all` must hold every match, a sample of its
 //               ranges must read "e", and the active match must be the
 //               buffer's last "e" with index 1, wherever the core lists it.
+//               That reading counts only when the core lists another match
+//               first (its instrument), since only then can it tell find's
+//               position order from the core's own.
 //   NEWEST   -- the stream again, find active from the newest match (the
 //               stream prunes it).
 //   OLDEST   -- find steps to the oldest match (newer from the newest
@@ -36,16 +41,19 @@
 //               second segment at least 90 percent of the way up from the
 //               newest match, so each rescan places it late. The page
 //               narrows and widens back twice. The leg reads find only when
-//               its instrument holds: the count after each resize equals
-//               the count before (the reflow pruned nothing), the narrow
+//               its instrument holds: the count and the history's rows
+//               after each resize equal those before (the reflow pruned
+//               nothing and no line changed its rows), the narrow
 //               width moves the active match to its line's second row, and
 //               1.5 s after the first narrowing the match is kept with its
 //               index unplaced (the reading is past the one-second press
 //               cap and ahead of placement). Then 1.5 s after each resize
 //               the active match must still be highlighted on the same line
-//               and offset, placed or not, and once the count completes it
-//               must have the index it had before the reflow. At the end the
-//               count must again equal the buffer's "e".
+//               and offset, on the row of its line that offset falls on at
+//               that width and reading "e", placed or not, and once the
+//               count completes it must have the index it had before the
+//               reflow. At the end the count must again equal the buffer's
+//               "e".
 //
 // The widget's frame work is the time spent in the animation-frame
 // callbacks the widget's chunk registers (its render loop, whose search work
@@ -55,8 +63,8 @@
 // duration). BASELINE is the same stream with no search. Long animation
 // frames and frame gaps come from the page.
 //
-// Verdict: FAIL when a correctness reading above fails, when the reflow's
-// instrument does not hold, or when a leg saw fewer than 30 frames or 30
+// Verdict: FAIL when a correctness reading above fails, when an instrument
+// above does not hold, or when a leg saw fewer than 30 frames or 30
 // widget callbacks (the instrument did not see the widget). Each leg's frame
 // work median, p95 and maximum, its frames over 12 and 16 ms, and whether
 // its p95 is within the 12 ms target are written to 349-find-frames.json in
@@ -208,8 +216,8 @@ export default {
         const k = ++marks;
         const mark = `DONE349x${k}y`;
         const body = slow
-          ? `for i in $(seq 1 ${lines}); do printf '%d:%06d %s\\n' ${k} $i "${tail}"; sleep 0.01; done`
-          : `awk 'BEGIN{for(i=1;i<=${lines};i++) printf "%d:%06d %s\\n", ${k}, i, "${tail}"}'`;
+          ? `for i in $(seq 1 ${lines}); do printf '%d:%06d %s\\n' ${k} $i "$T"; sleep 0.01; done`
+          : `awk -v t="$T" 'BEGIN{for(i=1;i<=${lines};i++) printf "%d:%06d %s\\n", ${k}, i, t}'`;
         await cs(["write", "--tab-name", TAB, `${body}; echo DONE349x${k}''y\n`]);
         return { mark, done: () => until(`stream ${mark}`, () => screenHas(mark)), seen: () => screenHas(mark) };
       }
@@ -252,7 +260,7 @@ export default {
         range.end.absoluteRow === cell.absoluteRow && range.end.col === cell.col;
 
       // FILL
-      await cs(["write", "--tab-name", TAB, "PS1='$ '; clear\n"]);
+      await cs(["write", "--tab-name", TAB, `PS1='$ '; T='${tail}'; clear\n`]);
       const fill = await stream(FILL);
       await fill.done();
       details.fill = await term.evaluate((t) => ({ cols: t.cols, rows: t.rows, history: t.getScrollbackLength() }));
@@ -281,10 +289,24 @@ export default {
           total: t.search.state.total, buffer: window.__find349.count(), all: ranges.length, sampled: Math.ceil(ranges.length / step),
           wrong: wrong.slice(0, 5), wrongCount: wrong.length,
           index: t.search.state.index, active: t.highlights.get("search-active")?.ranges?.[0] ?? null, last: window.__find349.lastBefore(),
+          coreFirst: (() => {
+            const raw = t.core.createSearch();
+            try {
+              raw.setNeedle("e");
+              raw.feed();
+              return raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1)[0] ?? null;
+            } finally {
+              raw.free();
+            }
+          })(),
         };
       });
       const scan = details.correctness.scan;
       scan.newest = onCell(scan.active, scan.last) && scan.index === 1;
+      const coreFirst = scan.coreFirst && { start: { absoluteRow: scan.coreFirst.startRow, col: scan.coreFirst.startCol }, end: { absoluteRow: scan.coreFirst.endRow, col: scan.coreFirst.endCol } };
+      if (!coreFirst || onCell(coreFirst, scan.last)) {
+        failures.push(`scan instrument: the core lists ${at(scan.coreFirst)} first, the buffer's last "e" at ${at(scan.last)} or nothing, so the newest reading cannot tell find's order from the core's`);
+      }
       if (!(scan.total > 0)) failures.push("scan: no matches");
       if (scan.total !== scan.buffer) failures.push(`scan: the count ${scan.total} is not the buffer's ${scan.buffer} "e"`);
       if (scan.all !== scan.total) failures.push(`scan: search-all holds ${scan.all} ranges for ${scan.total} matches`);
@@ -361,7 +383,14 @@ export default {
         return { steps, state: t.search.state, identity, onSecond: onSecond(identity), history: t.getScrollbackLength(), cols: t.cols };
       }, [second, SEGMENT.length]);
       const start = details.reflowStart;
-      const same = (id) => id !== null && start.identity !== null && id.line === start.identity.line && id.offset === start.identity.offset;
+      // The match on its line and offset, read where that offset falls at
+      // the reading's width: a highlight left on its old cell keeps the
+      // offset, since lines keep their rows, but not the row or the "e".
+      const same = (reading) => {
+        const id = reading?.identity ?? null;
+        return id !== null && start.identity !== null && id.line === start.identity.line && id.offset === start.identity.offset &&
+          id.text === "e" && id.rowInLine === Math.floor(id.offset / reading.cols);
+      };
       a = await window_();
       details.reflow = [];
       for (const width of [Math.round(pageViewport.width * 0.7), pageViewport.width, Math.round(pageViewport.width * 0.7), pageViewport.width]) {
@@ -374,7 +403,7 @@ export default {
       }
       details.legs.reflow = await collect(a, await window_());
       details.correctness.reflowEnd = await term.evaluate((t) => ({ total: t.search.state.total, buffer: window.__find349.count() }));
-      details.reflowUnplacedAt1500 = details.reflow.filter(({ during }) => same(during.identity) && during.state.index === null).length;
+      details.reflowUnplacedAt1500 = details.reflow.filter(({ during }) => same(during) && during.state.index === null).length;
       // The instrument: what the leg needs of the buffer and of the timing
       // before its readings say anything about find.
       const instrument = [];
@@ -389,14 +418,15 @@ export default {
       }
       details.reflow.forEach(({ width, settled }, i) => {
         if (settled.state.total !== start.state.total) instrument.push(`resize ${i + 1} (${width}px) took the count from ${start.state.total} to ${settled.state.total}: the reflow pruned matches`);
+        if (settled.history !== start.history) instrument.push(`resize ${i + 1} (${width}px) took the history from ${start.history} to ${settled.history} rows: a line changed its rows`);
       });
       const first = details.reflow[0]?.during;
-      if (first && same(first.identity) && first.state.index !== null) instrument.push(`1.5 s after the first narrowing the active match was placed as index ${first.state.index}, so the reading is not past the press cap ahead of placement`);
+      if (first && same(first) && first.state.index !== null) instrument.push(`1.5 s after the first narrowing the active match was placed as index ${first.state.index}, so the reading is not past the press cap ahead of placement`);
       for (const message of instrument) failures.push(`reflow instrument: ${message}`);
       if (!instrument.length) {
         details.reflow.forEach(({ width, during, settled }, i) => {
-          if (!same(during.identity)) failures.push(`reflow ${i + 1} (${width}px): 1.5 s after the resize the active match is ${at(during.identity)}, not line ${start.identity.line} offset ${start.identity.offset}`);
-          if (!same(settled.identity)) failures.push(`reflow ${i + 1} (${width}px): once counted the active match is ${at(settled.identity)}, not line ${start.identity.line} offset ${start.identity.offset}`);
+          if (!same(during)) failures.push(`reflow ${i + 1} (${width}px): 1.5 s after the resize the active match is ${at(during.identity)}, not line ${start.identity.line} offset ${start.identity.offset}`);
+          if (!same(settled)) failures.push(`reflow ${i + 1} (${width}px): once counted the active match is ${at(settled.identity)}, not line ${start.identity.line} offset ${start.identity.offset}`);
           if (settled.state.index !== start.state.index) failures.push(`reflow ${i + 1} (${width}px): once counted the index is ${settled.state.index}, not ${start.state.index}`);
         });
       }
@@ -408,7 +438,7 @@ export default {
         if (leg.frames < 30 || leg.work.frames < 30) failures.push(`${name}: the instrument saw ${leg.frames} frames and ${leg.work.frames} widget frames`);
       }
       const reflowKept = !instrument.length &&
-        details.reflow.every(({ during, settled }) => same(during.identity) && same(settled.identity) && settled.state.index === start.state.index);
+        details.reflow.every(({ during, settled }) => same(during) && same(settled) && settled.state.index === start.state.index);
       details.verdict = failures.length ? "FAIL" : "PASS";
       details.failures = failures;
       details.frames = Object.fromEntries(Object.entries(details.legs).map(([n, l]) => [n,
