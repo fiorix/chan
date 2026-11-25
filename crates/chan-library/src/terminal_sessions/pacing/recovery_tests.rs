@@ -143,6 +143,11 @@ fn a_redial_of_the_live_generation_resumes_as_the_live_recovery() {
             "a redial of the live generation in a {ring}-byte ring gets the live recovery's \
              mode bytes"
         );
+        assert!(
+            redial.continues_view,
+            "a redial of the live generation in a {ring}-byte ring continues its view, so it \
+             gets no alternate-screen attach prelude"
+        );
     }
 }
 
@@ -176,6 +181,10 @@ fn a_dial_without_a_live_generation_cursor_keeps_its_resume() {
             String::from_utf8_lossy(&attached.mode_reassert),
             "\x1b[?1h",
             "{dialed} gets the enables-only prelude"
+        );
+        assert!(
+            !attached.continues_view,
+            "{dialed} continues no view, so it gets the alternate-screen attach prelude"
         );
     }
 }
