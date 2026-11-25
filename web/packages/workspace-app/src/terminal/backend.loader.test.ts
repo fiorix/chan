@@ -179,3 +179,26 @@ describe("loadGhosttyKit", () => {
     await expect((await retry).instantiate(), "the checked kit still hands out terminals").resolves.toBeDefined();
   });
 });
+
+describe("onGhosttyKitLoaded", () => {
+  test("calls its listeners when a load passes, not on a failed load or a cached answer", async () => {
+    const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
+    fetch.mockRejectedValueOnce(new Error("connection lost"));
+    vi.stubGlobal("fetch", fetch);
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const { loadGhosttyKit, onGhosttyKitLoaded } = await import("./backend");
+    const loaded = vi.fn();
+    const removed = vi.fn();
+    onGhosttyKitLoaded(loaded);
+    onGhosttyKitLoaded(removed)();
+
+    await expect(loadGhosttyKit()).rejects.toThrow("connection lost");
+    expect(loaded, "a failed load").not.toHaveBeenCalled();
+    await loadGhosttyKit();
+    expect(loaded, "the load that passed").toHaveBeenCalledTimes(1);
+    await loadGhosttyKit();
+    await loadGhosttyKit();
+    expect(loaded, "a cached answer is no load").toHaveBeenCalledTimes(1);
+    expect(removed, "a removed listener").not.toHaveBeenCalled();
+  });
+});
