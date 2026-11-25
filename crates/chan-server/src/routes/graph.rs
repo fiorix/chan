@@ -4402,6 +4402,51 @@ mod tests {
         }
     }
 
+    // The filesystem layer draws a symlink's target folder as a node of its
+    // own, with no edge from its parent when the target lies below the
+    // layer's depth. The tree layer still joins that folder to its parent,
+    // under the listing cap and over it, so a walked folder never floats
+    // apart from the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_below_the_filesystem_layers_depth_is_joined_to_its_parent() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "a/b/c/note.md", b"# Note\n");
+        std::os::unix::fs::symlink("a/b/c", root.path().join("alias")).unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "symlink"
+                    && edge.source == "alias"
+                    && edge.target == "directory:a/b/c"),
+                "fixture: {when}, the filesystem layer draws no symlink to the folder"
+            );
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "contains"
+                    && edge.source == "directory:a/b"
+                    && edge.target == "directory:a/b/c"),
+                "{when}, the symlinked folder is not joined to its parent"
+            );
+        }
+    }
+
     /// The shared graph's load of `app` in its JSON form, the `tree` of each
     /// `meta` of its stream form in order (`null` where it is absent), and
     /// whether every `meta` comes before the stream's first `nodes` event.
