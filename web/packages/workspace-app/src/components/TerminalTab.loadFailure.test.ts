@@ -436,6 +436,63 @@ describe("what a terminal's load error says and offers", () => {
   });
 });
 
+describe("a terminal whose view fails after the core loads", () => {
+  test("a widget that cannot open releases what was built and shows the error with Retry, and Retry opens it", async () => {
+    serveCore();
+    let instances = 0;
+    const made = vi.spyOn(WebAssembly, "instantiate").mockImplementation((async (module: WebAssembly.Module) => {
+      instances += 1;
+      const instance = await instantiate(module, {});
+      // The loader's check instance passes, and so does the terminal's own;
+      // the widget's open() then fails to allocate its terminal in it.
+      if (instances !== 2) return instance;
+      const exports = { ...(instance.exports as Record<string, unknown>) };
+      exports.ghostty_terminal_new = () => {
+        throw new RangeError("Out of memory: terminal");
+      };
+      return { exports } as unknown as WebAssembly.Instance;
+    }) as typeof WebAssembly.instantiate);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => void rejections.push(reason);
+    const runner = globalThis as unknown as {
+      process: {
+        on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+      };
+    };
+    runner.process.on("unhandledRejection", onRejection);
+    try {
+      page = await openPage();
+      const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+      const { target } = page.open(tab!);
+
+      const error = await shownLoadError(target);
+      expect(actions(error), "the next open can pass").toEqual(waysOut(page, tab!, true));
+      expect(error.textContent, "the error says why").toContain("Out of memory: terminal");
+      expect(error.textContent).toContain(NO_SHELL);
+      expect(terminalArea(target).querySelector("canvas"), "nothing left in its area").toBeNull();
+      expect(areaWatchers(page, target), "nothing left wired").toBe(0);
+      expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
+      expect(loadReports(), "the failure is reported once").toHaveLength(1);
+      // The terminal that failed is gone: the pane's focus goes to Retry, not to it.
+      await vi.waitFor(() => expect(document.activeElement, "Retry holds the keyboard").toBe(action(error, "Retry")));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(rejections, "nothing rejected unhandled").toEqual([]);
+
+      action(error, "Retry").click();
+      await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the retry dialed its PTY").toHaveLength(1));
+      expect(loadError(target), "the error is gone").toBeNull();
+      expect(terminalArea(target).querySelectorAll("canvas"), "one terminal in its area").toHaveLength(1);
+      expect(areaWatchers(page, target), "wired once").toBe(1);
+      expect(made, "a fresh instance for the retried terminal").toHaveBeenCalledTimes(3);
+      expect(rejections).toEqual([]);
+      expect(takeShownLoadFailures(), "one error shown").toBe(1);
+    } finally {
+      runner.process.off("unhandledRejection", onRejection);
+    }
+  });
+});
+
 describe("a terminal closed or restarted while its core loads", () => {
   test("closing the tab while the core loads makes no instance for it and dials nothing", async () => {
     const core = serveCore();
