@@ -153,6 +153,22 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  test("matchAt reads nothing past a snapshot that shrank", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS);
+    // Line 9 is the screen's second row: erasing its ERROR leaves three
+    // matches, while the copied buffer still holds the fourth entry.
+    t.write("\x1b[2;1H\x1b[2Kline 9 fine");
+    scan(s);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS.slice(1));
+    expect(s.matchAt(2)).toEqual(ERRORS[3]);
+    expect(s.matchAt(3), "past the shrunk end").toBeNull();
+    s.free();
+  });
+
   test("the same needle keeps the results and another one restarts the scan", async () => {
     const t = await errorTerminal();
     const s = t.createSearch();
