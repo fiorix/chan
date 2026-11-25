@@ -1530,8 +1530,8 @@ pub enum AttachSeam {
     AttachBeforeRingLock,
     /// In `Session::attach`, just after it releases the ring lock.
     AttachAfterRingLock,
-    /// In a reattach of a live session, after its resume is chosen and
-    /// before the session is attached.
+    /// In an attach of a live session by its id, after the resume is
+    /// chosen against the session and before that session is attached.
     ResumeBeforeAttach,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
@@ -2848,18 +2848,6 @@ impl Registry {
         Some(session.window_id())
     }
 
-    /// The live session's current incarnation epoch, or `None` if there is no
-    /// such live session. Used by the WS attach path to honor a client `since`
-    /// cursor only when the client's cached generation still matches.
-    fn session_generation(&self, id: &str) -> Option<u64> {
-        let sessions = self.sessions.lock().expect("terminal registry poisoned");
-        let session = sessions.get(id)?;
-        if session.closed.load(Ordering::Relaxed) {
-            return None;
-        }
-        Some(session.generation())
-    }
-
     /// Snapshot of every live session for the cross-window roster. Mirrors
     /// [`Registry::session_summaries`] but carries `window_id`, whether a page
     /// holds that window, and the `broadcast` toggle, and skips the
@@ -3288,13 +3276,18 @@ impl Registry {
         since: Option<u64>,
         flow: Option<OutputFlow>,
     ) -> Option<AttachHandle> {
-        self.attach_resuming(id, Resume::Since(since), flow)
+        self.attach_resuming(id, |_| Resume::Since(since), flow)
     }
 
+    /// Attach live session `id` from the resume `choose` picks for it. The
+    /// choice reads the session the attach takes, so a client's cursor is
+    /// never applied to a life it was not chosen against: a restart that
+    /// replaces the session after the lookup reaches this handle as
+    /// [`SessionLifecycle::Restarted`], as it reaches any attached view.
     fn attach_resuming(
         &self,
         id: &str,
-        resume: Resume,
+        choose: impl FnOnce(&Session) -> Resume,
         flow: Option<OutputFlow>,
     ) -> Option<AttachHandle> {
         let session = self
@@ -3306,36 +3299,10 @@ impl Registry {
         if session.closed.load(Ordering::Relaxed) {
             return None;
         }
+        let resume = choose(&session);
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(id, AttachSeam::ResumeBeforeAttach);
         Some(session.attach_resuming_with_progress(resume, flow))
-    }
-
-    /// Where a client echoing `generation`, which is not live session `id`'s,
-    /// resumes. A client of the process a lossy restore came from has a
-    /// cursor that agrees with this process's numbering only up to the
-    /// restored `seq`. Any other generation replays the ring as
-    /// [`Resume::OtherLife`]: an earlier life's, or one from before a lossy
-    /// restore and a further restore. With no session under `id` there is
-    /// nothing to resume.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    fn resume_other_generation(&self, id: &str, generation: u64, since: Option<u64>) -> Resume {
-        let sessions = self.sessions.lock().expect("terminal registry poisoned");
-        let Some(session) = sessions.get(id) else {
-            return Resume::Since(None);
-        };
-        #[cfg(target_os = "linux")]
-        if let Some(lossy) = session
-            .lossy_restore
-            .filter(|lossy| lossy.generation == generation)
-        {
-            return match since {
-                Some(since) => Resume::PastLossyRestore {
-                    since,
-                    restored: lossy.seq,
-                },
-                None => Resume::Since(None),
-            };
-        }
-        Resume::OtherLife
     }
 
     #[cfg(test)]
@@ -3358,7 +3325,10 @@ impl Registry {
     /// restore came from with a missed count when its cursor is past the
     /// restore, and any other one marked [`AttachHandle::stale_generation`].
     /// A cursor past the ring's end also replays from the start, with a
-    /// missed count.
+    /// missed count. The resume is chosen against the session the attach
+    /// takes, so a restart after that choice reaches the handle as
+    /// [`SessionLifecycle::Restarted`] and never as the next life resumed
+    /// from this client's cursor.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
     /// The one attach this makes carries the WebSocket's `flow`, so its lease,
@@ -3389,19 +3359,17 @@ impl Registry {
             // resuming echoes NO generation -- its `since` (the SPA's
             // `Some(0)`) is honored as sent so a ring overflow still surfaces
             // via `missed_bytes`.
-            let resume = match client_generation {
-                Some(g) if self.session_generation(id) == Some(g) => match since {
+            let resume = |session: &Session| match client_generation {
+                Some(g) if session.generation() == g => match since {
                     Some(cursor) if cursor > 0 => Resume::Live(cursor),
                     _ => Resume::Since(since),
                 },
                 // Echoed a generation that no longer matches (e.g. a restart it
                 // did not observe): the cached cursor is stale -> full replay.
-                Some(g) => self.resume_other_generation(id, g, since),
+                Some(g) => session.resume_other_generation(g, since),
                 // Not a resume attempt: pass `since` through unchanged.
                 None => Resume::Since(since),
             };
-            #[cfg(any(test, feature = "test-util"))]
-            fire_attach_seam(id, AttachSeam::ResumeBeforeAttach);
             if let Some(handle) = self.attach_resuming(id, resume, flow) {
                 // Move invariant: re-home the session to the attaching window.
                 // A cross-window terminal move re-binds it here, so a later
@@ -7217,6 +7185,30 @@ impl Session {
     /// mints a new session under the same id with a higher value.
     fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Where a client echoing `generation`, which is not this session's,
+    /// resumes. A client of the process a lossy restore came from has a
+    /// cursor that agrees with this process's numbering only up to the
+    /// restored `seq`. Any other generation replays the ring as
+    /// [`Resume::OtherLife`]: an earlier life's, or one from before a lossy
+    /// restore and a further restore.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    fn resume_other_generation(&self, generation: u64, since: Option<u64>) -> Resume {
+        #[cfg(target_os = "linux")]
+        if let Some(lossy) = self
+            .lossy_restore
+            .filter(|lossy| lossy.generation == generation)
+        {
+            return match since {
+                Some(since) => Resume::PastLossyRestore {
+                    since,
+                    restored: lossy.seq,
+                },
+                None => Resume::Since(None),
+            };
+        }
+        Resume::OtherLife
     }
 
     /// Rebind the owning window on reattach. A `None`
