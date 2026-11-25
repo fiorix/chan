@@ -48,6 +48,12 @@
     return pane?.kind === "leaf" && activeTabInPane(pane)?.id === slot;
   }
 
+  // Sequential navigation never moves the active pane, so a survey that does
+  // not own the keyboard keeps its buttons out of the Tab order: a Tab walk
+  // from the focused pane passes its card by. A press still answers it, since
+  // the pane makes itself the focused one on the press first.
+  const buttonTabIndex = $derived(ownsKeyboard() ? 0 : -1);
+
   // A visible survey owns the keyboard only in its focused pane. Retain its
   // first return target across tab and pane switches. Read live ownership in
   // the effect and its queued callbacks, since docking can move the terminal
@@ -95,10 +101,11 @@
       return;
     }
     // A hidden survey must not hold the visible tab's keyboard; an unfocused
-    // one must not hold another pane's. Keep the survey and its return target
-    // intact for the later tab or pane return.
+    // one must not hold another pane's, whether its card took the keyboard or
+    // focus reached the card some other way. Keep the survey and its return
+    // target intact for the later tab or pane return.
     if (!shown || !eligible) {
-      if (focusedSurveyId && !eligible && card?.contains(document.activeElement)) {
+      if (!eligible && card?.contains(document.activeElement)) {
         (document.activeElement as HTMLElement | null)?.blur();
       }
       return;
@@ -152,10 +159,14 @@
   // focused terminal does not swallow the keystroke into its PTY, and a handled
   // Escape does not bubble out to close other overlays. The card answers them
   // unmodified, as the viewers do: a chord with Ctrl, Cmd or Alt held is the
-  // app's and travels on.
+  // app's and travels on. A card whose survey does not own the keyboard
+  // answers no key: focus can still reach it (a script, assistive
+  // technology), and its keys travel on as from any element outside the
+  // focused pane.
   function onCardKeydown(e: KeyboardEvent): void {
     const s = active;
     if (!s) return;
+    if (!ownsKeyboard()) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key >= "1" && e.key <= "9") {
       const idx = Number(e.key) - 1;
@@ -210,6 +221,7 @@
             <button
               type="button"
               class="survey-option"
+              tabindex={buttonTabIndex}
               disabled={busy}
               onclick={() => pickOption(slot, i)}
             >
@@ -227,6 +239,7 @@
         <button
           type="button"
           class="survey-followup"
+          tabindex={buttonTabIndex}
           disabled={busy}
           onclick={() => requestFollowup(slot)}
         >
@@ -235,6 +248,7 @@
         <button
           type="button"
           class="survey-dismiss"
+          tabindex={buttonTabIndex}
           disabled={busy}
           onclick={() => dismissSurvey(slot)}
         >
