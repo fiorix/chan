@@ -58,9 +58,13 @@ export class SearchOwner {
   private head: number | null = null;
   // Whether those entries list a page ahead of a newer one; null until read.
   private inverted: boolean | null = null;
-  // The core's first entry in the list being placed: where it lists a page
-  // ahead, the page above's newest.
-  private firstListed: MatchRange | null = null;
+  // While a list is placed: the first entry the core listed of the page it
+  // is listing, the first of the page it listed before that, which is that
+  // page's newest match, and the last entry read. An entry newer than the
+  // one listed before it starts a page.
+  private listedPage: MatchRange | null = null;
+  private pageAbove: MatchRange | null = null;
+  private lastListed: MatchRange | null = null;
   // The scan starts from scratch at its next feed (a new needle, a restart,
   // a resize), which lists only the core's active area at first.
   private fresh = false;
@@ -200,7 +204,7 @@ export class SearchOwner {
     this.starts = [];
     this.total = 0;
     this.readCursor = 0;
-    this.firstListed = null;
+    this.listedPage = this.pageAbove = this.lastListed = null;
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
@@ -254,7 +258,7 @@ export class SearchOwner {
     this.lastTotal = 0;
     this.readCursor = 0;
     this.head = this.inverted = null;
-    this.firstListed = null;
+    this.listedPage = this.pageAbove = this.lastListed = null;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -428,12 +432,16 @@ export class SearchOwner {
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
     while (this.readCursor < state.total && performance.now() < deadline) {
       const batch = search.readMatches(this.readCursor, deadline - performance.now());
-      if (this.readCursor === 0) this.firstListed = batch.ranges[0] ?? null;
       this.readCursor = batch.next;
       const added: HighlightRange[] = [];
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
+        if (!this.lastListed || compare(range, this.lastListed) > 0) {
+          this.pageAbove = this.listedPage;
+          this.listedPage = range;
+        }
+        this.lastListed = range;
         const painted = this.place(range);
         if (painted) added.push(painted);
       }
@@ -613,10 +621,11 @@ export class SearchOwner {
     let from = Math.max(0, index - BEFORE_REACH);
     let to = Math.min(this.total, index + BEFORE_REACH + 1);
     // With the count of the core's active-area entries unknown, a list the
-    // core lists a page ahead can lack screen-page matches newer than the
-    // page above's newest, the core's first entry, while placing them, so
-    // the window ends at that entry on the side away from the active match.
-    const split = this.head === null && !this.complete && this.firstListed ? this.indexOf(this.firstListed) : undefined;
+    // core lists pages ahead in can lack the matches of the page being
+    // placed that lie between its placed ones and the newest match of the
+    // page listed before it, so the window ends at that match on the side
+    // away from the active match.
+    const split = this.head === null && !this.complete && this.pageAbove ? this.indexOf(this.pageAbove) : undefined;
     if (split !== undefined && split > 0) {
       if (index < split) to = Math.min(to, split);
       else from = Math.max(from, split);
@@ -740,6 +749,10 @@ function highlight(range: MatchRange): HighlightRange {
 // Positive when `a` comes after `b` in text order: nearer the prompt.
 function order(a: MatchRange, b: HighlightRange): number {
   return a.startRow - b.start.absoluteRow || a.startCol - b.start.col || a.endRow - b.end.absoluteRow || a.endCol - b.end.col;
+}
+// The same order between two match ranges.
+function compare(a: MatchRange, b: MatchRange): number {
+  return a.startRow - b.startRow || a.startCol - b.startCol || a.endRow - b.endRow || a.endCol - b.endCol;
 }
 function learned(estimate: number, measured: number, floor: number): number {
   return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);
