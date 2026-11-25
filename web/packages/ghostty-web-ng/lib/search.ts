@@ -313,11 +313,14 @@ export class SearchOwner {
 
   /**
    * Whether the list placed so far is the head of the whole list in
-   * position order: complete, past the core's active-area entries, or
-   * those entries list no page ahead of a newer one. With `measure` an
-   * unknown count of them is read from a scratch search's first feed,
-   * which lists the same active area alone, a cost only a press pays;
-   * without it an unknown count reads as passed.
+   * position order: complete, past the core's active-area entries and,
+   * where they list a page ahead, the entry after them, or those entries
+   * list no page ahead of a newer one. A match wrapped across the boundary
+   * between the page above and the next page is in neither page's entries:
+   * the core lists it first in its history. With `measure` an unknown
+   * count of them is read from a scratch search's first feed, which lists
+   * the same active area alone, a cost only a press pays; without it an
+   * unknown count reads as passed.
    */
   private ordered(measure: boolean): boolean {
     if (this.complete) return true;
@@ -325,7 +328,7 @@ export class SearchOwner {
       if (!measure) return true;
       this.head = this.activeCount();
     }
-    if (this.readCursor >= this.head) return true;
+    if (this.readCursor > this.head || this.head === 0) return true;
     this.inverted ??= this.listsAhead(this.head);
     return !this.inverted;
   }
