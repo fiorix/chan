@@ -9,8 +9,11 @@
 // The failures are the network's: request interception aborts the page's
 // requests for the core's wasm asset, or for the widget's JS chunk, while the
 // check holds them failed, and lets them through once it lifts the failure.
-// Every reload runs with interception on, so no kit or module a document
-// loaded before is reused.
+// Chrome's cache is off for the whole check: a reloaded document is otherwise
+// handed the widget's chunk from the renderer's cache of the document before,
+// a load request interception never sees, so the abort fails nothing and the
+// terminal opens. What the network did with each core and chunk request is
+// recorded beside what the check asked of it.
 
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
@@ -35,7 +38,7 @@ export default {
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("opening and counting terminals needs the server's control socket");
     const { page } = ctx;
-    const details = { coreRequests: [], chunkRequests: [], continueErrors: [], legs: {} };
+    const details = { coreRequests: [], chunkRequests: [], network: [], continueErrors: [], legs: {} };
     await page.setViewport({ width: 1280, height: 800 });
 
     const failing = { core: true, chunk: false };
@@ -49,8 +52,22 @@ export default {
       }
       void request.continue().catch(answered);
     };
+    // How each core and chunk request ended: failed by the network, or
+    // finished, from the cache or not.
+    const kindOf = (url) => (CORE.test(url) ? "core" : CHUNK.test(url) ? "chunk" : null);
+    const onFailed = (request) => {
+      const kind = kindOf(request.url());
+      if (kind) details.network.push({ kind, url: request.url(), ended: "failed", error: request.failure()?.errorText ?? null });
+    };
+    const onFinished = (request) => {
+      const kind = kindOf(request.url());
+      if (kind) details.network.push({ kind, url: request.url(), ended: "finished", fromCache: request.response()?.fromCache() ?? null });
+    };
+    await page.setCacheEnabled(false);
     await page.setRequestInterception(true);
     page.on("request", onRequest);
+    page.on("requestfailed", onFailed);
+    page.on("requestfinished", onFinished);
     writeFileSync(join(ctx.workspaceDir, FILE), "# Load 347\n");
     let terminal = null;
     // The window's sessions before the check opens its terminal.
@@ -278,11 +295,19 @@ export default {
         failing.chunk = true;
         const coreBefore = details.coreRequests.length;
         const chunkBefore = details.chunkRequests.length;
+        const networkBefore = details.network.length;
         await page.reload({ waitUntil: "domcontentloaded", timeout: WAIT_MS });
         await page.waitForSelector(".pane", { visible: true, timeout: WAIT_MS });
         await ctx.waitWindowLive(windowId);
-        const restored = await restoredFailure(shot);
+        // A red here says whether the network failed the chunk the check
+        // aborted, or the terminal opened over a chunk it failed.
+        const restored = await restoredFailure(shot).catch((error) => {
+          error.message += `; since the reload the check aborted ${details.chunkRequests.slice(chunkBefore).filter((r) => r.failed).length} ` +
+            `chunk request(s), and the network ended these: ${JSON.stringify(details.network.slice(networkBefore))}`;
+          throw error;
+        });
         Object.assign(leg, restored);
+        leg.network = details.network.slice(networkBefore);
         const chunkRequests = details.chunkRequests.slice(chunkBefore);
         leg.chunkRequests = chunkRequests.length;
         leg.coreRequests = details.coreRequests.length - coreBefore;
@@ -388,7 +413,10 @@ export default {
       throw error;
     } finally {
       page.off("request", onRequest);
+      page.off("requestfailed", onFailed);
+      page.off("requestfinished", onFinished);
       await page.setRequestInterception(false).catch(() => {});
+      await page.setCacheEnabled(true).catch(() => {});
       // Every session the window gained goes with the check: the retried
       // terminal and, at a red, one opened in place of the error or a second
       // PTY. A session closes by its name, which the registry keeps unique.
