@@ -1472,6 +1472,88 @@ async fn a_redial_across_a_restart_gets_the_restart_reset() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_a_restart_overtakes_before_its_attach_gets_the_restart_reset() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"\x1b[?1049h\x1b[?1000h";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // The session restarts once the redial's resume is chosen and before
+    // its attach, and the next life prints past the old life's cursor, so
+    // that cursor would fall inside the next life's output.
+    let next_life = vec![b'n'; 2 * cursor as usize];
+    let registry = rig.state.terminal_sessions.clone();
+    let id = rig.handle.id().to_owned();
+    let printed = next_life.clone();
+    arm_attach_seam(&id.clone(), AttachSeam::ResumeBeforeAttach, move || {
+        assert!(registry
+            .restart(&id, RestartOverrides::default())
+            .expect("restart controlled child"));
+        assert!(registry.inject_output(&id, &printed));
+    });
+    let mut client = bounded(
+        "dial terminal socket",
+        dial_terminal_with_small_buffer(
+            rig.address,
+            &format!(
+                "session={}&cols=80&rows=24&since={cursor}&generation={generation}",
+                rig.handle.id()
+            ),
+        ),
+    )
+    .await;
+    // Read to the Ready that follows the next life's session frame. A view
+    // of the old life may come first and end at the restart, as a live
+    // socket's does.
+    let (mut received, mut next_session) = (Vec::new(), None);
+    let split = loop {
+        match next(&mut client).await {
+            ClientMessage::Binary(bytes) => received.extend_from_slice(&bytes),
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") if number(&frame, "generation") != generation => {
+                        assert!(next_session.is_none(), "one session frame of the next life");
+                        next_session = Some((frame, received.len()));
+                    }
+                    Some("ready") => {
+                        if let Some((_, split)) = &next_session {
+                            break *split;
+                        }
+                    }
+                    Some("error" | "exit" | "closed") => panic!("the dial ended: {frame}"),
+                    _ => {}
+                }
+            }
+            other => panic!("the dial ended before Ready: {other:?}"),
+        }
+    };
+    let (session, _) = next_session.expect("the next life's session frame");
+    let (before, after) = received.split_at(split);
+    assert!(
+        before.ends_with(RESET_TERMINAL),
+        "a redial a restart overtook gets the restart's reset ahead of the next life's \
+         session frame, got {:?} before it",
+        String::from_utf8_lossy(before)
+    );
+    assert_eq!(
+        number(&session, "replay_bytes"),
+        number(&session, "seq"),
+        "the next life replays from its start, not from the old life's cursor"
+    );
+    assert!(
+        after
+            .windows(next_life.len())
+            .any(|bytes| bytes == next_life),
+        "the next life's output follows the reset"
+    );
+    assert_eq!(
+        parsed_modes(&[&shown[..], &received].concat()),
+        (false, BTreeSet::new()),
+        "no mode of the old life survives on the view"
+    );
+}
+
 /// What a terminal holds after parsing `bytes` of the state a redial must
 /// not leave stale: whether it is on the alternate screen, and which other
 /// DEC private modes are on. CAN, an escape or the end cuts a partial

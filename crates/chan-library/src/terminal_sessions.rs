@@ -1530,6 +1530,9 @@ pub enum AttachSeam {
     AttachBeforeRingLock,
     /// In `Session::attach`, just after it releases the ring lock.
     AttachAfterRingLock,
+    /// In a reattach of a live session, after its resume is chosen and
+    /// before the session is attached.
+    ResumeBeforeAttach,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
     /// Before a report takes the lock shared with focus words.
@@ -3397,6 +3400,8 @@ impl Registry {
                 // Not a resume attempt: pass `since` through unchanged.
                 None => Resume::Since(since),
             };
+            #[cfg(any(test, feature = "test-util"))]
+            fire_attach_seam(id, AttachSeam::ResumeBeforeAttach);
             if let Some(handle) = self.attach_resuming(id, resume, flow) {
                 // Move invariant: re-home the session to the attaching window.
                 // A cross-window terminal move re-binds it here, so a later
