@@ -47,6 +47,32 @@ fn missed_live_tail_reconciles_every_mode_and_both_screen_targets() {
 }
 
 #[test]
+fn a_resume_past_a_lost_mode_reset_gets_the_live_recovery_suffix() {
+    // A redialed view keeps the screen and modes it had parsed up to its
+    // cursor. When the reset of those modes is evicted before the redial,
+    // only an authoritative suffix can take them away again.
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(b"\x1b[?1049l\x1b[?1000l");
+    session.record_output(b"$ the shell again\r\n");
+    let live = viewer.replay_from(cursor);
+    assert!(live.missed_bytes > 0, "fixture: the reset was evicted");
+    assert_eq!(
+        live.mode_reassert,
+        expected_suffix(false, &[]),
+        "fixture: a live socket's recovery from the cursor resets every mode"
+    );
+    let resumed = session.clone().attach(Some(cursor));
+    assert_eq!(resumed.missed_bytes, live.missed_bytes);
+    assert_eq!(
+        resumed.mode_reassert, live.mode_reassert,
+        "a resume that lost bytes gets the suffix a live recovery gets"
+    );
+}
+
+#[test]
 fn fresh_attach_keeps_the_enables_only_prelude() {
     let session = test_session_with_ring(1024);
     session.record_output(b"\x1b[?1049;1000h");

@@ -1307,6 +1307,164 @@ async fn an_evicted_restart_reattaches_the_new_generation_once() {
     );
 }
 
+/// Dial `query` and collect its attach window up to Ready: the session
+/// frame and the raw bytes before and after it.
+async fn dial_until_ready(
+    address: std::net::SocketAddr,
+    query: &str,
+) -> (Client, Value, Vec<u8>, Vec<u8>) {
+    let mut client = bounded(
+        "dial terminal socket",
+        dial_terminal_with_small_buffer(address, query),
+    )
+    .await;
+    let (mut session, mut before, mut after) = (None, Vec::new(), Vec::new());
+    loop {
+        match next(&mut client).await {
+            ClientMessage::Binary(bytes) if session.is_none() => before.extend_from_slice(&bytes),
+            ClientMessage::Binary(bytes) => after.extend_from_slice(&bytes),
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") => {
+                        assert!(session.is_none(), "one session frame before Ready");
+                        session = Some(frame);
+                    }
+                    Some("ready") => {
+                        let session = session.expect("session before Ready");
+                        return (client, session, before, after);
+                    }
+                    Some("error" | "exit" | "closed") => panic!("the dial ended: {frame}"),
+                    _ => {}
+                }
+            }
+            other => panic!("the dial ended before Ready: {other:?}"),
+        }
+    }
+}
+
+/// Attach a view, show it `modes` and drop its socket the way a sleep or a
+/// network drop does, keeping the widget that parsed them. Returns the
+/// view's generation and cursor, which its redial echoes.
+async fn view_modes_then_drop(rig: &Rig, modes: &[u8]) -> (u64, u64) {
+    let (mut client, initial) = rig.attach().await;
+    rig.output(modes);
+    assert_eq!(next_binary(&mut client).await, modes);
+    drop(client);
+    (
+        number(&initial, "generation"),
+        number(&initial, "seq") + modes.len() as u64,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_past_a_lost_mode_reset_gets_the_live_recovery_suffix() {
+    const RING: usize = 4096;
+    let _gate = pty_test_lock();
+    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
+    let (generation, cursor) = view_modes_then_drop(&rig, b"\x1b[?1049h\x1b[?1000h").await;
+    // The program resets its modes while the socket is down, and the ring
+    // moves past the reset before the redial.
+    let lost = b"\x1b[?1049l\x1b[?1000l";
+    rig.output(lost);
+    let shell = vec![b's'; RING / 4];
+    for _ in 0..4 {
+        rig.output(&shell);
+    }
+    let (_redial, session, before, after) = dial_until_ready(
+        rig.address,
+        &format!(
+            "session={}&cols=80&rows=24&since={cursor}&generation={generation}",
+            rig.handle.id()
+        ),
+    )
+    .await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        lost.len() as u64,
+        "fixture: the ring moved past the cursor and the reset with it"
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert_eq!(replay, RING, "fixture: the ring's tail is replayed");
+    assert!(
+        before.is_empty(),
+        "a redial of the same PTY life gets no reset before its session frame"
+    );
+    assert_eq!(after[..replay], shell.repeat(4)[..]);
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "a redial that lost bytes gets the live recovery suffix after its replay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_across_a_restart_gets_the_restart_reset() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let (generation, cursor) = view_modes_then_drop(&rig, b"\x1b[?1049h\x1b[?1000h").await;
+    assert!(rig
+        .state
+        .terminal_sessions
+        .restart(rig.handle.id(), RestartOverrides::default())
+        .expect("restart controlled child"));
+    // The next life prints before the redial, so its replay is not empty.
+    let mut next_life = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the next PTY life");
+    assert_ne!(next_life.generation, generation, "fixture: a new PTY life");
+    let mut printed = next_life.replay.concat();
+    bounded("the next PTY life prints", async {
+        while !printed
+            .windows(CHILD_READY.len())
+            .any(|bytes| bytes == CHILD_READY)
+        {
+            match next_life.rx.recv().await {
+                Ok(SessionEvent::Output(bytes)) => printed.extend_from_slice(&bytes),
+                Ok(_) => {}
+                Err(error) => panic!("next PTY life event: {error}"),
+            }
+        }
+    })
+    .await;
+    let (_redial, session, before, after) = dial_until_ready(
+        rig.address,
+        &format!(
+            "session={}&cols=80&rows=24&since={cursor}&generation={generation}",
+            rig.handle.id()
+        ),
+    )
+    .await;
+    assert_eq!(session["id"], rig.handle.id(), "fixture: the same session");
+    assert_eq!(
+        session["generation"], next_life.generation,
+        "fixture: the redial reached the next PTY life"
+    );
+    // A live socket gets RESET_TERMINAL ahead of the new life's session
+    // frame. A redial may carry it on either side of its own session frame,
+    // but before any byte of the new life's replay.
+    let received = [before, after].concat();
+    assert_eq!(
+        String::from_utf8_lossy(&received[..received.len().min(RESET_TERMINAL.len())]),
+        String::from_utf8_lossy(RESET_TERMINAL),
+        "a redial across a restart gets the restart's reset before the new replay: {:?}",
+        String::from_utf8_lossy(&received[..received.len().min(64)])
+    );
+    assert!(
+        received[RESET_TERMINAL.len()..]
+            .windows(CHILD_READY.len())
+            .any(|bytes| bytes == CHILD_READY),
+        "the new life's replay follows the reset"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_reads() {
     use std::fmt::Write as _;
@@ -1588,6 +1746,144 @@ async fn a_view_that_reads_without_acknowledging_is_bounded_and_resumes_with_a_c
         "the resume carries the ring's tail, once"
     );
     send(&mut live, json!({"type": "input", "data": "\n"})).await;
+}
+
+/// How long a view that needs recovery, and whose client shows it is alive,
+/// has to report the rest of what it was sent: as long as the reader gave
+/// it before the release.
+const SHORT_ACK_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+/// Scheduling slack on a loaded host, past the bound.
+const SHORT_ACK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Report `short`, a position before what the view was sent, then ping as
+/// a live page does, and read until the server ends the socket. The
+/// client redials from its cursor when it does.
+async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u64) {
+    ack(view, generation, short).await;
+    let acked_at = tokio::time::Instant::now();
+    let deadline = acked_at + SHORT_ACK_BOUND + SHORT_ACK_SLACK;
+    let mut ping = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut pongs = 0usize;
+    let closed_at = loop {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => break None,
+            frame = view.next() => match frame {
+                Some(Ok(ClientMessage::Text(text))) => {
+                    let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                    match frame["type"].as_str() {
+                        Some("pong") => pongs += 1,
+                        Some("error" | "session" | "exit" | "closed") => {
+                            panic!("a view whose ack stays short gets no {frame}")
+                        }
+                        _ => {}
+                    }
+                }
+                Some(Ok(ClientMessage::Binary(bytes))) => panic!(
+                    "a view waiting for its ack is sent no raw output: {} bytes",
+                    bytes.len()
+                ),
+                Some(Ok(ClientMessage::Close(_)) | Err(_)) | None => {
+                    break Some(tokio::time::Instant::now())
+                }
+                Some(Ok(_)) => {}
+            },
+            _ = ping.tick() => {
+                // A write that races the close is read as the close below.
+                let _ = view
+                    .send(ClientMessage::Text(json!({"type": "ping"}).to_string().into()))
+                    .await;
+            }
+        }
+    };
+    assert!(
+        closed_at.is_some(),
+        "a view whose ack stays short is closed within {SHORT_ACK_BOUND:?} \
+         (+{SHORT_ACK_SLACK:?}) while it pings: {pongs} pongs and no close"
+    );
+    assert!(pongs > 0, "the client showed it was alive before the close");
+    let waited = closed_at.expect("closed") - acked_at;
+    assert!(
+        waited >= SHORT_ACK_BOUND,
+        "a live client gets the whole bound to report progress: closed after {waited:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_whose_ack_stays_short_is_closed_within_the_bound() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(
+        64 * 1024,
+        "stty -onlcr; read -r _; seq -f %.0f 1 200000; printf '__STREAM_DONE__'; read -r _",
+    )
+    .await;
+    let (mut view, initial) = rig.attach_acking().await;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    rig.handle.send_input(b"\n");
+    // The view reads what it is sent and reports none of it, so it holds
+    // the reader until the release; only then can the program end.
+    let mut received = 0u64;
+    let mut tail = Vec::new();
+    bounded("the program ends past the released view", async {
+        loop {
+            tokio::select! {
+                frame = view.next() => match frame.expect("view open").expect("frame") {
+                    ClientMessage::Binary(bytes) => received += bytes.len() as u64,
+                    ClientMessage::Text(text) => {
+                        let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                        assert_ne!(frame["type"], "error", "no lag line: {frame}");
+                        assert_ne!(frame["type"], "session", "no recovery before an ack: {frame}");
+                    }
+                    other => panic!("view ended: {other:?}"),
+                },
+                event = watcher.rx.recv() => match event {
+                    Ok(SessionEvent::Output(bytes)) => {
+                        tail.extend_from_slice(&bytes);
+                        let keep = tail.len().saturating_sub(DONE_MARKER.len());
+                        tail.drain(..keep);
+                        if tail.ends_with(DONE_MARKER) {
+                            break;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(error) => panic!("session ended: {error}"),
+                },
+            }
+        }
+    })
+    .await;
+    // Take what is still in flight; a released view is sent nothing more.
+    while let Ok(frame) =
+        tokio::time::timeout(std::time::Duration::from_millis(300), view.next()).await
+    {
+        if let ClientMessage::Binary(bytes) = frame.expect("view open").expect("frame") {
+            received += bytes.len() as u64;
+        }
+    }
+    assert!(received > 0, "fixture: the view was sent output");
+    assert_short_ack_is_closed(&mut view, generation, start + received - 1).await;
+    rig.handle.send_input(b"\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lagged_view_whose_ack_stays_short_is_closed_within_the_bound() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let (mut view, initial) = rig.attach_acking().await;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    let _pending = rig.block_output().await;
+    rig.flood();
+    finish_blocked_frame(&mut view).await;
+    // The flood overran the view's broadcast while its send was pending, so
+    // the view waits for its client to report the frame it was sent.
+    assert_short_ack_is_closed(&mut view, generation, start + BLOCKED_BYTES as u64 - 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
