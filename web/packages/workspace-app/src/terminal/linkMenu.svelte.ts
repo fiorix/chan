@@ -1,4 +1,3 @@
-import type { IBufferRange, Terminal as XtermTerminal } from "@xterm/xterm";
 import { tick } from "svelte";
 
 import { openExternalUrl } from "../editor/external_links";
@@ -11,11 +10,10 @@ import { classifyTerminalLink, resolveTerminalPath, type TerminalLinkTarget } fr
 // A plain click on a link opens a menu at the pointer that shows the link's
 // real target (`linkTarget.ts`): "Open in browser" and "Copy link" for a web
 // link, "Open in editor" and "Copy path" for a file link. Ctrl or Cmd with
-// the click runs the first entry with no menu. Each backend decides what a
-// link click is (the ghostty widget in its `onLinkActivate`, xterm.js through
-// `xtermLinkHandlers` below) and hands it to `TerminalLinkMenu.onLink`. The
-// terminal tab keeps the markup, the menu's place and the watcher that closes
-// it when the link's cells change or move.
+// the click runs the first entry with no menu. The widget decides what a
+// link click is (its `onLinkActivate`) and the tab hands it to
+// `TerminalLinkMenu.onLink`. The tab keeps the markup, the menu's place and
+// the watcher that closes it when the link's cells change or move.
 
 /// A link's cells, 0-based, rows absolute (0 the oldest history row), both
 /// ends included.
@@ -185,53 +183,4 @@ export class TerminalLinkMenu {
       },
     });
   }
-}
-
-type XtermLinkTerminal = Pick<XtermTerminal, "hasSelection"> & {
-  modes: Pick<XtermTerminal["modes"], "mouseTrackingMode">;
-};
-
-/// The link hooks of an xterm.js terminal, both reporting a link click to
-/// `onLink` with a 0-based range: `linkHandler` for the terminal's
-/// `linkHandler` option (OSC 8, every scheme, since the menu judges the
-/// target) and `webLink` for `WebLinksAddon` (URLs in the text).
-///
-/// xterm.js activates a link on the release that ends a press on it. A drag
-/// that selected, a double click's second release and a press sent to a
-/// program tracking the mouse are not link clicks; Shift keeps a press from
-/// the program (`selectionBypass.ts`).
-export function xtermLinkHandlers(
-  terminal: () => XtermLinkTerminal | null,
-  onLink: (target: string, range: LinkRange, event: MouseEvent) => void,
-) {
-  const report = (event: MouseEvent, target: string, range: IBufferRange): void => {
-    const t = terminal();
-    if (!t || event.button !== 0 || event.detail > 1 || t.hasSelection()) return;
-    if (t.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
-    onLink(target, {
-      start: { x: range.start.x - 1, y: range.start.y - 1 },
-      end: { x: range.end.x - 1, y: range.end.y - 1 },
-    }, event);
-  };
-  // `WebLinksAddon` hands its handler no range. Its hover callback passes the
-  // link's own range, the 1-based buffer range the activation would carry
-  // (typed there as a viewport range), so the click takes the range the last
-  // hover reported for the same URL.
-  let hovered: { uri: string; range: IBufferRange } | null = null;
-  return {
-    linkHandler: { allowNonHttpProtocols: true, activate: report },
-    webLink: {
-      handler: (event: MouseEvent, uri: string): void => {
-        if (hovered?.uri === uri) report(event, uri, hovered.range);
-      },
-      options: {
-        hover: (_event: MouseEvent, uri: string, range: IBufferRange): void => {
-          hovered = { uri, range };
-        },
-        leave: (): void => {
-          hovered = null;
-        },
-      },
-    },
-  };
 }

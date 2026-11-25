@@ -28,7 +28,7 @@ vi.mock("../state/store.svelte", () => ({
   setTransientStatus: vi.fn(),
 }));
 
-import { TerminalLinkMenu, xtermLinkHandlers, type LinkMenuHost, type LinkRange } from "./linkMenu.svelte";
+import { TerminalLinkMenu, type LinkMenuHost, type LinkRange } from "./linkMenu.svelte";
 
 const RANGE: LinkRange = { start: { x: 2, y: 4 }, end: { x: 20, y: 4 } };
 
@@ -124,64 +124,5 @@ describe("TerminalLinkMenu", () => {
     calls.editorAnswer = "not found";
     await links.openInEditor();
     expect(links.menu?.editorRefusal).toBe("not found");
-  });
-});
-
-describe("xtermLinkHandlers", () => {
-  type Seen = { target: string; range: LinkRange; ctrl: boolean };
-
-  function xterm(state: { tracking?: boolean; selection?: boolean } = {}) {
-    const seen: Seen[] = [];
-    const terminal = {
-      hasSelection: () => state.selection ?? false,
-      modes: { mouseTrackingMode: (state.tracking ? "vt200" : "none") as "vt200" | "none" },
-    };
-    const hooks = xtermLinkHandlers(
-      () => terminal,
-      (target, range, event) => seen.push({ target, range, ctrl: event.ctrlKey }),
-    );
-    // xterm.js's 1-based range, as both hooks receive it.
-    const range = { start: { x: 3, y: 5 }, end: { x: 21, y: 5 } };
-    const web = (event: MouseEvent) => {
-      hooks.webLink.options.hover(event, "https://example.com/a", range);
-      hooks.webLink.handler(event, "https://example.com/a");
-    };
-    const osc8 = (event: MouseEvent) => hooks.linkHandler.activate(event, "file:///srv/a.md", range);
-    return { seen, web, osc8, hooks };
-  }
-
-  test("a click reports the link with its 0-based cells, from either hook", () => {
-    const { seen, web, osc8, hooks } = xterm();
-    web(click());
-    osc8(click({ ctrlKey: true }));
-    expect(seen).toEqual([
-      { target: "https://example.com/a", range: RANGE, ctrl: false },
-      { target: "file:///srv/a.md", range: RANGE, ctrl: true },
-    ]);
-    expect(hooks.linkHandler.allowNonHttpProtocols).toBe(true);
-  });
-
-  test("a double click's second release and the end of a drag selection are not link clicks", () => {
-    const { seen, web } = xterm();
-    web(click({ detail: 2 }));
-    const selected = xterm({ selection: true });
-    selected.web(click());
-    expect([...seen, ...selected.seen]).toEqual([]);
-  });
-
-  test("under mouse tracking a click is the program's unless Shift held it", () => {
-    const { seen, web } = xterm({ tracking: true });
-    web(click());
-    expect(seen).toEqual([]);
-    web(click({ shiftKey: true }));
-    expect(seen.map((s) => s.target)).toEqual(["https://example.com/a"]);
-  });
-
-  test("the addon's handler reports only the URL its last hover named, whose range it carries", () => {
-    const { seen, hooks } = xterm();
-    hooks.webLink.handler(click(), "https://example.com/a");
-    hooks.webLink.options.hover(click(), "https://example.com/a", { start: { x: 3, y: 5 }, end: { x: 21, y: 5 } });
-    hooks.webLink.handler(click(), "https://example.com/other");
-    expect(seen).toEqual([]);
   });
 });
