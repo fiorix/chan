@@ -29,7 +29,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -436,7 +436,7 @@ async function requireGhosttySurface(selector, name) {
           backend: canvas ? "ghostty" : tab?.querySelector(".terminal.xterm") ? "xterm" : "missing",
           shown: Boolean(box && box.width > 0 && box.height > 0 && getComputedStyle(canvas).visibility === "visible"),
         };
-      }, selector, TERMINAL_SURFACES.ghostty);
+      }, selector, TERMINAL_SURFACE);
       return observed;
     }, (surface) => surface?.backend === "ghostty" && surface.shown, 60_000);
   } finally {

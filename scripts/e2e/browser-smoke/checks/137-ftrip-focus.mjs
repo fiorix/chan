@@ -112,13 +112,13 @@ export default {
       const source = `FtripghosttySource`;
       const control = `FtripghosttyControl`;
       const path = join(ctx.outDir, `ghostty-input.jsonl`);
-      await openAttachedTerminal(ctx, page, cs, windowId, source, "ghostty");
+      await openAttachedTerminal(ctx, page, cs, windowId, source);
       opened.push(source);
       await cs(["write", "--tab-name", source, `node ${reader} ${path}\n`]);
       await waitFor(() => Promise.resolve(inputHex(path)), () => true, "reader file");
       await waitFor(async () => (await cs(["scrollback", "--tab-name", source])).stdout,
         (text) => text.includes("FTRIP_READY"), "focus mode parsed");
-      await openAttachedTerminal(ctx, page, cs, windowId, control, "ghostty");
+      await openAttachedTerminal(ctx, page, cs, windowId, control);
       opened.push(control);
       const subjectFrames = () => frames.filter((frame) => frame.tabName === source);
       const snapshot = () => ({ input: inputHex(path), messages: subjectFrames() });

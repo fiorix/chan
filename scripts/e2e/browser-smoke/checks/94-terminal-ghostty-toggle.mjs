@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { capturePointerTerminals, copyPointerChord, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -95,7 +95,7 @@ export default {
     }
 
     async function openTerminal(newArgs = []) {
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, "ghostty", newArgs);
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, newArgs);
       await assertOnlyGhostty();
       return row;
     }
@@ -154,7 +154,7 @@ export default {
           },
           canvasWidth: canvas?.getBoundingClientRect().width ?? null,
         };
-      }, TERMINAL_SURFACES.ghostty);
+      }, TERMINAL_SURFACE);
       const socketUrl = terminalSocketUrls
         .slice(socketStart)
         .find(
@@ -211,10 +211,10 @@ export default {
     /// the canvas (SelectionManager listens there), so a drag starting
     /// at host+5 silently selects nothing.
     async function screenBox() {
-      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
-      if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
+      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACE}`);
+      if (!canvas) throw new Error(`${TERMINAL_SURFACE} missing`);
       const box = await canvas.boundingBox();
-      if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
+      if (!box) throw new Error(`${TERMINAL_SURFACE} has no bounding box`);
       return box;
     }
 
@@ -621,7 +621,7 @@ export default {
         await waitSaved(ctx, page, windowId, TAB_G);
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
         await ctx.waitWindowLive(windowId);
-        const after = await waitRestoredTerminal(page, cs, windowId, before, "ghostty");
+        const after = await waitRestoredTerminal(page, cs, windowId, before);
         assert.equal(after.session_id, before.session_id, "reload keeps the same PTY on Ghostty");
         await assertOnlyGhostty();
         await cs(["write", "--tab-name", TAB_G, `printf '${MARK_PREFIX}RELOAD_%s\\n' ${MARK_ARG}\n`]);

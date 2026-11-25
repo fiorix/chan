@@ -15,14 +15,14 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { windowSessions } from "../lib/pane-strip.mjs";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const WINDOW = `ghostty-open-227-${RUN}`;
 const CSV = `ghostty-open-227-${RUN}.csv`;
 const CELL = 'button.cell[data-cell="1:0"]';
 const EDIT = ".csv-table td input";
-const CANVAS = `.terminal-tab ${TERMINAL_SURFACES.ghostty}`;
+const CANVAS = `.terminal-tab ${TERMINAL_SURFACE}`;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -260,7 +260,7 @@ async function focusedArm(ctx, page, csvPane, terminals) {
   const name = `ghostty-open-227-fg-${RUN}`;
   terminals.push(name);
   await cs(ctx, ["terminal", "new", "--tab-name", name, "--window", WINDOW, "--pane", csvPane]);
-  await page.waitForSelector(`.pane[data-pane-id="${csvPane}"] .terminal-tab.active ${TERMINAL_SURFACES.ghostty}`, {
+  await page.waitForSelector(`.pane[data-pane-id="${csvPane}"] .terminal-tab.active ${TERMINAL_SURFACE}`, {
     visible: true,
     timeout: 30_000,
   });

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 import { installSizeObserver } from "./terminal-size-page.mjs";
 import { checkpointAfter, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
 
@@ -230,7 +230,7 @@ try {
   await delay(500);
   page = await WebKitPage.open(values.inspector);
   await until(() => page.evaluate(() => document.readyState), (state) => state === "complete", "reloaded workspace page", 30_000);
-  await page.evaluate(installSizeObserver, TERMINAL_SURFACES);
+  await page.evaluate(installSizeObserver, TERMINAL_SURFACE);
   await calibrate();
   const initial = await layout();
   const left = initial.activePaneId;

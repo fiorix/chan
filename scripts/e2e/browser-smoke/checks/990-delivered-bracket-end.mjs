@@ -159,7 +159,7 @@ process.stdin.on("data", (bytes) => {
         writeFileSync(stub, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(recorder)}\n`);
         chmodSync(stub, 0o755);
         names.push(name);
-        const row = await openAttachedTerminal(localCtx, page, cs, windowId, name, "ghostty", ["--command", shellQuote(stub)]);
+        const row = await openAttachedTerminal(localCtx, page, cs, windowId, name, ["--command", shellQuote(stub)]);
         await ctx.pollFile(ready, 30_000);
         await sleep(500);
         if (row.agent !== agent) throw new Error(`${name}: derived ${JSON.stringify(row.agent)}, expected ${agent}`);

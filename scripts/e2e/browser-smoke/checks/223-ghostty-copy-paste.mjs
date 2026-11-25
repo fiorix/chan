@@ -198,7 +198,7 @@ export default {
       if (!(await captureGhosttyTerminals(page, "__ghostty223"))) throw new Error("no entry module of the page names a ghostty-web chunk");
 
       // Terminal A: the long command at the prompt.
-      const a = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, SOURCE, "ghostty"));
+      const a = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, SOURCE));
       await cs(["write", "--tab-name", SOURCE, `PS1='${PROMPT}'; printf '\\033[H\\033[2J\\033[3J'\n`]);
       await waitFor("A's cleared prompt", async () => (await bufferText(a.term)) === PROMPT.trimEnd());
       const cols = await a.term.evaluate((t) => t.cols);
@@ -253,7 +253,7 @@ export default {
       await ctx.shot("223-line");
 
       // Terminal B: the copy pasted and run, by the chord and by the menu.
-      const b = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, TARGET, "ghostty"));
+      const b = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, TARGET));
       await cs(["write", "--tab-name", TARGET, `PS1='${PROMPT}'; printf '\\033[H\\033[2J\\033[3J'\n`]);
       await waitFor("B's cleared prompt", async () => (await bufferText(b.term)) === PROMPT.trimEnd());
       const bHost = await cellCentre(b.term, Math.floor(cols / 2), 3);

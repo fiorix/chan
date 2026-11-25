@@ -28,7 +28,7 @@
 // background leaves both. Each bounded wait below is a hang guard: it
 // bounds a stuck engine, and its timeout reports which stage hung.
 
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const TAB = "SmokeHalfscale296";
 const MARK = "HS296_";
@@ -93,10 +93,10 @@ export default {
     });
     const terminalSocket = () => sockets.find((s) => s.url.includes(TAB));
 
-    const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+    const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB);
     const canvas =
       `.pane[data-pane-id="${row.pane}"] ` +
-      `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
+      `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACE}`;
 
     /// Painted pixels per quarter of the backing store, plus the canvas
     /// transform and grid. Without a reference colour the most frequent

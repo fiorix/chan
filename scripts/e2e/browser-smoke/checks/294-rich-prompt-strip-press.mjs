@@ -98,8 +98,8 @@ async function waitFor(page, card, label, accept, timeout = 15_000) {
 
 /// Open a terminal with a composer holding the given text.
 async function openComposer(ctx, page, cs, windowId, name, text) {
-  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
-  const attachment = await readTerminalAttachment(page, cs, "ghostty", (entry) => entry.session_id === row.session_id);
+  const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
+  const attachment = await readTerminalAttachment(page, cs, (entry) => entry.session_id === row.session_id);
   assert.ok(attachment.attached, "the ghostty terminal is attached");
   const terminal = attachment.selector;
   const card = `${terminal} .rich-prompt`;
@@ -411,8 +411,8 @@ export default {
         );
         const nameB = `${name}-B`;
         const textB = `${text}-B`;
-        const rowB = await openAttachedTerminal(ctx, page, cs, windowId, nameB, "ghostty");
-        const attachmentB = await readTerminalAttachment(page, cs, "ghostty", (entry) => entry.session_id === rowB.session_id);
+        const rowB = await openAttachedTerminal(ctx, page, cs, windowId, nameB);
+        const attachmentB = await readTerminalAttachment(page, cs, (entry) => entry.session_id === rowB.session_id);
         assert.ok(attachmentB.attached, "the second terminal is attached");
         const cardB = `${attachmentB.selector} .rich-prompt`;
         await page.click(`${attachmentB.selector} .terminal-host`);

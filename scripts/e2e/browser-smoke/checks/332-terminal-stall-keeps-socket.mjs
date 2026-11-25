@@ -257,7 +257,7 @@ async function stallEnded(page, timeoutMs) {
 async function openTab(ctx, page, cs, windowId, name, fixture) {
   const spawnArgs = ["--command", `stty -opost -echo && ${fixture.command}`,
     ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
-  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+  const row = await openAttachedTerminal(ctx, page, cs, windowId, name, spawnArgs);
   await fixture.ready();
   await until("the terminal socket is ready", () => read(page, name), (seen) => seen.sockets.at(-1)?.ready, 30_000);
   return row;

@@ -88,7 +88,7 @@ export default {
         // credential must not enter the runner's saved error message.
         let row;
         try {
-          row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+          row = await openAttachedTerminal(ctx, page, cs, windowId, name, spawnArgs);
           opened = true;
         } catch (error) {
           throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]"));

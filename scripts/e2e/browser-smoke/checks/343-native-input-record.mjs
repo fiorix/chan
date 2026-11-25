@@ -88,7 +88,7 @@ export default {
       summary.boot = { retried: wrap.retried, attempts: wrap.attempts, prefs: { wrote: false } };
       await page.evaluate(INSTALL_SRC);
       transport = await startTerminalFixture({ logPath: join(outDir, "program-output.bin"), deadlineMs: 20_000 });
-      row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty", [
+      row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, [
         "--command", "stty -opost -echo && " + transport.command,
         ...Object.entries(transport.env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
       ]);

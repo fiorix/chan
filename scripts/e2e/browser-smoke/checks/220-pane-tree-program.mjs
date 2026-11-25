@@ -143,7 +143,7 @@ export default {
       for (const identity of TERMINALS) {
         const name = tabName(identity);
         await closeTree(page);
-        const attached = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", SHELL]);
+        const attached = await openAttachedTerminal(ctx, page, cs, windowId, name, ["--command", SHELL]);
         opened.push(name);
         if (!attached.session_id || sessions.has(attached.session_id)) throw new Error(`${name}: expected a distinct terminal session`);
         sessions.add(attached.session_id);

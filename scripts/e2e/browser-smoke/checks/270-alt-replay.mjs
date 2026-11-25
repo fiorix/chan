@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -112,7 +112,7 @@ async function currentRow(cs, name, id) {
 
 function screenSelector(row, backend) {
   const tab = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-  return `${tab} ${TERMINAL_SURFACES[backend]}`;
+  return `${tab} ${TERMINAL_SURFACE}`;
 }
 
 async function screenBox(page, row, backend) {
@@ -329,7 +329,7 @@ export default {
           writeFileSync(envFile, Object.entries(fixture.env)
             .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`).join(""), { mode: 0o600 });
           creationAttempted = true;
-          let row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+          let row = await openAttachedTerminal(ctx, page, cs, windowId, name);
           result.before = await prelude(trace, name);
           const normal = `NORMAL270_${backend}`;
           const initial = `ALT270_${backend}`;

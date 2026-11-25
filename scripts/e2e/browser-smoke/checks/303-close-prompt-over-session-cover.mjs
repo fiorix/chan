@@ -95,7 +95,7 @@ export default {
       if (!ok) failures.push(`${name}: ${JSON.stringify(detail)}`);
     };
     try {
-      await openAttachedTerminal(ctx, page, cs, windowId, "Close303", "ghostty");
+      await openAttachedTerminal(ctx, page, cs, windowId, "Close303");
       await frame("window_hidden");
       await page.waitForSelector(COVER, { visible: true, timeout: 10_000 });
       result.coverUp = await until("precondition: the cover's button holds the keyboard", focusOn,

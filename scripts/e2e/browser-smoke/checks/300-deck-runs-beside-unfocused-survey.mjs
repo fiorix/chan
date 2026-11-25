@@ -89,7 +89,7 @@ export default {
       await closeExtraPanes(page).catch((error) => result.cleanupErrors.push(`${label} panes: ${error.message}`));
     };
     try {
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
       const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
 
       // Leg 1: one pane; the survey over its active terminal holds the keyboard.

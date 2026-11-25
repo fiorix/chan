@@ -91,7 +91,7 @@ export default {
     try {
       const chunk = await captureGhosttyTerminals(page, "__ghostty211");
       if (!chunk) throw new Error("no entry module of the page names a ghostty-web chunk");
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB);
       const tabQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
       const hostQuery = `${tabQuery} .terminal-host`;
       const inputQuery = `${tabQuery} .terminal-find input.find`;

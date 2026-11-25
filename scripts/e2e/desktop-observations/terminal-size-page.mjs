@@ -1,12 +1,12 @@
 // Used only at driver polls in the control arm: no socket wrapper,
 // per-send layout read or interval sampler runs in the page.
-export function unobservedViews({ name, tabId, surfaces }) {
+export function unobservedViews({ name, tabId, surface }) {
   return [...document.querySelectorAll("[data-terminal-tab-id]")].flatMap((tab) => {
     const id = tab.getAttribute("data-terminal-tab-id");
     if (id !== tabId) return [];
     const host = tab.querySelector(".terminal-host");
     const pane = tab.closest(".pane");
-    const screen = tab.querySelector(surfaces.ghostty);
+    const screen = tab.querySelector(surface);
     const box = (element) => {
       if (!element) return null;
       const { x, y, width, height } = element.getBoundingClientRect();
@@ -21,7 +21,7 @@ export function unobservedViews({ name, tabId, surfaces }) {
 
 // Installed before the app. Retain only terminal identity and geometry, never
 // the socket URL, spawn environment, input bytes or authentication fields.
-export function installSizeObserver(surfaces) {
+export function installSizeObserver(surface) {
   const NativeSocket = window.WebSocket;
   const sockets = new Map();
   const records = [];
@@ -38,7 +38,7 @@ export function installSizeObserver(surfaces) {
     const tab = document.querySelector(`[data-terminal-tab-id="${CSS.escape(entry.tab)}"]`);
     const pane = tab?.closest(".pane");
     const host = tab?.querySelector(".terminal-host");
-    const screen = tab?.querySelector(surfaces.ghostty);
+    const screen = tab?.querySelector(surface);
     const style = host ? getComputedStyle(host) : null;
     const padding = style ? {
       left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight),

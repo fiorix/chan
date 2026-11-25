@@ -12,7 +12,7 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const TERMINAL = ".pane .terminal-tab.active";
@@ -55,7 +55,7 @@ async function openTerminal(page, engine) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await sleep(1_000);
 }
 

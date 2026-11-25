@@ -23,7 +23,7 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const DIR = `pane-focus-226-${RUN}`;
@@ -116,7 +116,7 @@ async function openTerminal(page) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await sleep(1_000);
 }
 
@@ -316,7 +316,7 @@ async function restoreArm(ctx, page, engine, adopt) {
   await page.setViewport({ width: 1280, height: 900 });
   await page.bringToFront();
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await page.waitForFunction((selector) => document.querySelectorAll(selector).length > 0, { timeout: 15_000 }, FILE_ROW);
   // Past the terminal's open and ghostty-web's zero-delay focus retry,
   // sampled so a reading shows what took the keyboard and when.

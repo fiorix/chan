@@ -76,7 +76,7 @@ export default {
       const result = { backend, legs: {}, cleanupErrors: [] };
       const calls = [];
       try {
-        const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+        const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
         const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
         const file = `owner299-${backend}.md`;
         const directory = `owner299-${backend}-dir`;

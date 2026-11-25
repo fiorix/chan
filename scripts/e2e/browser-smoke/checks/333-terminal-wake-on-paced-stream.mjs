@@ -56,7 +56,7 @@ export default {
       const command = ["stty -echo", ...LEGS.flatMap(({ begin, end, count }) => [
         "IFS= read -r _", `printf '${begin}\\n'`, `seq -f %.0f 1 ${count}`, `printf '${end}'`,
       ]), "exec sleep 600"].join("; ");
-      await openAttachedTerminal(ctx, page, cs, windowId, NAME, "ghostty", ["--command", command]);
+      await openAttachedTerminal(ctx, page, cs, windowId, NAME, ["--command", command]);
       const read = () => page.evaluate((name) => __streamProbe.read(name), NAME);
       await until("the terminal socket is ready", read, (state) => state?.ready);
       assert.equal(await page.evaluate(() => __streamProbe.wakeProbeCount()), 1,

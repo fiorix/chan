@@ -286,7 +286,7 @@ export default {
       {
         const scope = ".rich-prompt";
         const known = new Set((await listDrafts(ctx)).drafts.map((d) => d.primary.draft_id));
-        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "ghostty", ["--command", "cat"]);
+        await openAttachedTerminal(ctx, page, terminal, windowId, TAB, ["--command", "cat"]);
         terminalOpen = true;
         await page.evaluate(() => {
           window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.richPrompt" } }));

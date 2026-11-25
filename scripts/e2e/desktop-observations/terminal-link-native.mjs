@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 
 const exec = promisify(execFile);
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -169,7 +169,7 @@ async function surfaceOf(name, backend) {
   const listed = JSON.parse(await cs("terminal", "list", "--json"));
   const row = Object.values(listed.groups ?? {}).flat().find((entry) => entry.name === name);
   if (!row?.pane || !row.tab) return null;
-  return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES[backend]}`;
+  return `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACE}`;
 }
 
 async function runBackend(backend, offset) {
@@ -204,7 +204,7 @@ async function driveBackend(backend, name, record, offset) {
         tab: tab ? { active: tab.classList.contains("active"), width: tabBox.width, height: tabBox.height } : null,
         mounted: tab ? (tab.querySelector(ghosttySurface) ? "ghostty" : tab.querySelector(".terminal.xterm") ? "xterm" : "none") : null,
       };
-    }, surface, surface.slice(0, surface.indexOf("]", surface.indexOf("data-terminal-tab-id")) + 1), TERMINAL_SURFACES.ghostty);
+    }, surface, surface.slice(0, surface.indexOf("]", surface.indexOf("data-terminal-tab-id")) + 1), TERMINAL_SURFACE);
     record.mounted = state.mounted;
     return state;
   }, (v) => v?.shown === true && v.mounted === backend, 60_000, SetupError);

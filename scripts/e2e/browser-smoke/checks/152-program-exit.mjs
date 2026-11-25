@@ -20,7 +20,7 @@ with release.open() as signal:
 sys.stdout.buffer.write(b"\x1b]7501;state=done:id=finished\x07")
 sys.stdout.buffer.flush()
 `);
-    await ctx.exec("mkfifo", [join(ctx.workspaceDir, "Status152ghosttyS.fifo")]);
+    await ctx.exec("mkfifo", [join(ctx.workspaceDir, "Status152S.fifo")]);
     await withProgramStatusTabs(ctx, "152", async (tab) => {
       assert.equal((await tab.read()).mark?.active, false, "the subject is behind the front tab before release");
       await writeFile(join(ctx.workspaceDir, `${tab.subject}.fifo`), "go\n");

@@ -68,7 +68,7 @@ export default {
       }
     };
     try {
-      await openAttachedTerminal(ctx, page, cs, windowId, "Paint302", "ghostty");
+      await openAttachedTerminal(ctx, page, cs, windowId, "Paint302");
 
       await leg("deckAlone", async (r) => {
         await openDeck(page);

@@ -6,7 +6,7 @@
 // Stored off: a fresh terminal paints output without masks.
 // Re-enabled: a fresh terminal masks, copies cleartext and toggles again.
 
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB_DEFAULT = "SmokeMask93Default";
@@ -75,7 +75,7 @@ export default {
     const patchTerminalConfig = (changes) => writeTerminalPrefs(page, authToken, changes);
     const assertToml = (expected) => assertTerminalPrefs(ctx, expected);
     const openTerminal = (name) =>
-      openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+      openAttachedTerminal(ctx, page, cs, windowId, name);
 
     async function closeTerminal(name) {
       await cs(["close", "--tab-name", name]);
@@ -204,7 +204,7 @@ export default {
           for (const [key, rect] of next) open.set(key, rect);
         }
         return { rects: rects.filter((rect) => rect.h >= 8), markerPixels };
-      }, `.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
+      }, `.terminal-tab ${TERMINAL_SURFACE}`);
     }
 
     /// Wait until the canvas holds exactly `want` mask rectangles, and
@@ -243,10 +243,10 @@ export default {
 
     // A trusted canvas drag must focus the terminal without a private input seam.
     async function dragAndCopy(rects) {
-      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
-      if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
+      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACE}`);
+      if (!canvas) throw new Error(`${TERMINAL_SURFACE} missing`);
       const box = await canvas.boundingBox();
-      if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
+      if (!box) throw new Error(`${TERMINAL_SURFACE} has no bounding box`);
       const pixelHeight = await canvas.evaluate((element) => element.height);
       const cellHeight = rects[0].h * box.height / pixelHeight;
       const x0 = box.x + 1;

@@ -75,7 +75,7 @@ Path(audit_path).write_text(json.dumps(audit))
       await ctx.shot(`${tab.backend}-headless-status-persists`, tab.page);
 
       const deadName = `Status161${tab.backend}D`;
-      const dead = await openAttachedTerminal(ctx, tab.page, tab.cs, tab.windowId, deadName, tab.backend);
+      const dead = await openAttachedTerminal(ctx, tab.page, tab.cs, tab.windowId, deadName);
       assert.ok(dead.session_id, "closed-session probe has a real attached session id");
       await tab.cs(["close", "--tab-name", deadName]);
       const afterClose = Object.values(JSON.parse((await tab.cs(["list", "--json"])).stdout).groups ?? {}).flat();

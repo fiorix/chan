@@ -226,7 +226,7 @@ process.stdin.on("data", (bytes) => {
 `);
       writeFileSync(stub, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(recorder)}\n`);
       chmodSync(stub, 0o755);
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", shellQuote(stub)]);
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, ["--command", shellQuote(stub)]);
       opened = true;
       await ctx.pollFile(ready, 30_000);
       if (row.agent !== "muse") throw new Error(`${name}: derived ${JSON.stringify(row.agent)}, expected muse`);

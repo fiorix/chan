@@ -183,7 +183,7 @@ export default {
 
       // The terminal attached on `tabId`, or null.
       const attachedOn = async (tabId) => {
-        const attachment = await readTerminalAttachment(page, terminal, "ghostty", (row) => row.name === NAME);
+        const attachment = await readTerminalAttachment(page, terminal, (row) => row.name === NAME);
         return attachment.attached && attachment.row.tab === tabId ? attachment.row : null;
       };
 

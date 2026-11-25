@@ -199,7 +199,7 @@ async function fixture(ctx, index, report) {
   for (const label of [result.labels.control, result.labels.file]) await result.cs(["open", label, "--window", result.windowId]);
   await poll("both clean file tabs", async () => (await state(page)).tabs.filter((tab) => tab.label?.endsWith(".md")).length === 2);
   for (const kind of ["live", "ended"]) {
-    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], "ghostty");
+    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind]);
     result[`${kind}Session`] = row.session_id;
     result[`${kind}TabId`] = row.tab;
     result[`${kind}PaneId`] = row.pane;

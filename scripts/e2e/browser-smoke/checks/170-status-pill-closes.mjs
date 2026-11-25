@@ -139,7 +139,7 @@ export default {
 
     const observations = {};
     try {
-      await openAttachedTerminal(ctx, page, terminal, windowId, TAB, "ghostty");
+      await openAttachedTerminal(ctx, page, terminal, windowId, TAB);
       // The find box opens from the terminal's own menu.
       await read(`(() => {
         const tab = document.querySelector('.terminal-tab.active');

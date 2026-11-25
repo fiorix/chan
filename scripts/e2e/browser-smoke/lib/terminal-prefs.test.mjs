@@ -3,7 +3,6 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { openAttachedTerminal } from "./terminal-attach.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
 
 for (const ghostty of [true, false, undefined, null]) {
@@ -61,9 +60,6 @@ for (const ghostty of [undefined, true, false]) {
     assert.equal(JSON.parse(f.requests[1].body).preferences.terminal.mouse_capture, true);
     assert.equal(JSON.parse(f.requests[1].body).expected_revision, 3);
     assert.deepEqual(f.commands, [["new", "--tab-name", "legacy"], ["list", "--json"]]);
-    assert.throws(() => openAttachedTerminal(f.ctx, f.page, f.cs, "w", "retired", "xterm"),
-      /retired or unsupported terminal backend/);
-    assert.equal(f.commands.length, 2, "legacy compatibility cannot authorize an xterm spawn");
   });
 }
 

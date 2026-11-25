@@ -130,7 +130,7 @@ async function settledTerminalCount(page) {
 /// Open a Ghostty terminal in the window's pane and wait for its renderer.
 async function openTerminal(ctx, page, cs, windowId, name) {
   const before = await settledTerminalCount(page);
-  await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+  await openAttachedTerminal(ctx, page, cs, windowId, name);
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
   // A moment for the shell's prompt; keys typed before it wait in the PTY.
   await sleep(1_000);

@@ -220,7 +220,7 @@ async function runEngine(ctx, backend, directory, save) {
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
     requested.push(names.target);
-    target = await openAttachedTerminal(ctx, page, cs, windowId, names.target, backend, [
+    target = await openAttachedTerminal(ctx, page, cs, windowId, names.target, [
       "--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(files.target)}`,
     ]);
     await until("target recorder starts", () => existsSync(files.target));
@@ -231,7 +231,7 @@ async function runEngine(ctx, backend, directory, save) {
     await dispatchCommand(page, "app.pane.splitDown");
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
     requested.push(names.away);
-    away = await openAttachedTerminal(ctx, page, cs, windowId, names.away, backend, [
+    away = await openAttachedTerminal(ctx, page, cs, windowId, names.away, [
       "--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(files.away)}`,
     ]);
     await until("other recorder starts", () => existsSync(files.away));

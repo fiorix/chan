@@ -92,17 +92,17 @@ export async function waitSaved(ctx, page, windowId, name) {
   }, { timeout: 20_000, polling: 100 }, { windowId, name, token });
 }
 
-export async function waitRestoredTerminal(page, cs, windowId, original, backend, timeout = 30_000) {
+export async function waitRestoredTerminal(page, cs, windowId, original, timeout = 30_000) {
   const deadline = Date.now() + timeout;
   let placement = null;
   for (;;) {
-    const { row, selector, attached } = await readTerminalAttachment(page, cs, backend, (entry) =>
+    const { row, selector, attached } = await readTerminalAttachment(page, cs, (entry) =>
       entry.session_id === original.session_id && entry.window === windowId);
     // Session identity survives a reload; pane and tab IDs are regenerated.
     placement = row ? { session_id: row.session_id, window: row.window, pane: row.pane, tab: row.tab } : null;
     if (attached) return { ...placement, selector };
     if (Date.now() >= deadline) {
-      assert.fail(`restored ${backend} terminal not attached: ${JSON.stringify(placement)}`);
+      assert.fail(`restored terminal not attached: ${JSON.stringify(placement)}`);
     }
     await sleep(100);
   }
@@ -136,7 +136,7 @@ export default {
     try {
       const spawnArgs = ["--command", "stty -opost -echo && " + fixture.command,
         ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, spawnArgs);
       opened = true;
       result.fixture = await fixture.ready();
       assert.ok(result.fixture.tty && result.fixture.raw, "the fixture runs in a raw PTY");
@@ -150,7 +150,7 @@ export default {
       await ctx.waitWindowLive(windowId);
       // Ready follows the server's placement update for this same session.
       await waitFor(page, card, "the reloaded terminal received ready", (value) => value.sockets[0]?.ready);
-      result.attachment = await waitRestoredTerminal(page, cs, windowId, row, "ghostty");
+      result.attachment = await waitRestoredTerminal(page, cs, windowId, row);
       const terminal = result.attachment.selector;
       card = `${terminal} .rich-prompt`;
       await page.click(`${terminal} .terminal-host`);

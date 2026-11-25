@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const SOURCE = "TypedBroadcastSource178";
 const TARGET = "TypedBroadcastTarget178";
@@ -60,7 +60,7 @@ async function selectTab(page, name) {
     const label = await tab.$eval(".path", (node) => node.textContent?.trim() ?? "").catch(() => "");
     if (label !== name) continue;
     await tab.click();
-    const surface = `.terminal-tab.active ${TERMINAL_SURFACES.ghostty}`;
+    const surface = `.terminal-tab.active ${TERMINAL_SURFACE}`;
     await page.waitForSelector(surface, { visible: true, timeout: 10_000 });
     await page.click(surface);
     await page.waitForFunction(() => {
@@ -99,7 +99,7 @@ export default {
     const details = { backend: "ghostty", arms: [] };
     try {
       for (const [role, name] of [["source", SOURCE], ["target", TARGET]]) {
-        await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+        await openAttachedTerminal(ctx, page, cs, windowId, name);
         opened.push(name);
         await cs(["write", "--tab-name", name, `node ${reader} ${role} ${paths[role]}\n`]);
         const ready = await waitFor(() => Promise.resolve(rows(paths[role])),

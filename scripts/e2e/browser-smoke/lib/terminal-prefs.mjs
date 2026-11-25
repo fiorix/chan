@@ -185,5 +185,5 @@ async function openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArg
       throw new Error("legacy terminal.ghostty survived canonical readback");
     }
   }, { token, ghostty });
-  return openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", newArgs);
+  return openAttachedTerminal(ctx, page, cs, windowId, name, newArgs);
 }

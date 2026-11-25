@@ -153,9 +153,9 @@ export default {
           const command =
             `i=0; while [ ! -e ${shellQuote(stop)} ] && [ $i -lt 300 ]; do echo tick; sleep .2; i=$((i+1)); done; ` +
             `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`;
-          const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", command]);
+          const row = await openAttachedTerminal(ctx, page, cs, windowId, name, ["--command", command]);
           opened = true;
-          const attachment = await readTerminalAttachment(page, cs, "ghostty", (entry) => entry.session_id === row.session_id);
+          const attachment = await readTerminalAttachment(page, cs, (entry) => entry.session_id === row.session_id);
           assert.ok(attachment.attached, `the ${backend} terminal is attached`);
           await page.evaluate(() => { window.__prompt292.prompts.length = 0; });
           const terminal = attachment.selector;

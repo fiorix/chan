@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const WINDOW = "rich-prompt-chrome-177";
 const SENT = "rp177-sent.txt";
@@ -110,7 +110,7 @@ export default {
       await page.evaluate(() => window.dispatchEvent(
         new CustomEvent("chan:command", { detail: { name: "app.terminal.toggle" } }),
       ));
-      await page.waitForSelector(Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", "),
+      await page.waitForSelector(`.terminal-tab.active ${TERMINAL_SURFACE}`,
         { timeout: 30_000 });
       // A live shell before the card sends to it.
       await sleep(2500);

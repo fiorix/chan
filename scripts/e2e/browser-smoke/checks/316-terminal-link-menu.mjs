@@ -57,7 +57,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { capturePointerTerminals, pointerTerminal, seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -234,10 +234,10 @@ export default {
       await writeTerminalPrefs(page, authToken, { mouse_capture: true });
       await assertTerminalPrefs(ctx, { mouse_capture: true });
       await capturePointerTerminals(page);
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
       tabs.push(name);
       terminal = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
-      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
+      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACE}`;
       const sizeFile = join(dir, `size316-ghostty`);
       rmSync(sizeFile, { force: true });
 

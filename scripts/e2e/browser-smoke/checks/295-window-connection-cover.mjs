@@ -17,7 +17,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { startRelay } from "../lib/flow-relay.mjs";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 // api/transport.ts, components/DisconnectOverlay.svelte,
 // components/terminalConnectionHealth.svelte.ts and state/store.svelte.ts.
@@ -237,7 +237,7 @@ async function observe(page) {
       terminalInputPresent: !!terminalInput,
       record: JSON.parse(JSON.stringify(window.__c295 ?? null)),
     };
-  }, { barSelector: BAR_SELECTOR, stallNotes: STALL_NOTES, terminalSurface: TERMINAL_SURFACES.ghostty });
+  }, { barSelector: BAR_SELECTOR, stallNotes: STALL_NOTES, terminalSurface: TERMINAL_SURFACE });
 }
 
 function fail(label, seen, relay) {
@@ -470,7 +470,7 @@ async function browserPass(ctx, bar) {
   try {
     ({ page, windowId } = await openPass(ctx, relay, { name, bar, desktop: false, terminalName }));
     if (!bar) writeFileSync(join(ctx.workspaceDir, STATUS_FILE), "the status pill's placement target\n");
-    await openAttachedTerminal(ctx, page, terminal, windowId, terminalName, "ghostty");
+    await openAttachedTerminal(ctx, page, terminal, windowId, terminalName);
     await waitFor(page, `${name} terminal attached`, (seen) =>
       seen.terminalInputPresent && seen.record.terminalFrameCount > 0, Date.now() + PAGE_GUARD_MS, relay);
     await focusTerminal(page, name, relay);

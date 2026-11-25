@@ -17,7 +17,7 @@
 // terminal is the only member of a group of its own, read back from the
 // server's roster before the toggle.
 
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
@@ -210,11 +210,11 @@ export default {
     try {
       // The tab's name doubles as its group's.
       const name = `LauncherFocus203ghostty`;
-      await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--tab-group", name]);
+      await openAttachedTerminal(ctx, page, cs, windowId, name, ["--tab-group", name]);
       opened.push(name);
       await waitSoleMember(page, token, name, name, `ghostty: before Group broadcast`);
       // The keyboard starts in the terminal the way a user's does: by a click.
-      await page.click(`.terminal-tab.active ${TERMINAL_SURFACES.ghostty}`);
+      await page.click(`.terminal-tab.active ${TERMINAL_SURFACE}`);
       await waitForTerminalKeyboard(page, `ghostty: after the click`);
       await typeLine(page, `printf 'BEFORE_%s_OK\\n' ghostty`);
       await waitForScrollback(cs, name, `BEFORE_ghostty_OK`, `ghostty: typed before the launcher`);
