@@ -14,6 +14,11 @@
 // - card-key: focus placed on A's option by script, as assistive technology
 //   can place it, and a 1 typed there answers nothing; selecting B's tab
 //   takes the keyboard back to B's terminal, where a 1 reaches B's PTY.
+// - link-press: the survey's body renders the same two links; a press on
+//   the first, through the page's hit-testing, clicks that link, makes A
+//   the focused pane, puts the link back in the Tab order and answers
+//   nothing. A capture listener on the window holds the click's default,
+//   so the page stays.
 // - pointer: a click on A's option answers it and makes A the focused pane.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -34,10 +39,13 @@ const bytes = (file, offset = 0) => existsSync(file)
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const WALK_LIMIT = 16;
 const BODY = "Pane B keeps the keyboard; this survey answers a press only.";
+const LINKED_BODY = "Pane B keeps the keyboard; see https://example.com/pull/348 or [the notes](https://example.com/notes).";
 /// A leg's survey body where the default does not serve it.
 const LEG_BODY = {
-  "strip-walk": "Pane B keeps the keyboard; see https://example.com/pull/348 or [the notes](https://example.com/notes).",
+  "strip-walk": LINKED_BODY,
+  "link-press": LINKED_BODY,
 };
+const LEG_COUNT = 5;
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -175,6 +183,16 @@ async function runEngine(ctx, backend, directory, save) {
     return handle.result;
   }
 
+  /// The linked body's two links, rendered in A's survey card.
+  async function expectBodyLinks(result) {
+    result.bodyLinks = await page.evaluate((card) =>
+      [...document.querySelectorAll(`${card} .survey-body a[href]`)].map((link) => link.textContent),
+    `${terminalSelector(target.tab)} .survey-card`);
+    if (!same(result.bodyLinks, ["https://example.com/pull/348", "the notes"])) {
+      throw new Error(`precondition: the survey body renders its two links: ${JSON.stringify(result.bodyLinks)}`);
+    }
+  }
+
   async function focusByScript(selector) {
     const focused = await page.evaluate((query) => {
       const element = document.querySelector(query);
@@ -216,12 +234,7 @@ async function runEngine(ctx, backend, directory, save) {
     },
 
     async "strip-walk"(result, handle, offsets) {
-      result.bodyLinks = await page.evaluate((card) =>
-        [...document.querySelectorAll(`${card} .survey-body a[href]`)].map((link) => link.textContent),
-      `${terminalSelector(target.tab)} .survey-card`);
-      if (!same(result.bodyLinks, ["https://example.com/pull/348", "the notes"])) {
-        throw new Error(`precondition: the survey body renders its two links: ${JSON.stringify(result.bodyLinks)}`);
-      }
+      await expectBodyLinks(result);
       const label = `.pane[data-pane-id="${result.appeared.awayPane}"] .tabs [role="tab"]`;
       await focusByScript(label);
       result.start = await read();
@@ -282,6 +295,51 @@ async function runEngine(ctx, backend, directory, save) {
       result.targetBytes = bytes(files.target, offsets.target);
       if (result.targetBytes.length) result.failures.push(`A's PTY took ${JSON.stringify(result.targetBytes)}`);
       if (!result.unsolicitedReply && handle.result) result.failures.push(`typing in pane B answered the survey: ${JSON.stringify(handle.result)}`);
+    },
+
+    async "link-press"(result, handle, offsets) {
+      await expectBodyLinks(result);
+      const link = `${terminalSelector(target.tab)} .survey-body a[href]`;
+      await page.evaluate((query) => {
+        const clicks = [];
+        const hold = (event) => {
+          const at = event.target;
+          clicks.push({
+            link: at === document.querySelector(query),
+            element: `${at?.tagName ?? "none"}.${at?.className?.toString?.() ?? ""}`,
+          });
+          event.preventDefault();
+        };
+        window.__survey348LinkPress = { clicks, hold };
+        window.addEventListener("click", hold, true);
+      }, link);
+      try {
+        await page.click(link);
+        await settle(page);
+      } finally {
+        result.clicks = await page.evaluate(() => {
+          const { clicks, hold } = window.__survey348LinkPress;
+          window.removeEventListener("click", hold, true);
+          delete window.__survey348LinkPress;
+          return clicks;
+        });
+      }
+      if (!same(result.clicks.map((click) => click.link), [true])) {
+        result.failures.push(`the press on the body link clicked ${JSON.stringify(result.clicks)}, expected the link once`);
+      }
+      result.afterPress = await until("the press on the body link makes A the focused pane", async () => {
+        const current = await read();
+        return current.focusedPane === current.targetPane ? current : null;
+      }).catch(async () => ({ ...(await read()), timedOut: true }));
+      if (result.afterPress.timedOut) result.failures.push(`the press on the body link left pane ${result.afterPress.focusedPane} focused, expected pane A`);
+      if (!result.afterPress.surveyOpen) result.failures.push("the press on the body link closed the survey");
+      if (!result.afterPress.inTargetPane) result.failures.push(`after the press on the body link the keyboard belongs to ${result.afterPress.keyboard}, outside pane A`);
+      result.linkTabIndex = await page.$eval(link, (anchor) => anchor.tabIndex);
+      if (result.linkTabIndex !== 0) result.failures.push(`pane A focused, the body link reads tabIndex ${result.linkTabIndex}; expected 0`);
+      result.unsolicitedReply = await unsolicitedReply(handle, 1_000);
+      if (result.unsolicitedReply) result.failures.push(`the press on the body link answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
+      expectNoBytes(result, "the press on the body link", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
+      result.screenshot = basename(await ctx.shot(`348-${backend}-link-press`, page));
     },
 
     async pointer(result, handle, offsets) {
@@ -400,7 +458,7 @@ export default {
       catch (error) { report.cleanupErrors.push(describeError(error)); }
       save();
     }
-    const failed = report.engines.filter((engine) => engine.setup !== "observed" || engine.setupErrors.length || engine.pageErrors.length || engine.cleanupErrors.length || engine.legs.length !== 4 ||
+    const failed = report.engines.filter((engine) => engine.setup !== "observed" || engine.setupErrors.length || engine.pageErrors.length || engine.cleanupErrors.length || engine.legs.length !== LEG_COUNT ||
       engine.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length));
     if (failed.length || !same(report.engines.map((engine) => engine.backend), ["ghostty"]) || report.cleanupErrors.length) {
       const reasons = report.engines.flatMap((engine) => [

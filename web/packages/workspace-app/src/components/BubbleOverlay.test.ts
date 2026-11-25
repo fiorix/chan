@@ -385,8 +385,9 @@ describe("the survey card's keys", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
-  // A window-wide survey is no pane's: whatever the focused pane shows, its
-  // buttons stay in the Tab order and its card answers its keys.
+  // A window-wide survey is no pane's: whatever the focused pane shows,
+  // everything in its card stays in the Tab order, its body's link and its
+  // buttons alike, and its card answers its keys.
   test.each([
     ["1", "option", 0],
     ["F", "followup", undefined],
@@ -396,14 +397,18 @@ describe("the survey card's keys", () => {
     expect(activeTabInPane(layout.nodes[layout.activePaneId] as LeafNode)?.kind, "the focused pane shows a dashboard")
       .toBe("dashboard");
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
-    surveyState.windowWide = { spec: spec(), busy: false };
+    surveyState.windowWide = {
+      spec: spec({ bodyMarkdown: "Pick a backend; [the notes](https://example.com/notes) compare them." }),
+      busy: false,
+    };
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
     await tick();
     const card = target.querySelector<HTMLElement>(".survey-card")!;
-    expect([...card.querySelectorAll<HTMLButtonElement>("button")].map((b) => b.tabIndex), "every button in the Tab order")
-      .toEqual([0, 0, 0, 0]);
+    const tabbable = [...card.querySelectorAll<HTMLElement>("*")].filter((el) => el.tabIndex >= 0);
+    expect(tabbable.map((el) => el.localName), "the body's link and every button in the Tab order")
+      .toEqual(["a", "button", "button", "button", "button"]);
 
     const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
     card.dispatchEvent(event);

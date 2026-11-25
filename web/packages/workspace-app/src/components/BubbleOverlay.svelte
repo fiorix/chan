@@ -54,22 +54,31 @@
   // the pane makes itself the focused one on the press first.
   const buttonTabIndex = $derived(ownsKeyboard() ? 0 : -1);
 
-  // The body's markup can hold focusables of its own (a link, a bare URL the
-  // markdown links, raw HTML the sanitizer keeps), which leave the Tab order
-  // with the buttons and get their own tabindex back when the survey owns the
-  // keyboard. A negative tabindex still lets a press focus and follow them.
+  // The body's markup can hold focusables of its own, which leave the Tab
+  // order with the buttons and get their own tabindex back when the survey
+  // owns the keyboard: a link in any namespace (a bare URL the markdown links,
+  // an SVG link by either spelling, an image map's area), a control, a
+  // details, whose summary the browser supplies when the markup has none,
+  // media with controls, an element with a tabindex of its own, and a scroll
+  // container, which Chrome and Firefox put in the Tab order. The sanitizer
+  // strips `contenteditable`. A negative tabindex still lets a press focus
+  // and follow them.
   const BODY_FOCUSABLE =
-    "a[href], area[href], button, input, select, textarea, iframe, summary, " +
-    "audio[controls], video[controls], [tabindex], [contenteditable]";
+    "[*|href], button, input, select, textarea, iframe, details, summary, " +
+    "audio[controls], video[controls], [tabindex]";
+  function scrolls(el: Element): boolean {
+    const { overflowX, overflowY } = getComputedStyle(el);
+    return [overflowX, overflowY].some((overflow) => overflow === "auto" || overflow === "scroll");
+  }
   let body = $state<HTMLDivElement | null>(null);
   $effect(() => {
     // A new body replaces the markup, so the hold moves to the new elements.
     active?.bodyMarkdown;
     if (!body || ownsKeyboard()) return;
-    const held = [...body.querySelectorAll<HTMLElement>(BODY_FOCUSABLE)].map(
-      (el) => [el, el.getAttribute("tabindex")] as const,
-    );
-    for (const [el] of held) el.tabIndex = -1;
+    const held = [...body.querySelectorAll("*")]
+      .filter((el) => el.matches(BODY_FOCUSABLE) || scrolls(el))
+      .map((el) => [el, el.getAttribute("tabindex")] as const);
+    for (const [el] of held) el.setAttribute("tabindex", "-1");
     return () => {
       for (const [el, own] of held) {
         if (own === null) el.removeAttribute("tabindex");
@@ -139,8 +148,8 @@
       if (current instanceof HTMLElement && current !== document.body) {
         // A per-terminal survey first shown from a hidden tab can observe the
         // previous tab or the clicked tab header. Only remember a target from
-        // inside the owning terminal; TerminalTab restores xterm itself when
-        // no eligible target exists.
+        // inside the owning terminal; TerminalTab refocuses its terminal
+        // itself when no eligible target exists.
         const owner = card?.closest(".terminal-tab");
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
@@ -304,7 +313,7 @@
   /* Per-terminal: cover only the owning terminal (the .terminal-tab is the
      position:relative context), so the survey sits over its own terminal and
      other terminals stay usable. Below the terminal menu bubble (z 25500) but
-     above the xterm canvas. */
+     above the terminal's canvas. */
   .survey-overlay.per-terminal {
     position: absolute;
     z-index: 24000;
