@@ -450,11 +450,12 @@ export class SearchOwner {
     while (this.waiting.length) {
       const { direction, at } = this.waiting[0];
       if (this.kept !== null && this.index === null) {
-        // Output, a restarted scan or a resize has left the active match's
-        // index unplaced. Applied from no active match the press would
-        // start over from the newest or oldest match, so it steps from the
-        // list placed before the output where it can (a resize keeps none),
-        // and otherwise waits for placement up to its cap.
+        // Output, a restarted scan, a resize or the switch back from the
+        // alternate screen has left the active match's index unplaced.
+        // Applied from no active match the press would start over from the
+        // newest or oldest match, so it steps from the list placed before
+        // where it can (a resize keeps none), and otherwise waits for
+        // placement up to its cap.
         const next = this.stepBefore(direction);
         if (next === 'newest' || (next === null && performance.now() - at >= WAIT_CAP_MS)) {
           this.forget();
