@@ -248,8 +248,10 @@
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
-  /// depth change reads through `raiseDepth`, which counts the budget over
-  /// each read before it opens a level.
+  /// depth change reads the levels it opens below the selected directory
+  /// through `raiseDepth`, which counts the budget over each read before it
+  /// opens a level, and the directories it opens above it through this,
+  /// leaving a failed one to its retry too.
   function loadOpenedChildren(leaveFailed = false): void {
     const withChildren = new Set<string>();
     if ((kept ?? taken)?.tree == null) {
@@ -321,10 +323,12 @@
       raiseDepth(depthDir, value, true);
       return;
     }
-    // A lowered depth always applies, since it draws less.
+    // A lowered depth always applies, since it draws less. It opens the
+    // directories above `depthDir`, which no read may have reached.
     depthRaise = null;
     const before = new Set(visibleNodeIds);
     graphState.expanded = openBelow(nodes, expandedDirs, depthDir, value);
+    loadOpenedChildren(true);
     void requestExpansionFitAfterUpdate(depthDir, before);
   }
   /// The depth is the selected node's, so a new selection starts it over:
@@ -386,6 +390,9 @@
     }
     if (depthRaise !== raise) return;
     depthRaise = null;
+    // The levels below `raise.dir` were read before they opened; the
+    // directories above it, which its first pass opened, were not.
+    loadOpenedChildren(true);
     if (fit) void requestExpansionFitAfterUpdate(raise.dir, before);
   }
 
