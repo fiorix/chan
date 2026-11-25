@@ -19,7 +19,7 @@
   // laid-out node of every id that stays visible and re-warms the
   // simulation around the change.
 
-  import { api } from "../api/client";
+  import { api, type GraphTreeCoverage } from "../api/client";
   import { ApiError, isWorkspaceRootMissingError } from "../api/errors";
   import { isDraftClientPath } from "../api/fileIdentity";
   import type {
@@ -232,17 +232,22 @@
   /// budget again.
   const OPENED_CHILDREN_READS_PER_STEP = 64;
 
-  /// The shared graph holds the whole tree once the index has answered.
-  /// Until then the tab draws its filesystem spine only as deep as the
-  /// opened directories reached at its last fetch, so one a double-click
-  /// opens past that has no children to show: read them, a level per such
-  /// directory, at most OPENED_CHILDREN_READS_PER_STEP, shallowest first. A
-  /// depth change reads through `raiseDepth`, which counts the budget over
-  /// each read before it opens a level.
+  /// The shared graph holds the whole tree once the index has answered,
+  /// unless its answer is over the listing cap (`taken.tree`): that one
+  /// holds every folder but of the files only those it holds for another
+  /// reason, so a child node there does not show a directory's level is
+  /// drawn. The tab draws its filesystem spine only as deep as the opened
+  /// directories reached at its last fetch, so one a double-click opens
+  /// past that, with no level the drawn graph is known to hold, is read: a
+  /// level per such directory, at most OPENED_CHILDREN_READS_PER_STEP,
+  /// shallowest first. A depth change reads through `raiseDepth`, which
+  /// counts the budget over each read before it opens a level.
   function loadOpenedChildren(): void {
     const withChildren = new Set<string>();
-    for (const n of nodes) {
-      if ((n.kind === "file" || n.kind === "folder") && n.path) withChildren.add(parentDir(n.path));
+    if (taken?.tree == null) {
+      for (const n of nodes) {
+        if ((n.kind === "file" || n.kind === "folder") && n.path) withChildren.add(parentDir(n.path));
+      }
     }
     const missing: string[] = [];
     for (const dir of Object.keys(expandedDirs)) {
@@ -576,11 +581,12 @@
 
   // ---- state -------------------------------------------------------------
 
-  /// The view of the window's shared graph this tab draws, and whether it
-  /// was still streaming when taken (`graphData.partial`). The tab takes it
-  /// while shown (see the effect that takes it). Held raw: the view is the
-  /// store's own object, never a copy.
-  let taken = $state.raw<{ view: GraphView; partial: boolean } | null>(null);
+  /// The view of the window's shared graph this tab draws, whether it was
+  /// still streaming when taken (`graphData.partial`), and what its answer
+  /// holds of the tree (`graphData.tree`). The tab takes it while shown
+  /// (see the effect that takes it). Held raw: the view is the store's own
+  /// object, never a copy.
+  let taken = $state.raw<{ view: GraphView; partial: boolean; tree: GraphTreeCoverage | null } | null>(null);
   /// What a hidden tab holds in place of `taken` once the window's graph has
   /// moved on under it: the part of its view it draws from, and no more.
   let kept = $state.raw<DrawnGraph | null>(null);
@@ -627,6 +633,9 @@
     if (!graphWhole || error !== null) return [];
     const failed = [...spineFailures].filter(([, failure]) => failure.status === "failed");
     if (failed.length === 0) return [];
+    // An answer over the listing cap holds a directory without its files,
+    // so it covers no failed read.
+    if (taken?.tree != null) return failed;
     // The spine's own directory entries can survive a failed child read.
     const covered = sharedDirectories;
     return failed.filter(([dir]) => !covered.has(dir));
@@ -2024,7 +2033,8 @@
       const drawsWhole =
         kept !== null || (taken !== null && !taken.partial && taken.view.nodes.length > 0);
       if (partial && drawsWhole) return;
-      taken = { view, partial };
+      // The store publishes an answer's mark no later than its view.
+      taken = { view, partial, tree: graphData.tree };
       kept = null;
     });
   });
