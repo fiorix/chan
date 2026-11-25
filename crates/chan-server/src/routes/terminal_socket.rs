@@ -42,8 +42,9 @@ pub(super) struct InputState {
     /// them, so a count that moves shows the page runs; a stopped page's
     /// network stack can still answer protocol pings.
     pub(super) frames: u64,
-    /// The wait of a view that needs recovery, kept where the client's
-    /// frames are read.
+    /// The wait of a view for its client to report progress: one that
+    /// needs recovery, or one whose window is full after its program
+    /// exited. It is kept where the client's frames are read.
     pub(super) stall: Option<Stall>,
     replies: VecDeque<(usize, Message)>,
     reply_bytes: usize,
