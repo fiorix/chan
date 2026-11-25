@@ -1808,13 +1808,15 @@
   onMount(() => window.addEventListener("chan:command", onChanCommand));
   onDestroy(() => window.removeEventListener("chan:command", onChanCommand));
 
-  // Prune stale or over-cap editor-buffer entries from localStorage at app
-  // load. editorBuffer self-prunes on quota-exceeded too, but an up-front
-  // sweep keeps storage tidy for long-lived sessions. The terminal snapshots
-  // older builds kept there go whole.
+  // Tidy localStorage at app load. The terminal snapshots older builds kept
+  // there go whole, and go first: nothing else removes them, and the prune
+  // after them does not catch a storage error. Then stale or over-cap
+  // editor-buffer entries are pruned; editorBuffer self-prunes on
+  // quota-exceeded too, but an up-front sweep keeps storage tidy for
+  // long-lived sessions.
   onMount(() => {
-    pruneEditorBuffers();
     sweepTerminalSnapshots();
+    pruneEditorBuffers();
   });
 
   // Synchronously put every tab's unsaved input in its recovery buffer before
