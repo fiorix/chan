@@ -668,16 +668,9 @@ impl TreeWalk {
                 }
                 TreeWalk::Listed { files, dirs }
             }
-            Err(chan_workspace::ChanError::ListingTooLarge { .. }) => {
-                #[cfg(test)]
-                let limit = tree_walks::directory_limit(workspace.root())
-                    .unwrap_or(chan_workspace::fs_ops::LIST_TREE_LIMIT);
-                #[cfg(not(test))]
-                let limit = chan_workspace::fs_ops::LIST_TREE_LIMIT;
-                TreeWalk::OverCap {
-                    dirs: walk_directories(workspace, limit),
-                }
-            }
+            Err(chan_workspace::ChanError::ListingTooLarge { .. }) => TreeWalk::OverCap {
+                dirs: walk_directories(workspace, directory_walk_limit(workspace.root())),
+            },
             Err(_) => TreeWalk::Failed,
         }
     }
@@ -691,6 +684,21 @@ impl TreeWalk {
             TreeWalk::OverCap { dirs: None } | TreeWalk::Failed => Some(TreeCoverage::Depth),
         }
     }
+}
+
+/// The bound a graph load gives the directories-only walk of the workspace
+/// at `root`: the listing cap, so that walk holds at most as many paths as
+/// the listing it stands in for.
+#[cfg_attr(
+    not(test),
+    expect(unused_variables, reason = "only a test lowers the bound per root")
+)]
+fn directory_walk_limit(root: &std::path::Path) -> usize {
+    #[cfg(test)]
+    if let Some(limit) = tree_walks::directory_limit(root) {
+        return limit;
+    }
+    chan_workspace::fs_ops::LIST_TREE_LIMIT
 }
 
 /// Every directory in the workspace's scope, workspace-relative POSIX
@@ -4590,6 +4598,30 @@ mod tests {
         assert!(
             ahead,
             "with the folders over the cap too, a meta follows the first node batch"
+        );
+    }
+
+    // A graph load bounds its directories-only walk at the listing cap
+    // itself, unlowered; only a test lowers it, for one workspace root.
+    #[test]
+    fn the_directories_only_walk_is_bounded_at_the_listing_cap() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            chan_workspace::fs_ops::LIST_TREE_LIMIT,
+            "the production bound"
+        );
+        let lowered = super::tree_walks::lower_directory_walk(root.path(), 1);
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            1,
+            "fixture: the lowered bound"
+        );
+        drop(lowered);
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            chan_workspace::fs_ops::LIST_TREE_LIMIT,
+            "the bound once the lowered one is dropped"
         );
     }
 
