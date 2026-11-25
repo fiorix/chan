@@ -28,6 +28,11 @@ const TOP = "pane-survey";
 const BOTTOM = "pane-dashboard";
 const TERMINAL = "term-survey";
 const SURVEY = { surveyId: "unfocused-pane", title: "Choose", bodyMarkdown: "Pick one", options: ["A", "B"] };
+/// A body the markdown renders focusables in: a bare URL and a link.
+const LINKED = {
+  ...SURVEY,
+  bodyMarkdown: "Review https://example.com/pull/1 or [the notes](https://example.com/notes) first.",
+};
 
 beforeEach(async () => {
   await mountApp(demoData([]));
@@ -55,7 +60,7 @@ function pane(id: string): HTMLElement {
 
 /// The terminal above the dashboard, split in a column, with the dashboard's
 /// pane focused, and the survey shown over the terminal.
-async function surveyOverUnfocusedPane(): Promise<HTMLElement> {
+async function surveyOverUnfocusedPane(survey: typeof SURVEY = SURVEY): Promise<HTMLElement> {
   layout.nodes = {
     root: { kind: "split", id: "root", direction: "column", a: TOP, b: BOTTOM, ratio: 0.5 },
     [TOP]: { kind: "leaf", id: TOP, tabs: [terminalTab({ id: TERMINAL })], activeTabId: TERMINAL },
@@ -71,7 +76,7 @@ async function surveyOverUnfocusedPane(): Promise<HTMLElement> {
   await settleLong();
   await seatedGhostty(pane(TOP));
   expect(pane(BOTTOM).querySelector(".dashboard"), "the focused pane shows the dashboard").not.toBeNull();
-  showSurvey(SURVEY, TERMINAL);
+  showSurvey(survey, TERMINAL);
   await settleLong();
   const card = pane(TOP).querySelector<HTMLElement>(".survey-card");
   if (!card) throw new Error("no survey card over the top pane's terminal");
@@ -83,6 +88,19 @@ function buttons(card: HTMLElement): HTMLButtonElement[] {
   return [...card.querySelectorAll<HTMLButtonElement>(".survey-option, .survey-followup, .survey-dismiss")];
 }
 
+/// Every element in the card that sequential navigation reaches, by the
+/// element's own tabIndex, whatever rendered it: the template's buttons
+/// and whatever the body's markdown renders.
+function tabbables(card: HTMLElement): string[] {
+  return [...card.querySelectorAll<HTMLElement>("*")]
+    .filter((el) => el.tabIndex >= 0 && !(el as HTMLButtonElement).disabled)
+    .map(named);
+}
+
+function named(el: Element): string {
+  return `${el.tagName.toLowerCase()} ${el.textContent?.replace(/\s+/g, " ").trim()}`;
+}
+
 /// A primary press and release as a browser runs them for a trusted event:
 /// each listener's microtasks run before the press's default action, which
 /// focuses the pressed element's nearest focusable ancestor.
@@ -90,7 +108,7 @@ async function click(el: HTMLElement): Promise<void> {
   const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
   el.dispatchEvent(down);
   await settle();
-  if (!down.defaultPrevented) el.closest<HTMLElement>("[tabindex], button")?.focus();
+  if (!down.defaultPrevented) el.closest<HTMLElement>("a[href], [tabindex], button")?.focus();
   el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
   await settleLong();
@@ -114,6 +132,24 @@ describe("a survey over a terminal whose pane is not focused", () => {
     expect(buttons(card).map((b) => b.tabIndex), "out again when the other pane is focused again")
       .toEqual([-1, -1, -1, -1]);
     expect(card.contains(document.activeElement), "the card lets the keyboard go with its pane").toBe(false);
+  });
+
+  test("nothing in its card is in the Tab order, its body's links included, until its pane is focused", async () => {
+    const card = await surveyOverUnfocusedPane(LINKED);
+    const links = [...card.querySelectorAll<HTMLAnchorElement>(".survey-body a[href]")];
+    expect(links.map(named), "the body renders the bare URL and the link")
+      .toEqual(["a https://example.com/pull/1", "a the notes"]);
+    expect(tabbables(card), "out of the Tab order while the other pane is focused").toEqual([]);
+
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    expect(tabbables(card), "all of it back in the Tab order once its pane is focused")
+      .toEqual([...links, ...buttons(card)].map(named));
+
+    setActivePane(BOTTOM);
+    await settleLong();
+    expect(tabbables(card), "out again when the other pane is focused again").toEqual([]);
   });
 
   test.each([
@@ -162,5 +198,28 @@ describe("a survey over a terminal whose pane is not focused", () => {
     await click(card.querySelector<HTMLButtonElement>(".survey-option")!);
     expect(reply).toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 0, optionLabel: "A" });
     expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
+  });
+
+  test("a press on a link in its body makes its pane the focused one and leaves the link its click", async () => {
+    const card = await surveyOverUnfocusedPane(LINKED);
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const link = card.querySelector<HTMLAnchorElement>(".survey-body a[href]")!;
+    const followed: boolean[] = [];
+    // Read whether the click reached the document with the link's default
+    // left alone, then hold the default: jsdom cannot navigate.
+    const onDocumentClick = (e: MouseEvent) => {
+      if (e.target !== link) return;
+      followed.push(!e.defaultPrevented);
+      e.preventDefault();
+    };
+    document.addEventListener("click", onDocumentClick);
+    await click(link);
+    document.removeEventListener("click", onDocumentClick);
+
+    expect(followed, "the link's click travels on with its default").toEqual([true]);
+    expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
+    expect(link.tabIndex, "the link is back in the Tab order with its pane").toBe(0);
+    expect(reply, "a link answers nothing").not.toHaveBeenCalled();
+    expect(surveyFor(TERMINAL)?.surveyId).toBe(LINKED.surveyId);
   });
 });
