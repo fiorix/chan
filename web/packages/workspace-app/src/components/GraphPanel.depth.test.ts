@@ -1193,6 +1193,48 @@ describe("the workspace tree", () => {
     expect(filesOfA()).toEqual(["a/b/c.md", "a/b/y.md", "a/x.md"]);
   });
 
+  /// The note's link shows `a/b` under the closed `a`, and `a/b` is
+  /// selected there; `opened` is the tab's opened set besides the root and
+  /// `notes`. Resolves to the tab and its depth slider.
+  async function selectBelowClosedParent(opened: Record<string, boolean>): Promise<{ tab: GraphTab; slider: HTMLInputElement }> {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, notes: true, ...opened } }));
+    canvas.props!.onSelect("notes/n.md");
+    await settle(2);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a", "directory:a/b", "a/b/c.md"]));
+    canvas.props!.onSelect("directory:a/b");
+    await settle(2);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    return { tab, slider };
+  }
+
+  test.each([
+    ["an answer of the whole tree", null, { a: 0, "a/b": 1 }],
+    ["an answer over the listing cap", "folders", { a: 1, "a/b": 1 }],
+  ] as const)("a depth raised on a folder under its closed parent draws the parent it opens, over %s", async (_answer, tree, reads) => {
+    serveLinkBelowClosedFolder(tree);
+    const { tab, slider } = await selectBelowClosedParent({});
+    expect(slider.value, "a/b is closed").toBe("0");
+
+    await slideTo(slider, 1);
+    expect({ a: tab.expanded.a, "a/b": tab.expanded["a/b"] }, "the raise opens a/b and the folder above it").toEqual({ a: true, "a/b": true });
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }, "each opened level read at most once").toEqual(reads);
+    expect(filesOfA()).toEqual(["a/b/c.md", "a/b/y.md", "a/x.md"]);
+  });
+
+  test.each([
+    ["an answer of the whole tree", null, 0],
+    ["an answer over the listing cap", "folders", 1],
+  ] as const)("a depth lowered on a folder open under its closed parent draws the parent it opens, over %s", async (_answer, tree, reads) => {
+    serveLinkBelowClosedFolder(tree);
+    const { tab, slider } = await selectBelowClosedParent({ "a/b": true });
+    expect(slider.value, "a/b is open").toBe("1");
+
+    await slideTo(slider, 0);
+    expect({ a: tab.expanded.a, "a/b": tab.expanded["a/b"] }, "the depth closes a/b and opens the folder above it").toEqual({ a: true, "a/b": undefined });
+    expect(levelReads("a"), "the opened parent's level").toBe(reads);
+    expect(filesOfA()).toEqual(["a/x.md"]);
+  });
+
   test("a tab whose spine lands after an answer over the listing cap reads each opened folder once", async () => {
     serveFoldersWithoutFiles();
     graphServer.tree = "folders";
