@@ -850,6 +850,25 @@ describe('widget search', () => {
     expect(active(term), 'a step goes on from the returned match').toEqual([range(1, 3)]);
   });
 
+  test('the count reads an unknown index, not zero, while a returned match waits for its rescan', async () => {
+    const { term } = await create('x needle\r\nyy needle');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    const counts: Count[] = [];
+    search.onChange(count => counts.push(count));
+    term.write('\x1b[?1049h');
+    term.write('\x1b[?1049l');
+    expect(active(term)).toEqual([range(0, 2)]);
+    expect(search.state, 'a match is highlighted, at an unknown index').toEqual({ index: null, total: 0, partial: true });
+    settle(search);
+    expect(search.state).toEqual({ index: 2, total: 2, partial: false });
+    expect(counts.slice(0, 2), 'the alternate screen has no match; the return has one').toEqual([
+      { index: 0, total: 0, partial: true }, { index: null, total: 0, partial: true },
+    ]);
+  });
+
   test('a step after an alternate screen excursion steps from the list placed before it', async () => {
     const { term } = await create(Array.from({ length: 2000 }, (_, i) => `needle ${i}`).join('\r\n'));
     const search = searchOf(term);
