@@ -435,6 +435,51 @@ describe('widget search', () => {
     expect(now, 'placement, not the cap, ended the wait').toBeLessThan(1000);
   });
 
+  test("under output every frame, find lands on the newest past the one-second cap", async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    batchPerFrame();
+    const search = searchOf(term);
+    search.find('needle');
+    // Each write empties the list again, so placement never passes the
+    // core's active-area entries while the output lasts.
+    for (let i = 0; i < 100; i++) {
+      term.write('x');
+      now += 11;
+      frame();
+      if (active(term)) expect(active(term), `frame ${i} at ${now} ms activates only the newest match`).toEqual([newest]);
+    }
+    expect(now, 'the output outlasted the cap').toBeGreaterThan(1000);
+    settle(search);
+    expect(active(term)).toEqual([newest]);
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
+  test('under output every frame, older from the oldest wraps to the newest past the one-second cap', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    batchPerFrame();
+    term.write('x');
+    frame();
+    search.step('needle', 'older');
+    const pressed = now;
+    for (let i = 0; i < 100; i++) {
+      term.write('x');
+      now += 11;
+      frame();
+      if (active(term)) expect(active(term), `frame ${i} at ${now - pressed} ms: the wrap lands only on the newest`).toEqual([newest]);
+    }
+    expect(now - pressed, 'the output outlasted the cap').toBeGreaterThan(1000);
+    settle(search);
+    expect(active(term)).toEqual([newest]);
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
   test("after output, a step waits while the screen page's matches are placed behind the page above", async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
