@@ -364,3 +364,29 @@ test("a refresh keeps the drawn answer's tree mark until its own answer replaces
   expect(graphData.view).not.toBe(previous);
   expect(graphData.tree, "an answer that holds the whole tree carries no mark").toBeNull();
 });
+
+test.each(["superseded", "failed"])("a first load starts with no tree mark after a first load over the listing cap was %s", async (end) => {
+  const first = stream();
+  const clock = frames();
+  const loadA = ensureGraphLoaded();
+  first.send([meta, { ...meta, tree: "folders" }, ...batches.slice(0, 2)]);
+  await drain();
+  clock.run();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.tree).toBe("folders");
+  if (end === "failed") {
+    first.fail(new Error("dropped"));
+    await loadA;
+    expect(graphData.tree, "the failed load's partial view keeps its mark").toBe("folders");
+  }
+
+  const second = stream();
+  const loadB = end === "superseded" ? refreshGraph() : ensureGraphLoaded();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.view).toEqual({ nodes: [], edges: [] });
+  expect(graphData.tree, "the old mark goes with the view it described").toBeNull();
+  second.send([meta, ...batches, done]);
+  second.close();
+  await loadB;
+  expect(graphData.tree).toBeNull();
+});
