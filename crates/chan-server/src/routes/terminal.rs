@@ -1367,6 +1367,7 @@ async fn terminal_ws(
             break;
         }
         let restarting = matches!(lifecycle, Some(SessionLifecycle::Restarted));
+        let exited = matches!(lifecycle, Some(SessionLifecycle::Exit(_)));
         let progress = session
             .output_progress()
             .expect("terminal socket has output progress");
@@ -1467,7 +1468,11 @@ async fn terminal_ws(
         if behind && progress.drained() {
             continue;
         }
-        let stall_deadline = if behind {
+        // An exit ends the reader's waits, so a view whose window is full
+        // when its program exits is never released, and only its client's
+        // ack lets the rest of the output and the exit reach it.
+        let waiting = behind || (exited && progress.send_credit() == Some(0));
+        let stall_deadline = if waiting {
             let (acked, frames) = (progress.acked(), socket.input.frames);
             socket
                 .input
@@ -1475,6 +1480,8 @@ async fn terminal_ws(
                 .get_or_insert_with(|| Stall::new(acked, frames))
                 .update(acked, frames)
         } else {
+            // Room in its window ends an exited view's wait, so a frame
+            // read while it can send starts no clock for the next one.
             socket.input.stall = None;
             None
         };
@@ -1586,15 +1593,17 @@ async fn terminal_ws(
 /// the client answers by redialing from its parsed cursor.
 const STALL_CLOSE: (u16, &str) = (1013, "terminal view stalled");
 
-/// A view that needs recovery, waiting for its client to report having
-/// parsed what it was sent. The wait starts at a lag, when the socket loop
-/// sees it, or at the reader's release, when the loop next passes or the
-/// socket reads its first client frame after it, wherever it reads it, so
-/// that frame starts the clock. A client that runs (it sends frames) and
-/// still reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its
-/// socket closes, from the loop or from a replay's wait for send credit,
-/// and the client redials from its parsed cursor. A stopped page sends
-/// nothing and keeps waiting, to recover on this socket when it wakes.
+/// A view waiting for its client to report having parsed what it was
+/// sent: one that needs recovery, or one whose window is full after its
+/// program exited. The wait starts at a lag or an exit, when the socket
+/// loop sees it, or at the reader's release, when the loop next passes or
+/// the socket reads its first client frame after it, wherever it reads
+/// it, so that frame starts the clock. A client that runs (it sends
+/// frames) and still reports no progress for [`NO_PROGRESS_LIMIT`] is
+/// wedged: its socket closes, from the loop or from a replay's wait for
+/// send credit, and the client redials from its parsed cursor. A stopped
+/// page sends nothing and keeps waiting, and its view goes on over this
+/// socket when it wakes.
 struct Stall {
     /// The parsed position the wait started at; an advance restarts it.
     acked: Option<u64>,
