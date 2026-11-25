@@ -68,7 +68,7 @@ export function installKeyboardProtocolHandlers(
 }
 
 // xterm.js's own parser, from the TypeScript source its package ships
-// (vite.config.ts aliases its imports), runs chan's xterm.js handlers as the
+// (vite.config.ts aliases its imports), runs chan's protocol handlers as the
 // reference. The specifier is a variable so svelte-check does not try to
 // type xterm.js's source.
 type Params = { toArray(): Array<number | number[]> };
@@ -87,9 +87,9 @@ beforeAll(async () => {
 
 type Run = { protocol: TerminalKeyboardProtocolState; replies: string[] };
 
-/// chan's xterm.js terminal: its handlers on xterm.js's parser, which hands
-/// them params through the public API's toArray().
-function xterm(stream: string): Run {
+/// chan's protocol handlers on the parser above, which hands them params
+/// through its public API's toArray().
+function reference(stream: string): Run {
   const parser = new Parser();
   const protocol = createTerminalKeyboardProtocolState();
   const replies: string[] = [];
@@ -166,12 +166,12 @@ const CORPUS: Array<[string, string]> = [
 ];
 
 function same(stream: string, cuts?: number[]) {
-  const want = xterm(stream);
+  const want = reference(stream);
   const got = observer(stream, cuts);
   expect(got).toEqual(want);
 }
 
-describe("the observer follows the stream as chan's xterm.js handlers do", () => {
+describe("the observer follows the stream as chan's protocol handlers do", () => {
   test.each(CORPUS)("%s", (_name, stream) => {
     same(stream);
   });
@@ -195,7 +195,7 @@ describe("the observer follows the stream as chan's xterm.js handlers do", () =>
       const length = 1 + Math.floor(next() * 40);
       let stream = "";
       for (let i = 0; i < length; i++) stream += alphabet[Math.floor(next() * alphabet.length)];
-      const want = xterm(stream);
+      const want = reference(stream);
       const got = observer(stream, [Math.floor(next() * new TextEncoder().encode(stream).length)]);
       expect(got, JSON.stringify(stream)).toEqual(want);
     }
