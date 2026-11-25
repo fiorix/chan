@@ -8,7 +8,7 @@
 // a stand-in socket, then closed as its tab's X closes it or restarted from
 // the command, with the running shell's confirm accepted.
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -39,11 +39,35 @@ installTerminalDom();
 
 const SESSION = "sess-live";
 
+// Every case runs on the fake clock and waits for the close on the real one
+// without moving it (`settled`), so a dropped socket's redial is never due
+// and a slow host cannot hand the close frame a redialed socket.
+const realTimeout = globalThis.setTimeout;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
 afterEach(() => {
   if (confirmState.open) resolveConfirm(false);
   resetTerminals();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+/// Wait until `check` passes, polling on the real clock and leaving the
+/// fake one where it is.
+async function settled(check: () => void): Promise<void> {
+  for (let tries = 0; ; tries += 1) {
+    try {
+      check();
+      return;
+    } catch (error) {
+      if (tries >= 500) throw error;
+    }
+    await new Promise((resolve) => realTimeout(resolve, 10));
+  }
+}
 
 /// A loaded terminal on the live session SESSION, its socket left `open`,
 /// still `dialing` (a restored tab whose dial has not answered), or
@@ -68,10 +92,10 @@ async function end(tab: TerminalTabState, how: "close" | "restart"): Promise<voi
   let closing: Promise<void> | undefined;
   if (how === "close") closing = closeTab(TERMINAL_PANE, tab.id);
   else window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
-  await vi.waitFor(() => expect(confirmState.open, "a running shell asks first").toBe(true));
+  await settled(() => expect(confirmState.open, "a running shell asks first").toBe(true));
   resolveConfirm(true);
   await closing;
-  await vi.waitFor(() => expect(tab.terminalSessionId, "the tab let go of its session").toBeUndefined());
+  await settled(() => expect(tab.terminalSessionId, "the tab let go of its session").toBeUndefined());
 }
 
 function closeFrames(): number {
@@ -105,7 +129,7 @@ describe("ending a terminal's live session", () => {
       const { tab, closeTerminal } = await loaded(socketState);
 
       await end(tab, "restart");
-      await vi.waitFor(() => expect(TerminalSocket.all, "the restarted terminal dialed").toHaveLength(2));
+      await settled(() => expect(TerminalSocket.all, "the restarted terminal dialed").toHaveLength(2));
 
       expect(closeFrames(), "no socket could carry the close frame").toBe(0);
       expect(closeTerminal.mock.calls, "the route ended the live session, once").toEqual([[SESSION]]);
