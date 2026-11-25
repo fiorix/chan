@@ -55,7 +55,7 @@ use bytes::{contains_subslice, VisibleScan};
 #[cfg(target_os = "linux")]
 pub use child_identity::{current_boot_id, process_start_time, RecordedChildIdentity};
 use pacing::Pacing;
-pub use pacing::{OutputFlow, OutputProgress};
+pub use pacing::{OutputFlow, OutputProgress, NO_PROGRESS_LIMIT};
 #[cfg(windows)]
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
@@ -1670,6 +1670,9 @@ enum Resume {
     Since(Option<u64>),
     /// Raw delta for the same live view, including alternate-screen bytes.
     Live(u64),
+    /// The whole ring, for a client of an earlier life of this session: its
+    /// screen shows a program this life never ran.
+    OtherLife,
     /// The whole ring, for a client of the process a lossy restore came from
     /// whose cursor is `since`; see [`RingBuffer::snapshot_past`].
     #[cfg(target_os = "linux")]
@@ -1716,11 +1719,20 @@ pub struct AttachHandle {
     /// `None` means a later exit arrives on `rx` and is retained by `lifecycle_rx`.
     pub exit: Option<TerminalExit>,
     /// Private-mode bytes applied after replay and before the redraw nudge.
-    /// Fresh attaches re-assert enabled input modes; lossless live recovery
-    /// adds no bytes that could interrupt a split sequence. Recovery with
-    /// missed bytes cancels partial escapes, restores
-    /// the screen target without clearing it, and explicitly resets absent modes.
+    /// An attach that resumes a client's cursor past missed bytes (a live
+    /// recovery, a redial, or a client of the process a lossy restore came
+    /// from) cancels partial escapes, restores the screen target without
+    /// clearing it, and explicitly resets absent modes: the missed span can
+    /// hold the reset of a mode that client's screen still shows. Lossless
+    /// live recovery adds no bytes that could interrupt a split sequence.
+    /// Any other attach, a fresh view's included, re-asserts enabled input
+    /// modes.
     pub mode_reassert: Vec<u8>,
+    /// The client echoed a generation of an earlier life of this session,
+    /// not the one a lossy restore continues. Its screen shows a program
+    /// this life never ran, so it needs a terminal reset ahead of this
+    /// life's session frame, as a live socket gets at a restart.
+    pub stale_generation: bool,
 }
 
 impl AttachHandle {
@@ -3281,27 +3293,29 @@ impl Registry {
     /// Where a client echoing `generation`, which is not live session `id`'s,
     /// resumes. A client of the process a lossy restore came from has a
     /// cursor that agrees with this process's numbering only up to the
-    /// restored `seq`; any other generation is stale and replays the ring.
+    /// restored `seq`; any other generation is an earlier life's and
+    /// replays the ring. With no session under `id` there is nothing to
+    /// resume.
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn resume_other_generation(&self, id: &str, generation: u64, since: Option<u64>) -> Resume {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let Some(session) = sessions.get(id) else {
+            return Resume::Since(None);
+        };
         #[cfg(target_os = "linux")]
+        if let Some(lossy) = session
+            .lossy_restore
+            .filter(|lossy| lossy.generation == generation)
         {
-            let lossy = self
-                .sessions
-                .lock()
-                .expect("terminal registry poisoned")
-                .get(id)
-                .and_then(|session| session.lossy_restore);
-            if let (Some(lossy), Some(since)) = (lossy, since) {
-                if lossy.generation == generation {
-                    return Resume::PastLossyRestore {
-                        since,
-                        restored: lossy.seq,
-                    };
-                }
-            }
+            return match since {
+                Some(since) => Resume::PastLossyRestore {
+                    since,
+                    restored: lossy.seq,
+                },
+                None => Resume::Since(None),
+            };
         }
-        Resume::Since(None)
+        Resume::OtherLife
     }
 
     #[cfg(test)]
@@ -3319,7 +3333,8 @@ impl Registry {
     /// cursor is honoured when no `client_generation` is sent or when it
     /// matches the live session; a stale generation replays from the start,
     /// with a missed count when it is the generation of the process a lossy
-    /// restore came from and its cursor is past the restore. A cursor past the
+    /// restore came from and its cursor is past the restore, and otherwise
+    /// marked [`AttachHandle::stale_generation`]. A cursor past the
     /// ring's end also replays from the start, with a missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
@@ -6169,6 +6184,7 @@ impl Session {
                 match resume {
                     Resume::Since(since) => ring.snapshot_since(since),
                     Resume::Live(since) => ring.snapshot_since(Some(since)),
+                    Resume::OtherLife => ring.snapshot_since(None),
                     #[cfg(target_os = "linux")]
                     Resume::PastLossyRestore { since, restored } => {
                         ring.snapshot_past(since, restored)
@@ -6180,6 +6196,16 @@ impl Session {
                     self.private_mode_recovery_prelude(alt_screen)
                 }
                 Resume::Live(_) => Vec::new(),
+                // A client cursor the ring has moved past names a screen
+                // that parsed bytes this replay no longer holds. A fresh
+                // view, dialed at 0, has no such screen.
+                Resume::Since(Some(since)) if since > 0 && missed_bytes > 0 => {
+                    self.private_mode_recovery_prelude(alt_screen)
+                }
+                #[cfg(target_os = "linux")]
+                Resume::PastLossyRestore { .. } if missed_bytes > 0 => {
+                    self.private_mode_recovery_prelude(alt_screen)
+                }
                 _ => self.private_mode_prelude(),
             };
             let sent_seq = ring
@@ -6237,6 +6263,7 @@ impl Session {
             alt_screen,
             exit,
             mode_reassert,
+            stale_generation: matches!(resume, Resume::OtherLife),
         }
     }
 
@@ -12675,6 +12702,11 @@ mod tests {
             mismatched.replay.concat().len() > matched.replay.concat().len(),
             "a mismatched generation must replay more (full ring) than the matched delta"
         );
+        assert!(!matched.stale_generation, "the live generation resumes");
+        assert!(
+            mismatched.stale_generation,
+            "another generation is an earlier life's view, which needs a reset"
+        );
         registry.close_all(CloseReason::Shutdown);
     }
 
@@ -16678,6 +16710,10 @@ mod tests {
             assert_eq!(
                 ahead.missed_bytes, 500,
                 "the notice counts the bytes past the restore"
+            );
+            assert!(
+                !ahead.stale_generation,
+                "the restore continues the previous process's program, so its view keeps its screen"
             );
             drop(ahead);
 

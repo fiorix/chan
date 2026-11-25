@@ -35,6 +35,10 @@ pub(super) struct InputState {
     pub(super) size_conditional: bool,
     pub(super) focus: Option<u64>,
     pub(super) queue_details: bool,
+    /// Text frames read from the client. Only the page's script sends
+    /// them, so a count that moves shows the page runs; a stopped page's
+    /// network stack can still answer protocol pings.
+    pub(super) frames: u64,
     replies: VecDeque<(usize, Message)>,
     reply_bytes: usize,
     cwd: Option<CwdFuture>,
@@ -58,6 +62,7 @@ impl TerminalSocket {
                 size_conditional,
                 focus: None,
                 queue_details: false,
+                frames: 0,
                 replies: VecDeque::new(),
                 reply_bytes: 0,
                 cwd: None,
@@ -246,6 +251,7 @@ impl InputState {
             Message::Close(_) => return Err(()),
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => return Ok(()),
         };
+        self.frames += 1;
         self.client.observe(Some(session.id()), None);
         match serde_json::from_str::<ClientFrame>(&text) {
             Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {

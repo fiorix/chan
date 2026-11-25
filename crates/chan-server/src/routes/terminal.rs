@@ -24,7 +24,7 @@ use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, OutputFlow, ProgramReading,
     ProgramStatusSnapshot, QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle,
     TerminalExit, TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
-    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
+    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP, NO_PROGRESS_LIMIT,
 };
 
 #[path = "terminal_socket.rs"]
@@ -1310,6 +1310,16 @@ async fn terminal_ws(
         opts.declared_size,
         opts.size_if_unset,
     );
+    // A client of an earlier life gets the reset a live socket gets at the
+    // restart: ahead of this life's session frame, outside its replay.
+    if session.stale_generation
+        && socket
+            .send(&session, Message::binary(RESET_TERMINAL))
+            .await
+            .is_err()
+    {
+        return;
+    }
     if socket.input.size_conditional {
         if let Some(size) = socket.input.size {
             session.fit_if_unsized(size);
@@ -1340,6 +1350,7 @@ async fn terminal_ws(
     }
     let mut lifecycle_rx = session.lifecycle_rx.clone();
     let mut recover = false;
+    let mut stall: Option<Stall> = None;
     let mut finish: Option<(u16, &'static str)> = None;
 
     loop {
@@ -1428,6 +1439,7 @@ async fn terminal_ws(
             tmux_consent_rx = session.tmux_consent_rx.clone();
             lifecycle_rx = session.lifecycle_rx.clone();
             recover = false;
+            stall = None;
         }
         if let Some(exit) = &session.exit {
             send_exit(
@@ -1452,6 +1464,15 @@ async fn terminal_ws(
         if behind && progress.drained() {
             continue;
         }
+        let stall_deadline = if behind {
+            let (acked, frames) = (progress.acked(), socket.input.frames);
+            stall
+                .get_or_insert_with(|| Stall::new(acked, frames))
+                .update(acked, frames)
+        } else {
+            stall = None;
+            None
+        };
         let may_send = !behind && progress.send_credit() != Some(0);
         #[cfg(all(test, unix))]
         program_status_tests::loop_gate(session.id()).await;
@@ -1463,6 +1484,13 @@ async fn terminal_ws(
             }
             changed = lifecycle_rx.changed() => {
                 if changed.is_err() { break; }
+            }
+            // Above the client's frames, which a pinging client keeps ready.
+            () = tokio::time::sleep_until(
+                stall_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if stall_deadline.is_some() => {
+                finish = Some((1013, "terminal view stalled"));
+                break;
             }
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
@@ -1547,6 +1575,41 @@ async fn terminal_ws(
     }
     if let Some((code, reason)) = finish {
         socket.finish(code, reason.into()).await;
+    }
+}
+
+/// A view that needs recovery, waiting for its client to report having
+/// parsed what it was sent. A client that runs (it sends frames) and still
+/// reports no progress for [`NO_PROGRESS_LIMIT`] is wedged: its socket
+/// closes, and the client redials from its parsed cursor. A stopped page
+/// sends nothing and keeps waiting, to recover on this socket when it wakes.
+struct Stall {
+    /// The parsed position the wait started at; an advance restarts it.
+    acked: Option<u64>,
+    /// The client frames read when the wait started.
+    frames: u64,
+    /// Set by the client's first frame after the start.
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl Stall {
+    fn new(acked: Option<u64>, frames: u64) -> Self {
+        Self {
+            acked,
+            frames,
+            deadline: None,
+        }
+    }
+
+    /// Bring the wait to the client's parsed position and frame count, and
+    /// return when it ends, once a frame has started its clock.
+    fn update(&mut self, acked: Option<u64>, frames: u64) -> Option<tokio::time::Instant> {
+        if acked != self.acked {
+            *self = Self::new(acked, frames);
+        } else if self.deadline.is_none() && frames > self.frames {
+            self.deadline = Some(tokio::time::Instant::now() + NO_PROGRESS_LIMIT);
+        }
+        self.deadline
     }
 }
 
@@ -2022,6 +2085,40 @@ mod tests {
             "these refusals have no branching reader"
         );
         body["error"].as_str().expect("sentence").to_owned()
+    }
+
+    #[test]
+    fn a_stall_starts_its_clock_at_a_client_frame_and_restarts_on_progress() {
+        // A stopped page sends nothing, and its wait has no deadline.
+        let mut stall = Stall::new(Some(100), 3);
+        assert_eq!(
+            stall.update(Some(100), 3),
+            None,
+            "a silent client keeps waiting"
+        );
+        let before = tokio::time::Instant::now();
+        let deadline = stall
+            .update(Some(100), 4)
+            .expect("the client's first frame starts the clock");
+        let after = tokio::time::Instant::now();
+        assert!(
+            before + NO_PROGRESS_LIMIT <= deadline && deadline <= after + NO_PROGRESS_LIMIT,
+            "the client gets the whole limit from its first frame"
+        );
+        assert_eq!(
+            stall.update(Some(100), 9),
+            Some(deadline),
+            "later frames do not extend the wait"
+        );
+        assert_eq!(
+            stall.update(Some(150), 10),
+            None,
+            "an ack advance restarts the wait"
+        );
+        assert!(
+            stall.update(Some(150), 11).is_some(),
+            "the next frame starts the clock again"
+        );
     }
 
     #[tokio::test]

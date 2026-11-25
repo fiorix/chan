@@ -1748,11 +1748,9 @@ async fn a_view_that_reads_without_acknowledging_is_bounded_and_resumes_with_a_c
     send(&mut live, json!({"type": "input", "data": "\n"})).await;
 }
 
-/// How long a view that needs recovery, and whose client shows it is alive,
-/// has to report the rest of what it was sent: as long as the reader gave
-/// it before the release.
-const SHORT_ACK_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
-/// Scheduling slack on a loaded host, past the bound.
+/// Scheduling slack on a loaded host, past [`NO_PROGRESS_LIMIT`], the time
+/// a view that needs recovery and whose client shows it is alive has to
+/// report the rest of what it was sent.
 const SHORT_ACK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Report `short`, a position before what the view was sent, then ping as
@@ -1761,7 +1759,7 @@ const SHORT_ACK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u64) {
     ack(view, generation, short).await;
     let acked_at = tokio::time::Instant::now();
-    let deadline = acked_at + SHORT_ACK_BOUND + SHORT_ACK_SLACK;
+    let deadline = acked_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK;
     let mut ping = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut pongs = 0usize;
     let closed_at = loop {
@@ -1798,13 +1796,13 @@ async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u
     };
     assert!(
         closed_at.is_some(),
-        "a view whose ack stays short is closed within {SHORT_ACK_BOUND:?} \
+        "a view whose ack stays short is closed within {NO_PROGRESS_LIMIT:?} \
          (+{SHORT_ACK_SLACK:?}) while it pings: {pongs} pongs and no close"
     );
     assert!(pongs > 0, "the client showed it was alive before the close");
     let waited = closed_at.expect("closed") - acked_at;
     assert!(
-        waited >= SHORT_ACK_BOUND,
+        waited >= NO_PROGRESS_LIMIT,
         "a live client gets the whole bound to report progress: closed after {waited:?}"
     );
 }
