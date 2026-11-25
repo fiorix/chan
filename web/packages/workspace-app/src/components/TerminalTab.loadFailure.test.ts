@@ -47,9 +47,9 @@ const SESSION = "sess-live";
 // What the error says: what failed, then what still holds and the way past it.
 const FAILED = "The terminal view could not load.";
 const NO_SHELL = "No shell was started.";
-const SHELL_RUNS = "Its shell is still running, and Retry attaches to it.";
+const SHELL_RUNS = "The failure did not end its shell; Retry attaches to it.";
 const FINAL = "This page will not load the terminal again; reload the window to try once more.";
-const FINAL_SHELL_RUNS = "Its shell is still running, and the reload attaches to it.";
+const FINAL_SHELL_RUNS = "The failure did not end its shell; the reload attaches to it.";
 
 /// The engine's own, kept before any case spies on them.
 const instantiate = WebAssembly.instantiate.bind(WebAssembly) as (
@@ -305,7 +305,7 @@ describe("a terminal whose core fails to load", () => {
     const [tab] = page.harness.seatTerminals([page.harness.terminalTab({ terminalSessionId: SESSION })]);
     const { target } = page.open(tab!);
     const error = await shownLoadError(target);
-    expect(error.textContent, "the error says the shell still runs and Retry attaches to it").toContain(SHELL_RUNS);
+    expect(error.textContent, "the error says the failure did not end the shell, and Retry attaches to it").toContain(SHELL_RUNS);
     expect(error.textContent).not.toContain(NO_SHELL);
     expect(page.harness.TerminalSocket.all, "nothing dialed while the view failed").toHaveLength(0);
     expect(tab!.terminalSessionId, "the tab keeps its session").toBe(SESSION);

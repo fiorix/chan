@@ -27,7 +27,7 @@ const CORE = /\/ghostty-vt[^/]*\.wasm(?:[?#]|$)/;
 const CHUNK = /\/assets\/ghostty-web-[A-Za-z0-9_-]+\.js(?:[?#]|$)/;
 const FAILED = "The terminal view could not load.";
 const NO_SHELL = "No shell was started.";
-const SHELL_RUNS = "Its shell is still running, and Retry attaches to it.";
+const SHELL_RUNS = "The failure did not end its shell; Retry attaches to it.";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default {
@@ -291,7 +291,7 @@ export default {
         assert.deepEqual(leg.state.actions.slice(0, 2), ["Retry", "Reload window"], "a failed chunk offers Retry and a reload");
         assert.equal(leg.state.actions.length, 3, "and Close");
         assert.ok(leg.state.error.includes(FAILED), "the error says what failed");
-        assert.ok(leg.state.error.includes(SHELL_RUNS), "and that the live shell still runs");
+        assert.ok(leg.state.error.includes(SHELL_RUNS), "and that the failure did not end the live shell");
         assert.deepEqual(leg.state.area, [], "nothing opened in the terminal's area");
         leg.sessions = await sessions();
         assert.deepEqual(leg.sessions.map((row) => row.session_id), [session], "the live session is kept, and no PTY spawned");

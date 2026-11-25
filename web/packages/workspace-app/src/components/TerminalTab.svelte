@@ -2827,10 +2827,12 @@
 
   /// What the load error says still holds, and what its action does about
   /// it. Neither the loader nor the engine says why a final failure stays,
-  /// so no cause is named.
+  /// so no cause is named. Of a session the tab held, the page knows only
+  /// that the failure did not end it: with no socket, the view would not
+  /// hear the server end it since.
   function loadFailureHint(final: boolean): string {
     const shell = tab.terminalSessionId
-      ? `Its shell is still running, and ${final ? "the reload" : "Retry"} attaches to it.`
+      ? `The failure did not end its shell; ${final ? "the reload" : "Retry"} attaches to it.`
       : "No shell was started.";
     return final ? `This page will not load the terminal again; reload the window to try once more. ${shell}` : shell;
   }
