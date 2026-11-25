@@ -2975,8 +2975,15 @@ async fn a_lagged_view_whose_ack_stays_short_is_closed_within_the_bound() {
 async fn a_view_with_a_full_window_when_its_program_exits_is_closed_the_bound_after_its_ping() {
     let _gate = pty_test_lock();
     const RING: usize = 64 * 1024;
-    // What the program writes past the window: small enough for any PTY to
-    // hold, so the program exits while the reader still waits for the view.
+    // What the program writes past the window, held by the PTY so the
+    // program exits while the reader still waits for the view. A Linux PTY
+    // holds more than one read returns (4095 bytes), so there the exit's
+    // drain records the tail as two events and the view, sent the first
+    // whole once it can send, is still owed the second at its close. Other
+    // PTYs may hold less, so the tail stays small enough for any of them.
+    #[cfg(target_os = "linux")]
+    const TAIL: usize = 6000;
+    #[cfg(not(target_os = "linux"))]
     const TAIL: usize = 64;
     let total = (RING / 2 + TAIL) as u64;
     let rig = Rig::new(
@@ -3079,6 +3086,10 @@ async fn a_view_with_a_full_window_when_its_program_exits_is_closed_the_bound_af
     assert!(
         waited >= NO_PROGRESS_LIMIT,
         "the client gets the whole bound from its frame: closed after {waited:?}"
+    );
+    assert!(
+        cfg!(not(target_os = "linux")) || received < total,
+        "fixture: the view was still owed output at its close"
     );
     drop(view);
     // The client redials from what it received, as it does after any close
