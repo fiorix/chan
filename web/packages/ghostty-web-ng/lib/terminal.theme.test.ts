@@ -351,8 +351,9 @@ describe('widget themes', () => {
     term.search.find('needle');
     for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
     expect(term.search.state).toEqual({ index: 1, total: 2, partial: false });
+    // The last glyph painted at a column of row 0, whose baseline is y 14.
     const ink = (col: number) => {
-      const color = ctx.texts.filter(t => t.x === col * 8).at(-1)?.color ?? '';
+      const color = ctx.texts.filter(t => t.x === col * 8 && t.y === 14).at(-1)?.color ?? '';
       return color.startsWith('#') ? color.slice(1).match(/../g)!.map(c => Number.parseInt(c, 16)) : color.match(/\d+/g)!.map(Number);
     };
     const hex = (color: string) => color.slice(1).match(/../g)!.map(c => Number.parseInt(c, 16));
