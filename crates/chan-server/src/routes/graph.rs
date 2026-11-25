@@ -1293,11 +1293,14 @@ impl<'a> TreeMergeCtx<'a> {
     /// its parent by a `contains` edge.
     ///
     /// It stops at a folder already merged: one with a classified node and
-    /// its edge from its parent. Every edge the graph holds into a folder by
-    /// then was pushed with the folders above it, by this pass or by the
-    /// filesystem layer's walk down from its own root, so what is above that
-    /// folder is merged already. A folder is classified only when its node
-    /// is new or has no class yet, since merging keeps a class it has.
+    /// its edge from its parent. Such an edge is pushed by this pass after
+    /// the folders above it, or by the filesystem layer, which joins each
+    /// folder to its parent down from its own root. In directory scope that
+    /// root is the scoped folder, which has no edge from its parent, so the
+    /// first entry the merge takes, in path order, joins it to the folders
+    /// above before any folder below it is reached. A folder is classified
+    /// only when its node is new or has no class yet, since merging keeps a
+    /// class it has.
     fn ensure_directory_path(&mut self, path: &str) {
         let clean = path.trim_matches('/');
         let id = directory_node_id(clean);
