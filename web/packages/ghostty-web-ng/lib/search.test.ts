@@ -307,7 +307,7 @@ describe('widget search', () => {
     expect(all(term) ?? []).toEqual([]);
   });
 
-  test('a step from the middle of a large list after a write waits for its index and steps from it', async () => {
+  test('a step from the middle of a large list after a write steps from the kept match before its index is placed', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);
     search.find('needle');
@@ -316,48 +316,34 @@ describe('widget search', () => {
     for (let i = 0; i < 499; i++) search.step('needle', 'newer');
     expect(search.state).toEqual({ index: 1501, total: 2000, partial: false });
     expect(active(term)).toEqual([range(499, 0)]);
-    const read = VtSearch.prototype.readMatches;
-    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
-      const batch = read.apply(this, args);
-      now += 600;
-      return batch;
-    });
+    slowPlacement();
     term.write('more');
     frame();
     search.step('needle', 'older');
-    expect(search.state.index).toBeNull();
+    expect(search.state.index, 'the index waits for placement').toBeNull();
+    expect(active(term), 'the press lands from the kept match, not from the newest').toEqual([range(498, 0)]);
     now += 1000;
     frame();
     expect(search.state.partial).toBe(true);
-    expect(search.state.index, 'the press outlives its deadline rather than restart from the newest match').toBeNull();
-    expect(active(term)).toEqual([range(499, 0)]);
+    expect(active(term)).toEqual([range(498, 0)]);
     settle(search);
     expect(search.state).toEqual({ index: 1502, total: 2000, partial: false });
     expect(active(term)).toEqual([range(498, 0)]);
   });
 
-  test('a queued step at the oldest match waits for placement of its index, past its deadline, before it wraps', async () => {
+  test('a step at the oldest match after a write wraps to the newest at once when the list was complete', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);
     search.find('needle');
     settle(search);
     search.step('needle', 'newer');
-    const read = VtSearch.prototype.readMatches;
-    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
-      const batch = read.apply(this, args);
-      now += 600;
-      return batch;
-    });
+    expect(active(term)).toEqual([range(0, 0)]);
+    slowPlacement();
     term.write('more');
     frame();
     search.step('needle', 'older');
-    expect(search.state.index).toBeNull();
-    expect(active(term)).toEqual([range(0, 0)]);
-    now += 1000;
-    frame();
-    expect(search.state.partial).toBe(true);
-    expect(search.state.index).toBeNull();
-    expect(active(term)).toEqual([range(0, 0)]);
+    expect(search.state).toEqual({ index: 1, total: 2000, partial: true });
+    expect(active(term)).toEqual([range(1999, 0)]);
     settle(search);
     expect(search.state).toEqual({ index: 1, total: 2000, partial: false });
     expect(active(term)).toEqual([range(1999, 0)]);

@@ -13,10 +13,17 @@ const COST_PRIORS = { read: 4e-6, check: 2e-11, complete: 3e-11 } as const;
 const LEARN_ROWS = 64;
 const LEARN_CHECK = 1e11;
 const STEP_FLOOR_MS = 1;
+// Matches kept on each side of the active one from the list a write
+// discards; presses beyond them wait for placement.
+const BEFORE_REACH = 1024;
 const EMPTY: TerminalSearchState = Object.freeze({ index: 0, total: 0, partial: false });
 type Direction = 'older' | 'newer';
 type Waiting = { direction: Direction; at: number; newest?: boolean };
 type MatchIndex = Map<number, number | number[]>;
+// A window of the list placed before a write, in the rows of the moment it
+// was read: `ranges[0]` is entry `offset` of `total`, `index` the active
+// match's entry, `history` the history rows then.
+type Before = { ranges: HighlightRange[]; offset: number; total: number; complete: boolean; index: number; history: number };
 type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell };
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
@@ -39,6 +46,11 @@ export class SearchOwner {
   private kept: MatchRange | null = null;
   private keptStart: TerminalCoreTrackedCell | null = null;
   private keptEnd: TerminalCoreTrackedCell | null = null;
+  // The last list that placed the active match, kept across the writes
+  // since, so a press can step from it before placement reaches the match.
+  private before: Before | null = null;
+  // History rows when the list being placed was read.
+  private listHistory = 0;
   // The primary screen's active match while the alternate screen shows.
   private parked: Parked | null = null;
   private backlogCell: TerminalCoreTrackedCell | null = null;
@@ -130,6 +142,11 @@ export class SearchOwner {
     const switched = alternate !== this.alternateScreen;
     this.alternateScreen = alternate;
     if (!this.search) return;
+    // Reflow moves rows unevenly and the other screen has other rows, so
+    // only a write on the same screen keeps a list to step from.
+    if (switched || kind === 'resize') this.before = null;
+    else if (this.kept && this.index !== null) this.before = this.window(this.index);
+    this.listHistory = this.core.getScrollbackLength();
     this.dirty = true;
     this.resized ||= kind === 'resize';
     // The other screen's total says nothing about this one.
@@ -165,6 +182,7 @@ export class SearchOwner {
     this.search.setNeedle(query);
     this.needle = query;
     this.complete = false;
+    this.listHistory = this.core.getScrollbackLength();
     this.markBacklog();
     return true;
   }
@@ -325,11 +343,15 @@ export class SearchOwner {
     const found = this.indexFor(range).get(startKey(range));
     if (found === undefined) return undefined;
     const sameEnd = (index: number) => {
-      const end = this.matches[Math.floor(index / 256)][index % 256].end;
+      const end = this.at(index).end;
       return end.absoluteRow === range.endRow && end.col === range.endCol;
     };
     if (typeof found === 'number') return sameEnd(found) ? found : undefined;
     return found?.find(sameEnd);
+  }
+
+  private at(index: number): HighlightRange {
+    return this.matches[Math.floor(index / 256)][index % 256];
   }
 
   private applyWaiting(): boolean {
@@ -337,27 +359,72 @@ export class SearchOwner {
     let selected = false;
     while (this.waiting.length) {
       const { direction, at } = this.waiting[0];
+      if (this.kept !== null && this.index === null) {
+        // Output has left the active match's index unplaced. Applied from
+        // no active match the press would start over from the newest or
+        // oldest match, so it steps from the list placed before the output
+        // where it can, and otherwise waits for placement up to its cap.
+        const next = this.stepBefore(direction);
+        if (next === 'newest' || (next === null && performance.now() - at >= WAIT_CAP_MS)) {
+          this.forget();
+          continue;
+        }
+        if (next === null) break;
+        this.waiting.shift();
+        this.keep(next);
+        this.index = this.indexOf(next) ?? null;
+        selected = true;
+        continue;
+      }
       const total = this.total;
-      const restoring = this.kept !== null && this.index === null;
-      const lands = !restoring && (direction === 'newer' ? this.index !== null && this.index > 0
-        : this.index === null ? total > 0 : this.index < total - 1);
-      // A press made while the kept match's index is unplaced has no
-      // deadline: applied without the index it would start over from the
-      // newest or oldest match. It goes through once placement finds the
-      // index or the match is lost.
-      const capped = !restoring && performance.now() - at >= WAIT_CAP_MS && total > 0;
+      const lands = direction === 'newer' ? this.index !== null && this.index > 0
+        : this.index === null ? total > 0 : this.index < total - 1;
+      const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
       if (!this.complete && !lands && !capped) break;
       this.waiting.shift();
       if (!total) continue;
       this.index = direction === 'newer'
         ? this.index === null ? total - 1 : (this.index + total - 1) % total
         : this.index === null ? 0 : (this.index + 1) % total;
-      const range = this.matches[Math.floor(this.index / 256)][this.index % 256];
-      this.keep({ startRow: range.start.absoluteRow, startCol: range.start.col,
-        endRow: range.end.absoluteRow, endCol: range.end.col });
+      this.keep(matchRange(this.at(this.index)));
       selected = true;
     }
     return selected;
+  }
+
+  /**
+   * The active match's neighbour in the list placed before the writes that
+   * left its index unplaced, where it is now; `newest` when that list was
+   * complete and the press wraps from its oldest match; null when the
+   * neighbour is unknown. History rows cannot change, and pruning moves
+   * every row by the count it removed, which the active match's own move
+   * measures. A neighbour that was on the screen then may hold other text.
+   */
+  private stepBefore(direction: Direction): MatchRange | 'newest' | null {
+    const before = this.before;
+    const range = this.keptRange();
+    if (!before || !range) return null;
+    const was = before.ranges[before.index - before.offset];
+    const shift = was.start.absoluteRow - range.startRow;
+    if (shift < 0 || was.end.absoluteRow - shift !== range.endRow ||
+      was.start.col !== range.startCol || was.end.col !== range.endCol) return null;
+    const next = before.index + (direction === 'older' ? 1 : -1);
+    if (next === before.total && before.complete) return 'newest';
+    const target = before.ranges[next - before.offset];
+    if (!target || target.end.absoluteRow >= before.history || target.start.absoluteRow < shift) return null;
+    before.index = next;
+    return {
+      startRow: target.start.absoluteRow - shift, startCol: target.start.col,
+      endRow: target.end.absoluteRow - shift, endCol: target.end.col,
+    };
+  }
+
+  private window(index: number): Before {
+    const from = Math.max(0, index - BEFORE_REACH);
+    const to = Math.min(this.total, index + BEFORE_REACH + 1);
+    const ranges: HighlightRange[] = [];
+    for (let i = from; i < to; i++) ranges.push(this.at(i));
+    return { ranges, offset: from, total: this.total, complete: this.complete, index, history: this.listHistory };
   }
 
   // The primary screen's active match waits out the alternate screen in its
@@ -411,6 +478,7 @@ export class SearchOwner {
     this.kept = null;
     this.index = null;
     this.restoreAt = null;
+    this.before = null;
     this.highlights.clear('search-active');
   }
 
@@ -446,6 +514,9 @@ export class SearchOwner {
   }
 }
 
+function matchRange(range: HighlightRange): MatchRange {
+  return { startRow: range.start.absoluteRow, startCol: range.start.col, endRow: range.end.absoluteRow, endCol: range.end.col };
+}
 function highlight(range: MatchRange): HighlightRange {
   return { start: { absoluteRow: range.startRow, col: range.startCol }, end: { absoluteRow: range.endRow, col: range.endCol } };
 }
