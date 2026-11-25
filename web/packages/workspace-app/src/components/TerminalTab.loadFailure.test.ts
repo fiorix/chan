@@ -604,6 +604,28 @@ describe("a terminal closed or restarted while its core loads", () => {
     expect(takeShownLoadFailures()).toBe(0);
   });
 
+  test("closing the tab while its font loads asks for no core and makes nothing", async () => {
+    const core = serveCore();
+    const made = vi.spyOn(WebAssembly, "instantiate");
+    page = await openPage({ font: "source-code-pro" });
+    const font = page.holdNextFont();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    page.open(tab!);
+    await vi.waitFor(() => expect(font.asked(), "the terminal waits on its font").toBe(true));
+
+    expect(await page.tabs.closeTabsInPane(page.harness.TERMINAL_PANE, { force: true })).toBe(true);
+    page.svelte.unmount(page.mounts.pop()!);
+    font.release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(core.requests(), "no core fetched for a closed terminal").toBe(0);
+    expect(made, "and no instance").not.toHaveBeenCalled();
+    expect(page.harness.TerminalSocket.all).toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
+    expect(loadReports()).toHaveLength(0);
+    expect(takeShownLoadFailures()).toBe(0);
+  });
+
   test("a load that fails after its tab closed reports nothing", async () => {
     const core = serveCore();
     const release = core.holdNext();
