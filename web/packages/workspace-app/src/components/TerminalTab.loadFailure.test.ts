@@ -209,6 +209,11 @@ function errorHoldsKeyboard(error: HTMLElement): boolean {
   return document.activeElement !== null && error.contains(document.activeElement);
 }
 
+/// Whether the keyboard is on one of the error's actions.
+function actionHoldsKeyboard(error: HTMLElement): boolean {
+  return [...error.querySelectorAll("button")].some((button) => button === document.activeElement);
+}
+
 /// The tabs seated in the terminal's pane.
 function seated(p: Page): string[] {
   const pane = p.tabs.activeLayout().nodes[p.harness.TERMINAL_PANE] as { tabs: Array<{ id: string }> };
@@ -429,13 +434,39 @@ describe("what a terminal's load error says and offers", () => {
     expect(error.textContent).toContain(`${FINAL} ${NO_SHELL}`);
     expect(error.textContent, "no cause the page does not know").not.toContain("engine");
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(errorHoldsKeyboard(error), "a typed-ahead Enter or Space must not reload the window").toBe(false);
+    expect(actionHoldsKeyboard(error), "a typed-ahead Enter or Space must not reload the window").toBe(false);
     expect(description(action(error, "Reload window"))).toBe(`${FAILED} unsupported SIMD ${FINAL} ${NO_SHELL}`);
 
     const next = await shownLoadError(page.open(live!).target);
     expect(next.textContent, "a live session's reload attaches to it").toContain(`${FINAL} ${FINAL_SHELL_RUNS}`);
     expect(page.reloadWindow).not.toHaveBeenCalled();
     expect(takeShownLoadFailures(), "two errors shown").toBe(2);
+  });
+
+  test("a final failure in the focused pane takes the keyboard from the surface it came from and rests it on the card, not on an action", async () => {
+    serveCore();
+    vi.spyOn(WebAssembly, "compile").mockRejectedValue(new WebAssembly.CompileError("unsupported SIMD"));
+    page = await openPage();
+    // The editor the user opened the terminal from keeps the keyboard until
+    // something takes it.
+    const editor = document.createElement("div");
+    editor.setAttribute("contenteditable", "true");
+    editor.tabIndex = 0;
+    document.body.append(editor);
+    editor.focus();
+    expect(document.activeElement, "the editor holds the keyboard at the mount").toBe(editor);
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target, props } = page.place(tab!, { active: true, focused: true });
+    const error = await shownLoadError(target);
+    expect(actions(error), "a final failure").toEqual(waysOut(page, tab!, false));
+
+    await vi.waitFor(() => expect(document.activeElement, "the card itself holds the keyboard").toBe(error));
+    expect(actionHoldsKeyboard(error), "no action holds it").toBe(false);
+
+    props.focused = false;
+    page.svelte.flushSync();
+    expect(errorHoldsKeyboard(error), "another pane took focus").toBe(false);
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 
   test("the error's action gives up the keyboard when its tab stops being the focused pane's active tab", async () => {

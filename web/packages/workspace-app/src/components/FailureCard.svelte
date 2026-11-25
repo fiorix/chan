@@ -33,17 +33,24 @@
 
   const id = $props.id();
   const describedBy = `${id}-title ${id}-detail ${id}-hint`;
+  let card: HTMLDivElement | undefined = $state();
   let retryButton: HTMLButtonElement | undefined = $state();
 
   /// Hand the keyboard to the retry button, the one way out safe to take it
   /// unasked: a typed-ahead Enter or Space on a reload or a close would act
-  /// on the whole window or the tab. A card without one takes nothing.
-  export function focusRetry(): void {
-    retryButton?.focus();
+  /// on the whole window or the tab. A card without one takes it on itself,
+  /// so whatever held it stops taking the keys meant for what failed, and
+  /// Tab reaches the actions from there.
+  export function takeKeyboard(): void {
+    (retryButton ?? card)?.focus();
   }
 </script>
 
-<div class="pane-failed" role="alert">
+<!-- Focusable only without Retry, the one case the card itself is where
+     the keyboard rests; at -1 it never joins the Tab order, which the
+     static check cannot read from the expression. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<div class="pane-failed" role="alert" tabindex={onRetry ? undefined : -1} bind:this={card}>
   <p class="pane-failed-title" id="{id}-title">{title}</p>
   <p class="pane-failed-detail" id="{id}-detail">
     {errorText(error)}

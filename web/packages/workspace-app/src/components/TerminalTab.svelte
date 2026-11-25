@@ -271,7 +271,7 @@
   function focusTerminal(): void {
     if (keyboardHeld()) return;
     if (term) term.focus();
-    else loadFailureCard?.focusRetry();
+    else loadFailureCard?.takeKeyboard();
   }
 
   /// Whether nothing outside `within` holds the keyboard: it is on the body,
@@ -1359,8 +1359,8 @@
     console.warn("[chan] ghostty-web failed to load:", err);
     loadFailure = { final, error: err };
     // The focused pane's terminal would take the keyboard once open; its
-    // Retry takes it instead, once rendered. A final failure's card takes
-    // nothing (see FailureCard's focusRetry).
+    // card takes it instead, once rendered: Retry, or a final failure's
+    // card itself (see FailureCard's takeKeyboard).
     void tick().then(focusLoadedTerminal);
   }
 
