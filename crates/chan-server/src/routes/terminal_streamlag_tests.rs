@@ -2975,35 +2975,53 @@ async fn a_lagged_view_whose_ack_stays_short_is_closed_within_the_bound() {
 async fn a_view_with_a_full_window_when_its_program_exits_is_closed_the_bound_after_its_ping() {
     let _gate = pty_test_lock();
     const RING: usize = 64 * 1024;
-    // What the program writes past the window, held by the PTY so the
-    // program exits while the reader still waits for the view. A Linux PTY
-    // holds more than one read returns (4095 bytes), so there the exit's
-    // drain records the tail as two events and the view, sent the first
-    // whole once it can send, is still owed the second at its close. Other
-    // PTYs may hold less, so the tail stays small enough for any of them.
+    // What the program writes once the view's window is full, before it
+    // exits. The exit must not wait on the reader: macOS holds a
+    // controlling process's exit until the master has read all of its
+    // terminal's output. A Linux reader waits for output before it takes
+    // credit, so it waits for the view with the tail in the PTY, which
+    // holds more than one read returns (4095 bytes): the exit ends that
+    // wait, its drain records the tail as two events, and the view, sent
+    // the first whole once it can send, is still owed the second at its
+    // close. Elsewhere the read the reader is blocked in when the window
+    // fills took its credit before, so it takes a tail written at once and
+    // within macOS's 100-byte terminal output chunk whole, nothing is left
+    // in the PTY at the exit, and the redial carries the exit alone.
     #[cfg(target_os = "linux")]
     const TAIL: usize = 6000;
     #[cfg(not(target_os = "linux"))]
     const TAIL: usize = 64;
-    let total = (RING / 2 + TAIL) as u64;
     let rig = Rig::new(
         RING,
-        &format!("stty -onlcr; read -r _; head -c {total} /dev/zero | tr '\\0' 'x'; exit 23"),
+        &format!("stty -onlcr; read -r _; head -c {TAIL} /dev/zero | tr '\\0' 'x'; exit 23"),
     )
     .await;
     let (mut view, initial) = rig.attach_acking().await;
     let generation = number(&initial, "generation");
     let start = number(&initial, "seq");
+    let window = number(&initial, "ack_window");
     assert_eq!(
-        number(&initial, "ack_window"),
+        window,
         (RING / 2) as u64,
         "fixture: the window is half the ring"
     );
+    // The window counts the view's replay, and output recorded while the
+    // program waits for its line fills the rest.
+    let fill = window - number(&initial, "replay_bytes");
+    rig.output(&vec![b'x'; fill as usize]);
+    let total = fill + TAIL as u64;
     let mut watcher = rig
         .state
         .terminal_sessions
         .attach_for_ws(rig.handle.id(), None, None)
         .expect("watch the session");
+    #[cfg(target_os = "linux")]
+    let held = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "linux")]
+    arm_attach_seam(rig.handle.id(), AttachSeam::ReaderWaitingForProgress, {
+        let held = held.clone();
+        move || held.store(true, Ordering::SeqCst)
+    });
     let input_at = tokio::time::Instant::now();
     rig.handle.send_input(b"\n");
     bounded("the program exits", async {
@@ -3016,6 +3034,14 @@ async fn a_view_with_a_full_window_when_its_program_exits_is_closed_the_bound_af
         }
     })
     .await;
+    // The exit ends every wait of the reader, so one seen now came first.
+    // Off Linux nothing is pending in the PTY at the exit, so the reader
+    // need not be waiting for the view then.
+    #[cfg(target_os = "linux")]
+    assert!(
+        held.load(Ordering::SeqCst),
+        "fixture: the reader waits for the view when the program exits"
+    );
     assert!(
         tokio::time::Instant::now() - input_at
             < NO_PROGRESS_LIMIT - std::time::Duration::from_secs(1),
