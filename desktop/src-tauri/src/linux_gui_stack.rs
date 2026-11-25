@@ -35,8 +35,8 @@ pub fn prefer_system_gui_stack() {
 /// Whether the desktop WebKit process has a decided renderer path.
 ///
 /// The Linux AppImage bootstrap returns its dma-buf result. Other Linux
-/// packages return `None` because that bootstrap does not run, which leaves
-/// the SPA on its fail-safe DOM renderer. A FreeBSD build is never an
+/// packages return `None` because that bootstrap does not run, so their
+/// window URLs carry no renderer value. A FreeBSD build is never an
 /// AppImage, so it answers as those packages do. macOS and Windows return
 /// WebGL.
 pub fn webgl_renderer_available() -> Option<bool> {
@@ -455,7 +455,7 @@ mod linux {
 
     /// Expose the AppImage bootstrap's result without probing the driver again.
     /// A non-AppImage has no result because [`set_webkit_env_defaults`] never
-    /// runs there, so it emits no renderer signal and the SPA stays on DOM.
+    /// runs there, so it emits no renderer signal.
     pub fn webgl_renderer_available() -> Option<bool> {
         renderer_signal(
             cs_install::appimage_path().is_some(),

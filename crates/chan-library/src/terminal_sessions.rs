@@ -661,8 +661,8 @@ pub struct Registry {
     /// The stop descriptor every PTY reader this registry starts polls.
     reader_wake: Arc<ReaderWake>,
     /// Per-PTY-life epoch source. Each spawn (create OR restart) takes the next
-    /// value and stamps it on the session, so a reattach can prove its cached
-    /// scrollback belongs to the SAME incarnation: a restart reuses the session
+    /// value and stamps it on the session, so a reattach can prove its `since`
+    /// cursor was counted in the SAME incarnation: a restart reuses the session
     /// id but resets `seq` to 0, so without the bumped generation a stale client
     /// `since` cursor would desync silently (empty replay, no warning).
     generation_counter: AtomicU64,
@@ -2818,8 +2818,9 @@ impl Registry {
     }
 
     /// The live session's current incarnation epoch, or `None` if there is no
-    /// such live session. Used by the WS attach path to honor a client `since`
-    /// cursor only when the client's cached generation still matches.
+    /// such live session. Used by the WS attach path to honor a resuming
+    /// client's `since` cursor only when the generation it echoes still
+    /// matches.
     fn session_generation(&self, id: &str) -> Option<u64> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         let session = sessions.get(id)?;
@@ -7826,9 +7827,9 @@ impl Session {
         // resume would otherwise jump to a stale saved position instead of
         // where the replay ended. The alt head is ?1047h rather than ?1049h:
         // the core's ?1049h saves the cursor into the active screen's slot
-        // before it switches, so over a view already on the alternate screen
-        // it clobbers the program's own saved cursor, and from the normal
-        // screen it clears the alternate screen. ?1047h switches screens
+        // and erases the alternate screen, from either screen, so over a view
+        // already on the alternate screen it clobbers the program's own saved
+        // cursor and wipes the frame the replay left. ?1047h switches screens
         // without touching any saved slot or the alternate screen's contents,
         // and the guest suite exercises exactly that switch; the core also
         // honors ?47h (shown by the app's recovery tests on the core), which
@@ -12625,9 +12626,10 @@ mod tests {
 
     #[tokio::test]
     async fn reattach_honors_since_only_on_matching_generation() {
-        // A reattach resumes from `since` only when the client's cached
-        // generation still matches the live session; a mismatch forces a full
-        // replay so a stale cursor never yields a silently-truncated screen.
+        // A reattach that echoes a generation resumes from `since` only when
+        // that generation still matches the live session; a mismatch forces a
+        // full replay so a stale cursor never yields a silently-truncated
+        // screen.
         let registry = Registry::new(test_config(1 << 16, 4, 60));
         let mut first = registry.create(opts_with_window("win-gate")).unwrap();
         let id = first.id().to_string();

@@ -326,9 +326,8 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool, candidate:
 ///     advertised-but-dead capability would leave visible commands
 ///     404ing. Same authority and same before-first-render need.
 ///   - `<meta name="chan-webgl-renderer" content="1|0">` when a native
-///     desktop supplied its WebKit renderer result. The explicit false value
-///     keeps affected hosts on xterm.js's DOM renderer, while true enables the
-///     accelerated path where WebKit can composite it.
+///     desktop supplied its WebKit renderer result: `0` when WebKit's
+///     dma-buf renderer is off in the Linux AppImage, `1` otherwise.
 ///   - `<meta name="chan-gpu" content="1|0">` when a native desktop
 ///     supplied its GPU answer. On `0` the unnamed welcome keeps to its 2D
 ///     animations; `1` and no tag leave the page's renderer string to

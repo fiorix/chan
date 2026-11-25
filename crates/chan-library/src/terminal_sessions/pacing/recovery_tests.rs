@@ -8,8 +8,9 @@ fn expected_suffix(alt_screen: bool, enabled: &[u16]) -> Vec<u8> {
     // without the DECSC the resume jumps to a stale saved position.
     // The alt head is ?1047h: the core's ?1049h writes the active
     // screen's saved-cursor slot, which over the alternate screen is the
-    // program's own. ?1047h switches screens without touching any saved
-    // slot, and the guest suite exercises exactly that switch (the core
+    // program's own, and erases the alternate screen. ?1047h switches
+    // screens without touching any saved slot or the alternate screen's
+    // contents, and the guest suite exercises exactly that switch (the core
     // also honors ?47h, shown by the app's recovery tests on the core).
     let mut bytes = if alt_screen {
         b"\x18\x1b[?1047h".to_vec()
