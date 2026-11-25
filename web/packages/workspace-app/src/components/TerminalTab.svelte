@@ -2834,7 +2834,7 @@
     const shell = tab.terminalSessionId
       ? `The failure did not end its shell; ${final ? "the reload" : "Retry"} attaches to it.`
       : "No shell was started.";
-    return final ? `This page will not load the terminal again; reload the window to try once more. ${shell}` : shell;
+    return final ? `This window will not load the terminal again until it is reloaded. ${shell}` : shell;
   }
 
   function releaseLoadFailureKeyboard(): void {

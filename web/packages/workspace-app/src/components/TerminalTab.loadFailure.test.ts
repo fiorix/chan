@@ -48,7 +48,7 @@ const SESSION = "sess-live";
 const FAILED = "The terminal view could not load.";
 const NO_SHELL = "No shell was started.";
 const SHELL_RUNS = "The failure did not end its shell; Retry attaches to it.";
-const FINAL = "This page will not load the terminal again; reload the window to try once more.";
+const FINAL = "This window will not load the terminal again until it is reloaded.";
 const FINAL_SHELL_RUNS = "The failure did not end its shell; the reload attaches to it.";
 
 /// The engine's own, kept before any case spies on them.
@@ -419,7 +419,7 @@ describe("what a terminal's load error says and offers", () => {
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 
-  test("a final failure says this page will not load the terminal again, and its Reload window waits to be chosen", async () => {
+  test("a final failure says this window will not load the terminal again until it is reloaded, and its Reload window waits to be chosen", async () => {
     serveCore();
     vi.spyOn(WebAssembly, "compile").mockRejectedValue(new WebAssembly.CompileError("unsupported SIMD"));
     page = await openPage();
