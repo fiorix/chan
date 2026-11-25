@@ -1,14 +1,10 @@
 // Mounting TerminalTab in jsdom over a stand-in WebSocket. A file that
 // declares the shared fixture in `./ghosttyTab` mounts it on the real widget
-// over the vendored core. A file on the transitional stand-in route in
-// `./xterm` runs it on the stand-in xterm instead: its Ghostty load fails on
-// purpose, TerminalTab falls back, and the xterm modules are replaced with
-// the recorders in `./xterm`, re-exported here, so a test reads what the
-// component configured and wrote, and drives the key handler it registered
-// the way xterm would. A terminal opened with neither fails its test (the
-// guard in vitest.setup.ts). This module imports no component: a test file
-// declares its mocks, imports TerminalTab itself and hands it to
-// mountTerminal.
+// over the vendored core. The xterm modules TerminalTab still imports are
+// replaced with the recorders in `./xterm`, re-exported here. A terminal
+// opened without the fixture fails its test (the guard in vitest.setup.ts).
+// This module imports no component: a test file declares its mocks, imports
+// TerminalTab itself and hands it to mountTerminal.
 
 import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { mount, tick, unmount, type Component } from "svelte";
@@ -16,7 +12,7 @@ import { expect, vi } from "vitest";
 
 import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { FakeTerminal, useXtermStandIn, xterm } from "./xterm";
+import { FakeTerminal, xterm } from "./xterm";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { resetLayout } from "./tabs";
 
@@ -258,17 +254,6 @@ export function openSocket(): TerminalSocket {
   return socket;
 }
 
-/// Type a key into the stand-in and return whether xterm goes on to handle
-/// it (false: the component consumed it): `init` goes straight to the
-/// handler the component registered, as xterm hands it a key before it
-/// processes one. A key typed into the widget is `pressInGhostty` in
-/// `./ghosttyTab`, read by what the terminal sent.
-export function pressInTerminal(term: FakeTerminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
-  if (!term.keyHandler) throw new Error("no key handler registered");
-  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
-  return { event, handled: term.keyHandler(event) };
-}
-
 /// Deliver a server control frame on the socket.
 export async function receive(socket: TerminalSocket, frame: Record<string, unknown>): Promise<void> {
   await socket.onmessage?.({ data: JSON.stringify(frame) });
@@ -363,7 +348,6 @@ export function resetTerminals(): void {
   xterm.webgl.splice(0);
   xterm.webLinks.splice(0);
   xterm.webglThrows = false;
-  useXtermStandIn(false);
   xterm.textareaFocus = false;
   ghostty?.reset();
   resizeObservers.splice(0);

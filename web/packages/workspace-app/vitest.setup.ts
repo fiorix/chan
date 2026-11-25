@@ -23,7 +23,6 @@
 
 import { afterAll, afterEach, expect } from "vitest";
 
-import { takeUnroutedStandIns, XtermStandInRequested } from "./src/__tests__/xterm";
 import { trackTimers } from "./src/demo/timers";
 
 /// The Storage surface the SPA actually uses: `getItem`, `setItem`,
@@ -110,44 +109,56 @@ afterAll(() => {
   failOnTerminalInitFailures();
 });
 
-// TerminalTab reports a Ghostty load that failed on the console and falls
-// back to xterm.js, so a test that opens a terminal without the shared widget
-// fixture would pass against a terminal it never chose. Two records catch it,
-// and either fails the test it came from once the test's own teardown has
-// run (a setup file's `afterEach` runs last); one that arrives after the last
-// test fails the file, once its timers are released:
+// TerminalTab reports a Ghostty load that failed on the console and shows the
+// failure in the terminal's area, so a test that opens a terminal without the
+// shared widget fixture would pass against a terminal that never opened.
+// Two records catch it, and either fails the test it came from once the
+// test's own teardown has run (a setup file's `afterEach` runs last); one
+// that arrives after the last test fails the file, once its timers are
+// released:
 //
 // - the report, matched by its prefix, while the test has not replaced
 //   console.warn;
-// - the stand-in xterm a fallback opened with no load paying for it, counted
-//   by the stand-in itself (src/__tests__/xterm.ts), which no console
-//   replacement hides.
-//
-// The one report let through is a load failed with XtermStandInRequested,
-// matched by its class: a file on the transitional stand-in route in
-// src/__tests__/xterm.ts asks for that failure to run its terminals on the
-// xterm stand-in. It is counted and not printed, as every such file gives one
-// per terminal. The exception goes with the route.
+// - the load error a terminal shows in its own area (TerminalTab's
+//   `.terminal-load-failure`), counted from the DOM, which no console
+//   replacement hides. A file that makes a load fail on purpose takes the
+//   count its case expects with `takeShownLoadFailures`.
 const TERMINAL_INIT_FAILURE = "[chan] ghostty-web failed to load";
 const terminalInitFailures: string[] = [];
-let standInReports = 0;
 const environmentWarn = console.warn;
 console.warn = function (this: Console, ...args: unknown[]) {
   if (typeof args[0] === "string" && args[0].startsWith(TERMINAL_INIT_FAILURE)) {
-    if (args[1] instanceof XtermStandInRequested) {
-      standInReports += 1;
-      return;
-    }
     terminalInitFailures.push(args.map((arg) => String(arg)).join(" "));
   }
   return environmentWarn.apply(this, args);
 };
 
-/// The stand-in route's own load reports since the last call.
-export function takeStandInReports(): number {
-  const reports = standInReports;
-  standInReports = 0;
-  return reports;
+const TERMINAL_LOAD_FAILURE = ".terminal-load-failure";
+let shownLoadFailures = 0;
+
+function countShownLoadFailures(records: MutationRecord[]): void {
+  for (const record of records) {
+    for (const node of record.addedNodes) {
+      if (!(node instanceof Element)) continue;
+      if (node.matches(TERMINAL_LOAD_FAILURE)) shownLoadFailures += 1;
+      shownLoadFailures += node.querySelectorAll(TERMINAL_LOAD_FAILURE).length;
+    }
+  }
+}
+
+// A file in the node environment has no document to watch.
+const loadFailureWatch =
+  typeof MutationObserver === "undefined" || typeof document === "undefined"
+    ? null
+    : new MutationObserver(countShownLoadFailures);
+loadFailureWatch?.observe(document.documentElement, { childList: true, subtree: true });
+
+/// How many terminal load errors were shown since the last call.
+export function takeShownLoadFailures(): number {
+  countShownLoadFailures(loadFailureWatch?.takeRecords() ?? []);
+  const shown = shownLoadFailures;
+  shownLoadFailures = 0;
+  return shown;
 }
 
 /// Throw for the terminal initialization failures recorded since the last
@@ -155,11 +166,11 @@ export function takeStandInReports(): number {
 /// mounted test.
 export function failOnTerminalInitFailures(): void {
   const failures = terminalInitFailures.splice(0);
-  const unrouted = takeUnroutedStandIns();
-  if (failures.length === 0 && unrouted === 0) return;
+  const shown = takeShownLoadFailures();
+  if (failures.length === 0 && shown === 0) return;
   const found = [
     ...(failures.length > 0 ? [`Reported: ${failures.join(" | ")}`] : []),
-    ...(unrouted > 0 ? [`${unrouted} opened on the xterm stand-in with no route request`] : []),
+    ...(shown > 0 ? [`${shown} showed the terminal load error`] : []),
   ];
   throw new Error(
     "a mounted terminal failed to initialize: open it on the real widget through the shared fixture in " +

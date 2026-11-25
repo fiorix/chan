@@ -1,17 +1,17 @@
 import { expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalReplay")).parserTerminalModule());
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
-import { bytes as Buffer, caseName, drainParser, emit, mountRealTerminal, observations, parsers, ReplaySocket, requiredSubcases, rpc, save, snapshot } from "../__tests__/terminalReplay";
-import { pressInTerminal } from "../__tests__/terminalTab";
+import { ghosttyFixture, ghosttyMode, pressInGhostty, typeInGhostty } from "../__tests__/ghosttyTab";
+import { bytes as Buffer, caseName, emit, mountRealTerminal, observations, ReplaySocket, requiredSubcases, rpc, save, snapshot } from "../__tests__/terminalReplay";
 
 async function assertWireProvenance() {
   const received = ReplaySocket.all.map((peer) => ({ connection: peer.connection,
@@ -45,7 +45,7 @@ if (caseName === "restart") test("a terminal restarted in place resets before sh
     await socket.ready();
     const sessionOf = (ordinal: number) => JSON.parse(Buffer.from(socket.deliveries.filter((frame) => frame.type === "session")[ordinal - 1].bytes, "base64").toString());
     const initialSession = sessionOf(1);
-    const terminal = parsers.at(-1)!;
+    const terminal = mounted.term;
     await emit("rows", { prefix: "OLD_GENERATION", count: 80 });
     await emit("marker", { name: "OLD_GENERATION_END" });
     await socket.bytesInclude("MARKER:OLD_GENERATION_END\r\n");
@@ -82,7 +82,7 @@ if (caseName === "restart") test("a terminal restarted in place resets before sh
     await emit("marker", { name: "NEW_GENERATION_END" });
     await socket.bytesInclude("MARKER:NEW_GENERATION_END\r\n");
     const input = "restart-input\r";
-    terminal.type(input);
+    typeInGhostty(terminal, input);
     expect(Buffer.from(await rpc("keys", { length: Buffer.from(input).length }), "base64").toString(), "the new raw PTY receives input from the mounted page").toBe(input);
     await emit("marker", { name: "RESTART_LIVE" });
     await socket.bytesInclude("MARKER:RESTART_LIVE\r\n");
@@ -98,8 +98,8 @@ if (caseName === "restart") test("a terminal restarted in place resets before sh
     expect(delivered.toString("base64"), "restart delivers only RIS and the new generation's exact byte stream").toBe(Buffer.concat([Buffer.from("\x1bc"), emitted]).toString("base64"));
     expect(await rpc("fixture-log", { initial: true }), "the old fixture's evidence remains unchanged").toEqual(initialSource);
     expect(mounted.tab.terminalSessionId).toBe(initialSession.id);
-    expect(parsers).toHaveLength(1);
-    expect(parsers[0]).toBe(terminal);
+    expect(ghosttyFixture.terminals).toHaveLength(1);
+    expect(ghosttyFixture.terminals[0]).toBe(terminal);
     expect(ReplaySocket.all).toHaveLength(1);
     expect(ReplaySocket.all[0]).toBe(socket);
     expect(socket.closed).toBe(false);
@@ -167,7 +167,6 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
 
     ReplaySocket.acknowledge = async (message) => {
       if (message.connection === 4 && message.type === "ready") {
-        await drainParser("after-ready boundary");
         await emit("rows", { prefix: "SUFFIX", count: 7 });
         await emit("marker", { name: "SUFFIX_END" });
         await rpc("upstream-marker", { connection: 4, marker: "MARKER:SUFFIX_END\r\n" });
@@ -240,7 +239,6 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
           } else if (message.connection === second) {
             if (message.binary) delivered += Buffer.from(message.bytes, "base64").length;
             if (message.binary && delivered === variant.bytes) {
-              await drainParser(`${variant.name} boundary`);
               await rpc("ack", { connection: second, frame: message.frame, drained: true });
             }
           }
@@ -304,14 +302,31 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
     await current.bytesInclude("SCREEN:ATTACH_ALT_BASE\r\n");
     const alternateBaseline = await snapshot("alternate attach baseline");
     expect(alternateBaseline.active).toBe("alternate");
-    expect(alternateBaseline.normal).toEqual(splitBaseline.normal);
     const protocol = mounted.tab.keyboardProtocol;
     const protocolValue = JSON.parse(JSON.stringify(protocol));
+    const term = mounted.term;
+    // The core reads only the screen that shows, so the normal screen is read
+    // once the program leaves the alternate one; leaving restores the cursor
+    // that entering saved. The program then enters it again, which clears
+    // the alternate screen and keeps every mode and the keyboard protocol, so
+    // the next arm starts on the alternate screen with the modes it set.
+    async function normalAfterExit(name: string) {
+      await emit("alternate", { enabled: false });
+      await current.bytesInclude("\x1b[?1049l");
+      const left = await snapshot(`${name} normal screen`);
+      await emit("alternate", { enabled: true });
+      await emit("redraw", { name: `${name}-again` });
+      await current.bytesInclude(`SCREEN:${name}-again\r\n`);
+      return left;
+    }
+    const entered = await normalAfterExit("ATTACH_ALT_BASE");
+    expect(entered.active).toBe("normal");
+    expect(entered.normal, "entering the alternate screen preserves the normal history and cursor").toEqual(splitBaseline.normal);
     let expectedKeys = "";
     const alternatePrelude = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?1h\x1b[?2004h";
     async function alternateKeys(label: string) {
       for (const modifier of [{ ctrlKey: true }, { shiftKey: true }]) {
-        expect(pressInTerminal(parsers.at(-1)!, { key: "Enter", code: "Enter", ...modifier }).handled).toBe(false);
+        expect(pressInGhostty(term, { key: "Enter", code: "Enter", ...modifier }).defaultPrevented).toBe(true);
       }
       expectedKeys += "\x1b[27;5;13~\x1b[27;2;13~";
       expect(Buffer.from(await rpc("keys", { length: Buffer.from(expectedKeys).length }), "base64").toString(), label).toBe(expectedKeys);
@@ -340,7 +355,6 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
             || (variant.boundary === "after-ready" && message.type === "ready")
             || (variant.boundary === "after-session" && message.type === "session");
           if (atBoundary) {
-            await drainParser(`${variant.name} boundary`);
             await rpc("ack", { connection: first, frame: message.frame, drained: true });
           }
         });
@@ -378,11 +392,10 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       expect(binaryOf(current).toString()).toBe(alternatePrelude);
       const parsed = await snapshot(`${variant.name} recovery`);
       expect(parsed.active).toBe("alternate");
-      expect(parsed.normal, "empty replay and prelude preserve the normal history and cursor").toEqual(splitBaseline.normal);
       expect(mounted.tab.keyboardProtocol).toBe(protocol);
       expect(JSON.parse(JSON.stringify(mounted.tab.keyboardProtocol))).toEqual(protocolValue);
-      expect(parsers.at(-1)!.model.modes.applicationCursorKeysMode).toBe(true);
-      expect(parsers.at(-1)!.model.modes.bracketedPasteMode).toBe(true);
+      expect(ghosttyMode(term, 1)).toBe(true);
+      expect(ghosttyMode(term, 2004)).toBe(true);
       await alternateKeys(`${variant.name} keys`);
       records = await assertWireProvenance();
       const dials = records.filter((entry: any) => entry.event === "connection" && entry.connection >= first && entry.connection <= recoveryOrdinal);
@@ -396,7 +409,9 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       await current.bytesInclude(`SCREEN:${variant.name}\r\n`);
       const redrawn = await snapshot(`${variant.name} redraw`);
       expect(redrawn.alternate.rows.filter(Boolean)).toEqual([`SCREEN:${variant.name}`]);
-      expect(redrawn.normal).toEqual(splitBaseline.normal);
+      const left = await normalAfterExit(variant.name);
+      expect(left.active).toBe("normal");
+      expect(left.normal, "empty replay, prelude and redraw preserve the normal history and cursor").toEqual(splitBaseline.normal);
       passed(variant.name, { cuts, session, protocol: protocolValue });
     }
     await emit("alternate", { enabled: false });
@@ -500,8 +515,8 @@ if (caseName === "keyboard-modes") test("negotiated key bytes survive cut replay
   const protocolValue = () => JSON.parse(JSON.stringify(mounted!.tab.keyboardProtocol));
   async function checkKeys(label: string, expected: string) {
     for (const modifier of [{ ctrlKey: true }, { shiftKey: true }]) {
-      const key = pressInTerminal(parsers.at(-1)!, { key: "Enter", code: "Enter", ...modifier });
-      expect(key.handled, "the page encodes the negotiated modified Enter").toBe(false);
+      const key = pressInGhostty(mounted!.term, { key: "Enter", code: "Enter", ...modifier });
+      expect(key.defaultPrevented, "the page encodes the negotiated modified Enter").toBe(true);
     }
     expectedKeys += expected;
     const received = Buffer.from(await rpc("keys", { length: Buffer.from(expectedKeys).length }), "base64").toString();
@@ -710,7 +725,6 @@ if (caseName === "alternate-screen") test("an alternate-screen reconnect preserv
     await mounted.socket.bytesInclude("SCREEN:BEFORE_CUT\r\n");
     const alternate = await snapshot("alternate before cut");
     expect(alternate.active).toBe("alternate");
-    expect(alternate.normal).toEqual(before.normal);
     const alternateSource = await rpc("fixture-log");
 
     ReplaySocket.acknowledge = async (message) => {
@@ -736,12 +750,18 @@ if (caseName === "alternate-screen") test("an alternate-screen reconnect preserv
     expect(session.missed_bytes).toBe(0);
     const recovered = await snapshot("recovered alternate");
     expect(recovered.active).toBe("alternate");
-    expect(recovered.normal, "the cut and empty replay preserve every normal row and cursor").toEqual(before.normal);
     await emit("redraw", { name: "RECOVERED" });
     await recovery.bytesInclude("SCREEN:RECOVERED\r\n");
     const redrawn = await snapshot("redrawn alternate");
     expect(redrawn.alternate.rows.filter(Boolean)).toEqual(["SCREEN:RECOVERED"]);
     await emit("alternate", { enabled: false });
+    // The core reads only the screen that shows: the normal screen is read
+    // once the program leaves the alternate one, which restores the cursor
+    // entering saved, and before the prompt moves it.
+    await recovery.bytesInclude("\x1b[?1049l");
+    const left = await snapshot("normal screen after the alternate one");
+    expect(left.active).toBe("normal");
+    expect(left.normal, "the alternate screen, the cut and the empty replay preserve every normal row and cursor").toEqual(before.normal);
     await emit("marker", { name: "FINAL_PROMPT" });
     await recovery.bytesInclude("MARKER:FINAL_PROMPT\r\n");
     const final = await snapshot("returned to normal prompt");

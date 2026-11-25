@@ -7,7 +7,7 @@
 //   vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
 //
 // `./terminalTab` re-exports the stand-in beside its TerminalTab mounting
-// harness; the stand-in route at the end is imported from here. This module imports nothing from the app, so a mock factory can
+// harness. This module imports nothing from the app, so a mock factory can
 // load it while the app's own imports are still resolving.
 
 /// What the stand-in xterm recorded.
@@ -74,13 +74,6 @@ export class FakeTerminal {
   constructor(options: Record<string, unknown> = {}) {
     this.options = { ...options };
     xterm.terminals.push(this);
-    // A file's own Ghostty double built on the stand-in is constructed by its
-    // kit, with the core it instantiated; only the xterm.js fallback is paid
-    // for by a load (see the route below).
-    if (!("ghostty" in options)) {
-      if (route.paid > 0) route.paid -= 1;
-      else route.unpaid += 1;
-    }
   }
 
   loadAddon(addon: { activate?: (terminal: FakeTerminal) => void }): void {
@@ -266,73 +259,5 @@ export function webglAddonModule() {
         this.record.disposed = true;
       }
     },
-  };
-}
-
-// The stand-in route. A file that still asserts on the stand-in opens its
-// terminals on it through TerminalTab's own fallback: the file's Ghostty load
-// fails with `XtermStandInRequested`, TerminalTab falls back to xterm.js, and
-// the file's `@xterm/xterm` mock serves the stand-in. The setup file's
-// terminal initialization guard lets that one failure through, by its class.
-// The route is transitional: a file leaves it when its assertions move to the
-// widget fixture (`./ghosttyTab`), and the route goes with the last file.
-//
-// Each load that asks for the fallback, with the route's own failure, pays
-// for one stand-in. A stand-in nothing paid for fell back on its own: with
-// neither fixture nor route, or from a file's own kit failing to load. The
-// setup file's guard fails its test from this count, whatever the test did
-// with the console. The count is per file: a load whose component was torn
-// down before it built a terminal leaves its payment for the next.
-
-/// The load failure a file on the stand-in route asks for.
-export class XtermStandInRequested extends Error {
-  constructor() {
-    super("this terminal runs on the xterm stand-in");
-    this.name = "XtermStandInRequested";
-  }
-}
-
-const route = { paid: 0, unpaid: 0 };
-
-/// A Ghostty load that asks for the stand-in: it fails with the route's
-/// error, and pays for the fallback terminal it leads to.
-export function requestXtermStandIn(): Promise<never> {
-  route.paid += 1;
-  return Promise.reject(new XtermStandInRequested());
-}
-
-/// How many stand-ins were constructed with no load paying for them since
-/// the last call.
-export function takeUnroutedStandIns(): number {
-  const unpaid = route.unpaid;
-  route.unpaid = 0;
-  return unpaid;
-}
-
-/// The `vi.mock("../terminal/backend", ...)` factory of a file whose every
-/// terminal runs on the stand-in.
-export async function xtermStandInBackendModule(importOriginal: <T>() => Promise<T>) {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return { ...actual, loadGhosttyKit: requestXtermStandIn };
-}
-
-const standIn = { on: false };
-
-/// For a file whose own backend mock serves a Ghostty kit, per case: the
-/// terminals opened after `useXtermStandIn()` run on the stand-in, and after
-/// `useXtermStandIn(false)` on the file's kit. `resetTerminals` turns it off.
-export function useXtermStandIn(on = true): void {
-  standIn.on = on;
-}
-
-/// Wraps the module a file's own backend mock returns, so `useXtermStandIn`
-/// decides each load. The file's own load is returned as it is, so a kit's
-/// timing is the file's, and a failure of it pays for nothing: a case that
-/// means its kit to fail asks for the fallback with `requestXtermStandIn`.
-export function xtermStandInSwitch<T extends { loadGhosttyKit: () => Promise<unknown> }>(module: T): T {
-  const load = module.loadGhosttyKit;
-  return {
-    ...module,
-    loadGhosttyKit: (() => (standIn.on ? requestXtermStandIn() : load())) as T["loadGhosttyKit"],
   };
 }

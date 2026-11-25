@@ -2,7 +2,8 @@
   // The card a render boundary draws in place of what it could not draw: what
   // failed, why, what still works, and the ways out. It sits where the failed
   // body would be, so a failure reads as that pane's own rather than as the
-  // window having lost it.
+  // window having lost it. Its text describes each action, so a user who
+  // reaches one after the card appeared hears what it answers.
   import { errorText } from "../api/errors";
 
   let {
@@ -10,29 +11,60 @@
     error,
     hint,
     onRetry,
+    retryLabel = "Try again",
+    reloadLabel,
+    onReload,
     closeLabel,
     onClose,
   }: {
     title: string;
     error: unknown;
     hint: string;
-    onRetry: () => void;
+    /// No retry button without it.
+    onRetry?: () => void;
+    retryLabel?: string;
+    /// The reload button's text; no reload button without it and `onReload`.
+    reloadLabel?: string;
+    onReload?: () => void;
     /// Names the tab the close button closes; no close button without it.
     closeLabel?: string;
     onClose?: () => void;
   } = $props();
+
+  const id = $props.id();
+  const describedBy = `${id}-title ${id}-detail ${id}-hint`;
+  let card: HTMLDivElement | undefined = $state();
+  let retryButton: HTMLButtonElement | undefined = $state();
+
+  /// Hand the keyboard to the retry button, the one way out safe to take it
+  /// unasked: a typed-ahead Enter or Space on a reload or a close would act
+  /// on the whole window or the tab. A card without one takes it on itself,
+  /// so whatever held it stops taking the keys meant for what failed, and
+  /// Tab reaches the actions from there.
+  export function takeKeyboard(): void {
+    (retryButton ?? card)?.focus();
+  }
 </script>
 
-<div class="pane-failed" role="alert">
-  <p class="pane-failed-title">{title}</p>
-  <p class="pane-failed-detail">
+<!-- Focusable only without Retry, the one case the card itself is where
+     the keyboard rests; at -1 it never joins the Tab order, which the
+     static check cannot read from the expression. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<div class="pane-failed" role="alert" tabindex={onRetry ? undefined : -1} bind:this={card}>
+  <p class="pane-failed-title" id="{id}-title">{title}</p>
+  <p class="pane-failed-detail" id="{id}-detail">
     {errorText(error)}
   </p>
-  <p class="pane-failed-hint">{hint}</p>
+  <p class="pane-failed-hint" id="{id}-hint">{hint}</p>
   <div class="pane-failed-actions">
-    <button onclick={() => onRetry()}>Try again</button>
+    {#if onRetry}
+      <button bind:this={retryButton} aria-describedby={describedBy} onclick={() => onRetry?.()}>{retryLabel}</button>
+    {/if}
+    {#if reloadLabel !== undefined && onReload}
+      <button aria-describedby={describedBy} onclick={() => onReload?.()}>{reloadLabel}</button>
+    {/if}
     {#if closeLabel !== undefined && onClose}
-      <button onclick={() => onClose()}>Close {closeLabel}</button>
+      <button aria-describedby={describedBy} onclick={() => onClose?.()}>Close {closeLabel}</button>
     {/if}
   </div>
 </div>
@@ -66,8 +98,11 @@
     font-size: 0.8rem;
   }
 
+  /* Three ways out and a long tab name do not fit a narrow pane's card on
+     one row. */
   .pane-failed-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
 </style>

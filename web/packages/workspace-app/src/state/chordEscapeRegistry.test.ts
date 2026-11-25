@@ -7,7 +7,7 @@ import {
   shouldEscapeTerminal,
 } from "./shortcuts";
 import { ghosttyKeydownAction } from "../terminal/ghosttyKeys";
-import { createXtermKeydownState } from "../terminal/xtermKeyboard";
+import { createKeydownState } from "../terminal/keyEncoding";
 
 // Chord-escape registry. Global chords that must reach the App keymap even
 // from a focused terminal (Command launcher, Settings, Search, New terminal,
@@ -316,7 +316,7 @@ describe("terminal find's escape flag decides who owns Cmd+F", () => {
     return ghosttyKeydownAction(
       e,
       { platform: { isMac: true, isWindows: false }, applicationCursorMode: false, rows: 24, chanBytes: null },
-      createXtermKeydownState(),
+      createKeydownState(),
     );
   }
 

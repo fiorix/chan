@@ -27,7 +27,7 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 // xterm.js ships its TypeScript source, whose modules import each other as
 // `common/...` and `vs/...`. The keyboard parity tests load its key evaluator
 // and its parser from there to compare chan's ports with the originals
-// (src/terminal/xtermKeyboard.ts, src/terminal/keyboardProtocolStream.ts).
+// (src/terminal/keyEncoding.ts, src/terminal/keyboardProtocolStream.ts).
 const xtermSrc = join(dirname(require.resolve("@xterm/xterm/package.json")), "src");
 
 // The terminal widget's entry module, whose lazily loaded chunk keeps the

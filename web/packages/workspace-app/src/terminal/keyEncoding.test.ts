@@ -1,14 +1,14 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import {
-  createXtermKeydownState,
+  createKeydownState,
   evaluateKeyboardEvent,
-  xtermKeydown,
-  type XtermKeyInput,
-  type XtermKeyResultType,
-} from "./xtermKeyboard";
+  decideKeydown,
+  type KeyInput,
+  type KeyResultType,
+} from "./keyEncoding";
 
 type Reference = (
-  ev: XtermKeyInput,
+  ev: KeyInput,
   applicationCursorMode: boolean,
   isMac: boolean,
   macOptionIsMeta: boolean,
@@ -26,7 +26,7 @@ beforeAll(async () => {
 });
 
 // xterm.js's KeyboardResultType, in its order.
-const RESULT_TYPES: XtermKeyResultType[] = ["send", "select-all", "page-up", "page-down"];
+const RESULT_TYPES: KeyResultType[] = ["send", "select-all", "page-up", "page-down"];
 
 // Values of `key` and `code` that reach every branch of the evaluator: the
 // iOS arrow names, dead keys, the Ctrl+_ and Ctrl+@ symbols, composed and
@@ -50,7 +50,7 @@ const KEYS = [
 ];
 const CODES = ["KeyN", "Quote"];
 
-function* inputs(): Generator<XtermKeyInput> {
+function* inputs(): Generator<KeyInput> {
   for (let keyCode = 0; keyCode < 256; keyCode++) {
     for (let mods = 0; mods < 16; mods++) {
       for (const key of KEYS) {
@@ -98,7 +98,7 @@ describe("the evaluator matches xterm.js's", () => {
   });
 });
 
-type Event = Partial<XtermKeyInput> & {
+type Event = Partial<KeyInput> & {
   isComposing?: boolean;
   altGraph?: boolean;
 };
@@ -122,8 +122,8 @@ const LINUX = { isMac: false, isWindows: false };
 const MAC = { isMac: true, isWindows: false };
 const WINDOWS = { isMac: false, isWindows: true };
 
-function decide(init: Event, platform = LINUX, state = createXtermKeydownState()) {
-  return xtermKeydown(keydown(init), { applicationCursorMode: false, platform, rows: 24 }, state);
+function decide(init: Event, platform = LINUX, state = createKeydownState()) {
+  return decideKeydown(keydown(init), { applicationCursorMode: false, platform, rows: 24 }, state);
 }
 
 describe("the keydown decisions around the evaluator", () => {
@@ -162,14 +162,14 @@ describe("the keydown decisions around the evaluator", () => {
   });
 
   test("a dead key and the key after it are left to the browser, which composes them", () => {
-    const state = createXtermKeydownState();
+    const state = createKeydownState();
     expect(decide({ keyCode: 222, key: "Dead", code: "Quote" }, LINUX, state)).toEqual({ kind: "pass", deadKey: true });
     expect(decide({ keyCode: 69, key: "e", code: "KeyE" }, LINUX, state)).toEqual({ kind: "pass", deadKey: true });
     expect(decide({ keyCode: 69, key: "e", code: "KeyE" }, LINUX, state)).toEqual({ kind: "send", data: "e" });
   });
 
   test("AltGraph arms the same pending composition", () => {
-    const state = createXtermKeydownState();
+    const state = createKeydownState();
     expect(decide({ keyCode: 225, key: "AltGraph" }, LINUX, state)).toEqual({ kind: "pass", deadKey: true });
     expect(state.deadKey).toBe(true);
   });

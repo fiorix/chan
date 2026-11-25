@@ -589,7 +589,7 @@ test("native input recorder controls without a browser or server", async (t) => 
 
   {
     const productDir = wtFile("web/packages/workspace-app/src/terminal");
-    const needed = ["ghosttyKeys.ts", "xtermKeyboard.ts", "keymap.ts", "clipboardChord.ts"];
+    const needed = ["ghosttyKeys.ts", "keyEncoding.ts", "keymap.ts", "clipboardChord.ts"];
     if (!existsSync(join(productDir, "ghosttyKeys.ts"))) {
       note(`product evaluators absent at ${productDir}: anchor check skipped (host-only; set NATIVE_INPUT_PRODUCT)`);
     } else {
@@ -602,7 +602,7 @@ test("native input recorder controls without a browser or server", async (t) => 
       }
       const href = (f) => pathToFileURL(join(dir, f)).href;
       const { ghosttyKeydownAction } = await import(href("ghosttyKeys.ts"));
-      const { xtermKeydown, createXtermKeydownState } = await import(href("xtermKeyboard.ts"));
+      const { decideKeydown, createKeydownState } = await import(href("keyEncoding.ts"));
       const { controlSlashBytes, terminalMetaKeyBytes } = await import(href("keymap.ts"));
       const { isTerminalPasteChord } = await import(href("clipboardChord.ts"));
       const PLATFORM = { isMac: false, isWindows: false };
@@ -612,10 +612,10 @@ test("native input recorder controls without a browser or server", async (t) => 
         repeat: false, isComposing: false, getModifierState: () => false, ...extra,
       });
       const derived = (keys) => keys.map((e) => {
-        const state = createXtermKeydownState();
+        const state = createKeydownState();
         const chanBytes = controlSlashBytes(e, null) ?? terminalMetaKeyBytes(e, undefined) ?? null;
         const claimed = isTerminalPasteChord(e, "linux");
-        const action = ghosttyKeydownAction(e, { platform: PLATFORM, applicationCursorMode: false, rows: 24, chanBytes }, createXtermKeydownState());
+        const action = ghosttyKeydownAction(e, { platform: PLATFORM, applicationCursorMode: false, rows: 24, chanBytes }, createKeydownState());
         return { action, claimed };
       }).filter((r) => !r.claimed && r.action.kind === "send").map((r) => r.action.data).join("");
       const anchors = [
@@ -633,7 +633,7 @@ test("native input recorder controls without a browser or server", async (t) => 
         const keys = anchors[2][1];
         const kinds = keys.map((e) => {
           const chanBytes = controlSlashBytes(e, null) ?? terminalMetaKeyBytes(e, undefined) ?? null;
-          return ghosttyKeydownAction(e, { platform: PLATFORM, applicationCursorMode: false, rows: 24, chanBytes }, createXtermKeydownState()).kind;
+          return ghosttyKeydownAction(e, { platform: PLATFORM, applicationCursorMode: false, rows: 24, chanBytes }, createKeydownState()).kind;
         });
         const want = caseById("typing-ab").expect.pty;
         note(`typing-ab: kinds ${JSON.stringify(kinds)} vs case ${JSON.stringify(want)}`);
@@ -641,7 +641,7 @@ test("native input recorder controls without a browser or server", async (t) => 
           fail(`typing-ab: product does not pass both keystrokes through (kinds ${JSON.stringify(kinds)})`);
         }
       }
-      void xtermKeydown;
+      void decideKeydown;
     }
   }
   if (problems === 0) ok("bytes: the anchors come out of the product evaluators");
