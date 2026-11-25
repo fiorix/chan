@@ -284,7 +284,7 @@ const DSR_CURSOR_QUERY: &[u8] = b"\x1b[6n";
 /// [`Session::take_due_dsr_answer`]).
 const DSR_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
 /// How long a [`DSR_CURSOR_QUERY`] is left for an attached frontend to answer
-/// before the library answers it. Long enough that a live xterm.js round trip
+/// before the library answers it. Long enough that a live frontend round trip
 /// wins the race in ordinary interactive use, short enough that a headless
 /// session (tests, a server-side team spawn) is not visibly delayed.
 const DSR_ANSWER_GRACE_MS: i64 = 150;
@@ -1704,9 +1704,9 @@ pub struct AttachHandle {
     pub tmux_consent_rx: watch::Receiver<Arc<TmuxConsentSnapshot>>,
     pub replay: Vec<Vec<u8>>,
     pub seq: u64,
-    /// This session incarnation's epoch, sent in the attach prelude so the
-    /// client can prove a cached scrollback snapshot belongs to the SAME PTY
-    /// life before resuming from a `since` cursor (a restart bumps it).
+    /// This session incarnation's epoch, sent in the attach prelude so a
+    /// client that redials can prove its `since` cursor was counted in the
+    /// SAME PTY life before it resumes from there (a restart bumps it).
     pub generation: u64,
     pub missed_bytes: u64,
     pub alt_screen: bool,
@@ -3340,8 +3340,8 @@ impl Registry {
             tab_id,
         } = placement;
         if let Some(id) = id {
-            // Honor the client's `since` cursor for a SNAPSHOT RESUME only when
-            // its cached generation still matches the live session: a restart
+            // Honor the client's `since` cursor for a RESUME only when the
+            // generation it echoes still matches the live session: a restart
             // reuses the id but resets the ring/`seq` to 0, so a stale cursor
             // would otherwise replay an empty delta with missed=0 (silent
             // desync). A client that is not resuming echoes NO generation -- its
@@ -3350,7 +3350,7 @@ impl Registry {
             let resume = match client_generation {
                 Some(g) if self.session_generation(id) == Some(g) => Resume::Since(since),
                 // Echoed a generation that no longer matches (e.g. a restart it
-                // did not observe): the cached cursor is stale -> full replay.
+                // did not observe): its cursor is stale -> full replay.
                 Some(g) => self.resume_other_generation(id, g, since),
                 // Not a resume attempt: pass `since` through unchanged.
                 None => Resume::Since(since),
@@ -7820,16 +7820,19 @@ impl Session {
             .private_modes
             .lock()
             .expect("terminal private modes poisoned");
-        // The normal-screen head saves the cursor first: the backend that
-        // restores unconditionally on ?1049l (xterm.js) would otherwise jump
-        // to a stale saved position instead of resuming where the replay
-        // ended. The alt head is ?1047h rather than ?1049h: xterm.js's
-        // ?1049h writes the alternate buffer's saved-cursor slot before its
-        // guarded switch, clobbering the program's slot. ?1047h switches
-        // screens on both shipped backends without touching any saved slot,
-        // and the guest suite exercises exactly that switch; ghostty's core
-        // also honors ?47h (shown by the ghostty recovery case), which the
-        // product does not use.
+        // The normal-screen head saves the cursor first: the terminal's core,
+        // libghostty-vt, restores the saved cursor on ?1049l even on the
+        // normal screen (to the top left when nothing was saved), so the
+        // resume would otherwise jump to a stale saved position instead of
+        // where the replay ended. The alt head is ?1047h rather than ?1049h:
+        // the core's ?1049h saves the cursor into the active screen's slot
+        // before it switches, so over a view already on the alternate screen
+        // it clobbers the program's own saved cursor, and from the normal
+        // screen it clears the alternate screen. ?1047h switches screens
+        // without touching any saved slot or the alternate screen's contents,
+        // and the guest suite exercises exactly that switch; the core also
+        // honors ?47h (shown by the app's recovery tests on the core), which
+        // the product does not use.
         let mut out = if alt_screen {
             b"\x18\x1b[?1047h".to_vec()
         } else {

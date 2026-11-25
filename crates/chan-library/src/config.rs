@@ -42,8 +42,8 @@ pub struct TerminalConfig {
     pub session_cap: usize,
     #[serde(default = "default_terminal_ring_bytes")]
     pub ring_bytes: usize,
-    /// Per-terminal scrollback budget in MB. Consumed by the SPA at
-    /// xterm.js construction time to compute the scrollback line cap;
+    /// Per-terminal scrollback budget in MB. Consumed by the SPA when it
+    /// constructs the terminal widget, to compute the scrollback line cap;
     /// the server only persists + range-clamps the value. Spawn-time-
     /// only: existing terminals keep their current scrollback until
     /// the session restarts.
@@ -64,7 +64,7 @@ pub struct TerminalConfig {
     #[serde(default)]
     pub font: TerminalFontChoice,
     /// Renderer font size in pixels. The SPA captures this when it constructs
-    /// either terminal backend; existing renderers keep their captured size.
+    /// the terminal widget; an open terminal keeps its captured size.
     #[serde(default = "default_terminal_font_size")]
     pub font_size: u32,
     /// Terminal background opacity in percent, 100 opaque. The desktop's own

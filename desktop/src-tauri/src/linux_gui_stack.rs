@@ -412,9 +412,10 @@ mod linux {
     /// it off drops the webview onto the legacy WPE/X11 path for everything,
     /// not just the failing case. Measured cost on an AMD host: the WebGL
     /// layer paints nothing at all, on two independent capture paths, so
-    /// xterm.js's WebGL renderer is unavailable and the terminal grid is stuck
-    /// on the DOM renderer that bands rules and blocks. WebGL context creation
-    /// still succeeds, which is why nothing above the pixels notices.
+    /// every WebGL surface the page draws shows nothing: the welcome's and the
+    /// launcher's GPU animations draw WebGL, while the terminal widget draws a
+    /// 2D canvas. WebGL context creation still succeeds, which is why nothing
+    /// above the pixels notices.
     ///
     /// The fault it works around is the NVIDIA proprietary driver's ("Failed
     /// to create GBM buffer", Error 71). Upstream declined to detect that case
