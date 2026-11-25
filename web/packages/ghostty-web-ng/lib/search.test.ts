@@ -120,6 +120,28 @@ function slowFeed() {
     now += 5;
   });
 }
+// One placement batch per frame, far inside the one-second wait cap.
+function batchPerFrame() {
+  const read = VtSearch.prototype.readMatches;
+  vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
+    const batch = read.apply(this, args);
+    now += 5;
+    return batch;
+  });
+}
+// Placement stopped once at list entry `at` with its slice spent, as a
+// deadline falling there stops it.
+function placementStopsAt(at: number) {
+  const read = VtSearch.prototype.readMatches;
+  let armed = true;
+  vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, start: number, budget: number) {
+    const batch = read.call(this, start, budget);
+    if (!armed || start > at || batch.next <= at) return batch;
+    armed = false;
+    now += 5;
+    return { ranges: batch.ranges.slice(0, at - start), next: at, total: batch.total };
+  });
+}
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `needle ${i}`).join('\r\n');
 // Needles on irregular rows and columns, so a wrong row or a wrong entry
@@ -150,6 +172,15 @@ function coreFirst(term: Terminal, needle: string) {
   const first = raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1)[0];
   raw.free();
   return first;
+}
+// The start rows of the first `count` matches the core lists, in its own order.
+function coreRows(term: Terminal, needle: string, count: number) {
+  const raw = term.core!.createSearch();
+  raw.setNeedle(needle);
+  for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100) throw new Error('raw search did not complete');
+  const rows = raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, count).map(match => match.startRow);
+  raw.free();
+  return rows;
 }
 
 const wraps = [
@@ -318,6 +349,94 @@ describe('widget search', () => {
       if (active(term)) expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
     }
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
+  test("output during find's first activation wait leaves it waiting for the core's active-area matches", async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    batchPerFrame();
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(active(term), 'the activation waits').toBeUndefined();
+    term.write('x');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      if (active(term)) {
+        expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
+        expect(search.state.index).toBe(1);
+      }
+    }
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+    expect(active(term)).toEqual([newest]);
+    expect(now, 'placement, not the cap, ended the wait').toBeLessThan(1000);
+  });
+
+  test('after output, older from the oldest match wraps to the bottom-most match where the core lists a page ahead', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    batchPerFrame();
+    term.write('x');
+    frame();
+    search.step('needle', 'older');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      if (active(term)) {
+        expect(active(term), `frame ${i}: the wrap lands only on the newest`).toEqual([newest]);
+        expect(search.state.index).toBe(1);
+      }
+      frame();
+    }
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+    expect(active(term)).toEqual([newest]);
+    expect(now, 'placement, not the cap, ended the wait').toBeLessThan(1000);
+  });
+
+  test("after output, a step waits while the screen page's matches are placed behind the page above", async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(236, 0)]);
+    const rows = coreRows(term, 'needle', 118);
+    expect(rows.slice(0, 116).every(row => row <= 230), 'the core lists the page above first').toBe(true);
+    expect(rows.slice(116), 'then the screen page, newest first').toEqual([238, 236]);
+    // Placement stops right after the active match's entry, ahead of 234.
+    placementStopsAt(118);
+    term.write('\x1b[m');
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([236, 234], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(234, 0)]);
+    expect(search.state).toEqual({ index: 3, total: 120, partial: false });
+  });
+
+  test("a resize leaves the active match's index unknown while the screen page's matches are placed behind the page above", async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 6; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(226, 0)]);
+    expect(search.state).toEqual({ index: 7, total: 120, partial: false });
+    term.resize(200, 6);
+    const rows = coreRows(term, 'needle', 120);
+    const screenPage = rows.findIndex((row, i) => i > 0 && row > rows[i - 1]);
+    expect(screenPage, 'the resized core still lists the page above first').toBeGreaterThan(3);
+    placementStopsAt(screenPage);
+    frame();
+    expect(active(term), 'the match is kept').toEqual([range(226, 0)]);
+    expect(search.state.index, 'its index waits for the matches below it').toBeNull();
+    settle(search);
+    expect(active(term)).toEqual([range(226, 0)]);
+    expect(search.state).toEqual({ index: 7, total: 120, partial: false });
   });
 
   test('steps in position order across chunks after the screen page is inserted ahead of the page above', async () => {
