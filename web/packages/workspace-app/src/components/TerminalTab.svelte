@@ -176,7 +176,6 @@
     onGhosttyKitLoaded,
     loadGhosttyKit,
     type GhosttyKit,
-    type TerminalBackend,
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
@@ -661,10 +660,12 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend: "ghostty" from start() on, for every terminal. The
-  // "xterm" paths (search, serialize, WebGL, OSC guards, keyboard-protocol
-  // tracking, Shift-selection bypass) are reached by no terminal.
-  let backend = $state<TerminalBackend>("xterm");
+  // Whether start() has begun loading the terminal's view: true from that
+  // step until teardown, so also while the load is pending and after the
+  // kit or its instance failed to load. The xterm.js arms it guards
+  // (search, serialize, WebGL, OSC guards, keyboard-protocol tracking,
+  // Shift-selection bypass) are reached by no terminal.
+  let viewStarted = $state(false);
   // Why the terminal's view did not load, shown in the terminal's place;
   // null while it loads and once it opens. A final failure stays for the
   // page's life (see backend.ts), so it offers a reload and no retry.
@@ -1076,7 +1077,7 @@
 
   function applyTerminalTheme(): void {
     if (!term) return;
-    if (backend === "ghostty") {
+    if (viewStarted) {
       applyGhosttyTheme(term as GhosttyTerminal, ghosttyTerminalTheme());
     } else {
       const theme = terminalTheme();
@@ -1164,7 +1165,7 @@
       // program with focus reporting on sees CSI O then CSI I, as on any
       // terminal's wake.
       if (
-        backend === "ghostty" &&
+        viewStarted &&
         holder instanceof HTMLElement &&
         host?.contains(holder)
       ) {
@@ -1319,7 +1320,7 @@
     // that fails shows why in the terminal's area, with the action that can
     // get past it, and opens no terminal: the PTY is dialed only once one is
     // open, so a fresh tab spawns none and a live session is left running.
-    backend = "ghostty";
+    viewStarted = true;
     let ghosttyKit: GhosttyKit;
     let ghosttyInstance: GhosttyVt;
     try {
@@ -1495,7 +1496,7 @@
     // pane is focused once start() has wired it, below.
     term.open(host);
     host.addEventListener("keydown", noteInterruptKey, true);
-    if (backend === "ghostty") {
+    if (viewStarted) {
       ghosttyKeyParity = installGhosttyKeyParity(host, {
         terminal: term as GhosttyTerminal,
         platform: () => ({ isMac: currentOS() === "mac", isWindows: currentOS() === "windows" }),
@@ -1512,7 +1513,7 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
-    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu, focusFromMiddlePress);
+    primarySelectionCleanup = installTerminalPrimarySelection(host, term, viewStarted ? "ghostty" : "xterm", onTerminalContextMenu, focusFromMiddlePress);
     // The masker logged and disabled itself; record it on the tab so the
     // toggle's check stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
@@ -1538,12 +1539,12 @@
     // paste still reaches ghostty-web's native-paste early-return. Neither
     // renderer cancels a key the handler takes from it, so every path in
     // handleTerminalKeyEvent that acts on a key cancels it itself.
-    if (backend === "ghostty") {
+    if (viewStarted) {
       term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     } else {
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
-    term.onData(backend === "ghostty" ? handleGhosttyData : handleTerminalData);
+    term.onData(viewStarted ? handleGhosttyData : handleTerminalData);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
       publishLocalSize(cols, rows);
@@ -1709,7 +1710,7 @@
     // dump and the ghostty backend never captures one (serialize stays
     // null there), so a reattach under ghostty lets the server ring
     // replay restore the screen instead.
-    if (resumeSince === undefined && !replayCut && reattaching && tab.terminalSessionId && backend === "xterm") {
+    if (resumeSince === undefined && !replayCut && reattaching && tab.terminalSessionId && !viewStarted) {
       const cached = readTerminalSnapshot(tab.terminalSessionId);
       if (cached && cached.cols === term.cols && cached.rows === term.rows) {
         pendingSnapshot = cached;
@@ -1740,7 +1741,7 @@
         // shell the live PTY is already running, and the server ignores the
         // param on that path.
         profile: reattaching ? undefined : tab.profile,
-        ack: backend === "ghostty",
+        ack: viewStarted,
       }),
     );
     sentGrid = null;
@@ -2556,7 +2557,7 @@
     if (e.relatedTarget instanceof Node && host?.contains(e.relatedTarget)) {
       return;
     }
-    const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
+    const t = viewStarted ? (term as GhosttyTerminal | null) : null;
     if (!t?.hasFocusEvents()) {
       // The program did not hear of this change, so its last report no
       // longer says where the keyboard is: the next change it does hear of
@@ -2587,7 +2588,7 @@
   /// SGR as text, with coordinates from the canvas rect / live grid size
   /// (SGR coords are 1-based cells).
   function handleGhosttyWheel(e: WheelEvent): boolean {
-    const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
+    const t = viewStarted ? (term as GhosttyTerminal | null) : null;
     if (!t) return false;
     const tracking = t.hasMouseTracking();
     if (!tracking && t.buffer.active !== t.buffer.alternate) {
@@ -2669,7 +2670,7 @@
     reclaimPtySize(event);
     if (!host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
-    if (backend === "ghostty") handleGhosttyPaste(event, term as GhosttyTerminal | null);
+    if (viewStarted) handleGhosttyPaste(event, term as GhosttyTerminal | null);
     else handleXtermPaste(event, term as Terminal | null);
   }
 
@@ -2677,7 +2678,7 @@
   /// it, which ghostty-web's textarea would send unclean; the same cleaned
   /// paste. Only on the renderer host, as for the paste event.
   function onTerminalBeforeInputCapture(event: InputEvent): void {
-    if (backend !== "ghostty" || !host) return;
+    if (!viewStarted || !host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
     handleGhosttyPasteInput(event, term as GhosttyTerminal | null);
   }
@@ -2811,7 +2812,7 @@
     ghosttyStatusGuard = null;
     keyboardProtocolObserver = null;
     ghosttyViewport = null;
-    backend = "xterm";
+    viewStarted = false;
     fit = null;
     search = null;
     findCount = null;
@@ -2935,7 +2936,7 @@
   /// widget formats the history and screen as plain text through
   /// getScrollbackText(), applying the current drawn-wrap policy.
   function scrollbackText(): string {
-    if (backend === "ghostty") {
+    if (viewStarted) {
       const ghosttyTerm = term as GhosttyTerminal | null;
       return ghosttyTerm?.getScrollbackText() ?? "";
     }
@@ -2975,7 +2976,7 @@
   /// layer's range. Empty with the bar closed, with no match, and on xterm,
   /// whose addon selects its match.
   function findMatchText(): string {
-    if (!findOpen || backend !== "ghostty") return "";
+    if (!findOpen || !viewStarted) return "";
     const ghosttyTerm = term as GhosttyTerminal | null;
     const match = ghosttyTerm?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
     return match ? ghosttyTerm!.getRangeText(match) : "";
@@ -3008,7 +3009,7 @@
     closeTabMenu();
     const text = await readClipboardText();
     if (text && term) {
-      if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);
+      if (viewStarted) pasteIntoGhostty(term as GhosttyTerminal, text);
       else pasteIntoXterm(term as Terminal, text);
     }
     focusTerminalAfterWait();
@@ -3031,7 +3032,7 @@
     // xterm finds through its SearchAddon and ghostty through libghostty-vt's
     // search on chan's binding. A ghostty terminal on any other core has no
     // search, and its bar stays closed.
-    if (backend === "ghostty" && !ghosttyFinder()) return;
+    if (viewStarted && !ghosttyFinder()) return;
     findOpen = true;
     void tick().then(() => {
       if (searchInput && mayFocus(searchInput)) searchInput.focus();
@@ -3172,7 +3173,7 @@
   /// The ghostty terminal's find, made on first use; null on xterm, before
   /// the terminal exists, and on a core without search.
   function ghosttyFinder(): GhosttyFind | null {
-    if (!ghosttyFind && backend === "ghostty" && term && ghosttyViewport) {
+    if (!ghosttyFind && viewStarted && term && ghosttyViewport) {
       ghosttyFind = GhosttyFind.attach(term as GhosttyTerminal, ghosttyViewport, (count) => {
         findCount = count;
       });
@@ -3199,7 +3200,7 @@
       clearFind();
       return;
     }
-    if (backend === "ghostty") {
+    if (viewStarted) {
       ghosttyFinder()?.find(findQuery);
       return;
     }
@@ -3216,7 +3217,7 @@
       clearFind();
       return;
     }
-    if (backend === "ghostty") {
+    if (viewStarted) {
       ghosttyFinder()?.step(findQuery, direction);
       return;
     }
@@ -3309,7 +3310,7 @@
       // acted on, and its work is the native paste event's listener, so it
       // keeps travelling.
       if (isTerminalCopyChord(e, currentOS())) e.stopPropagation();
-      return terminalClipboardKeyHandlerResult(e, currentOS(), backend);
+      return terminalClipboardKeyHandlerResult(e, currentOS(), viewStarted ? "ghostty" : "xterm");
     }
     // Chord-escape registry. When the incoming event matches a shortcut
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
@@ -3321,7 +3322,7 @@
     // On ghostty every other key was decided before ghostty-web saw it
     // (ghosttyKeys.ts); what reaches here is plain typing, which ghostty-web
     // types itself.
-    if (backend === "ghostty") return true;
+    if (viewStarted) return true;
     const slash = controlSlashBytes(e, resolvedEventKey(e));
     if (slash !== null) {
       sendTypedInput(slash);
@@ -3451,7 +3452,7 @@
     const t = term;
     if (!t) return null;
     const top =
-      backend === "ghostty"
+      viewStarted
         ? (t as GhosttyTerminal).getScrollbackLength() - Math.floor((t as GhosttyTerminal).getViewportY())
         : (t as Terminal).buffer.active.viewportY;
     const rows: string[] = [String(range.start.y - top)];
