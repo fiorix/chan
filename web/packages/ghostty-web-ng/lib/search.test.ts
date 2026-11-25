@@ -457,6 +457,31 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 3, total: 120, partial: false });
   });
 
+  test("after output, a window taken while the screen page's matches are placed behind the page above ends at the page above", async () => {
+    const { term } = await create(paged(1), 200, 5, 10_000_000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(236, 0)]);
+    // Placement stops right after the active match's entry, ahead of 234,
+    // and the next write takes the window from that list.
+    placementStopsAt(118);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(2);
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'older');
+    expect(search.state.index, 'the press returned before placement').toBeNull();
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([236, 234], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(active(term)).toEqual([range(234, 0)]);
+    expect(search.state).toEqual({ index: 3, total: 120, partial: false });
+  });
+
   test("a resize leaves the active match's index unknown while the screen page's matches are placed behind the page above", async () => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
