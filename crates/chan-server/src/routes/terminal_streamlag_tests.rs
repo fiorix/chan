@@ -1703,6 +1703,112 @@ async fn an_alternate_screen_redial_holds_no_mode_its_program_reset_while_away()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_acknowledging_redial_larger_than_the_window_replays_its_delta_within_credit() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"\x1b[?1049h\x1b[?1000h";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // While the socket is down the program turns mouse tracking off and
+    // draws more than the window on its alternate screen. Nothing is lost.
+    let reset = b"\x1b[?1000l";
+    rig.output(reset);
+    let chunk = vec![b'd'; 1024];
+    for _ in 0..40 {
+        rig.output(&chunk);
+    }
+    let delta = (reset.len() + 40 * chunk.len()) as u64;
+    // The app's redial: it echoes its cursor and generation, and reports
+    // what it parsed whenever the replay goes quiet.
+    let mut client = bounded(
+        "dial terminal socket",
+        dial_terminal_with_small_buffer(
+            rig.address,
+            &format!(
+                "session={}&cols=80&rows=24&since={cursor}&generation={generation}&ack=1",
+                rig.handle.id()
+            ),
+        ),
+    )
+    .await;
+    let (mut session, mut after): (Option<Value>, Vec<u8>) = (None, Vec::new());
+    let (mut acked, mut quiet, mut waits) = (0u64, 0usize, 0usize);
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(400), client.next()).await {
+            Err(_) => {
+                quiet += 1;
+                assert!(
+                    quiet < 20,
+                    "the redial never reached Ready: {} of {delta} bytes",
+                    after.len()
+                );
+                // A client reports only once a session frame gave it a window.
+                if session.is_some() {
+                    waits += 1;
+                    acked = after.len() as u64;
+                    ack(&mut client, generation, cursor + acked).await;
+                }
+            }
+            Ok(Some(Ok(ClientMessage::Binary(bytes)))) => {
+                after.extend_from_slice(&bytes);
+                let frame = session.as_ref().expect("session before the replay");
+                assert!(
+                    after.len() as u64 <= acked + number(frame, "ack_window"),
+                    "the replay never runs past the credit the view's reports give: {} sent, \
+                     {acked} reported",
+                    after.len()
+                );
+            }
+            Ok(Some(Ok(ClientMessage::Text(text)))) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") => session = Some(frame),
+                    Some("ready") => break,
+                    Some("error" | "exit" | "closed") => panic!("the dial ended: {frame}"),
+                    _ => {}
+                }
+            }
+            other => panic!("the dial ended before Ready: {other:?}"),
+        }
+    }
+    let session = session.expect("session before Ready");
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert!(
+        number(&session, "ack_window") < delta,
+        "fixture: the delta is larger than the window"
+    );
+    assert_eq!(
+        (
+            number(&session, "seq") - number(&session, "replay_bytes"),
+            number(&session, "replay_bytes")
+        ),
+        (cursor, delta),
+        "the redial replays the delta from its cursor"
+    );
+    assert_eq!(
+        after.len() as u64,
+        delta,
+        "an acknowledging redial gets the delta and nothing else"
+    );
+    assert_redial_holds_the_program_state(
+        shown,
+        &after,
+        true,
+        &[],
+        "an acknowledging redial larger than the window",
+    );
+    assert!(waits > 0, "fixture: the replay waited for credit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lossy_alternate_screen_redial_holds_no_mode_its_program_reset_while_away() {
     const RING: usize = 4096;
     let _gate = pty_test_lock();
