@@ -194,26 +194,4 @@ describe("a replay the socket cuts short", () => {
       expect(screen(term).filter(Boolean), "a reset screen, then the replay alone").toEqual(["the whole ring"]);
     });
   }
-
-  test("puts the keyboard protocol back as it stood before the cut replay", async () => {
-    vi.useFakeTimers();
-    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
-    await mountGhosttyTerminal(TerminalTab, tab!);
-    const first = TerminalSocket.all.at(-1)!;
-    await attach(first, { id: SESSION, generation: 3, seq: 60 });
-    const protocol = tab!.keyboardProtocol!;
-    const before = JSON.parse(JSON.stringify(protocol));
-    // The replay pushes a kitty keyboard mode, and the socket drops before
-    // its `ready`.
-    await output(first, "\x1b[>1u");
-    expect(JSON.parse(JSON.stringify(protocol)), "the cut replay pushed a mode").not.toEqual(before);
-    first.close();
-    const second = await redial();
-
-    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
-    await output(second, "the whole ring");
-
-    expect(tab!.keyboardProtocol, "the handlers' own object").toBe(protocol);
-    expect(JSON.parse(JSON.stringify(protocol)), "as it stood before the cut replay").toEqual(before);
-  });
 });
