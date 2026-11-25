@@ -66,8 +66,9 @@ pub struct TerminalQuery {
     side: Option<PaneSide>,
     tab_id: Option<String>,
     /// The session incarnation epoch the client counted its `since` cursor
-    /// in. The server honors `since` only when it still matches the live
-    /// session's generation (a restart bumps it); absent or stale -> full replay.
+    /// in. Absent, `since` is honored as sent; present, `since` is honored
+    /// only while this matches the live session's generation (a restart
+    /// bumps it), and a stale generation replays the ring.
     generation: Option<u64>,
     mcp_env: Option<TerminalMcpEnv>,
     cwd: Option<String>,
