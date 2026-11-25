@@ -41,7 +41,11 @@ installTerminalDom();
 const SESSION = "sess-1";
 const startControl = ui.terminalControl;
 
+// Every case runs on the fake clock: uninstalling it after teardown has
+// put the file's frames back deletes requestAnimationFrame, which a case
+// on the real clock after it would need.
 beforeEach(() => {
+  vi.useFakeTimers();
   localStorage.clear();
 });
 
@@ -123,7 +127,6 @@ describe("resuming a reattach", () => {
   });
 
   test("a dropped socket redials the same session from the live cursor", async () => {
-    vi.useFakeTimers();
     const [tab] = seatTerminals([terminalTab()]);
     await mountGhosttyTerminal(TerminalTab, tab!);
     const first = TerminalSocket.all.at(-1)!;
@@ -143,7 +146,6 @@ describe("resuming a reattach", () => {
   });
 
   test("a dial that fails before its session frame leaves the next one on the live cursor", async () => {
-    vi.useFakeTimers();
     const [tab] = seatTerminals([terminalTab()]);
     await mountGhosttyTerminal(TerminalTab, tab!);
     const first = TerminalSocket.all.at(-1)!;
@@ -168,7 +170,6 @@ describe("resuming a reattach", () => {
 // of the replay, and the prelude's cursor already names the end of it.
 describe("a replay the socket cuts short", () => {
   async function cutReplay(tail = "") {
-    vi.useFakeTimers();
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     const first = TerminalSocket.all.at(-1)!;
