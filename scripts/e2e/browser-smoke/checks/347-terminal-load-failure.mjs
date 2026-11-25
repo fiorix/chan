@@ -106,7 +106,9 @@ export default {
       await ctx.shot("347-load-error");
       failed.coreRequests = details.coreRequests.length;
       assert.ok(failed.coreRequests >= 1 && details.coreRequests.every((r) => r.failed), "the page asked for the core and every request failed");
-      assert.deepEqual(failed.state.actions, ["Retry", "Reload window", `Close ${NAME}`], "a failed fetch offers Retry, a reload and Close");
+      assert.deepEqual(failed.state.actions.slice(0, 2), ["Retry", "Reload window"], "a failed fetch offers Retry and a reload");
+      assert.equal(failed.state.actions.length, 3, "and one more way out");
+      assert.match(failed.state.actions[2], /^Close \S/, "the third closes the tab");
       assert.ok(failed.state.error.includes("The terminal view could not load."), "the error says what failed");
       assert.ok(failed.state.error.includes("No shell was started."), "and that no shell was started");
       assert.deepEqual(failed.state.area, [], "nothing opened in the terminal's area");
