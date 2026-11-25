@@ -58,10 +58,12 @@ export class SearchOwner {
   private head: number | null = null;
   // Whether those entries list a page ahead of a newer one; null until read.
   private inverted: boolean | null = null;
-  // While a list is placed: the first entry the core listed of the page it
-  // is listing, the first of the page it listed before that, which is that
-  // page's newest match, and the last entry read. An entry newer than the
-  // one listed before it starts a page.
+  // While a list is placed: its first entry, the newest match of the first
+  // page the core listed; the first entry of the page it is listing; the
+  // first of the page it listed before that, which is that page's newest
+  // match; and the last entry read. An entry newer than the one listed
+  // before it starts a page.
+  private firstListed: MatchRange | null = null;
   private listedPage: MatchRange | null = null;
   private pageAbove: MatchRange | null = null;
   private lastListed: MatchRange | null = null;
@@ -204,7 +206,7 @@ export class SearchOwner {
     this.starts = [];
     this.total = 0;
     this.readCursor = 0;
-    this.listedPage = this.pageAbove = this.lastListed = null;
+    this.firstListed = this.listedPage = this.pageAbove = this.lastListed = null;
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
@@ -258,7 +260,7 @@ export class SearchOwner {
     this.lastTotal = 0;
     this.readCursor = 0;
     this.head = this.inverted = null;
-    this.listedPage = this.pageAbove = this.lastListed = null;
+    this.firstListed = this.listedPage = this.pageAbove = this.lastListed = null;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -440,6 +442,7 @@ export class SearchOwner {
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
+        this.firstListed ??= range;
         if (!this.lastListed || compare(range, this.lastListed) > 0) {
           this.pageAbove = this.listedPage;
           this.listedPage = range;
@@ -626,10 +629,15 @@ export class SearchOwner {
     // With the count of the core's active-area entries unknown, a list the
     // core lists pages ahead in can lack the matches of the page being
     // placed that lie between its placed ones and the newest match of the
-    // page listed before it, so the window ends at that match on the side
-    // away from the active match.
-    const split = this.head === null && !this.complete && this.pageAbove ? this.indexOf(this.pageAbove) : undefined;
-    if (split !== undefined && split > 0) {
+    // page listed before it, and a match wrapped across the boundary below
+    // the first listed page, which the core lists after every page's
+    // entries. So the window ends at both newest matches, the page listed
+    // before's and the first page's, on the side away from the active
+    // match.
+    const edges = this.head === null && !this.complete ? [this.pageAbove, this.firstListed] : [];
+    for (const edge of edges) {
+      const split = edge ? this.indexOf(edge) : undefined;
+      if (split === undefined || split <= 0) continue;
       if (index < split) to = Math.min(to, split);
       else from = Math.max(from, split);
     }
