@@ -227,7 +227,7 @@ describe("after AltGr or a dead key", () => {
 });
 
 // The full path: chan's listener in front of ghostty-web's own InputHandler
-// on Ghostty's wasm key encoder, against what chan's xterm.js path sends.
+// on Ghostty's wasm key encoder, against the reference encoding below.
 
 const WASM = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 let vt: GhosttyVt;
@@ -597,7 +597,7 @@ describe("delete input on the ghostty host", () => {
     ["deleteWordBackward", { key: "Backspace", code: "Backspace", keyCode: 8, altKey: true }, MAC],
     ["deleteWordForward", { key: "Delete", code: "Delete", keyCode: 46, altKey: true }, MAC],
   ] as const)("%s sends what its key sends (%j, %j)", (inputType, init, platform) => {
-    const want = xterm(init, platform).data;
+    const want = referenceEncoding(init, platform).data;
     expect(want).not.toBe("");
     const term = inputTerminal(false, platform, (e) => terminalMetaKeyBytes(e, createTerminalKeyboardProtocolState()));
     term.textarea.dispatchEvent(keydown({ ...init, keyCode: 229 }));
@@ -688,9 +688,9 @@ function ghostty(init: Init, platform: KeyPlatform, applicationCursorMode = fals
   return out;
 }
 
-/// What chan's xterm.js terminal sends for the same keydown: chan's key
+/// The reference encoding for the same keydown: chan's key
 /// handler, then xterm.js, with the browser typing the key it passes on.
-function xterm(init: Init, platform: KeyPlatform, applicationCursorMode = false): Omit<Outcome, "prevented"> {
+function referenceEncoding(init: Init, platform: KeyPlatform, applicationCursorMode = false): Omit<Outcome, "prevented"> {
   const ev = keydown(init);
   const chan = terminalMetaKeyBytes(ev, createTerminalKeyboardProtocolState());
   if (chan !== null) return { data: chan, scrolled: 0 };
@@ -773,7 +773,7 @@ function label(init: Init, platform: KeyPlatform): string {
   return `${platform.isMac ? "mac" : "linux"} ${[...mods.filter(Boolean), init.code].join("+")}`;
 }
 
-describe("a ghostty terminal sends what chan's xterm.js terminal sends", () => {
+describe("a ghostty terminal sends what the reference encoding sends", () => {
   test.each([
     ["linux", LINUX],
     ["mac", MAC],
@@ -784,7 +784,7 @@ describe("a ghostty terminal sends what chan's xterm.js terminal sends", () => {
       for (let mods = 0; mods < 16; mods++) {
         const init = event(k, mods, platform);
         for (const appCursor of [false, true]) {
-          const want = xterm(init, platform, appCursor);
+          const want = referenceEncoding(init, platform, appCursor);
           const got = ghostty(init, platform, appCursor);
           compared++;
           if (got.data !== want.data || got.scrolled !== want.scrolled) {
