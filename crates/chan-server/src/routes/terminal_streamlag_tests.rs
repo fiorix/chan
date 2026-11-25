@@ -2775,6 +2775,168 @@ async fn a_lagged_view_whose_ack_stays_short_is_closed_within_the_bound() {
     assert_short_ack_is_closed(&mut view, generation, start + BLOCKED_BYTES as u64 - 1).await;
 }
 
+/// An exit ends the reader's waits, so a view whose window is full when its
+/// program exits is never released, and only its client's ack lets the rest
+/// of the output and the exit reach it. It waits for its client under the
+/// same bound as a released view: an ack that makes room ends the wait, a
+/// frame read while the view can send starts no clock for the next one,
+/// and a client quiet past the bound stays open. The client's next frame
+/// starts the clock, the bound closes the view, and its redial gets what it
+/// was still owed and the exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_with_a_full_window_when_its_program_exits_is_closed_the_bound_after_its_ping() {
+    let _gate = pty_test_lock();
+    const RING: usize = 64 * 1024;
+    // What the program writes past the window: small enough for any PTY to
+    // hold, so the program exits while the reader still waits for the view.
+    const TAIL: usize = 64;
+    let total = (RING / 2 + TAIL) as u64;
+    let rig = Rig::new(
+        RING,
+        &format!("stty -onlcr; read -r _; head -c {total} /dev/zero | tr '\\0' 'x'; exit 23"),
+    )
+    .await;
+    let (mut view, initial) = rig.attach_acking().await;
+    let generation = number(&initial, "generation");
+    let start = number(&initial, "seq");
+    assert_eq!(
+        number(&initial, "ack_window"),
+        (RING / 2) as u64,
+        "fixture: the window is half the ring"
+    );
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    let input_at = tokio::time::Instant::now();
+    rig.handle.send_input(b"\n");
+    bounded("the program exits", async {
+        loop {
+            match watcher.rx.recv().await {
+                Ok(SessionEvent::Exit(_)) => break,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("session ended without an exit event: {error}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        tokio::time::Instant::now() - input_at
+            < NO_PROGRESS_LIMIT - std::time::Duration::from_secs(1),
+        "fixture: the program exits before the reader's bound can release the view"
+    );
+    // The view reads the window it is sent and reports none of it.
+    let mut received = read_replay_until_quiet(&mut view).await;
+    assert!(
+        received < total,
+        "fixture: the full window holds back the rest of the output and the exit"
+    );
+    // An ack that advances makes room for the rest, and a ping in the same
+    // write is read while the view can send.
+    let withheld_from = received;
+    bounded("send the client's ack and ping", async {
+        view.feed(ClientMessage::Text(
+            json!({"type": "ack", "generation": generation, "seq": start})
+                .to_string()
+                .into(),
+        ))
+        .await?;
+        view.feed(ClientMessage::Text(
+            json!({"type": "ping"}).to_string().into(),
+        ))
+        .await?;
+        view.flush().await
+    })
+    .await
+    .expect("client frames write");
+    let pinged_at = tokio::time::Instant::now();
+    let quiet_until = pinged_at + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(2);
+    while let Ok(frame) = tokio::time::timeout_at(quiet_until, next(&mut view)).await {
+        match frame {
+            ClientMessage::Binary(bytes) => received += bytes.len() as u64,
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                if let Some("error" | "session" | "exit" | "closed") = frame["type"].as_str() {
+                    panic!("a view whose window is full again gets no {frame}");
+                }
+            }
+            ClientMessage::Close(frame) => panic!(
+                "a frame read while the view could send starts no clock for its next \
+                 wait: closed {:?} after it: {frame:?}",
+                tokio::time::Instant::now() - pinged_at
+            ),
+            other => panic!("the view ended: {other:?}"),
+        }
+    }
+    assert!(
+        received > withheld_from,
+        "fixture: the advance let the view send more of the output"
+    );
+    let pinged_again_at = tokio::time::Instant::now();
+    send(&mut view, json!({"type": "ping"})).await;
+    let closed_at = read_until_closed(
+        &mut view,
+        pinged_again_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK,
+    )
+    .await;
+    let Some(closed_at) = closed_at else {
+        panic!(
+            "a view with a full window whose program exited, whose client pinged once, \
+             is closed within {NO_PROGRESS_LIMIT:?} (+{SHORT_ACK_SLACK:?}) of that ping: \
+             still open"
+        );
+    };
+    let waited = closed_at - pinged_again_at;
+    assert!(
+        waited >= NO_PROGRESS_LIMIT,
+        "the client gets the whole bound from its frame: closed after {waited:?}"
+    );
+    drop(view);
+    // The client redials from what it received, as it does after any close
+    // not preceded by an exit.
+    let (mut redial, session, before, after) = redial(&rig, start + received, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_eq!(
+        received + after.len() as u64,
+        total,
+        "the redial gets the output the view was still owed"
+    );
+    let mut exit = None;
+    let close = loop {
+        match next(&mut redial).await {
+            ClientMessage::Binary(bytes) => {
+                panic!(
+                    "the redial is sent nothing past its replay: {} bytes",
+                    bytes.len()
+                )
+            }
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                if frame["type"] == "exit" {
+                    exit = Some(frame);
+                }
+            }
+            ClientMessage::Close(frame) => break frame,
+            other => panic!("the redial ended without a close frame: {other:?}"),
+        }
+    };
+    assert_eq!(
+        exit.expect("the redial gets the program's exit")["code"],
+        23
+    );
+    let close = close.expect("the exit's close carries a code");
+    assert_eq!(
+        (u16::from(close.code), close.reason.as_str()),
+        (1000, "exit")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_does_not_acknowledge_never_holds_the_program() {
     let _gate = pty_test_lock();
