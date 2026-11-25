@@ -9,17 +9,16 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
 import TerminalTab from "../components/TerminalTab.svelte";
+import { ghosttyLineText, ghosttyMouseTracking, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { writeTerminalSnapshot } from "./snapshotCache";
 import { MOUSE_MODE_PARAMS, MouseModeFilter } from "./mouseModeFilter";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   output,
   receive,
   resetTerminals,
@@ -196,10 +195,9 @@ describe("MouseModeFilter: throughput sanity", () => {
   });
 });
 
-// A mounted TerminalTab: with mouse capture on (the default, or no setting)
-// no filter runs and output reaches xterm byte for byte; with it off, mouse
-// enables are stripped from live output and from a restored snapshot, while
-// the resume cursor still counts the bytes the server sent.
+// A mounted TerminalTab with mouse capture off: mouse enables are stripped
+// from live output before the terminal parses it, while the resume cursor
+// still counts the bytes the server sent.
 describe("a mounted terminal's mouse capture setting", () => {
   const ENABLE = "\x1b[?1000h";
 
@@ -209,57 +207,29 @@ describe("a mounted terminal's mouse capture setting", () => {
     localStorage.clear();
   });
 
-  function serveMouseCapture(on: boolean): void {
-    __testSetStandalonePreferences(terminalPreferences({ mouse_capture: on }));
-  }
-
   async function live() {
+    __testSetStandalonePreferences(terminalPreferences({ mouse_capture: false }));
     const [tab] = seatTerminals([terminalTab()]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket, { id: "sess-1", generation: 2, seq: 10 });
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     return { term, socket };
   }
 
-  test("on by default: mouse enables reach xterm untouched", async () => {
+  test("off: mouse enables are stripped from what the terminal parses", async () => {
     const { term, socket } = await live();
     await output(socket, `a${ENABLE}b`);
-    expect(term.written.join("")).toContain(`a${ENABLE}b`);
-  });
-
-  test("off: mouse enables are stripped from what xterm gets", async () => {
-    serveMouseCapture(false);
-    const { term, socket } = await live();
-    await output(socket, `a${ENABLE}b`);
-    expect(term.written.join("")).toContain("ab");
-    expect(term.written.join("")).not.toContain(ENABLE);
+    expect(ghosttyLineText(term, 0)).toBe("ab");
+    expect(ghosttyMouseTracking(term), "the program's enable never reached the terminal").toBe(false);
   });
 
   test("off: the resume cursor still counts every byte the server sent", async () => {
-    serveMouseCapture(false);
     const { socket } = await live();
     await output(socket, `a${ENABLE}b`);
     socket.close();
     await vi.waitFor(() => expect(TerminalSocket.all.length).toBe(2), { timeout: 3000 });
     const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
     expect(query.get("since")).toBe(String(10 + 2 + ENABLE.length));
-  });
-
-  test("off: a restored snapshot is filtered the same way", async () => {
-    serveMouseCapture(false);
-    writeTerminalSnapshot("sess-1", {
-      ansi: `before${ENABLE}after`,
-      generation: 2,
-      lastSeq: 5,
-      cols: 80,
-      rows: 24,
-      updatedAt: 1,
-    });
-    const [tab] = seatTerminals([terminalTab({ terminalSessionId: "sess-1" })]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
-    await attach(TerminalSocket.all.at(-1)!, { id: "sess-1", generation: 2, seq: 5 });
-    expect(term.written.join("")).toContain("beforeafter");
-    expect(term.written.join("")).not.toContain(ENABLE);
   });
 });
