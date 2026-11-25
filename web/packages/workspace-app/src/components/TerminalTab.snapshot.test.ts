@@ -103,6 +103,25 @@ describe("resuming a reattach", () => {
     expect(dialed(TerminalSocket.all.at(-1)!)).toEqual({ since: "0", generation: null });
   });
 
+  // The ring's replay restores the screen, so a snapshot the cache still
+  // holds for the session is neither dialed from nor painted.
+  test("a snapshot cached at the live size does not prime the terminal", async () => {
+    ui.terminalControl = false;
+    writeTerminalSnapshot(SESSION, { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 });
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    expect({ cols: term.cols, rows: term.rows }, "the snapshot's size is the terminal's").toEqual({ cols: 80, rows: 24 });
+    const socket = TerminalSocket.all.at(-1)!;
+    expect.soft(dialed(socket), "the dial asks for the whole ring").toEqual({ since: "0", generation: null });
+
+    // The session frame confirms the snapshot's generation with nothing
+    // missed, the one answer a primed dial would paint the snapshot on.
+    await attach(socket, { id: SESSION, generation: 3, seq: 42, missed_bytes: 0 });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+
+    expect(screen(term).filter(Boolean), "nothing of the snapshot is painted").toEqual([]);
+  });
+
   test("a dropped socket redials the same session from the live cursor", async () => {
     vi.useFakeTimers();
     const [tab] = seatTerminals([terminalTab()]);
