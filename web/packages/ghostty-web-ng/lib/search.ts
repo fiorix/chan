@@ -58,6 +58,9 @@ export class SearchOwner {
   private head: number | null = null;
   // Whether those entries list a page ahead of a newer one; null until read.
   private inverted: boolean | null = null;
+  // The core's first entry in the list being placed: where it lists a page
+  // ahead, the page above's newest.
+  private firstListed: MatchRange | null = null;
   // The scan starts from scratch at its next feed (a new needle, a restart,
   // a resize), which lists only the core's active area at first.
   private fresh = false;
@@ -197,6 +200,7 @@ export class SearchOwner {
     this.starts = [];
     this.total = 0;
     this.readCursor = 0;
+    this.firstListed = null;
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
@@ -250,6 +254,7 @@ export class SearchOwner {
     this.lastTotal = 0;
     this.readCursor = 0;
     this.head = this.inverted = null;
+    this.firstListed = null;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -396,6 +401,7 @@ export class SearchOwner {
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
     while (this.readCursor < state.total && performance.now() < deadline) {
       const batch = search.readMatches(this.readCursor, deadline - performance.now());
+      if (this.readCursor === 0) this.firstListed = batch.ranges[0] ?? null;
       this.readCursor = batch.next;
       const added: HighlightRange[] = [];
       // The canonical list persists across scan pumps, but never across a
@@ -566,8 +572,17 @@ export class SearchOwner {
   }
 
   private window(index: number): Before {
-    const from = Math.max(0, index - BEFORE_REACH);
-    const to = Math.min(this.total, index + BEFORE_REACH + 1);
+    let from = Math.max(0, index - BEFORE_REACH);
+    let to = Math.min(this.total, index + BEFORE_REACH + 1);
+    // With the count of the core's active-area entries unknown, a list the
+    // core lists a page ahead can lack screen-page matches newer than the
+    // page above's newest, the core's first entry, while placing them, so
+    // the window ends at that entry on the side away from the active match.
+    const split = this.head === null && !this.complete && this.firstListed ? this.indexOf(this.firstListed) : undefined;
+    if (split !== undefined && split > 0) {
+      if (index < split) to = Math.min(to, split);
+      else from = Math.max(from, split);
+    }
     const ranges: HighlightRange[] = [];
     for (let i = from; i < to; i++) ranges.push(this.at(i));
     // The window takes the list's anchor; the next list tracks its own.
