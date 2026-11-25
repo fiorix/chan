@@ -598,7 +598,9 @@ export class SearchOwner {
   private publish(): void {
     const total = this.complete ? this.total : Math.max(this.total, this.lastTotal);
     const next: TerminalSearchState = Object.freeze({
-      index: total === 0 ? 0 : this.index === null ? null : this.index + 1,
+      // A kept match whose index is unplaced has a position, just not a
+      // known one, even before the rescan has counted anything.
+      index: this.index !== null ? this.index + 1 : total === 0 && !this.kept ? 0 : null,
       total,
       partial: !this.complete,
     });
