@@ -1670,8 +1670,11 @@ enum Resume {
     Since(Option<u64>),
     /// Raw delta for the same live view, including alternate-screen bytes.
     Live(u64),
-    /// The whole ring, for a client of an earlier life of this session: its
-    /// screen shows a program this life never ran.
+    /// The whole ring, for a client echoing a generation that is neither the
+    /// live one nor the one a lossy restore continues. That is most often an
+    /// earlier life of this session, but not always: after a lossy restore
+    /// and a further restore, a client of the process from before both
+    /// echoes one while the same program still runs.
     OtherLife,
     /// The whole ring, for a client of the process a lossy restore came from
     /// whose cursor is `since`; see [`RingBuffer::snapshot_past`].
@@ -1728,10 +1731,13 @@ pub struct AttachHandle {
     /// Any other attach, a fresh view's included, re-asserts enabled input
     /// modes.
     pub mode_reassert: Vec<u8>,
-    /// The client echoed a generation of an earlier life of this session,
-    /// not the one a lossy restore continues. Its screen shows a program
-    /// this life never ran, so it needs a terminal reset ahead of this
-    /// life's session frame, as a live socket gets at a restart.
+    /// The client echoed a generation that is neither the live one nor the
+    /// one a lossy restore continues. Its screen is taken to show a program
+    /// this life never ran, so it gets a terminal reset ahead of this life's
+    /// session frame, as a live socket gets at a restart. That is most often
+    /// an earlier life's client; a client of the process from before a lossy
+    /// restore and a further restore gets the reset too, while its program
+    /// may still run.
     pub stale_generation: bool,
 }
 
@@ -3293,9 +3299,10 @@ impl Registry {
     /// Where a client echoing `generation`, which is not live session `id`'s,
     /// resumes. A client of the process a lossy restore came from has a
     /// cursor that agrees with this process's numbering only up to the
-    /// restored `seq`; any other generation is an earlier life's and
-    /// replays the ring. With no session under `id` there is nothing to
-    /// resume.
+    /// restored `seq`. Any other generation replays the ring as
+    /// [`Resume::OtherLife`]: an earlier life's, or one from before a lossy
+    /// restore and a further restore. With no session under `id` there is
+    /// nothing to resume.
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn resume_other_generation(&self, id: &str, generation: u64, since: Option<u64>) -> Resume {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -3331,11 +3338,11 @@ impl Registry {
     /// Reattach to session `id` when it is live, re-homing it to the attaching
     /// window and placement, or else spawn a new one from `opts`. The `since`
     /// cursor is honoured when no `client_generation` is sent or when it
-    /// matches the live session; a stale generation replays from the start,
-    /// with a missed count when it is the generation of the process a lossy
-    /// restore came from and its cursor is past the restore, and otherwise
-    /// marked [`AttachHandle::stale_generation`]. A cursor past the
-    /// ring's end also replays from the start, with a missed count.
+    /// matches the live session. Any other generation replays from the
+    /// start: the generation of the process a lossy restore came from with
+    /// a missed count when its cursor is past the restore, and any other one
+    /// marked [`AttachHandle::stale_generation`]. A cursor past the ring's
+    /// end also replays from the start, with a missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
     /// The one attach this makes carries the WebSocket's `flow`, so its lease,
