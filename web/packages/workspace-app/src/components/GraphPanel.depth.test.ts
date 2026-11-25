@@ -31,7 +31,7 @@ import {
   unmountGraphPanels,
   visibleIds,
 } from "../__tests__/graphPanel";
-import { invalidateGraph } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -1035,6 +1035,27 @@ describe("the workspace tree", () => {
     expect(tab.expanded.a).toBe(true);
     expect(graphServer.fsGraphCalls.length, "the shared graph holds the folder's level").toBe(reads);
     expect(visibleIds()).toContain("directory:a/b");
+  });
+
+  test("a folder opened over an answer of the whole tree is read once a refresh comes back over the listing cap", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(graphServer.fsGraphCalls.map((call) => call.path), "the whole tree holds the level").not.toContain("a");
+    expect(visibleIds()).toContain("a/x.md");
+
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    await refreshGraph();
+    await settle();
+    expect(graphData.tree).toBe("folders");
+    expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the opened folder's level").toHaveLength(1);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
   });
 
   /// Folders `a` and `a/b` with `a/x.md`, `a/b/c.md` and `a/b/y.md`, and
