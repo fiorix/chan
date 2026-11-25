@@ -112,11 +112,12 @@ function slowPlacement() {
   });
 }
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
-// 120 lines of 300 cells at 200 columns, two rows each, with `needles`
+// Lines of 300 cells at 200 columns, two rows each, with `needles`
 // matches at the start of each line's first row, 7 cells apart: the last
-// page of the core's history opens on a wrapped row, so its active-area
-// search takes in the page above and lists that page's matches first.
-const paged = (needles: number) => Array.from({ length: 120 }, () => 'needle '.repeat(needles).padEnd(300, 'x')).join('\r\n');
+// page of the core's history opens on a wrapped row, the second of line
+// 115, so its active-area search takes in the page above and lists that
+// page's matches first.
+const paged = (needles: number, lines = 120) => Array.from({ length: lines }, () => 'needle '.repeat(needles).padEnd(300, 'x')).join('\r\n');
 // The first match the core itself lists, in its own order.
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
@@ -269,6 +270,51 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
     expect(active(term)).toEqual([newest]);
     expect(now, 'placement, not the cap, ended the wait').toBeLessThan(1000);
+  });
+
+  test("a resize during find's first activation wait reads the rescan's active-area count", async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    const read = VtSearch.prototype.readMatches;
+    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, ...args) {
+      const batch = read.apply(this, args);
+      now += 5;
+      return batch;
+    });
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(active(term), 'the activation waits').toBeUndefined();
+    term.resize(200, 6);
+    expect(coreFirst(term, 'needle'), 'the resized core still lists a match above the newest first').not.toEqual({
+      startRow: newest.start.absoluteRow, startCol: newest.start.col, endRow: newest.end.absoluteRow, endCol: newest.end.col,
+    });
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      if (active(term)) expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
+    }
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
+  test('steps in position order across chunks after the screen page is inserted ahead of the page above', async () => {
+    const { term } = await create(paged(28, 127), 200, 5, 10_000_000);
+    expect(coreFirst(term, 'needle').startRow, 'unchanged core lists a match above the newest first').toBeLessThan(252);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 3556, partial: false });
+    // Entry i is needle 27 - i % 28 of line 126 - i / 28: the screen page's
+    // 308 matches inserted ahead of the 3,248 of the page above, more than
+    // a chunk holds.
+    const expected = (i: number) => range(2 * (126 - Math.floor(i / 28)), 7 * (27 - i % 28));
+    expect(active(term)).toEqual([expected(0)]);
+    for (let i = 1; i < 1200; i++) {
+      search.step('needle', 'older');
+      expect(active(term), `entry ${i}`).toEqual([expected(i)]);
+      expect(search.state.index).toBe(i + 1);
+    }
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([expected(1198)]);
   });
 
   test('settled navigation and repaint reuse placed results, including the oldest match', async () => {
