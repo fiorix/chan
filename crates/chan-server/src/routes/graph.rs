@@ -665,9 +665,10 @@ fn walk_directories(
     Some(dirs)
 }
 
-/// How many whole-tree walks graph loads have taken, per workspace root and
-/// kind of walk, so a test can read the walks of one load, and a lowered
-/// bound on the directories-only walk.
+/// How many whole-tree walks graph loads have taken, as calls of
+/// `TreeWalk::of` and `walk_directories`, per workspace root and kind of
+/// walk, so a test can read the walks of one load, and a lowered bound on
+/// the directories-only walk.
 #[cfg(test)]
 pub(crate) mod tree_walks {
     use std::collections::HashMap;
@@ -3396,7 +3397,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_disk_files_includes_non_markdown_targets() {
+    fn the_tree_walk_lists_every_file_a_link_may_target() {
         // The link resolver in `api_graph` walks the workspace once
         // (`TreeWalk::of`) and uses its files as the universe of
         // valid link targets. Without this, a `[mit](LICENSE)` or
@@ -3467,7 +3468,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_disk_dirs_includes_directory_entries() {
+    fn the_tree_walk_lists_every_directory_a_link_may_target() {
         // Pin the helper contract: every regular directory
         // the user might link to has to show up here so api_graph can
         // recognise `[label](some/dir/)` targets and keep them out of
@@ -3901,7 +3902,9 @@ mod tests {
     // One graph load walks the whole tree once, in each of its forms and
     // scopes: the link resolver's file and directory sets and the folder
     // layer share that walk. Over the listing cap the load also walks the
-    // directories alone, once; under it, never.
+    // directories alone, once; under it, never. What it counts is the calls
+    // of `TreeWalk::of` and of `walk_directories`, not the listings the
+    // workspace makes, so a listing taken outside them goes uncounted.
     #[tokio::test]
     async fn a_graph_load_walks_the_whole_tree_once() {
         use super::tree_walks::{taken, Walk};
@@ -4189,6 +4192,263 @@ mod tests {
                 "{when}, the note inside the read-only folder is joined to it"
             );
         }
+    }
+
+    // A file the index holds below a folder the scope has left since (a
+    // stale index, until the reconcile it requested runs) has a node and no
+    // folder under the cap, since the listing lists neither. Over the cap the
+    // walk lists neither either, so it reads the same: the folder nodes and
+    // the `contains` edges are those under the cap.
+    #[test]
+    fn over_the_listing_cap_a_file_below_a_folder_the_walk_does_not_list_gets_no_folder() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "notes/a.md", b"# A\n");
+        put(root.path(), "stalearea/sub/held.md", b"# Held\n");
+        put(root.path(), "keep/sub/held2.md", b"# Held2\n");
+        workspace.index_file("stalearea/sub/held.md").unwrap();
+        workspace.index_file("keep/sub/held2.md").unwrap();
+        workspace
+            .set_excluded_dirs(vec!["stalearea".to_string()])
+            .unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let summary = |view: &GraphViewResponse| {
+            let folders: std::collections::BTreeSet<String> = view
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    GraphNodeView::Directory { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            let files: std::collections::BTreeSet<(String, bool)> = view
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    GraphNodeView::File { id, missing, .. } => Some((id.clone(), *missing)),
+                    _ => None,
+                })
+                .collect();
+            let contains: std::collections::BTreeSet<(String, String)> = view
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == "contains")
+                .map(|edge| (edge.source.clone(), edge.target.clone()))
+                .collect();
+            (folders, files, contains)
+        };
+        let under = summary(&load());
+        let limit = over_the_listing_cap(&workspace);
+        let over = summary(&load());
+        drop(limit);
+        assert!(
+            under
+                .1
+                .contains(&("stalearea/sub/held.md".to_string(), false)),
+            "fixture: the stale file has no live node under the cap"
+        );
+        assert!(
+            !under.0.contains("directory:stalearea/sub"),
+            "fixture: under the cap the excluded folder is drawn"
+        );
+        assert_eq!(over.0, under.0, "over the cap, the folder nodes");
+        let held: std::collections::BTreeSet<&String> = over.1.iter().map(|(id, _)| id).collect();
+        let expected: std::collections::BTreeSet<(String, String)> = under
+            .2
+            .iter()
+            .filter(|(_, target)| target.starts_with("directory:") || held.contains(target))
+            .cloned()
+            .collect();
+        assert_eq!(over.2, expected, "over the cap, the contains edges");
+    }
+
+    // An indexed file that has left the disk keeps a muted node. Under the
+    // cap the listing does not hold it, so no folder contains it; over the
+    // cap it reads the same, though its folders are on disk and walked.
+    #[test]
+    fn over_the_listing_cap_a_vanished_note_stays_out_of_its_folder() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "notes/a.md", b"# A\n");
+        put(root.path(), "gone/deep/sub/held.md", b"# Held\n");
+        put(root.path(), "gone/deep/sub/stays.md", b"# Stays\n");
+        workspace.index_file("gone/deep/sub/held.md").unwrap();
+        std::fs::remove_file(root.path().join("gone/deep/sub/held.md")).unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            assert!(
+                view.nodes.iter().any(|node| matches!(
+                    node,
+                    GraphNodeView::File { id, missing: true, .. } if id == "gone/deep/sub/held.md"
+                )),
+                "fixture: {when}, the vanished note has no muted node"
+            );
+            assert!(
+                !view
+                    .edges
+                    .iter()
+                    .any(|edge| edge.kind == "contains" && edge.target == "gone/deep/sub/held.md"),
+                "{when}, a folder contains the vanished note"
+            );
+        }
+    }
+
+    /// The shared graph's load of `app` in its JSON form, the `tree` of each
+    /// `meta` of its stream form in order (`null` where it is absent), and
+    /// whether every `meta` comes before the stream's first `nodes` event.
+    async fn tree_marks(app: &GraphRouteApp) -> (serde_json::Value, Vec<serde_json::Value>, bool) {
+        let json: serde_json::Value =
+            serde_json::from_str(&graph_route_body(app, "/api/graph").await).unwrap();
+        let stream = graph_route_body(app, "/api/graph?stream=1").await;
+        let events: Vec<serde_json::Value> = stream
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let first_nodes = events
+            .iter()
+            .position(|event| event["type"] == "nodes")
+            .unwrap_or(events.len());
+        let metas: Vec<(usize, serde_json::Value)> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["type"] == "meta")
+            .map(|(at, event)| (at, event["tree"].clone()))
+            .collect();
+        let ahead = metas.iter().all(|(at, _)| *at < first_nodes);
+        (
+            json,
+            metas.into_iter().map(|(_, tree)| tree).collect(),
+            ahead,
+        )
+    }
+
+    // Over the listing cap the shared graph's answer says that its tree
+    // layer holds every folder and not every file: the JSON form in its
+    // `tree`, and the stream form in a `meta` ahead of its first node, the
+    // last `meta` it sends. Under the cap neither says anything, and the
+    // stream sends its one `meta`.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_answer_says_it_holds_every_folder_and_not_every_file() {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let (under, under_metas, under_ahead) = tree_marks(&app).await;
+        let limit = over_the_listing_cap(&workspace);
+        let (over, metas, ahead) = tree_marks(&app).await;
+        drop(limit);
+
+        assert_eq!(
+            (&under["tree"], under_metas, under_ahead),
+            (
+                &serde_json::Value::Null,
+                vec![serde_json::Value::Null],
+                true
+            ),
+            "under the cap, the JSON form's tree, the stream's metas and their order"
+        );
+        assert_eq!(
+            over["tree"], "folders",
+            "over the cap, the JSON form's tree"
+        );
+        assert_eq!(
+            metas.last(),
+            Some(&serde_json::json!("folders")),
+            "over the cap, the stream's last meta: {metas:?}"
+        );
+        assert!(ahead, "over the cap, a meta follows the first node batch");
+    }
+
+    // With the folders over the cap too, the directories-only walk stops at
+    // its bound, and the shared graph holds the folders of its depth-bounded
+    // filesystem layer and no other, as when no walk listed the folders. Its
+    // answer says so: its tree layer holds what lies down to the request's
+    // depth.
+    #[tokio::test]
+    async fn over_the_cap_for_the_folders_too_the_graph_keeps_the_depth_bounded_folders_and_says_so(
+    ) {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let directories = super::tree_walks::lower_directory_walk(workspace.root(), 1);
+        assert_eq!(
+            walk_directories(&workspace, 1),
+            None,
+            "fixture: the directories are not over the lowered bound"
+        );
+        let (answer, metas, ahead) = tree_marks(&app).await;
+        drop(directories);
+        drop(limit);
+
+        let layer = build_fs_graph(
+            &workspace,
+            FsGraphScope::Directory,
+            "",
+            default_graph_depth(),
+        )
+        .unwrap();
+        let expected: std::collections::BTreeSet<String> = layer
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "directory")
+            .map(|node| directory_node_id(&node.path))
+            .collect();
+        assert!(
+            expected.contains("directory:notes")
+                && !expected.contains(&format!("directory:{DEEP}")),
+            "fixture: the depth-bounded layer's folders, {expected:?}"
+        );
+        let folders: std::collections::BTreeSet<String> = nodes_by_id(&answer)
+            .into_iter()
+            .filter(|(_, node)| node["kind"] == "directory")
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            folders, expected,
+            "with the folders over the cap too, the folder nodes"
+        );
+        assert_eq!(
+            answer["tree"], "depth",
+            "with the folders over the cap too, the JSON form's tree"
+        );
+        assert_eq!(
+            metas.last(),
+            Some(&serde_json::json!("depth")),
+            "with the folders over the cap too, the stream's last meta: {metas:?}"
+        );
+        assert!(
+            ahead,
+            "with the folders over the cap too, a meta follows the first node batch"
+        );
     }
 
     #[test]
