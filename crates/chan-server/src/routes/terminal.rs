@@ -1648,9 +1648,11 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
     }
 }
 
-/// Send one coherent replay window, from Session through Ready. A live
-/// recovery appends retained bytes without clearing its existing screen or
-/// applying the client's older fit. Only raw replay bytes advance progress;
+/// Send one coherent replay window, from Session through Ready. A replay
+/// that continues its view, a live recovery's or a redial's of the live
+/// generation, appends retained bytes without clearing the screen, and a
+/// live recovery does not apply the client's older fit either. Only raw
+/// replay bytes advance progress;
 /// mode reconciliation stays inside the window without advancing the cursor.
 /// The returned time anchors status pacing before a potentially slow replay.
 async fn send_attach_prelude(
@@ -1696,7 +1698,9 @@ async fn send_attach_prelude(
             rest = tail;
         }
     }
-    if !recovering
+    // A view whose alternate-screen replay was skipped enters a cleared
+    // alternate screen, which the redraw nudge has its program paint.
+    if !session.continues_view
         && session.alt_screen
         && socket
             .send(session, Message::binary(ALT_SCREEN_ATTACH_PRELUDE))

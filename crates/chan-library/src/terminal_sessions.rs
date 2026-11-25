@@ -1668,7 +1668,9 @@ impl Drop for ChildEndedOnReturn {
 enum Resume {
     /// After the `since` cursor, or the whole ring for `None`.
     Since(Option<u64>),
-    /// Raw delta for the same live view, including alternate-screen bytes.
+    /// Raw delta after a cursor whose screen the client kept, including
+    /// alternate-screen bytes: the live socket's recovery, and a redial
+    /// whose cursor the live generation proves.
     Live(u64),
     /// The whole ring, for a client echoing a generation that is neither the
     /// live one nor the one a lossy restore continues. That is most often an
@@ -1726,11 +1728,19 @@ pub struct AttachHandle {
     /// recovery, a redial, or a client of the process a lossy restore came
     /// from) cancels partial escapes, restores the screen target without
     /// clearing it, and explicitly resets absent modes: the missed span can
-    /// hold the reset of a mode that client's screen still shows. Lossless
-    /// live recovery adds no bytes that could interrupt a split sequence.
-    /// Any other attach, a fresh view's included, re-asserts enabled input
-    /// modes.
+    /// hold the reset of a mode that client's screen still shows. An attach
+    /// that continues its view ([`Self::continues_view`]) and missed
+    /// nothing adds no bytes that could interrupt a split sequence: its
+    /// delta carries every mode change. Any other attach, a fresh view's
+    /// included, re-asserts enabled input modes.
     pub mode_reassert: Vec<u8>,
+    /// The replay continues the client's own screen from its cursor, as a
+    /// live recovery does: the raw delta, alternate-screen bytes included,
+    /// so the view is neither cleared nor moved onto a fresh alternate
+    /// screen. A redial whose non-zero cursor the live generation proves
+    /// continues its view too. Any other attach on the alternate screen
+    /// replays nothing and gets [`ALT_SCREEN_ATTACH_PRELUDE`].
+    pub continues_view: bool,
     /// The client echoed a generation that is neither the live one nor the
     /// one a lossy restore continues. Its screen is taken to show a program
     /// this life never ran, so it gets a terminal reset ahead of this life's
@@ -3338,11 +3348,14 @@ impl Registry {
     /// Reattach to session `id` when it is live, re-homing it to the attaching
     /// window and placement, or else spawn a new one from `opts`. The `since`
     /// cursor is honoured when no `client_generation` is sent or when it
-    /// matches the live session. Any other generation replays from the
-    /// start: the generation of the process a lossy restore came from with
-    /// a missed count when its cursor is past the restore, and any other one
-    /// marked [`AttachHandle::stale_generation`]. A cursor past the ring's
-    /// end also replays from the start, with a missed count.
+    /// matches the live session; a non-zero cursor of the live generation
+    /// resumes as the live socket's recovery does, so the handle continues
+    /// its view ([`AttachHandle::continues_view`]). Any other generation
+    /// replays from the start: the generation of the process a lossy
+    /// restore came from with a missed count when its cursor is past the
+    /// restore, and any other one marked [`AttachHandle::stale_generation`].
+    /// A cursor past the ring's end also replays from the start, with a
+    /// missed count.
     /// `Err(Closed)` when `id` names an explicitly closed session, and
     /// `Err(Exited)` with its exit when it names one removed after its exit.
     /// The one attach this makes carries the WebSocket's `flow`, so its lease,
@@ -3362,15 +3375,22 @@ impl Registry {
             tab_id,
         } = placement;
         if let Some(id) = id {
-            // Honor the client's `since` cursor for a SNAPSHOT RESUME only when
-            // its cached generation still matches the live session: a restart
-            // reuses the id but resets the ring/`seq` to 0, so a stale cursor
-            // would otherwise replay an empty delta with missed=0 (silent
-            // desync). A client that is not resuming echoes NO generation -- its
-            // `since` (the SPA's `Some(0)`) is honored as sent so a ring
-            // overflow still surfaces via `missed_bytes`.
+            // Honor the client's `since` cursor for a resume only when its
+            // generation still matches the live session: a restart reuses the
+            // id but resets the ring/`seq` to 0, so a stale cursor would
+            // otherwise replay an empty delta with missed=0 (silent desync).
+            // A non-zero cursor the live generation proves names the screen
+            // its client kept, on either screen, so the view resumes as its
+            // live socket's recovery would: no mode the program changed while
+            // the socket was down survives on it. A client that is not
+            // resuming echoes NO generation -- its `since` (the SPA's
+            // `Some(0)`) is honored as sent so a ring overflow still surfaces
+            // via `missed_bytes`.
             let resume = match client_generation {
-                Some(g) if self.session_generation(id) == Some(g) => Resume::Since(since),
+                Some(g) if self.session_generation(id) == Some(g) => match since {
+                    Some(cursor) if cursor > 0 => Resume::Live(cursor),
+                    _ => Resume::Since(since),
+                },
                 // Echoed a generation that no longer matches (e.g. a restart it
                 // did not observe): the cached cursor is stale -> full replay.
                 Some(g) => self.resume_other_generation(id, g, since),
@@ -6272,6 +6292,7 @@ impl Session {
             alt_screen,
             exit,
             mode_reassert,
+            continues_view: matches!(resume, Resume::Live(_)),
             stale_generation: matches!(resume, Resume::OtherLife),
         }
     }
