@@ -53,6 +53,8 @@ export default {
     page.on("request", onRequest);
     writeFileSync(join(ctx.workspaceDir, FILE), "# Load 347\n");
     let terminal = null;
+    // The window's sessions before the check opens its terminal.
+    let baseline = null;
     try {
       await page.reload({ waitUntil: "domcontentloaded", timeout: WAIT_MS });
       await page.waitForSelector(".pane", { visible: true, timeout: WAIT_MS });
@@ -67,10 +69,12 @@ export default {
       const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
       const shell = (args) => ctx.exec(ctx.chanBin, ["shell", ...args], { cwd: ctx.workspaceDir, env, timeout: 60_000 });
       terminal = (args) => shell(["terminal", ...args]);
+      const rows = async () => Object.values(JSON.parse((await terminal(["list", "--json"])).stdout).groups ?? {}).flat();
+      // Every session the window gained since the baseline, whatever its
+      // name: a second PTY for the same tab is registered under a name of
+      // its own (Load347-2), and must still count.
       const sessions = async () =>
-        Object.values(JSON.parse((await terminal(["list", "--json"])).stdout).groups ?? {})
-          .flat()
-          .filter((row) => row.name === NAME);
+        (await rows()).filter((row) => row.window === windowId && !baseline.has(row.session_id));
 
       // What a terminal tab holds: its load error and actions, and what
       // opened in its terminal area.
@@ -134,7 +138,10 @@ export default {
 
       const before = await page.$$eval(".terminal-tab[data-terminal-tab-id]", (tabs) =>
         tabs.map((tab) => tab.getAttribute("data-terminal-tab-id")));
-      assert.deepEqual(await sessions(), [], `no ${NAME} session before the check`);
+      const listed = await rows();
+      assert.deepEqual(listed.filter((row) => row.name === NAME), [], `no ${NAME} session before the check`);
+      baseline = new Set(listed.filter((row) => row.window === windowId).map((row) => row.session_id));
+      details.baseline = baseline.size;
       await terminal(["new", "--tab-name", NAME]);
       const tabId = await page.waitForFunction(
         (known) => [...document.querySelectorAll(".terminal-tab[data-terminal-tab-id]")]
@@ -156,7 +163,7 @@ export default {
           failed.sessions = await sessions();
           await ctx.shot("347-no-load-error");
           assert.fail(`the terminal's load error never showed: the tab reads ${JSON.stringify(failed.state)}, ` +
-            `with ${failed.sessions.length} ${NAME} session(s)`);
+            `with ${failed.sessions.length} session(s) new in the window`);
         }
         await sleep(100);
       }
@@ -342,9 +349,14 @@ export default {
     } finally {
       page.off("request", onRequest);
       await page.setRequestInterception(false).catch(() => {});
-      // Whatever opened under the name, the retried terminal or, at a red, the
-      // one opened in place of the error, goes with the check.
-      if (terminal) await terminal(["close", "--tab-name", NAME]).catch(() => {});
+      // Every session the window gained goes with the check: the retried
+      // terminal and, at a red, one opened in place of the error or a second
+      // PTY. A session closes by its name, which the registry keeps unique.
+      if (terminal) {
+        const found = baseline ? await sessions().catch(() => []) : [];
+        details.closed = [...new Set([NAME, ...found.map((row) => row.name).filter(Boolean)])];
+        for (const name of details.closed) await terminal(["close", "--tab-name", name]).catch(() => {});
+      }
       rmSync(join(ctx.workspaceDir, FILE), { force: true });
     }
   },
