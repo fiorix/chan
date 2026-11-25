@@ -134,9 +134,15 @@ describe("OSC 52 clipboard", () => {
     expect(writeMock).toHaveBeenCalledWith(text);
   });
 
-  test("consumes the read/query form without writing", () => {
-    handleOsc52Clipboard("c;?");
-    expect(writeMock).not.toHaveBeenCalled();
+  test("consumes the read/query form without warning or writing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      handleOsc52Clipboard("c;?");
+      expect(warn).not.toHaveBeenCalled();
+      expect(writeMock).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("consumes malformed base64 without throwing", () => {
