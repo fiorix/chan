@@ -23,11 +23,7 @@ function dispatchGhosttyClipboardChord(
     const matched = handleTerminalClipboardChord(event, { os, copySelection });
     if (!matched) return;
 
-    const chanResult = terminalClipboardKeyHandlerResult(
-      event,
-      os,
-      "ghostty",
-    );
+    const chanResult = terminalClipboardKeyHandlerResult(event, os);
     // This is the widget's custom-key-handler contract: true claims the
     // key, which the widget then neither sends nor default-prevents.
     // TerminalTab passes the inverse of chanResult to that handler.

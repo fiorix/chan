@@ -7,7 +7,8 @@ type ReplayMaskBatch = {
 ///
 /// The server's `ready` frame can arrive while xterm still has replay writes
 /// queued. The whole-buffer scan therefore waits for both `ready` and the last
-/// tracked replay callback. Live writes always retain their capture/scan path.
+/// tracked replay callback. A live write needs no scan of its own: the masker
+/// follows the widget's change event.
 export class ReplayMaskScanBatch {
   #active: ReplayMaskBatch | null = null;
   #pendingReplayWrites = 0;
@@ -27,16 +28,12 @@ export class ReplayMaskScanBatch {
     this.#flush(batch);
   }
 
-  track<T>(
-    replay: boolean,
-    captureWrite: () => T,
-    scanWrite: (snapshot: T) => void,
-  ): () => void {
+  /// Tracks one PTY write; the returned callback is run once it is parsed.
+  /// A replay write holds the batch's whole-buffer scan until then; any
+  /// other write holds nothing.
+  track(replay: boolean): () => void {
     const batch = replay ? this.#active : null;
-    if (!batch) {
-      const snapshot = captureWrite();
-      return this.#once(() => scanWrite(snapshot));
-    }
+    if (!batch) return () => {};
 
     const lifecycle = this.#lifecycle;
     this.#pendingReplayWrites += 1;

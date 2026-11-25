@@ -51,29 +51,25 @@ export async function terminalMessageBytes(data: unknown): Promise<Uint8Array | 
 }
 
 /// PTY mouse reports are input bytes, but do not mean typed input awaits an answer.
-/// Ghostty and xterm use these two complete report encodings.
+/// The terminal sends these two complete report encodings.
 export function terminalMouseReport(data: string): "x10" | "sgr" | null {
   if (data.startsWith("\x1b[M") && /^\x1b\[M[\x20-\xff]{3}$/.test(data)) return "x10";
   if (data.startsWith("\x1b[<") && /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data)) return "sgr";
   return null;
 }
 
-/// Route one chunk of terminal data. `user` is xterm.js's mark that the user
-/// typed, pasted or composed it (`xtermUserInput.ts`): such a chunk reaches the
-/// whole broadcast group whatever the terminal's output is doing, except a
-/// lone focus report, which keeps the route below. An unmarked chunk, a
-/// terminal-generated reply among them, takes the route below.
+/// Route one chunk of the data the terminal hands the program, which carries
+/// no mark of who made it. While a live write is being parsed it may be the
+/// terminal's reply to that output, so it reaches only this PTY; during a
+/// replay write a chunk that may be a reply is dropped
+/// (`isReplayGeneratedTerminalInput`); a focus report reaches only this PTY;
+/// anything else reaches the whole broadcast group.
 export function routeTerminalData(
   data: string,
   writes: PtyWriteTracker,
   sendInput: (data: string) => void,
   sendUserInput: (data: string) => void,
-  user = false,
 ): void {
-  if (user && data !== "\x1b[I" && data !== "\x1b[O") {
-    sendUserInput(data);
-    return;
-  }
   const origin = writes.currentOrigin;
   if (origin === "live") {
     // Terminal-generated replies belong only to the PTY that emitted the query.
@@ -81,7 +77,7 @@ export function routeTerminalData(
     return;
   }
   if (origin === "replay" && isReplayGeneratedTerminalInput(data)) return;
-  // A user-made chunk of exactly these bytes also reaches only its own PTY.
+  // A focus report is this terminal's answer to its own program.
   if (data === "\x1b[I" || data === "\x1b[O") {
     sendInput(data);
     return;
@@ -95,11 +91,11 @@ export function shouldForwardGeneratedTerminalInput(writes: PtyWriteTracker): bo
 
 export function isReplayGeneratedTerminalInput(data: string): boolean {
   if (!data) return false;
-  // Historical replay can re-trigger xterm answers to old PTY queries. Those
-  // replies have no live reader anymore; forwarding them leaks raw CPR/DA/DCS
-  // bytes into the shell prompt after refresh or reattach.
+  // Historical replay can re-trigger the terminal's answers to old PTY
+  // queries. Those replies have no live reader anymore; forwarding them leaks
+  // raw CPR/DA/DCS bytes into the shell prompt after refresh or reattach.
   if (isTerminalGeneratedReply(data)) return true;
-  // xterm emits a native paste as one bracketed-paste payload. It can race an
+  // A native paste arrives as one bracketed-paste payload. It can race an
   // asynchronous replay write, but it is user input, not a terminal answer.
   // Let it reach the PTY while retaining the fail-closed rule for unknown
   // escape-prefixed replies replay may generate.

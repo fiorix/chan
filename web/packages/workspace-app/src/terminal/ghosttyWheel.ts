@@ -1,7 +1,7 @@
-/// Wheel input for a terminal app that owns the wheel under the Ghostty
-/// backend: one with mouse tracking on (wheel reports), or one on the
-/// alternate screen without it (up/down arrows). Paced like xterm.js 6, which
-/// the xterm.js backend uses for the same two cases. ghostty-web's own
+/// Wheel input for a terminal app that owns the wheel: one with mouse
+/// tracking on (wheel reports), or one on the
+/// alternate screen without it (up/down arrows). Paced like xterm.js 6 in
+/// the same two cases. ghostty-web's own
 /// alternate-screen path sends up to five arrows per wheel event
 /// (|deltaY| / 33, nothing carried), so a trackpad swipe, dozens of events,
 /// floods the app. xterm.js turns pixel deltas into rows, scales a trackpad's

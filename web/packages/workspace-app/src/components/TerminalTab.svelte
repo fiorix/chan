@@ -16,11 +16,6 @@
     Users,
     X,
   } from "@lucide/svelte";
-  import { Terminal } from "@xterm/xterm";
-  import { FitAddon } from "@xterm/addon-fit";
-  import { SearchAddon } from "@xterm/addon-search";
-  import { SerializeAddon } from "@xterm/addon-serialize";
-  import "@xterm/xterm/css/xterm.css";
   import { api, sessionWindowId, windowLibraryId, withTokenQuery } from "../api/client";
   import {
     createSocket,
@@ -148,7 +143,6 @@
     controlSlashBytes,
     isTerminalInterruptKey,
     copyTerminalKeyboardProtocolState,
-    handleTerminalMetaKey,
     terminalMetaKeyBytes,
     type TerminalKeyboardProtocolState,
   } from "../terminal/keymap";
@@ -162,7 +156,6 @@
   } from "../terminal/clipboardChord";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installTerminalPrimarySelection, isPrimarySelectionDesktop } from "../terminal/primarySelection";
-  import type { UserInputTracker } from "../terminal/xtermUserInput";
   import {
     ghosttyLoadIsFinal,
     onGhosttyKitLoaded,
@@ -177,7 +170,6 @@
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
-  import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type { Terminal as GhosttyTerminal, TerminalLinkActivation } from "@chan/ghostty-web-ng";
   import {
@@ -206,7 +198,6 @@
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
-  import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
   import { sessionRunsMuse } from "../terminal/drawnWraps";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
@@ -440,18 +431,12 @@
   // The surface inside this terminal that last took the keyboard. A move of
   // the element to another pane drops the keyboard, and it goes back here.
   let keyboardSurface: "terminal" | "find" | "composer" = "terminal";
-  let term: Terminal | GhosttyTerminal | null = null;
-  // xterm.js's mark on the data the user made; null under ghostty, which has
-  // no such mark and keeps the unmarked route.
-  let userInput: UserInputTracker | null = null;
-  let fit: FitAddon | FitLike | null = null;
-  let search: SearchAddon | null = null;
-  let serialize: SerializeAddon | null = null;
-  // Visual-only masking owner for this terminal: xterm decorations or a
-  // painter over ghostty's canvas, disposed with the terminal. Whether it
-  // masks is the tab's own state, which the launcher's toggle reads and
-  // flips too.
-  let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
+  let term: GhosttyTerminal | null = null;
+  let fit: FitLike | null = null;
+  // Visual-only masking owner for this terminal: a painter over the widget's
+  // canvas, disposed with the terminal. Whether it masks is the tab's own
+  // state, which the launcher's toggle reads and flips too.
+  let secretMasker: GhosttySecretMasker | null = null;
   const effectiveSecretMasking = $derived(terminalSecretMaskingOn(tab));
   // The one place a change of that state reaches the masker, whatever made
   // it: the menu's row, the launcher's, a chord, Privacy mode. The state is
@@ -473,8 +458,8 @@
   const RESIZE_SCAN_QUIET_MS = 150;
   let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
   // Scrollback line cap captured at construction time from the
-  // persisted MB budget so xterm.js gets a stable number. Held on
-  // the component so the "copy scrollback" actions serialize the same
+  // persisted MB budget so the widget gets a stable number. Held on
+  // the component so the "copy scrollback" actions read the same
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
@@ -534,9 +519,7 @@
   // knows where to resume from. `serverGeneration` is the live session epoch
   // (null until the first prelude).
   let receivedSeq = 0;
-  // Reports each frame as the ghostty core takes it, in the same task as its
-  // parse; xterm.js queues its writes, so that backend never dials with `ack`
-  // and never paces the program.
+  // Reports each frame as the core takes it, in the same task as its parse.
   const streamAck = new StreamAck((frame) => send(frame));
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -578,7 +561,7 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
-  /// The find bar's match count on either backend (see `FindCount`); null
+  /// The find bar's match count (see `FindCount`); null
   /// leaves the count blank.
   let findCount = $state<FindCount | null>(null);
   const findCountText = $derived(
@@ -594,10 +577,10 @@
   });
   $effect(() => findAnnouncer.update(findCountText, !findCount?.partial));
   $effect(() => () => findAnnouncer.dispose());
-  // Set by a session frame: this xterm shows the session up to
+  // Set by a session frame: this terminal shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
-  // disposed xterm clears it.
+  // disposed terminal clears it.
   let sawSessionControl = false;
   // Set when a socket is closed between a session frame and its `ready`
   // (closeSocket, which every redial's connect runs first, marks it): the
@@ -632,12 +615,10 @@
     effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
   const replayMaskScans = new ReplayMaskScanBatch();
-  // The writer handed to ptyWrites. On xterm this is the terminal
-  // itself (its write callback fires off xterm's own queue). On
-  // ghostty it is a SYNCHRONOUS wrapper: ghostty-web parses inside
-  // write() synchronously and only defers the optional callback to
-  // requestAnimationFrame, which STALLS in a backgrounded or headless
-  // page -- a stalled callback would wedge the tracker's replay-origin
+  // The writer handed to ptyWrites: a SYNCHRONOUS wrapper. ghostty-web
+  // parses inside write() synchronously and only defers the optional
+  // callback to requestAnimationFrame, which STALLS in a backgrounded or
+  // headless page -- a stalled callback would wedge the tracker's replay-origin
   // suppression window open and silently eat every ESC-prefixed input
   // (mouse reports, Alt+keys) until the next frame. ghostty emits its
   // device replies synchronously during write(), so firing the tracker
@@ -648,12 +629,6 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Whether start() has begun loading the terminal's view: true from that
-  // step until teardown, so also while the load is pending and after the
-  // kit or its instance failed to load. The xterm.js arms it guards
-  // (search, serialize, WebGL, OSC guards, keyboard-protocol tracking,
-  // Shift-selection bypass) are reached by no terminal.
-  let viewStarted = $state(false);
   // Why the terminal's view did not load, shown in the terminal's place;
   // null while it loads and once it opens. A final failure stays for the
   // page's life (see backend.ts), so it offers a reload and no retry.
@@ -664,28 +639,26 @@
   // the latest when a load settles was overtaken by a restart, a retry or a
   // close and does nothing more.
   let startAttempt = 0;
-  // OSC 52 clipboard observer, non-null ONLY on the ghostty backend:
-  // the ghostty VT core drops OSC 52 and ghostty-web exposes no hook for
-  // it, so the clipboard copy rides this byte observer instead of xterm's
-  // registerOscHandler (see osc52Bridge.ts).
+  // OSC 52 clipboard observer, non-null while a terminal is open: the VT
+  // core drops OSC 52 and ghostty-web exposes no hook for it, so the
+  // clipboard copy rides this byte observer (see osc52Bridge.ts).
   let osc52Bridge: Osc52Bridge | null = null;
   let ghosttyStatusGuard: GhosttyStatusGuard | null = null;
-  // Follows the program's keyboard protocol requests on the ghostty backend,
-  // where installKeyboardProtocolHandlers has no parser to hook. Fed in the
-  // termWriter, so it sees the bytes in the order the VT parses them.
+  // Follows the program's keyboard protocol requests in the output stream,
+  // since the widget exposes no parser hooks. Fed in the termWriter, so it
+  // sees the bytes in the order the VT parses them.
   let keyboardProtocolObserver: KeyboardProtocolObserver | null = null;
-  // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
-  // ghostty backend.
+  // Removes the key listener (ghosttyKeys.ts). Non-null while a terminal is
+  // open.
   let ghosttyKeyParity: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path) and the one
   // path chan writes to the terminal through (PTY output and writeChanLine),
-  // non-null ONLY on the ghostty backend and disposed with the terminal.
+  // non-null while a terminal is open and disposed with it.
   let ghosttyViewport: GhosttyViewportController | null = null;
-  // Find on the ghostty backend, made when the find bar first opens (see
-  // ghosttyFinder) and disposed with the terminal. Null on xterm, which
-  // finds through its SearchAddon.
+  // Find, made when the find bar first opens (see ghosttyFinder) and
+  // disposed with the terminal.
   let ghosttyFind: GhosttyFind | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
@@ -808,10 +781,7 @@
     tabFocusPulse.value;
     // The pane gaining focus runs the same fit + repaint recovery the
     // blur / active-flip paths use so WKWebView redraws any rows left
-    // stale by the visibility flip. It does NOT clear the shared
-    // texture atlas (see refreshTerminalRenderer): a per-focus atlas
-    // clear would garble the sibling panes when the user moves focus
-    // around the grid.
+    // stale by the visibility flip.
     recoverTerminalRendererAfterHostResume();
     setTerminalActivity(tab, false);
     untrack(() => markProgramCompletionsSeen(tab.programStatus));
@@ -839,20 +809,17 @@
   });
 
   // When focus moves AWAY from this terminal to another pane, the
-  // pane losing focus can paint stale in the desktop app's WKWebView:
-  // its WebGL renderer leaves the canvas half-updated and a single
-  // refresh does not always correct it. So run the SAME recovery the
-  // host-resume / active-flip paths use (fit + repaint + delayed
-  // re-fits) on blur too. The size is unchanged on a focus switch, so
+  // pane losing focus can paint stale in the desktop app's WKWebView,
+  // where a single refresh does not always correct it. So run the SAME
+  // recovery the host-resume / active-flip paths use (fit + repaint +
+  // delayed re-fits) on blur too. The size is unchanged on a focus switch, so
   // the fit is a dimensional no-op; the value is the deferred repaint
-  // pass WebKit needs. That recovery does NOT clear the shared
-  // texture atlas (a per-focus clear would corrupt sibling panes); it
-  // only repaints.
+  // pass WebKit needs.
   $effect(() => {
     if (focused) return;
     // Relinquish keyboard focus when this terminal stops being the active
     // tab, so a newly opened editor (e.g. `cs open {path}`) actually gets the
-    // keystrokes instead of the xterm textarea keeping `document.activeElement`.
+    // keystrokes instead of the widget's element keeping `document.activeElement`.
     // The load error's actions give it up the same way: under WebKit a hidden
     // tab keeps DOM focus, and a Space typed elsewhere would press Retry.
     term?.blur();
@@ -925,7 +892,7 @@
   // tab just switched to in a non-active pane) renders garbled until
   // the user clicks or resizes it. The tab uses `visibility: hidden`
   // (not `display: none`) while inactive, so the host keeps layout
-  // dimensions, but xterm.js / the WebGL renderer can paint at a stale
+  // dimensions, but the renderer can paint at a stale
   // size (or skip painting) while hidden and there is nothing to force
   // a re-fit + repaint when the tab becomes ACTIVE without also
   // becoming focused. The focus effect (above) covers focus changes
@@ -942,7 +909,7 @@
     recoverTerminalRendererAfterHostResume();
   });
 
-  // Track the resolved terminal body theme so either backend's canvas
+  // Track the resolved terminal body theme so the terminal's canvas
   // palette follows a switch and the per-surface override.
   $effect(() => {
     effectiveHybridSurfaceTheme("terminal");
@@ -970,7 +937,7 @@
 
   function terminalTheme() {
     // Read CSS variables from `host` so the terminal surface's
-    // `data-theme` override resolves before xterm paints.
+    // `data-theme` override resolves before the terminal paints.
     const styles = getComputedStyle(host ?? document.documentElement);
     const bg = terminalBackground(styles);
     const text =
@@ -1037,8 +1004,8 @@
   // on the light theme those land below 3:1 against the white background
   // and the palette cannot reach truecolor. 4.5 (WCAG AA) has either
   // renderer darken only under-contrast foregrounds; 1 is the identity,
-  // keeping dark rendering untouched. xterm.js takes the floor as an option
-  // of its own, the widget as a field of its theme.
+  // keeping dark rendering untouched. The widget takes the floor as a
+  // field of its theme.
   function terminalMinimumContrastRatio(): number {
     // While the desktop shows through, the backdrop is whatever sits behind
     // the window, so a ratio measured against the theme background would be
@@ -1065,14 +1032,7 @@
 
   function applyTerminalTheme(): void {
     if (!term) return;
-    if (viewStarted) {
-      applyGhosttyTheme(term as GhosttyTerminal, ghosttyTerminalTheme());
-    } else {
-      const theme = terminalTheme();
-      term.options.theme = theme;
-      (term as Terminal).options.minimumContrastRatio =
-        terminalMinimumContrastRatio();
-    }
+    applyGhosttyTheme(term, ghosttyTerminalTheme());
     secretMasker?.setColor(terminalSecretMaskColor());
   }
 
@@ -1080,18 +1040,11 @@
     refreshTerminalRowsImpl(term);
   }
 
-  // Repaint the visible rows; do NOT clear the texture atlas.
-  // xterm.js's WebGL renderer shares ONE process-global TextureAtlas
-  // across every terminal pane, so clearing it from the pane the user
-  // just moved to would rebuild the atlas out from under the SIBLING
-  // panes still on screen and garble their glyphs. The addon-webgl
-  // 0.19 renderer rebuilds the atlas itself for color / DPR / font /
-  // options changes, so the focus / blur / active-flip / wake
-  // recovery only needs a row repaint: term.refresh() redraws from
-  // the existing good atlas with no cross-pane fallout. On ghostty the
-  // same call forces a full pass of its canvas renderer, since its
-  // frame loop repaints dirty rows only and the fit below is a no-op
-  // while the grid is unchanged (refreshTerminalRows in renderer.ts).
+  // Repaint the visible rows for the focus / blur / active-flip / wake
+  // recovery. The call forces a full pass of the widget's canvas
+  // renderer, since its frame loop repaints dirty rows only and the fit
+  // below is a no-op while the grid is unchanged (refreshTerminalRows in
+  // renderer.ts).
   //
   // At most one repaint is pending at a time (createRepaintScheduler): the
   // recovery runs on every focus, visibility and wake signal and on every
@@ -1128,8 +1081,8 @@
   // pane, but never steals it from an editor, prompt, menu, find box, or other
   // focused surface, and never from the launcher shown over the window: the
   // desktop refocuses this webview itself when the launcher hides. Re-focus
-  // even when xterm's textarea still appears active: WKWebView can retain
-  // document.activeElement while detaching keyboard input.
+  // even when the widget's element still appears active: WKWebView can
+  // retain document.activeElement while detaching keyboard input.
   function recoverTerminalFocusAfterHostResume(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
@@ -1152,11 +1105,7 @@
       // focus that follows is then a real focus change, as a click is. A
       // program with focus reporting on sees CSI O then CSI I, as on any
       // terminal's wake.
-      if (
-        viewStarted &&
-        holder instanceof HTMLElement &&
-        host?.contains(holder)
-      ) {
+      if (holder instanceof HTMLElement && host?.contains(holder)) {
         holder.blur();
       }
       focusTerminal();
@@ -1185,7 +1134,7 @@
     // macOS screensaver / display + system sleep does NOT fire focus
     // / pageshow / visibilitychange in the desktop app's WKWebView
     // (the window stays "visible" + focused through the sleep), so the
-    // listeners above never fire on wake and the WebGL renderer stays
+    // listeners above never fire on wake and the terminal stays
     // glitchy until the user RESIZES a window (ResizeObserver ->
     // queueFit -> recovery). The shared wall-clock detector catches the wake
     // directly (a coarse interval firing far later than scheduled means JS
@@ -1262,7 +1211,7 @@
     const rendererFontSize = terminalPrefs?.font_size ?? 14;
     // Scrollback honors the Settings MB budget. Read once here so a
     // settings change after spawn doesn't reach through and resize
-    // the existing xterm.js buffer; the hint copy under the slider
+    // the existing terminal's buffer; the hint copy under the slider
     // names this spawn-time-only contract.
     scrollbackLines = scrollbackLinesFromMb(
       clampScrollbackMb(terminalPrefs?.scrollback_mb),
@@ -1285,10 +1234,11 @@
     const secretMaskSuffixes =
       terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
     const fontPref = terminalPrefs?.font ?? "os-default";
-    // Canvas terminal renderers cache glyph metrics synchronously. Resolve the
-    // selected chain before either backend exists so the bundled face cannot
-    // swap in halfway through atlas warmup. A failed load returns a system-only
-    // chain, which keeps the live renderer stable if the face appears later.
+    // The canvas renderer caches glyph metrics synchronously. Resolve the
+    // selected chain before the terminal exists so the bundled face cannot
+    // swap in halfway through its first measurement. A failed load returns
+    // a system-only chain, which keeps the live renderer stable if the face
+    // appears later.
     const readyFont = await resolveReadyTerminalFont(
       currentOS(),
       fontPref,
@@ -1303,12 +1253,11 @@
         readyFont.error,
       );
     }
-    // Every terminal opens on Ghostty. The kit lazy-loads on the first spawn
-    // and each terminal gets its own WASM instance (see backend.ts). A load
-    // that fails shows why in the terminal's area, with the action that can
-    // get past it, and opens no terminal: the PTY is dialed only once one is
-    // open, so a fresh tab spawns none and a live session is left running.
-    viewStarted = true;
+    // The kit lazy-loads on the first spawn and each terminal gets its own
+    // WASM instance (see backend.ts). A load that fails shows why in the
+    // terminal's area, with the action that can get past it, and opens no
+    // terminal: the PTY is dialed only once one is open, so a fresh tab
+    // spawns none and a live session is left running.
     let ghosttyKit: GhosttyKit;
     let ghosttyInstance: GhosttyVt;
     try {
@@ -1334,10 +1283,10 @@
       showLoadFailure(err, false);
       return;
     }
-    // This xterm is brand-new and EMPTY, so the attach below carries no
+    // This terminal is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor would make the server skip everything the
-    // PREVIOUS xterm had seen, and that buffer died with term.dispose().
+    // PREVIOUS terminal had seen, and that buffer died with term.dispose().
     void connect();
     queueMicrotask(focusLoadedTerminal);
   }
@@ -1365,7 +1314,7 @@
       secretMaskSuffixes: readonly string[];
     },
   ): void {
-    // lineHeight is 1.2 (not xterm.js's 1.0 default) so multi-row
+    // lineHeight is 1.2 (not the widget's 1.0 default) so multi-row
     // ASCII glyphs (e.g. the Claude Code splash cube, figlet output,
     // nethack tiles) render with the row separation a user gets from
     // iTerm; the 1.0 default packs ascender glyphs against the next
@@ -1381,8 +1330,7 @@
       tab,
       !tab.terminalSessionId,
     );
-    // Ghostty backend: Ghostty's WASM VT parser + its own canvas
-    // renderer (no xterm addons exist for it).
+    // Ghostty's WASM VT parser, drawn by ghostty-web's canvas renderer.
     const terminalHost = host;
     const ghosttyTerm = new ghosttyKit.Terminal({
       copy: (text: string) => {
@@ -1399,8 +1347,9 @@
       fontSize: rendererFontSize,
       ghostty: ghosttyInstance,
       scrollback: scrollbackLines,
-      // Synchronous scrolling matches xterm.js and lets calibrated pixel
-      // gestures accumulate directly in the widget's fractional viewport.
+      // Synchronous scrolling (the widget's default eases over 100 ms) lets
+      // calibrated pixel gestures accumulate directly in the widget's
+      // fractional viewport.
       smoothScrollDuration: 0,
       theme: ghosttyTerminalTheme(),
     });
@@ -1480,28 +1429,26 @@
     // InputHandler can report it, so SGR wheel-over-TUI reporting
     // never fires upstream (clicks do work). See handleGhosttyWheel.
     term.attachCustomWheelEventHandler(handleGhosttyWheel);
-    // Neither backend's open() takes the keyboard; a terminal in the focused
-    // pane is focused once start() has wired it, below.
+    // The widget's open() does not take the keyboard; a terminal in the
+    // focused pane is focused once start() has wired it, below.
     term.open(host);
     host.addEventListener("keydown", noteInterruptKey, true);
-    if (viewStarted) {
-      ghosttyKeyParity = installGhosttyKeyParity(host, {
-        terminal: term as GhosttyTerminal,
-        platform: () => ({ isMac: currentOS() === "mac", isWindows: currentOS() === "windows" }),
-        claimed: (e) =>
-          isCloseExitedTabKey(e) ||
-          shouldEscapeTerminal(e) ||
-          isTerminalCopyChord(e, currentOS()) ||
-          isTerminalPasteChord(e, currentOS()),
-        chanBytes: (e) =>
-          controlSlashBytes(e, resolvedEventKey(e)) ??
-          terminalMetaKeyBytes(e, tab.keyboardProtocol),
-        send: sendTypedInput,
-      });
-      host.addEventListener("focusin", onGhosttyFocusChange);
-      host.addEventListener("focusout", onGhosttyFocusChange);
-    }
-    primarySelectionCleanup = installTerminalPrimarySelection(host, term, viewStarted ? "ghostty" : "xterm", onTerminalContextMenu, focusFromMiddlePress);
+    ghosttyKeyParity = installGhosttyKeyParity(host, {
+      terminal: ghosttyTerm,
+      platform: () => ({ isMac: currentOS() === "mac", isWindows: currentOS() === "windows" }),
+      claimed: (e) =>
+        isCloseExitedTabKey(e) ||
+        shouldEscapeTerminal(e) ||
+        isTerminalCopyChord(e, currentOS()) ||
+        isTerminalPasteChord(e, currentOS()),
+      chanBytes: (e) =>
+        controlSlashBytes(e, resolvedEventKey(e)) ??
+        terminalMetaKeyBytes(e, tab.keyboardProtocol),
+      send: sendTypedInput,
+    });
+    host.addEventListener("focusin", onGhosttyFocusChange);
+    host.addEventListener("focusout", onGhosttyFocusChange);
+    primarySelectionCleanup = installTerminalPrimarySelection(host, ghosttyTerm, onTerminalContextMenu, focusFromMiddlePress);
     // The masker logged and disabled itself; record it on the tab so the
     // toggle's check stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
@@ -1510,7 +1457,7 @@
     };
     // After open(): the widget retains a paint layer only once it is open.
     secretMasker = new GhosttySecretMasker(
-      term as GhosttyTerminal,
+      ghosttyTerm,
       secretMaskSuffixes,
       terminalSecretMaskColor(),
       effectiveSecretMasking,
@@ -1518,21 +1465,16 @@
     );
     refreshTerminalRenderer();
     installHostResumeListeners();
-    // The custom-key-handler contracts are INVERTED between the
-    // backends: xterm skips the keystroke when the handler returns
-    // FALSE, ghostty-web skips it when the handler returns TRUE.
-    // handleTerminalKeyEvent uses xterm's semantics except for the native
-    // paste result prepared for this inversion; wrap it for ghostty so "chan
-    // consumed this chord" maps to ghostty's "handled" on both backends while
-    // paste still reaches ghostty-web's native-paste early-return. Neither
-    // renderer cancels a key the handler takes from it, so every path in
-    // handleTerminalKeyEvent that acts on a key cancels it itself.
-    if (viewStarted) {
-      term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
-    } else {
-      term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
-    }
-    term.onData(viewStarted ? handleGhosttyData : handleTerminalData);
+    // The widget skips a keystroke when its custom key handler returns
+    // TRUE. handleTerminalKeyEvent returns FALSE for a key chan took and
+    // TRUE for one the widget may type, with the native paste result
+    // prepared for this inversion, so it is wrapped: "chan consumed this
+    // chord" maps to the widget's "handled", while paste still reaches the
+    // widget's native-paste early-return. The widget does not cancel a key
+    // the handler takes from it, so every path in handleTerminalKeyEvent
+    // that acts on a key cancels it itself.
+    term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
+    term.onData(handleGhosttyData);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
       publishLocalSize(cols, rows);
@@ -1706,7 +1648,7 @@
         // shell the live PTY is already running, and the server ignores the
         // param on that path.
         profile: reattaching ? undefined : tab.profile,
-        ack: viewStarted,
+        ack: true,
       }),
     );
     sentGrid = null;
@@ -2301,22 +2243,16 @@
     onComplete?: () => void,
   ): void {
     if (!term || !termWriter) return;
-    // Ghostty backend only: observe (never alter) the stream for OSC 52
-    // clipboard copies -- the VT core drops them and exposes no JS hook.
+    // Observe (never alter) the stream for OSC 52 clipboard copies -- the
+    // VT core drops them and exposes no JS hook.
     osc52Bridge?.push(bytes);
     if (ghosttyStatusGuard) bytes = ghosttyStatusGuard.push(bytes);
     if (!bytes.length) {
       onComplete?.();
       return;
     }
-    const masker = secretMasker;
-    const completeMaskScan = replayMaskScans.track(
-      attachReplayActive,
-      () => masker?.captureWrite() ?? null,
-      (snapshot) => masker?.scanWrite(snapshot),
-    );
-    // Restore the reset's keyboard state before draining the mask batch or
-    // running a live write's captured scan.
+    const completeMaskScan = replayMaskScans.track(attachReplayActive);
+    // Restore the reset's keyboard state before draining the mask batch.
     ptyWrites.write(termWriter, bytes, origin, () => {
       onComplete?.();
       completeMaskScan();
@@ -2324,12 +2260,11 @@
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
-  /// ending, an error. On ghostty it takes the viewport controller's write,
-  /// as output does, so an open find bar counts it and a scrolled-back
-  /// viewport keeps its place.
+  /// ending, an error. It takes the viewport controller's write, as output
+  /// does, so an open find bar counts it and a scrolled-back viewport keeps
+  /// its place.
   function writeChanLine(line: string): void {
-    if (ghosttyViewport) ghosttyViewport.write(`${line}\r\n`);
-    else term?.writeln(line);
+    ghosttyViewport?.write(`${line}\r\n`);
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute
@@ -2410,10 +2345,10 @@
   }
 
   function handleTerminalData(data: string): void {
-    routeTerminalData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
+    routeTerminalData(data, ptyWrites, sendInput, sendUserInput);
   }
 
-  /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and
+  /// Focus reporting (DECSET 1004). xterm.js sends CSI I and
   /// CSI O itself when its input gains and loses focus; ghostty-web tracks
   /// the mode and sends nothing, so the report is made here, at the element
   /// ghostty-web focuses. A move between that element and its own input is
@@ -2423,7 +2358,7 @@
     if (e.relatedTarget instanceof Node && host?.contains(e.relatedTarget)) {
       return;
     }
-    const t = viewStarted ? (term as GhosttyTerminal | null) : null;
+    const t = term;
     if (!t?.hasFocusEvents()) {
       // The program did not hear of this change, so its last report no
       // longer says where the keyboard is: the next change it does hear of
@@ -2439,8 +2374,8 @@
     sendInput(hasFocus ? "\x1b[I" : "\x1b[O");
   }
 
-  /// Ghostty-backend wheel input. ghostty-web registers its viewport
-  /// scroller capture-phase with an unconditional stopPropagation(), so
+  /// Wheel input. ghostty-web registers its viewport scroller
+  /// capture-phase with an unconditional stopPropagation(), so
   /// its InputHandler's wheel reporter (SGR 64/65) never sees the event;
   /// the custom-wheel hook runs before the scroller and true claims the
   /// event. On the primary buffer without mouse tracking the viewport
@@ -2454,7 +2389,7 @@
   /// SGR as text, with coordinates from the canvas rect / live grid size
   /// (SGR coords are 1-based cells).
   function handleGhosttyWheel(e: WheelEvent): boolean {
-    const t = viewStarted ? (term as GhosttyTerminal | null) : null;
+    const t = term;
     if (!t) return false;
     const tracking = t.hasMouseTracking();
     if (!tracking && t.buffer.active !== t.buffer.alternate) {
@@ -2526,27 +2461,25 @@
   }
 
   /// The tab's capture-phase paste: the PTY size reclaim, then the paste
-  /// itself, cleaned before the renderer would frame it as the clipboard
-  /// holds it: under ghostty by the core's encoder, with an empty one (an
-  /// image) that ghostty-web would drop (ghosttyPaste.ts), and under xterm.js
-  /// with the encoder's byte set before xterm.js's own paste (xtermPaste.ts).
+  /// itself, cleaned by the core's encoder before the renderer would frame
+  /// it as the clipboard holds it, with an empty one (an image) that
+  /// ghostty-web would drop (ghosttyPaste.ts).
   /// Only a paste aimed at the renderer host: the composer inside the tab
   /// takes its own pastes, images included.
   function onTerminalPasteCapture(event: ClipboardEvent): void {
     reclaimPtySize(event);
     if (!host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
-    if (viewStarted) handleGhosttyPaste(event, term as GhosttyTerminal | null);
-    else handleXtermPaste(event, term as Terminal | null);
+    handleGhosttyPaste(event, term);
   }
 
-  /// Under ghostty, a paste delivered as an input with no paste event before
-  /// it, which ghostty-web's textarea would send unclean; the same cleaned
-  /// paste. Only on the renderer host, as for the paste event.
+  /// A paste delivered as an input with no paste event before it, which
+  /// ghostty-web's textarea would send unclean; the same cleaned paste. Only
+  /// on the renderer host, as for the paste event.
   function onTerminalBeforeInputCapture(event: InputEvent): void {
-    if (!viewStarted || !host) return;
+    if (!host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
-    handleGhosttyPasteInput(event, term as GhosttyTerminal | null);
+    handleGhosttyPasteInput(event, term);
   }
 
   /// Measure what a tmux pane's host can show without fitting the renderer
@@ -2662,8 +2595,6 @@
     resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
-    userInput?.dispose();
-    userInput = null;
     // Before the terminal: it frees its search and clears its highlight
     // layer on the terminal.
     ghosttyFind?.dispose();
@@ -2678,11 +2609,8 @@
     ghosttyStatusGuard = null;
     keyboardProtocolObserver = null;
     ghosttyViewport = null;
-    viewStarted = false;
     fit = null;
-    search = null;
     findCount = null;
-    serialize = null;
   }
 
   /// The load error's Retry: load again, from whatever the loader kept.
@@ -2799,16 +2727,11 @@
     return true;
   }
 
-  /// Scrollback text for the copy actions. The xterm backend serializes
-  /// through the SerializeAddon (ANSI styling preserved). The ghostty
-  /// widget formats the history and screen as plain text through
-  /// getScrollbackText(), applying the current drawn-wrap policy.
+  /// Scrollback text for the copy actions. The widget formats the history
+  /// and screen as plain text through getScrollbackText(), applying the
+  /// current drawn-wrap policy.
   function scrollbackText(): string {
-    if (viewStarted) {
-      const ghosttyTerm = term as GhosttyTerminal | null;
-      return ghosttyTerm?.getScrollbackText() ?? "";
-    }
-    return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
+    return term?.getScrollbackText() ?? "";
   }
 
   /// Whether this terminal's session runs Muse, whose cut rows a ghostty
@@ -2838,16 +2761,14 @@
     await copyToClipboard(text);
   }
 
-  /// The active find match's text while the find bar is open on ghostty.
-  /// Find paints the match on the widget's `search-active` highlight layer
-  /// and leaves the selection to the user, so the match is read from the
-  /// layer's range. Empty with the bar closed, with no match, and on xterm,
-  /// whose addon selects its match.
+  /// The active find match's text while the find bar is open. Find paints
+  /// the match on the widget's `search-active` highlight layer and leaves
+  /// the selection to the user, so the match is read from the layer's
+  /// range. Empty with the bar closed and with no match.
   function findMatchText(): string {
-    if (!findOpen || !viewStarted) return "";
-    const ghosttyTerm = term as GhosttyTerminal | null;
-    const match = ghosttyTerm?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
-    return match ? ghosttyTerm!.getRangeText(match) : "";
+    if (!findOpen) return "";
+    const match = term?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
+    return match ? term!.getRangeText(match) : "";
   }
 
   async function copySelectionOrScrollback(): Promise<void> {
@@ -2871,15 +2792,11 @@
   // read the clipboard programmatically. `readClipboardText` does that natively
   // in Rust under chan-desktop so it bypasses WKWebView's DOM-paste "Paste"
   // button; on web it falls back to the gesture-permitted navigator.clipboard.
-  // The text goes the way Cmd+V's does: chan's cleaned paste on either
-  // backend.
+  // The text goes the way Cmd+V's does: chan's cleaned paste.
   async function pasteClipboard(): Promise<void> {
     closeTabMenu();
     const text = await readClipboardText();
-    if (text && term) {
-      if (viewStarted) pasteIntoGhostty(term as GhosttyTerminal, text);
-      else pasteIntoXterm(term as Terminal, text);
-    }
+    if (text && term) pasteIntoGhostty(term, text);
     focusTerminalAfterWait();
   }
 
@@ -3027,71 +2944,43 @@
   // prompt-frame path every terminal uses). Per-terminal text input is the
   // universal Rich Prompt (Cmd+Shift+P) - see RichPrompt.svelte / sendPrompt.
 
-  function findOptions() {
-    return {
-      decorations: {
-        matchBackground: "#7c5cff",
-        matchOverviewRuler: "#7c5cff",
-        activeMatchBackground: "#58a6ff",
-        activeMatchColorOverviewRuler: "#58a6ff",
-      },
-    };
-  }
-
-  /// The ghostty terminal's find, made on first use; null on xterm, before
-  /// the terminal exists, and on a core without search.
+  /// The terminal's find, made on first use; null before the terminal
+  /// exists and on a core without search.
   function ghosttyFinder(): GhosttyFind | null {
-    if (!ghosttyFind && viewStarted && term && ghosttyViewport) {
-      ghosttyFind = GhosttyFind.attach(term as GhosttyTerminal, ghosttyViewport, (count) => {
+    if (!ghosttyFind && term && ghosttyViewport) {
+      ghosttyFind = GhosttyFind.attach(term, ghosttyViewport, (count) => {
         findCount = count;
       });
     }
     return ghosttyFind;
   }
 
-  /// The bar closed or its query emptied: drop the highlights and the count.
-  /// On ghostty this also frees the search and stops its scan.
+  /// The bar closed or its query emptied: drop the highlights and the count,
+  /// free the search and stop its scan.
   function clearFind(): void {
-    search?.clearDecorations();
     ghosttyFind?.close();
     findCount = null;
   }
 
   /// The query changed: select the newest match, the bottom-most in the
-  /// buffer. On ghostty the scan selects it on the frame that finds it. The
-  /// xterm addon's reverse search starts at the bottom only when nothing is
-  /// selected; from a selection it expands or steps from the previous match
-  /// instead, so a shortened query would keep an older match while a newer
-  /// one sits below it.
+  /// buffer. The scan selects it on the frame that finds it.
   function findNewest(): void {
     if (!findQuery.trim()) {
       clearFind();
       return;
     }
-    if (viewStarted) {
-      ghosttyFinder()?.find(findQuery);
-      return;
-    }
-    if (!search) return;
-    term?.clearSelection();
-    search.findPrevious(findQuery, findOptions());
+    ghosttyFinder()?.find(findQuery);
   }
 
   /// Step from the selected match. Next (Enter) walks toward older output,
-  /// up the buffer, the way a terminal is read from the prompt: the xterm
-  /// addon's "previous". Newer is down the buffer, its "next". Both wrap.
+  /// up the buffer, the way a terminal is read from the prompt. Newer is
+  /// down the buffer. Both wrap.
   function stepFind(direction: "older" | "newer"): void {
     if (!findQuery.trim()) {
       clearFind();
       return;
     }
-    if (viewStarted) {
-      ghosttyFinder()?.step(findQuery, direction);
-      return;
-    }
-    if (!search) return;
-    if (direction === "older") search.findPrevious(findQuery, findOptions());
-    else search.findNext(findQuery, findOptions());
+    ghosttyFinder()?.step(findQuery, direction);
   }
 
   function onFindKeydown(e: KeyboardEvent): void {
@@ -3145,9 +3034,9 @@
   function closeExitedTabFromKey(e: KeyboardEvent): boolean {
     if (!isCloseExitedTabKey(e)) return false;
     e.preventDefault();
-    // Both renderers call their custom key handler and then let the event
-    // keep going: each returns out of its keydown without touching it.
-    // Neither stops propagation, so without this the key this close took
+    // The widget calls its custom key handler and then lets the event
+    // keep going: it returns out of its keydown without touching it.
+    // It does not stop propagation, so without this the key this close took
     // would go on to the terminal root's onkeydown and every handler above
     // it.
     e.stopPropagation();
@@ -3157,14 +3046,14 @@
 
   function handleTerminalKeyEvent(e: KeyboardEvent): boolean {
     if (closeExitedTabFromKey(e)) return false;
-    // Copy/paste chords act on the xterm selection / system clipboard, not
-    // the PTY. Resolve them here (the custom handler runs before xterm
-    // processes the key) so no bytes reach the shell and Ctrl+Shift+C does not
-    // raise SIGINT. `false` tells xterm to skip the keystroke. Paste leaves the
-    // browser's native event to travel to the tab's capture listener
-    // (onTerminalPasteCapture), which takes it on both backends; Ghostty's
-    // pre-inversion result is true so its wrapper also passes the key through
-    // without suppressing that native event.
+    // Copy/paste chords act on the terminal's selection / system clipboard,
+    // not the PTY. Resolve them here (the custom handler runs before the
+    // widget processes the key) so no bytes reach the shell and Ctrl+Shift+C
+    // does not raise SIGINT. `false` means chan took the keystroke. Paste
+    // leaves the browser's native event to travel to the tab's capture
+    // listener (onTerminalPasteCapture); its pre-inversion result is true so
+    // the wrapper passes the key through without suppressing that native
+    // event.
     if (
       handleTerminalClipboardChord(e, {
         os: currentOS(),
@@ -3172,32 +3061,24 @@
       })
     ) {
       // The copy is done here, and the component root claims the same chord
-      // for a terminal whose renderer does NOT have focus. Neither renderer
-      // stops propagation on its own, so without this the event reaches the
+      // for a terminal whose renderer does NOT have focus. The widget does
+      // not stop propagation on its own, so without this the event reaches the
       // root and copies a second time. Paste is only MATCHED here, never
       // acted on, and its work is the native paste event's listener, so it
       // keeps travelling.
       if (isTerminalCopyChord(e, currentOS())) e.stopPropagation();
-      return terminalClipboardKeyHandlerResult(e, currentOS(), viewStarted ? "ghostty" : "xterm");
+      return terminalClipboardKeyHandlerResult(e, currentOS());
     }
     // Chord-escape registry. When the incoming event matches a shortcut
-    // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
-    // does not consume the keystroke. It leaves either renderer with its
+    // flagged `escapeTerminal: true` in shortcuts.ts, return false so the
+    // widget does not consume the keystroke. It leaves the widget with its
     // default intact: the handler that acts on it (this tab's root for find,
     // the app's window keymap for the rest) cancels it there, and a chord
     // the app declines is still the browser's.
     if (shouldEscapeTerminal(e)) return false;
-    // On ghostty every other key was decided before ghostty-web saw it
-    // (ghosttyKeys.ts); what reaches here is plain typing, which ghostty-web
-    // types itself.
-    if (viewStarted) return true;
-    const slash = controlSlashBytes(e, resolvedEventKey(e));
-    if (slash !== null) {
-      sendTypedInput(slash);
-      consumeKey(e);
-      return false;
-    }
-    return handleTerminalMetaKey(e, sendTypedInput, tab.keyboardProtocol);
+    // Every other key was decided before the widget saw it (ghosttyKeys.ts);
+    // what reaches here is plain typing, which the widget types itself.
+    return true;
   }
 
   function descendantOwnsCopy(e: KeyboardEvent): boolean {
@@ -3234,7 +3115,7 @@
     // Team-work entry points are `Mod+. p` (Hybrid Nav) and the hamburger,
     // with no direct chord - nothing terminal-local here. The only chord
     // this handler owns is `terminal.find`, resolved from the registry so the
-    // form it acts on is the one the escape registry lets out of xterm: Cmd+F
+    // form it acts on is the one the escape registry lets out of the widget: Cmd+F
     // on macOS, Ctrl+Shift+F elsewhere, and a bare Ctrl+F is the shell's.
     if (eventMatchesShortcut(e, "terminal.find")) {
       e.preventDefault();
@@ -3319,10 +3200,7 @@
   function linkAnchorKey(range: LinkRange): string | null {
     const t = term;
     if (!t) return null;
-    const top =
-      viewStarted
-        ? (t as GhosttyTerminal).getScrollbackLength() - Math.floor((t as GhosttyTerminal).getViewportY())
-        : (t as Terminal).buffer.active.viewportY;
+    const top = t.getScrollbackLength() - Math.floor(t.getViewportY());
     const rows: string[] = [String(range.start.y - top)];
     for (let y = range.start.y; y <= range.end.y; y++) {
       rows.push(t.buffer.active.getLine(y)?.translateToString(true) ?? "");
@@ -3739,8 +3617,8 @@
   <!-- data-file-drop-zone exempts the terminal from the global drop
        guard's not-allowed cursor; onTerminalFileDrop owns the drop
        (path-print on desktop, silent no-op in a plain browser). The
-       div is xterm's mount, not an interactive control -- xterm
-       manages its own accessibility tree inside. -->
+       div is the terminal widget's mount, not an interactive control:
+       the widget handles the keyboard there itself. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="terminal-main" class:inspector-open={tab.inspectorOpen}>
     <div
@@ -3879,8 +3757,7 @@
       transparent
     );
   }
-  :global(:root[data-transparent-window]) .terminal-host,
-  :global(:root[data-transparent-window]) .terminal-host :global(.xterm-viewport) {
+  :global(:root[data-transparent-window]) .terminal-host {
     background-color: transparent;
   }
   /* Marks the composer's subtree for the keyboard's return; the composer
@@ -3888,19 +3765,14 @@
   .terminal-composer {
     display: contents;
   }
-  :global(.terminal-secret-mask) {
-    border-radius: 2px;
-    pointer-events: none;
-  }
   .terminal-find {
     position: absolute;
     top: 8px;
     right: 10px;
     display: flex;
     align-items: center;
-    /* Above every layer xterm stacks in the same context (its canvases at
-       2, helpers at 5, decorations at 6, message overlay at 10), so the
-       box takes its own clicks rather than the terminal under it. */
+    /* Above the terminal's canvas, so the box takes its own clicks
+       rather than the terminal under it. */
     z-index: 11;
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -4026,13 +3898,6 @@
   .queue-inspector p, .queue-source { margin: 6px 0; color: var(--text-secondary); font-size: 12px; }
   .program-record { padding: 8px 0; border-top: 1px solid var(--separator); }
   .program-record div + div { margin-top: 4px; }
-  .terminal-host :global(.xterm) {
-    height: 100%;
-  }
-  .terminal-host :global(.xterm-viewport) {
-    background-color: var(--terminal-background, var(--bg));
-    scrollbar-color: var(--separator) var(--terminal-background, var(--bg));
-  }
   .terminal-tab-menu-bubble {
     position: fixed;
     z-index: 25500;

@@ -1044,16 +1044,16 @@ describe("terminal find on the ghostty backend", () => {
     return { calls, unread: mentions - calls.length };
   }
 
-  test("every write the tab makes reaches a ghostty terminal through the viewport controller", () => {
+  test("every write the tab makes reaches the terminal through the viewport controller", () => {
     // The controller tells find of each write, and a write around it leaves
-    // the count and the highlight behind. On ghostty the PTY writer handed
-    // to ptyWrites is the controller's write, chan's own lines take it in
-    // writeChanLine, and that helper's xterm arm is the one writeln.
+    // the count and the highlight behind. The PTY writer handed to
+    // ptyWrites is the controller's write, and chan's own lines take it in
+    // writeChanLine.
     const { calls, unread } = writeCalls(terminalTabSource);
-    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "term.writeln", "viewport.write"]);
+    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "viewport.write"]);
     expect(unread, "no write method is reached another way").toBe(0);
     const helper = terminalTabSource.slice(terminalTabSource.indexOf("function writeChanLine("));
-    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("else term?.writeln(line);");
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("ghosttyViewport?.write(");
   });
 
   test("the write scan reads a call through an assertion, a cast or an optional chain, and counts what it cannot name", () => {

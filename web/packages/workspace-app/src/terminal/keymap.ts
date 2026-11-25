@@ -43,15 +43,15 @@ export function terminalMetaKeyBytes(
       // Fallback for Shift+Enter when no enhanced keyboard protocol is
       // active. This is the "agent already running, never observed
       // negotiating" case: the agent enabled modifyOtherKeys/kitty before
-      // this tab attached, so the negotiation is neither in the reattach
-      // replay nor in the serialized snapshot, and the branches above see
-      // a pristine state. Without this, Shift+Enter falls through to
-      // xterm's plain `\r` and SUBMITS to the agent instead of inserting a
-      // newline. A bare LF is the safe default across both foreground
-      // programs: a plain shell's line discipline accepts `\n` exactly like
-      // Enter (it submits the line, no stray bytes on the prompt), while
-      // Claude Code reads `\n` as a newline inside its multi-line draft
-      // (live-probed; the inverse of the server-owned Claude submit chord).
+      // this tab attached, so the negotiation is not in the reattach
+      // replay, and the branches above see a pristine state. Without
+      // this, Shift+Enter falls through to the terminal's plain `\r` and
+      // SUBMITS to the agent instead of inserting a newline. A bare LF is
+      // the safe default across both foreground programs: a plain shell's
+      // line discipline accepts `\n` exactly like Enter (it submits the
+      // line, no stray bytes on the prompt), while Claude Code reads `\n`
+      // as a newline inside its multi-line draft (live-probed; the inverse
+      // of the server-owned Claude submit chord).
       // Scoped to Shift+Enter only: Cmd/Ctrl+Enter (modifiers 9/5) keep
       // falling through to `\r` so their submit semantics are preserved.
       if (modifier === 2) return "\n";
@@ -70,18 +70,6 @@ export function terminalMetaKeyBytes(
     default:
       return null;
   }
-}
-
-export function handleTerminalMetaKey(
-  ev: KeyboardEvent,
-  sendInput: (data: string) => void,
-  protocol?: TerminalKeyboardProtocolState,
-): boolean {
-  const bytes = terminalMetaKeyBytes(ev, protocol);
-  if (bytes === null) return true;
-  sendInput(bytes);
-  ev.preventDefault();
-  return false;
 }
 
 /// xterm.js leaves Ctrl+/ unencoded; chan sends the shell's Unit Separator.

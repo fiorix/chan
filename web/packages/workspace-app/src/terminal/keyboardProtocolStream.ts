@@ -1,18 +1,17 @@
 // The keyboard protocol state of a ghostty terminal, followed from its output.
 //
-// chan's xterm.js terminals follow the program's xterm modifyOtherKeys and
-// kitty keyboard requests through parser hooks (keymap.ts
-// installKeyboardProtocolHandlers), and the modified-Enter encoding reads the
-// result. ghostty-web exposes no parser hooks, so this observer reads the
-// same sequences from the bytes on their way into the VT and applies them
-// with the same function. It never alters the stream.
+// The modified-Enter encoding reads the program's modifyOtherKeys and kitty
+// keyboard requests from this state. ghostty-web exposes no parser hooks, so
+// this observer reads the sequences from the bytes on their way into the VT
+// and applies them with keymap.ts's applyKeyboardProtocolCsi. It never alters
+// the stream.
 //
 // The grammar is xterm.js's (common/parser/EscapeSequenceParser.ts) for what
 // the state depends on: CSI with its prefix, params, sub-params and
 // intermediates, and ESC c (RIS). Every other sequence, the string ones (OSC,
 // DCS, APC and the like) included, can be read as plain text: only an ESC
 // starts what the state follows, and an ESC inside a string ends the string
-// in xterm.js too. keyboardProtocolStream.test.ts runs the same streams
+// in that parser too. keyboardProtocolStream.test.ts runs the same streams
 // through xterm.js's parser. The 8-bit C1 introducers are not followed;
 // programs in a UTF-8 terminal use the 7-bit ESC forms.
 

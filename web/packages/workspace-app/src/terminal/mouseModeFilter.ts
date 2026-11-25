@@ -1,18 +1,13 @@
 /// MouseModeFilter -- a stateful DECSET-mouse-enable strip filter for the
-/// PTY -> xterm output path, backing `terminal.mouse_capture = false`.
+/// PTY -> terminal output path, backing `terminal.mouse_capture = false`.
 ///
-/// WHY a byte filter: xterm.js exposes no public API to refuse mouse
-/// reporting -- `Terminal.modes` is a read-only getter and
-/// `ITerminalOptions` has no mouse switch. The moment a mouse DECSET is
-/// parsed, xterm disables its SelectionService, so click-drag selection
-/// dies at the mode flip REGARDLESS of what happens to the outgoing report
-/// bytes: intercepting pointer events or dropping outgoing reports provably
-/// leaves selection broken. The only non-fork mechanism is to keep xterm
-/// from ever seeing the enable sequence. The public
-/// `parser.registerCsiHandler` hook is no substitute either: its callback
-/// receives a COPY of the params, so a mixed list like `CSI ? 1049;1000 h`
-/// can only be swallowed whole (losing the alt-screen switch) or kept
-/// whole -- it cannot be rewritten. Hence this pre-parse byte filter.
+/// WHY a byte filter: the widget has no option to refuse mouse reporting.
+/// Once the core has parsed a mouse DECSET, the widget's selection manager
+/// reports a press to the program instead of starting a selection, so
+/// click-drag selection depends on the core never seeing the enable, not on
+/// what happens to the outgoing report bytes. The widget exposes no parser
+/// hooks, and a mixed list like `CSI ? 1049;1000 h` must keep its
+/// alt-screen switch, so this pre-parse byte filter rewrites the sequence.
 ///
 /// Grammar filtered: `ESC [ ? Pm h` (DECSET) ONLY. Params in
 /// MOUSE_MODE_PARAMS are dropped; survivors re-emit with their ORIGINAL
@@ -30,11 +25,11 @@
 /// over-cap param list split across chunks can therefore still enable
 /// mouse mode; deliberate and accepted.
 
-/// DEC private modes that enable mouse tracking/encoding in xterm.js v6:
-/// 9 (X10), 1000 (VT200), 1002 (drag), 1003 (any-motion), 1006 (SGR),
-/// 1016 (SGR-pixels). 1001/1005/1015 are no-ops or unhandled in xterm v6
-/// but are stripped anyway: harmless, future-proof, and they only ever
-/// travel alongside the real enables.
+/// DEC private modes that enable mouse tracking or set its encoding:
+/// 9 (X10), 1000 (VT200), 1001 (highlight), 1002 (drag), 1003
+/// (any-motion), 1005 (UTF-8), 1006 (SGR), 1015 (urxvt), 1016
+/// (SGR-pixels). An encoding only ever travels alongside a real enable,
+/// and stripping a mode the core does not act on is harmless.
 export const MOUSE_MODE_PARAMS: ReadonlySet<number> = new Set([
   9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016,
 ]);
@@ -113,9 +108,9 @@ export class MouseModeFilter {
     this.#held = new Uint8Array(0);
   }
 
-  /// Filter one PTY output chunk. Returns the bytes to hand to xterm; may
-  /// be shorter than the input (stripped enables, held tail) and may
-  /// include bytes held from previous pushes.
+  /// Filter one PTY output chunk. Returns the bytes to hand to the
+  /// terminal; may be shorter than the input (stripped enables, held tail)
+  /// and may include bytes held from previous pushes.
   push(bytes: Uint8Array): Uint8Array {
     let buf: Uint8Array;
     if (this.#held.length) {

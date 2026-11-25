@@ -1,5 +1,5 @@
 /// The cell a painter's buffer line hands back: what the span mapping
-/// reads of it. Both xterm.js's IBufferCell and ghostty-web's satisfy it.
+/// reads of it. ghostty-web's buffer cell satisfies it.
 export type MaskCell = {
   getWidth(): number;
   getChars(): string;
@@ -7,8 +7,7 @@ export type MaskCell = {
 
 /// A buffer line as the detection reads it: the text of a column range,
 /// the cell at a column and whether the line continues the one above it.
-/// xterm.js's IBufferLine and ghostty-web's both satisfy it, so the two
-/// painters share one detection over their own buffers.
+/// ghostty-web's buffer line satisfies it, and a test can stand one in.
 export type MaskLine = {
   readonly isWrapped: boolean;
   translateToString(trimRight?: boolean, startColumn?: number, endColumn?: number): string;
@@ -205,7 +204,7 @@ export class SecretAssignmentMatcher {
   }
 }
 
-export function translatedLine(line: MaskLine, cols: number): string {
+function translatedLine(line: MaskLine, cols: number): string {
   return line.translateToString(false, 0, cols);
 }
 

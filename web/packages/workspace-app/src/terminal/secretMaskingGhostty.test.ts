@@ -388,10 +388,6 @@ describe("ghostty secret masking over a fake buffer", () => {
     screen.lines[0].text = "TOKEN=abcde";
     masker.scanAll();
     expect(screen.frame([0]).fills).toEqual([cells(6, 0, 5)]);
-    // The write hooks are no-ops: the widget's change event carries a write.
-    expect(masker.captureWrite()).toBeNull();
-    masker.scanWrite(null);
-    expect(screen.frame([0]).reads).toBe(0);
   });
 
   test("masking toggled off redraws the rows it covered and paints nothing", () => {

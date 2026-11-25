@@ -10,7 +10,7 @@ import {
 } from "./renderer";
 
 describe("terminal renderer helpers", () => {
-  test("repaints only visible rows through xterm refresh", () => {
+  test("asks refresh() for the visible rows", () => {
     const calls: Array<[number, number]> = [];
     refreshTerminalRows({ rows: 24, refresh: (start, end) => calls.push([start, end]) });
     expect(calls).toEqual([[0, 23]]);

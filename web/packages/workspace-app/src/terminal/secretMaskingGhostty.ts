@@ -58,9 +58,8 @@ type FrameKey = {
 /// has the widget repaint every row at its next frame, which is how a
 /// toggle draws or clears the masks.
 ///
-/// Writes reach the painter through the widget's change event, so the write
-/// hooks the xterm masker needs are no-ops here; scanAll and scanViewport
-/// force a rescan at the next frame that repaints rows.
+/// Writes reach the painter through the widget's change event; scanAll and
+/// scanViewport force a rescan at the next frame that repaints rows.
 export class GhosttySecretMasker {
   readonly #term: GhosttyMaskTerminal;
   readonly #matcher: SecretAssignmentMatcher;
@@ -112,12 +111,6 @@ export class GhosttySecretMasker {
     this.#color = color;
     if (this.#removeLayer && this.#spans.length > 0) this.#term.refresh();
   }
-
-  captureWrite(): null {
-    return null;
-  }
-
-  scanWrite(_snapshot: unknown): void {}
 
   scanAll(): void {
     if (this.#disposed || !this.#enabled) return;

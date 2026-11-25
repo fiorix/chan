@@ -29,42 +29,21 @@ import {
 installTerminalDom();
 
 describe("attach replay secret-mask scans", () => {
-  test("keeps live writes on the per-write capture and scan path", () => {
+  test("scans all once, after ready and the last replay write", () => {
     const scans = new ReplayMaskScanBatch();
-    const snapshot = Symbol("snapshot");
-    const captureWrite = vi.fn(() => snapshot);
-    const scanWrite = vi.fn();
-
-    const complete = scans.track(false, captureWrite, scanWrite);
-
-    expect(captureWrite).toHaveBeenCalledOnce();
-    expect(scanWrite).not.toHaveBeenCalled();
-    complete();
-    complete();
-    expect(scanWrite).toHaveBeenCalledOnce();
-    expect(scanWrite).toHaveBeenCalledWith(snapshot);
-  });
-
-  test("skips per-write replay scans and scans all once after ready drains", () => {
-    const scans = new ReplayMaskScanBatch();
-    const captureWrite = vi.fn(() => Symbol("snapshot"));
-    const scanWrite = vi.fn();
     const scanAll = vi.fn();
 
     scans.begin(scanAll);
-    const completeFirst = scans.track(true, captureWrite, scanWrite);
-    const completeLast = scans.track(true, captureWrite, scanWrite);
+    const completeFirst = scans.track(true);
+    const completeLast = scans.track(true);
 
-    expect(captureWrite).not.toHaveBeenCalled();
     completeFirst();
     scans.ready();
-    expect(scanWrite).not.toHaveBeenCalled();
     expect(scanAll).not.toHaveBeenCalled();
 
     completeLast();
     completeLast();
     scans.ready();
-    expect(scanWrite).not.toHaveBeenCalled();
     expect(scanAll).toHaveBeenCalledOnce();
   });
 
@@ -79,27 +58,15 @@ describe("attach replay secret-mask scans", () => {
     expect(scanAll).toHaveBeenCalledOnce();
   });
 
-  test("leaves live writes byte-for-byte on their scan path while replay drains", () => {
+  test("a live write while a replay drains neither holds nor runs its scan", () => {
     const scans = new ReplayMaskScanBatch();
     const scanAll = vi.fn();
-    const replayComplete = (() => {
-      scans.begin(scanAll);
-      return scans.track(
-        true,
-        () => Symbol("unused replay snapshot"),
-        () => {},
-      );
-    })();
+    scans.begin(scanAll);
+    const replayComplete = scans.track(true);
     scans.ready();
 
-    const liveSnapshot = Symbol("live snapshot");
-    const captureLive = vi.fn(() => liveSnapshot);
-    const scanLive = vi.fn();
-    const liveComplete = scans.track(false, captureLive, scanLive);
-
-    expect(captureLive).toHaveBeenCalledOnce();
+    const liveComplete = scans.track(false);
     liveComplete();
-    expect(scanLive).toHaveBeenCalledWith(liveSnapshot);
     expect(scanAll).not.toHaveBeenCalled();
 
     replayComplete();
@@ -112,7 +79,7 @@ describe("attach replay secret-mask scans", () => {
     const currentScanAll = vi.fn();
 
     scans.begin(abandonedScanAll);
-    const abandonedComplete = scans.track(true, () => null, () => {});
+    const abandonedComplete = scans.track(true);
     scans.begin(currentScanAll);
     scans.ready();
     expect(currentScanAll).not.toHaveBeenCalled();
@@ -138,26 +105,14 @@ describe("a mounted terminal's secret masking", () => {
   }
 
   test("scans a replay once, when it ends, not write by write", async () => {
-    const scans = vi.spyOn(GhosttySecretMasker.prototype, "scanWrite");
     const scanAlls = vi.spyOn(GhosttySecretMasker.prototype, "scanAll");
     const socket = await reattached();
     const before = scanAlls.mock.calls.length;
     await output(socket, "export TOKEN=abc\r\n");
     await output(socket, "export KEY=def\r\n");
-    expect(scans, "no per-write scan during the replay").not.toHaveBeenCalled();
-    expect(scanAlls).toHaveBeenCalledTimes(before);
+    expect(scanAlls, "no scan during the replay").toHaveBeenCalledTimes(before);
 
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     expect(scanAlls).toHaveBeenCalledTimes(before + 1);
-  });
-
-  test("scans live output write by write", async () => {
-    const captures = vi.spyOn(GhosttySecretMasker.prototype, "captureWrite");
-    const scans = vi.spyOn(GhosttySecretMasker.prototype, "scanWrite");
-    const socket = await reattached();
-    await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    await output(socket, "one\r\n");
-    await output(socket, "two\r\n");
-    expect([captures.mock.calls.length, scans.mock.calls.length]).toEqual([2, 2]);
   });
 });
