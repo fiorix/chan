@@ -111,6 +111,15 @@ function slowPlacement() {
     return batch;
   });
 }
+// A feed that outruns a press's placement slice, as on a large history, so
+// the press returns with the active match's index unplaced.
+function slowFeed() {
+  const feed = VtSearch.prototype.feed;
+  vi.spyOn(VtSearch.prototype, 'feed').mockImplementation(function (this: VtSearch) {
+    feed.call(this);
+    now += 5;
+  });
+}
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
 // Lines of 300 cells at 200 columns, two rows each, with `needles`
 // matches at the start of each line's first row, 7 cells apart: the last
@@ -530,6 +539,28 @@ describe('widget search', () => {
     search.step('needle', 'newer');
     search.step('needle', 'newer');
     expect(activeLine(term)).toBe('needle 1001');
+  });
+
+  test('a step from a match that scrolled under a fixed top row lands on its history neighbour', async () => {
+    const lines = Array.from({ length: 94 }, (_, i) => `needle ${i}`).concat(['HEADER', 'aaa', 'bbb', 'needle X', 'ccc', 'ddd']);
+    const { term } = await create(lines.join('\r\n'));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    expect(activeLine(term)).toBe('needle X');
+    slowFeed();
+    const history = term.getScrollbackLength();
+    // Two lines scroll the region below the first screen row: the active
+    // match moves up two rows and nothing enters or leaves the history.
+    term.write('\x1b[2;6r\x1b[6;1H\n\n');
+    expect(term.getScrollbackLength(), 'nothing was pruned or added').toBe(history);
+    expect(activeLine(term)).toBe('needle X');
+    search.step('needle', 'older');
+    expect(search.state.index, 'the press returned before placement').toBeNull();
+    expect(activeLine(term), 'the press lands on the real neighbour').toBe('needle 93');
+    settle(search);
+    expect(activeLine(term)).toBe('needle 93');
+    expect(search.state).toEqual({ index: 2, total: 95, partial: false });
   });
 
   test('under output every frame, a step whose neighbour was on the screen waits no longer than its cap', async () => {
