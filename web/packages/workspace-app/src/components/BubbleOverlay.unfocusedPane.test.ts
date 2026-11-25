@@ -33,6 +33,33 @@ const LINKED = {
   ...SURVEY,
   bodyMarkdown: "Review https://example.com/pull/1 or [the notes](https://example.com/notes) first.",
 };
+/// A body of raw HTML the sanitizer keeps, with one element of each kind a
+/// browser can put in the Tab order, each named by its `data-kind`, and the
+/// embed the markdown makes of a video link, named by its tag.
+const EVERY_KIND = {
+  ...SURVEY,
+  bodyMarkdown: [
+    'A <a data-kind="link" href="https://example.com/l">link</a>, <button data-kind="button">a button</button>, ' +
+      '<input data-kind="input" value="x">, <select data-kind="select"><option>a</option></select> ' +
+      'and <textarea data-kind="textarea">t</textarea>.',
+    '<details><summary data-kind="summary">more</summary>hidden</details>',
+    '<details data-kind="details">no summary of its own</details>',
+    'A map <img src="https://example.com/i.png" usemap="#m"><map name="m">' +
+      '<area data-kind="area" href="https://example.com/a" shape="rect" coords="0,0,9,9"></map>',
+    'A chart <svg width="20" height="20">' +
+      '<a data-kind="svg-xlink" xlink:href="https://example.com/s"><text y="10">s</text></a>' +
+      '<a data-kind="svg-href" href="https://example.com/t"><text y="10">t</text></a></svg>',
+    'Media <audio data-kind="audio" controls src="https://example.com/a.mp3"></audio> ' +
+      '<video data-kind="video" controls src="https://example.com/a.mp4"></video>',
+    '<div data-kind="scroller" style="overflow-y: auto; height: 2em">a<br>b<br>c<br>d</div>',
+    'A <span data-kind="tabindex" tabindex="0">note</span>.',
+    "![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)",
+  ].join("\n\n"),
+};
+const KINDS = [
+  "link", "button", "input", "select", "textarea", "summary", "details", "area",
+  "svg-xlink", "svg-href", "audio", "video", "scroller", "tabindex", "iframe",
+];
 
 beforeEach(async () => {
   await mountApp(demoData([]));
@@ -99,6 +126,14 @@ function tabbables(card: HTMLElement): string[] {
 
 function named(el: Element): string {
   return `${el.tagName.toLowerCase()} ${el.textContent?.replace(/\s+/g, " ").trim()}`;
+}
+
+/// The tabindex attribute of each element of the every-kind body, by kind.
+/// jsdom gives media, a details and a scroller no tabIndex of their own,
+/// so the attribute is what shows whether the rule holds them.
+function kindTabIndexes(card: HTMLElement): Record<string, string | null> {
+  return Object.fromEntries([...card.querySelectorAll(".survey-body [data-kind], .survey-body iframe")]
+    .map((el) => [el.getAttribute("data-kind") ?? el.localName, el.getAttribute("tabindex")]));
 }
 
 /// A primary press and release as a browser runs them for a trusted event:
@@ -168,6 +203,23 @@ describe("a survey over a terminal whose pane is not focused", () => {
     await settleLong();
     expect(tabbables(card), "each back as its markup has it, the aside still out")
       .toEqual(["a the log", "span a note", ...buttons(card).map(named)]);
+  });
+
+  test("every kind of focusable its body keeps leaves the Tab order, and each returns with its pane", async () => {
+    const card = await surveyOverUnfocusedPane(EVERY_KIND);
+    expect(Object.keys(kindTabIndexes(card)), "the body renders one element of each kind").toEqual(KINDS);
+    const held = Object.fromEntries(KINDS.map((kind) => [kind, "-1"]));
+    expect(kindTabIndexes(card), "every kind out of the Tab order while the other pane is focused").toEqual(held);
+    expect(tabbables(card), "nothing in the card reads as tabbable").toEqual([]);
+
+    setActivePane(TOP);
+    await settleLong();
+    expect(kindTabIndexes(card), "each back as its markup has it once its pane is focused")
+      .toEqual({ ...Object.fromEntries(KINDS.map((kind) => [kind, null])), tabindex: "0" });
+
+    setActivePane(BOTTOM);
+    await settleLong();
+    expect(kindTabIndexes(card), "out again when the other pane is focused again").toEqual(held);
   });
 
   test.each([
