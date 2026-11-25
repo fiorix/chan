@@ -16747,5 +16747,72 @@ mod tests {
                 "a cursor past the end gets the whole ring"
             );
         }
+
+        // A client of the process a lossy restore came from keeps the screen
+        // that process sent it. Past the restore it parsed bytes this process
+        // never had, which can hold the reset of a mode its screen still
+        // shows, so it gets the suffix a live recovery gets; at or before the
+        // restore, and with no cursor, nothing it parsed is missing.
+        #[test]
+        fn a_lossy_restore_client_gets_the_recovery_suffix_only_past_the_restore() {
+            const SUFFIX: &[u8] = b"\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004h";
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            let id = "lossy-restore-prelude";
+            let restored = numbered_lines(1000);
+            let (import, _pair) = ringless_import(id, 5, &restored);
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(registry.inject_output(id, b"\x1b[?2004h"));
+            let resume = |since: Option<u64>| {
+                registry
+                    .get_or_create_for_ws(
+                        Some(id),
+                        since,
+                        opts(Some("w1"), None),
+                        TerminalPlacement::default(),
+                        Some(5),
+                        None,
+                    )
+                    .unwrap()
+            };
+
+            let ahead = resume(Some(1500));
+            assert_eq!(
+                ahead.missed_bytes, 500,
+                "fixture: a cursor past the restore"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&ahead.mode_reassert),
+                String::from_utf8_lossy(SUFFIX),
+                "a cursor past the restore gets the recovery suffix"
+            );
+            assert!(!ahead.stale_generation);
+            drop(ahead);
+
+            let behind = resume(Some(800));
+            assert_eq!(
+                behind.missed_bytes, 0,
+                "fixture: a cursor the restore honours"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&behind.mode_reassert),
+                "\x1b[?2004h",
+                "a cursor the restore honours gets the enables-only prelude"
+            );
+            assert!(!behind.stale_generation);
+            drop(behind);
+
+            let bare = resume(None);
+            assert_eq!(bare.missed_bytes, 0);
+            assert_eq!(
+                String::from_utf8_lossy(&bare.mode_reassert),
+                "\x1b[?2004h",
+                "the lossy-restore generation with no cursor gets the enables-only prelude"
+            );
+            assert!(
+                !bare.stale_generation,
+                "the lossy-restore generation with no cursor is not an earlier life's"
+            );
+        }
     }
 }

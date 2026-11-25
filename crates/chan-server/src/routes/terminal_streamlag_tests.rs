@@ -1448,8 +1448,13 @@ async fn a_redial_across_a_restart_gets_the_restart_reset() {
         "fixture: the redial reached the next PTY life"
     );
     // A live socket gets RESET_TERMINAL ahead of the new life's session
-    // frame. A redial may carry it on either side of its own session frame,
-    // but before any byte of the new life's replay.
+    // frame, and so does a redial: a client takes what precedes its session
+    // frame as the old life's output.
+    assert_eq!(
+        String::from_utf8_lossy(&before),
+        String::from_utf8_lossy(RESET_TERMINAL),
+        "a redial across a restart gets the restart's reset ahead of its session frame"
+    );
     let received = [before, after].concat();
     assert_eq!(
         String::from_utf8_lossy(&received[..received.len().min(RESET_TERMINAL.len())]),
@@ -1753,6 +1758,18 @@ async fn a_view_that_reads_without_acknowledging_is_bounded_and_resumes_with_a_c
 /// report the rest of what it was sent.
 const SHORT_ACK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The close a socket ends a stalled view with: 1013, try again later,
+/// which the client answers by redialing from its parsed cursor.
+fn assert_stall_close(frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>) {
+    let frame = frame.expect("a stalled view's close carries a code");
+    assert_eq!(
+        u16::from(frame.code),
+        1013,
+        "a stalled view is closed with 1013: {frame:?}"
+    );
+    assert_eq!(frame.reason.as_str(), "terminal view stalled");
+}
+
 /// Report `short`, a position before what the view was sent, then ping as
 /// a live page does, and read until the server ends the socket. The
 /// client redials from its cursor when it does.
@@ -1781,9 +1798,12 @@ async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u
                     "a view waiting for its ack is sent no raw output: {} bytes",
                     bytes.len()
                 ),
-                Some(Ok(ClientMessage::Close(_)) | Err(_)) | None => {
-                    break Some(tokio::time::Instant::now())
+                Some(Ok(ClientMessage::Close(frame))) => {
+                    assert_stall_close(frame.as_ref());
+                    break Some(tokio::time::Instant::now());
                 }
+                Some(Err(error)) => panic!("the socket ended without a close frame: {error}"),
+                None => panic!("the socket ended without a close frame"),
                 Some(Ok(_)) => {}
             },
             _ = ping.tick() => {
@@ -1807,9 +1827,13 @@ async fn assert_short_ack_is_closed(view: &mut Client, generation: u64, short: u
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_released_view_whose_ack_stays_short_is_closed_within_the_bound() {
-    let _gate = pty_test_lock();
+/// A view the reader released, whose client has sent nothing since it
+/// attached: it read what it was sent and reported none of it, so it held
+/// the reader until the bound, and the program then ran to its end past
+/// it. The program waits for a line before it exits. Returns the rig, the
+/// view, its generation, the position its session frame gave and the raw
+/// bytes it was sent.
+async fn released_view() -> (Rig, Client, u64, u64, u64) {
     let rig = Rig::new(
         64 * 1024,
         "stty -onlcr; read -r _; seq -f %.0f 1 200000; printf '__STREAM_DONE__'; read -r _",
@@ -1865,7 +1889,223 @@ async fn a_released_view_whose_ack_stays_short_is_closed_within_the_bound() {
         }
     }
     assert!(received > 0, "fixture: the view was sent output");
+    (rig, view, generation, start, received)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_whose_ack_stays_short_is_closed_within_the_bound() {
+    let _gate = pty_test_lock();
+    let (rig, mut view, generation, start, received) = released_view().await;
     assert_short_ack_is_closed(&mut view, generation, start + received - 1).await;
+    rig.handle.send_input(b"\n");
+}
+
+/// Read `view`, sending nothing, until the server closes it or `deadline`
+/// passes, and say when the close arrived. A view waiting for its client is
+/// sent nothing but that close: no raw output, recovery or error.
+async fn read_until_closed(
+    view: &mut Client,
+    deadline: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    loop {
+        match tokio::time::timeout_at(deadline, view.next()).await {
+            Err(_) => return None,
+            Ok(Some(Ok(ClientMessage::Close(frame)))) => {
+                assert_stall_close(frame.as_ref());
+                return Some(tokio::time::Instant::now());
+            }
+            Ok(Some(Ok(ClientMessage::Text(text)))) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                if let Some("error" | "session" | "exit" | "closed") = frame["type"].as_str() {
+                    panic!("a view waiting for its client gets no {frame}");
+                }
+            }
+            Ok(Some(Ok(ClientMessage::Binary(bytes)))) => panic!(
+                "a view waiting for its client is sent no raw output: {} bytes",
+                bytes.len()
+            ),
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) => panic!("the socket ended without a close frame: {error}"),
+            Ok(None) => panic!("the socket ended without a close frame"),
+        }
+    }
+}
+
+/// The view's client reports everything it was sent, and the view recovers
+/// on its socket: a session frame whose count closes the gap between that
+/// position and the server's.
+async fn assert_recovers_on_its_socket(view: &mut Client, generation: u64, sent: u64) {
+    ack(view, generation, sent).await;
+    let recovery = loop {
+        match next(view).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "no lag line on resume: {frame}");
+                if frame["type"] == "session" {
+                    break frame;
+                }
+            }
+            ClientMessage::Binary(bytes) => panic!(
+                "a view waiting for its client is sent no raw output: {} bytes",
+                bytes.len()
+            ),
+            other => panic!("the view ended instead of recovering: {other:?}"),
+        }
+    };
+    assert_eq!(number(&recovery, "generation"), generation);
+    assert_eq!(
+        sent + number(&recovery, "missed_bytes") + number(&recovery, "replay_bytes"),
+        number(&recovery, "seq"),
+        "the count closes the gap between the view's cursor and the server's"
+    );
+}
+
+/// A released view's client that sends one frame shows it runs, and that
+/// frame is its first since the release: the close comes the bound after
+/// it, with no second frame needed to start the clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_that_pings_once_is_closed_the_bound_after_its_ping() {
+    let _gate = pty_test_lock();
+    let (rig, mut view, _generation, _start, _received) = released_view().await;
+    let pinged_at = tokio::time::Instant::now();
+    send(&mut view, json!({"type": "ping"})).await;
+    let closed_at =
+        read_until_closed(&mut view, pinged_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK).await;
+    let Some(closed_at) = closed_at else {
+        panic!(
+            "a released view whose client pinged once is closed within \
+             {NO_PROGRESS_LIMIT:?} (+{SHORT_ACK_SLACK:?}) of that ping: still open"
+        );
+    };
+    let waited = closed_at - pinged_at;
+    assert!(
+        waited >= NO_PROGRESS_LIMIT,
+        "the client gets the whole bound from its frame: closed after {waited:?}"
+    );
+    rig.handle.send_input(b"\n");
+}
+
+/// A released view that sends nothing keeps waiting past the bound, as a
+/// stopped page does, and recovers on its socket once it reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_silent_past_the_bound_stays_open_and_recovers() {
+    let _gate = pty_test_lock();
+    let (rig, mut view, generation, start, received) = released_view().await;
+    let silent_until =
+        tokio::time::Instant::now() + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(3);
+    assert_eq!(
+        read_until_closed(&mut view, silent_until).await,
+        None,
+        "a released view whose client sends nothing stays open past the bound"
+    );
+    assert_recovers_on_its_socket(&mut view, generation, start + received).await;
+    rig.handle.send_input(b"\n");
+}
+
+/// A stopped page's network stack can still answer protocol pings, so they
+/// do not show that the page runs: a released view that only exchanges
+/// them keeps waiting past the bound and recovers once it reports.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_that_only_answers_protocol_pings_stays_open_and_recovers() {
+    let _gate = pty_test_lock();
+    let (rig, mut view, generation, start, received) = released_view().await;
+    let until = tokio::time::Instant::now() + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(2);
+    let mut ping = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut pongs = 0usize;
+    loop {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(until) => break,
+            frame = view.next() => match frame {
+                Some(Ok(ClientMessage::Pong(_))) => pongs += 1,
+                Some(Ok(ClientMessage::Text(text))) => {
+                    let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                    if let Some("error" | "session" | "exit" | "closed") = frame["type"].as_str() {
+                        panic!("a view waiting for its client gets no {frame}");
+                    }
+                }
+                other => panic!(
+                    "a released view that only answers protocol pings stays open past \
+                     the bound: {other:?} after {pongs} pongs"
+                ),
+            },
+            _ = ping.tick() => {
+                bounded("send a protocol ping", view.send(ClientMessage::Ping(Vec::new().into())))
+                    .await
+                    .expect("protocol ping writes");
+            }
+        }
+    }
+    assert!(pongs > 0, "fixture: the server answered the protocol pings");
+    assert_recovers_on_its_socket(&mut view, generation, start + received).await;
+    rig.handle.send_input(b"\n");
+}
+
+/// A client whose frames are ready at every poll of the socket loop, here a
+/// flood of acknowledgements of another generation, which move nothing
+/// and get no reply, is closed at the bound all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_view_flooding_frames_is_closed_within_the_bound() {
+    let _gate = pty_test_lock();
+    let (rig, view, generation, start, received) = released_view().await;
+    let (mut sink, mut stream) = view.split();
+    let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let flooded_at = tokio::time::Instant::now();
+    let flood = tokio::spawn({
+        let frames = frames.clone();
+        async move {
+            let frame =
+                json!({"type": "ack", "generation": generation + 1, "seq": start + received})
+                    .to_string();
+            loop {
+                for _ in 0..64 {
+                    if sink
+                        .feed(ClientMessage::Text(frame.clone().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    frames.fetch_add(1, Ordering::Relaxed);
+                }
+                if sink.flush().await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let deadline = flooded_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK;
+    let closed_at = loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Err(_) => break None,
+            Ok(Some(Ok(ClientMessage::Close(frame)))) => {
+                assert_stall_close(frame.as_ref());
+                break Some(tokio::time::Instant::now());
+            }
+            Ok(Some(Ok(ClientMessage::Text(text)))) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                panic!("a flooding view waiting for its client gets no {frame}");
+            }
+            Ok(Some(Ok(other))) => {
+                panic!("a flooding view is sent nothing but its close: {other:?}")
+            }
+            Ok(Some(Err(error))) => panic!("the socket ended without a close frame: {error}"),
+            Ok(None) => panic!("the socket ended without a close frame"),
+        }
+    };
+    flood.abort();
+    let frames = frames.load(Ordering::Relaxed);
+    let Some(closed_at) = closed_at else {
+        panic!(
+            "a released view flooding frames is closed within {NO_PROGRESS_LIMIT:?} \
+             (+{SHORT_ACK_SLACK:?}): still open after {frames} frames"
+        );
+    };
+    assert!(
+        closed_at - flooded_at >= NO_PROGRESS_LIMIT,
+        "the client gets the whole bound from its first frame: closed after {:?}, {frames} frames",
+        closed_at - flooded_at
+    );
     rig.handle.send_input(b"\n");
 }
 

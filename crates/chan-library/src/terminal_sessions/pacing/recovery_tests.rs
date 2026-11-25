@@ -79,6 +79,23 @@ fn fresh_attach_keeps_the_enables_only_prelude() {
     assert_eq!(session.attach(None).mode_reassert, b"\x1b[?1000h");
 }
 
+#[test]
+fn a_fresh_view_past_an_overflowed_ring_keeps_the_enables_only_prelude() {
+    // A fresh view dials at 0, so an overflowed ring gives it a missed
+    // count. It never parsed the lost span, so it has no screen whose
+    // modes that span could have reset.
+    let session = test_session_with_ring(32);
+    session.record_output(b"\x1b[?2004h");
+    session.record_output(b"more shell output than the ring can hold, twice over");
+    let fresh = session.attach(Some(0));
+    assert!(fresh.missed_bytes > 0, "fixture: the ring overflowed");
+    assert_eq!(
+        String::from_utf8_lossy(&fresh.mode_reassert),
+        "\x1b[?2004h",
+        "a fresh view past an overflowed ring gets the enables-only prelude"
+    );
+}
+
 fn assert_lossless_live_sequence(prefix: &[u8], continuation: &[u8]) {
     let session = test_session_with_ring(1024);
     let attached = attach_acked(&session, None);
