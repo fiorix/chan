@@ -2359,10 +2359,9 @@
   /* Single-shot wobble fires on the newly focused pane when the
      active pane CHANGES (keyboard/click pane-switch via
      setActivePane, plus split / close / pane-move which all land
-     on a focused pane). Outer halo pulse via box-shadow only - no
-     transform on `.pane` so xterm's WebGL glyph atlas is
-     unaffected during focus changes. Same easeOutBack curve as the
-     tab-pill / right-click-menu pop. The halo expands to ~6px
+     on a focused pane). Outer halo pulse via box-shadow only. Same
+     easeOutBack curve as the tab-pill / right-click-menu pop. The
+     halo expands to ~6px
      into the inter-pane margin then dissipates back to no halo;
      the steady-state focus ring (the border) stays put underneath
      throughout, so the visual reads as "the focus ring just
