@@ -5,11 +5,11 @@ import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { isTerminalPasteChord } from "./clipboardChord";
 import { createTerminalKeyboardProtocolState, terminalMetaKeyBytes } from "./keymap";
-import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./keyEncoding";
+import { createKeydownState, decideKeydown, type KeyPlatform } from "./keyEncoding";
 
-const LINUX: XtermPlatform = { isMac: false, isWindows: false };
-const MAC: XtermPlatform = { isMac: true, isWindows: false };
-const WINDOWS: XtermPlatform = { isMac: false, isWindows: true };
+const LINUX: KeyPlatform = { isMac: false, isWindows: false };
+const MAC: KeyPlatform = { isMac: true, isWindows: false };
+const WINDOWS: KeyPlatform = { isMac: false, isWindows: true };
 
 type Init = KeyboardEventInit & { keyCode?: number };
 
@@ -25,7 +25,7 @@ function action(init: Init, platform = LINUX, chanBytes: string | null = null) {
   return ghosttyKeydownAction(
     keydown(init),
     { platform, applicationCursorMode: false, rows: 24, chanBytes },
-    createXtermKeydownState(),
+    createKeydownState(),
   );
 }
 
@@ -99,7 +99,7 @@ describe("ghosttyKeydownAction", () => {
       ghosttyKeydownAction(
         new KeyboardEvent("keyup", { key: "ArrowLeft" }),
         { platform: LINUX, applicationCursorMode: false, rows: 24, chanBytes: null },
-        createXtermKeydownState(),
+        createKeydownState(),
       ),
     ).toEqual({ kind: "ghostty" });
   });
@@ -113,8 +113,8 @@ describe("ghosttyKeydownAction", () => {
 });
 
 /// One state across a key sequence, as the listener keeps it.
-function sequence(platform: XtermPlatform, inits: Init[]) {
-  const state = createXtermKeydownState();
+function sequence(platform: KeyPlatform, inits: Init[]) {
+  const state = createKeydownState();
   return inits.map((init) =>
     ghosttyKeydownAction(keydown(init), { platform, applicationCursorMode: false, rows: 24, chanBytes: null }, state),
   );
@@ -650,7 +650,7 @@ describe("delete input on the ghostty host", () => {
 type Outcome = { data: string; scrolled: number; prevented: boolean };
 
 /// What a ghostty terminal does with a keydown under chan's listener.
-function ghostty(init: Init, platform: XtermPlatform, applicationCursorMode = false): Outcome {
+function ghostty(init: Init, platform: KeyPlatform, applicationCursorMode = false): Outcome {
   const host = document.createElement("div");
   const textarea = document.createElement("textarea");
   host.append(textarea);
@@ -690,11 +690,11 @@ function ghostty(init: Init, platform: XtermPlatform, applicationCursorMode = fa
 
 /// What chan's xterm.js terminal sends for the same keydown: chan's key
 /// handler, then xterm.js, with the browser typing the key it passes on.
-function xterm(init: Init, platform: XtermPlatform, applicationCursorMode = false): Omit<Outcome, "prevented"> {
+function xterm(init: Init, platform: KeyPlatform, applicationCursorMode = false): Omit<Outcome, "prevented"> {
   const ev = keydown(init);
   const chan = terminalMetaKeyBytes(ev, createTerminalKeyboardProtocolState());
   if (chan !== null) return { data: chan, scrolled: 0 };
-  const decision = xtermKeydown(ev, { applicationCursorMode, platform, rows: 24 }, createXtermKeydownState());
+  const decision = decideKeydown(ev, { applicationCursorMode, platform, rows: 24 }, createKeydownState());
   switch (decision.kind) {
     case "send":
       return { data: decision.data, scrolled: 0 };
@@ -756,7 +756,7 @@ const KEYS: Key[] = [
   { code: "Digit6", key: "6", keyCode: 54, shifted: "^", option: "§", optionShifted: "ﬂ" },
 ];
 
-function event(k: Key, mods: number, platform: XtermPlatform): Init {
+function event(k: Key, mods: number, platform: KeyPlatform): Init {
   const shiftKey = (mods & 1) !== 0;
   const altKey = (mods & 2) !== 0;
   const ctrlKey = (mods & 4) !== 0;
@@ -768,7 +768,7 @@ function event(k: Key, mods: number, platform: XtermPlatform): Init {
   return { key, code: k.code, keyCode: k.keyCode, shiftKey, altKey, ctrlKey, metaKey };
 }
 
-function label(init: Init, platform: XtermPlatform): string {
+function label(init: Init, platform: KeyPlatform): string {
   const mods = [init.ctrlKey && "Ctrl", init.altKey && "Alt", init.shiftKey && "Shift", init.metaKey && "Meta"];
   return `${platform.isMac ? "mac" : "linux"} ${[...mods.filter(Boolean), init.code].join("+")}`;
 }

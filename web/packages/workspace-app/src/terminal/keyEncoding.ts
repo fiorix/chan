@@ -1,6 +1,6 @@
 // xterm.js's keyboard encoding, ported so a terminal on another engine sends
 // the bytes an xterm.js terminal sends for the same keydown. The evaluator is
-// xterm.js 6.0.0's src/common/input/Keyboard.ts; `xtermKeydown` is the part
+// xterm.js 6.0.0's src/common/input/Keyboard.ts; `decideKeydown` is the part
 // of CoreBrowserTerminal._keyDown that decides what happens to its result.
 // keyEncoding.test.ts compares the evaluator with xterm.js's own over every
 // key code and modifier combination.
@@ -61,16 +61,16 @@ const KEYCODE_KEY_MAPPINGS: Record<number, [string, string]> = {
 };
 
 /// The fields of a keydown the evaluator reads.
-export type XtermKeyInput = Pick<
+export type KeyInput = Pick<
   KeyboardEvent,
   "altKey" | "ctrlKey" | "shiftKey" | "metaKey" | "keyCode" | "key" | "code"
 >;
 
 /// xterm.js's KeyboardResultType, by name.
-export type XtermKeyResultType = "send" | "select-all" | "page-up" | "page-down";
+export type KeyResultType = "send" | "select-all" | "page-up" | "page-down";
 
-export type XtermKeyResult = {
-  type: XtermKeyResultType;
+export type KeyResult = {
+  type: KeyResultType;
   cancel: boolean;
   key: string | undefined;
 };
@@ -103,12 +103,12 @@ const F5_TO_F12: Record<number, number> = {
 };
 
 export function evaluateKeyboardEvent(
-  ev: XtermKeyInput,
+  ev: KeyInput,
   applicationCursorMode: boolean,
   isMac: boolean,
   macOptionIsMeta: boolean,
-): XtermKeyResult {
-  const result: XtermKeyResult = { type: "send", cancel: false, key: undefined };
+): KeyResult {
+  const result: KeyResult = { type: "send", cancel: false, key: undefined };
   const modifiers =
     (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0) | (ev.metaKey ? 8 : 0);
   switch (ev.keyCode) {
@@ -249,7 +249,7 @@ export function evaluateKeyboardEvent(
   return result;
 }
 
-export type XtermPlatform = { isMac: boolean; isWindows: boolean };
+export type KeyPlatform = { isMac: boolean; isWindows: boolean };
 
 /// What xterm.js does with a keydown that its custom key handler declined.
 /// - `send`: it sends `data` as user input and cancels the event.
@@ -259,7 +259,7 @@ export type XtermPlatform = { isMac: boolean; isWindows: boolean };
 ///   the input or composition events. `deadKey` marks a pass for a pending
 ///   dead key, whose text the browser composes.
 /// - `composing`: an IME owns the key.
-export type XtermKeydown =
+export type KeydownDecision =
   | { kind: "send"; data: string }
   | { kind: "scroll"; lines: number }
   | { kind: "select-all" }
@@ -267,27 +267,27 @@ export type XtermKeydown =
   | { kind: "composing" };
 
 /// State xterm.js carries from one keydown to the next.
-export type XtermKeydownState = {
+export type KeydownState = {
   /// A dead key (or AltGraph) was pressed and its text is still to come.
   deadKey: boolean;
 };
 
-export function createXtermKeydownState(): XtermKeydownState {
+export function createKeydownState(): KeydownState {
   return { deadKey: false };
 }
 
-export type XtermKeydownInput = XtermKeyInput &
+export type KeydownInput = KeyInput &
   Pick<KeyboardEvent, "isComposing" | "getModifierState">;
 
 /// The decisions CoreBrowserTerminal._keyDown makes around the evaluator, for
 /// xterm.js with `macOptionIsMeta` on and screen reader mode off, as chan
 /// runs it. The composition helper's test is reduced to the event's own
 /// composing marks.
-export function xtermKeydown(
-  ev: XtermKeydownInput,
-  opts: { applicationCursorMode: boolean; platform: XtermPlatform; rows: number },
-  state: XtermKeydownState,
-): XtermKeydown {
+export function decideKeydown(
+  ev: KeydownInput,
+  opts: { applicationCursorMode: boolean; platform: KeyPlatform; rows: number },
+  state: KeydownState,
+): KeydownDecision {
   const { isMac, isWindows } = opts.platform;
   const macOptionIsMeta = true;
   const ignoreComposition = isMac && macOptionIsMeta && ev.altKey;

@@ -23,12 +23,12 @@
 //   native menu handling still run.
 
 import {
-  createXtermKeydownState,
+  createKeydownState,
   evaluateKeyboardEvent,
-  xtermKeydown,
-  type XtermKeydownInput,
-  type XtermKeydownState,
-  type XtermPlatform,
+  decideKeydown,
+  type KeydownInput,
+  type KeydownState,
+  type KeyPlatform,
 } from "./keyEncoding";
 
 export type GhosttyKeyAction =
@@ -68,7 +68,7 @@ function isOptionAscii(key: string): boolean {
 }
 
 export type GhosttyKeyContext = {
-  platform: XtermPlatform;
+  platform: KeyPlatform;
   applicationCursorMode: boolean;
   rows: number;
   /// What chan's xterm.js key handler sends for this event ahead of xterm.js,
@@ -78,9 +78,9 @@ export type GhosttyKeyContext = {
 
 /// Decide one keydown with chan's key mapping and xterm.js's encoding.
 export function ghosttyKeydownAction(
-  ev: XtermKeydownInput & Pick<KeyboardEvent, "type">,
+  ev: KeydownInput & Pick<KeyboardEvent, "type">,
   ctx: GhosttyKeyContext,
-  state: XtermKeydownState,
+  state: KeydownState,
 ): GhosttyKeyAction {
   if (ev.type !== "keydown") return { kind: "ghostty" };
   // An IME owns the key; ghostty-web's own keydown returns early for it and
@@ -119,7 +119,7 @@ export function ghosttyKeydownAction(
     state.deadKey = false;
     return { kind: "browser" };
   }
-  const decision = xtermKeydown(
+  const decision = decideKeydown(
     ev,
     { applicationCursorMode: ctx.applicationCursorMode, platform: ctx.platform, rows: ctx.rows },
     state,
@@ -162,7 +162,7 @@ export function ghosttyKeydownAction(
 /// What chan's xterm.js path sends for the key behind a delete input:
 /// Backspace, Delete, and their word chords (Option on macOS, where chan
 /// treats Option as Meta, and Ctrl elsewhere). Null for any other input.
-export function ghosttyDeleteInputBytes(inputType: string, platform: XtermPlatform): string | null {
+export function ghosttyDeleteInputBytes(inputType: string, platform: KeyPlatform): string | null {
   switch (inputType) {
     case "deleteContentBackward":
       return "\x7f";
@@ -188,7 +188,7 @@ export type GhosttyKeyTerminal = {
 
 export type GhosttyKeyDeps = {
   terminal: GhosttyKeyTerminal;
-  platform(): XtermPlatform;
+  platform(): KeyPlatform;
   /// A chord chan acts on itself (copy, paste, a shortcut that escapes the
   /// terminal, closing an exited tab). Its handling stays in the custom key
   /// handler ghostty-web calls.
@@ -205,7 +205,7 @@ const DECCKM = 1;
 /// Install the parity listeners on `host`, the element ghostty-web was opened
 /// in. Returns their removal.
 export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps): () => void {
-  const state = createXtermKeydownState();
+  const state = createKeydownState();
   let pendingText: string | null = null;
   let composing = false;
   // A key left to the browser whose bytes go with its line-break input. If
