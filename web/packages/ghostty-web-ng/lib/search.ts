@@ -325,13 +325,19 @@ export class SearchOwner {
    */
   private ordered(measure: boolean): boolean {
     if (this.complete) return true;
-    if (this.head === null) {
-      if (!measure) return true;
-      this.head = this.activeCount();
-    }
-    if (this.readCursor > this.head || this.head === 0) return true;
-    this.orderedAt ??= this.orderedFrom(this.head);
+    if (this.head === null && !measure) return true;
+    const head = this.activeEntries();
+    if (this.readCursor > head || head === 0) return true;
+    this.orderedAt ??= this.orderedFrom(head);
     return this.readCursor >= this.orderedAt;
+  }
+
+  // The count of the core's active-area entries, read where output made it
+  // unknown. The core lists its active area first, so a search that lists
+  // nothing has none and needs no scratch search.
+  private activeEntries(): number {
+    this.head ??= this.search!.state().total === 0 ? 0 : this.activeCount();
+    return this.head;
   }
 
   private activeCount(): number {
@@ -368,22 +374,26 @@ export class SearchOwner {
   }
 
   /**
-   * The newest match, read from the core's listing, while the list placed
-   * so far is not the head of the whole one; null once it is, where its
-   * first entry is the newest. The active-area entries list their pages
+   * The newest match, read from the core's listing while placement has
+   * not passed the active-area entries, whatever shape they list; null
+   * once it has, where the placed list's first entry is the newest, and
+   * where the active area holds no match. Those entries list their pages
    * oldest first, each newest first, so the last page's entries are the
    * ones not older than the last entry, and the first of them is the
-   * newest; a binary search finds it. An entry the core cannot place gives
-   * null, which leaves the press to the ordering rule.
+   * newest (entry 0 where they list one page); a binary search finds it.
+   * An entry the core cannot place gives null, which leaves the press to
+   * the ordering rule.
    */
   private listedNewest(): MatchRange | null {
-    if (this.ordered(true)) return null;
+    if (this.complete) return null;
+    const head = this.activeEntries();
+    if (head === 0 || this.readCursor > head) return null;
     const search = this.search!;
-    const last = search.matchAt(this.head! - 1);
+    const last = search.matchAt(head - 1);
     if (!last) return null;
     const oldest = highlight(last);
     let lo = 0;
-    let hi = this.head! - 1;
+    let hi = head - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       const range = search.matchAt(mid);
@@ -578,8 +588,9 @@ export class SearchOwner {
         continue;
       }
       // From no active match older lands on the newest, read from the
-      // core's listing while the placed list is not yet the head of the
-      // whole one, so no count of placed entries decides it.
+      // core's listing while placement has not passed the active-area
+      // entries, so neither the order of the matches placed so far nor a
+      // frame that placed none holds it back.
       const newest = direction === 'older' && this.index === null ? this.listedNewest() : null;
       if (newest) {
         this.waiting.shift();
