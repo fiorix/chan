@@ -97,6 +97,7 @@ function loadGraph(): Promise<void> {
       if (mode === "first") {
         graphData.view = { nodes: [], edges: [] };
         graphData.partial = true;
+        graphData.tree = null;
       }
       const view = await api.graphStream(
         {},
