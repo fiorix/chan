@@ -24,8 +24,13 @@ type Direction = 'older' | 'newer';
 type Waiting = { direction: Direction; at: number; newest?: boolean };
 // A window of the list placed before a write, in the rows of the moment it
 // was read: `ranges[0]` is entry `offset` of `total`, `index` the active
-// match's entry, `history` the history rows then.
-type Before = { ranges: HighlightRange[]; offset: number; total: number; complete: boolean; index: number; history: number };
+// match's entry, `history` the history rows then, and `anchor` a cell
+// tracked on the last of them (null with no history), which only pruning
+// moves.
+type Before = {
+  ranges: HighlightRange[]; offset: number; total: number; complete: boolean; index: number; history: number;
+  anchor: TerminalCoreTrackedCell | null;
+};
 type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell };
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
@@ -61,8 +66,10 @@ export class SearchOwner {
   // The last list that placed the active match, kept across the writes
   // since, so a press can step from it before placement reaches the match.
   private before: Before | null = null;
-  // History rows when the list being placed was read.
+  // History rows when the list being placed was read, and a cell tracked on
+  // the last of them for the window taken from that list.
   private listHistory = 0;
+  private listAnchor: TerminalCoreTrackedCell | null = null;
   // The primary screen's active match while the alternate screen shows.
   private parked: Parked | null = null;
   private backlogCell: TerminalCoreTrackedCell | null = null;
@@ -154,9 +161,9 @@ export class SearchOwner {
     if (!this.search) return;
     // Reflow moves rows unevenly and the other screen has other rows, so
     // only a write on the same screen keeps a list to step from.
-    if (switched || kind === 'resize') this.before = null;
-    else if (this.kept && this.index !== null) this.before = this.window(this.index);
-    this.listHistory = this.core.getScrollbackLength();
+    if (switched || kind === 'resize') this.setBefore(null);
+    else if (this.kept && this.index !== null) this.setBefore(this.window(this.index));
+    this.markList();
     this.dirty = true;
     // A resize resets the core's scan; after a write its listing has the
     // history it holds behind a new active area of unknown length.
@@ -195,7 +202,7 @@ export class SearchOwner {
     this.needle = query;
     this.complete = false;
     this.fresh = true;
-    this.listHistory = this.core.getScrollbackLength();
+    this.markList();
     this.markBacklog();
     return true;
   }
@@ -210,6 +217,8 @@ export class SearchOwner {
     this.parked = null;
     this.backlogCell?.free();
     this.backlogCell = null;
+    this.listAnchor?.free();
+    this.listAnchor = null;
     this.highlights.clear('search-all');
     this.needle = '';
     this.chunks = [];
@@ -275,6 +284,16 @@ export class SearchOwner {
 
   private markBacklog(): void {
     this.backlogCell = this.retrack(this.backlogCell, this.core.getScrollbackLength(), 0);
+  }
+
+  private markList(): void {
+    this.listHistory = this.core.getScrollbackLength();
+    if (this.listHistory > 0) {
+      this.listAnchor = this.retrack(this.listAnchor, this.listHistory - 1, 0);
+    } else {
+      this.listAnchor?.free();
+      this.listAnchor = null;
+    }
   }
 
   private schedule(): void {
@@ -428,8 +447,8 @@ export class SearchOwner {
         }
         if (next === null) break;
         this.waiting.shift();
-        this.keep(next);
         this.index = this.indexOf(next) ?? null;
+        this.keep(next);
         selected = true;
         continue;
       }
@@ -455,22 +474,22 @@ export class SearchOwner {
    * The active match's neighbour in the list placed before the writes that
    * left its index unplaced, where it is now; `newest` when that list was
    * complete and the press wraps from its oldest match; null when the
-   * neighbour is unknown. History rows cannot change, and pruning moves
-   * every row by the count it removed, which the active match's own move
-   * measures. A neighbour that was on the screen then may hold other text.
+   * neighbour is unknown. Only pruning moves a history row, every row by
+   * the count it removed, which the window's anchor measures; output
+   * inside the screen, a scroll region's included, moves screen rows and
+   * may rewrite them, so a neighbour that was on the screen is unknown.
+   * Erasing the history drops the anchor with it.
    */
   private stepBefore(direction: Direction): MatchRange | 'newest' | null {
     const before = this.before;
-    const range = this.keptRange();
-    if (!before || !range) return null;
-    const was = before.ranges[before.index - before.offset];
-    const shift = was.start.absoluteRow - range.startRow;
-    if (shift < 0 || was.end.absoluteRow - shift !== range.endRow ||
-      was.start.col !== range.startCol || was.end.col !== range.endCol) return null;
+    if (!before) return null;
     const next = before.index + (direction === 'older' ? 1 : -1);
     if (next === before.total && before.complete) return 'newest';
     const target = before.ranges[next - before.offset];
-    if (!target || target.end.absoluteRow >= before.history || target.start.absoluteRow < shift) return null;
+    const anchor = before.anchor?.point();
+    if (!target || !anchor || target.end.absoluteRow >= before.history) return null;
+    const shift = before.history - 1 - anchor.row;
+    if (target.start.absoluteRow < shift) return null;
     before.index = next;
     return {
       startRow: target.start.absoluteRow - shift, startCol: target.start.col,
@@ -483,7 +502,15 @@ export class SearchOwner {
     const to = Math.min(this.total, index + BEFORE_REACH + 1);
     const ranges: HighlightRange[] = [];
     for (let i = from; i < to; i++) ranges.push(this.at(i));
-    return { ranges, offset: from, total: this.total, complete: this.complete, index, history: this.listHistory };
+    // The window takes the list's anchor; the next list tracks its own.
+    const anchor = this.listAnchor;
+    this.listAnchor = null;
+    return { ranges, offset: from, total: this.total, complete: this.complete, index, history: this.listHistory, anchor };
+  }
+
+  private setBefore(next: Before | null): void {
+    this.before?.anchor?.free();
+    this.before = next;
   }
 
   // The primary screen's active match waits out the alternate screen in its
@@ -535,7 +562,7 @@ export class SearchOwner {
     this.keptStart = this.keptEnd = null;
     this.kept = null;
     this.index = null;
-    this.before = null;
+    this.setBefore(null);
     this.highlights.clear('search-active');
   }
 
