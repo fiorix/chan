@@ -5,7 +5,7 @@ import {
   xtermKeydown,
   type XtermKeyInput,
   type XtermKeyResultType,
-} from "./xtermKeyboard";
+} from "./keyEncoding";
 
 type Reference = (
   ev: XtermKeyInput,

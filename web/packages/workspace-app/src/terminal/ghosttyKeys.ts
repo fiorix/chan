@@ -29,7 +29,7 @@ import {
   type XtermKeydownInput,
   type XtermKeydownState,
   type XtermPlatform,
-} from "./xtermKeyboard";
+} from "./keyEncoding";
 
 export type GhosttyKeyAction =
   | { kind: "send"; data: string }

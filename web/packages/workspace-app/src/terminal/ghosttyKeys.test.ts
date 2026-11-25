@@ -5,7 +5,7 @@ import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { isTerminalPasteChord } from "./clipboardChord";
 import { createTerminalKeyboardProtocolState, terminalMetaKeyBytes } from "./keymap";
-import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./xtermKeyboard";
+import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./keyEncoding";
 
 const LINUX: XtermPlatform = { isMac: false, isWindows: false };
 const MAC: XtermPlatform = { isMac: true, isWindows: false };

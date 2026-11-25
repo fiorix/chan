@@ -2,7 +2,7 @@
 // the bytes an xterm.js terminal sends for the same keydown. The evaluator is
 // xterm.js 6.0.0's src/common/input/Keyboard.ts; `xtermKeydown` is the part
 // of CoreBrowserTerminal._keyDown that decides what happens to its result.
-// xtermKeyboard.test.ts compares the evaluator with xterm.js's own over every
+// keyEncoding.test.ts compares the evaluator with xterm.js's own over every
 // key code and modifier combination.
 //
 // Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)

@@ -589,7 +589,7 @@ test("native input recorder controls without a browser or server", async (t) => 
 
   {
     const productDir = wtFile("web/packages/workspace-app/src/terminal");
-    const needed = ["ghosttyKeys.ts", "xtermKeyboard.ts", "keymap.ts", "clipboardChord.ts"];
+    const needed = ["ghosttyKeys.ts", "keyEncoding.ts", "keymap.ts", "clipboardChord.ts"];
     if (!existsSync(join(productDir, "ghosttyKeys.ts"))) {
       note(`product evaluators absent at ${productDir}: anchor check skipped (host-only; set NATIVE_INPUT_PRODUCT)`);
     } else {
@@ -602,7 +602,7 @@ test("native input recorder controls without a browser or server", async (t) => 
       }
       const href = (f) => pathToFileURL(join(dir, f)).href;
       const { ghosttyKeydownAction } = await import(href("ghosttyKeys.ts"));
-      const { xtermKeydown, createXtermKeydownState } = await import(href("xtermKeyboard.ts"));
+      const { xtermKeydown, createXtermKeydownState } = await import(href("keyEncoding.ts"));
       const { controlSlashBytes, terminalMetaKeyBytes } = await import(href("keymap.ts"));
       const { isTerminalPasteChord } = await import(href("clipboardChord.ts"));
       const PLATFORM = { isMac: false, isWindows: false };

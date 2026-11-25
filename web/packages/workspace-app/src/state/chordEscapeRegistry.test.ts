@@ -7,7 +7,7 @@ import {
   shouldEscapeTerminal,
 } from "./shortcuts";
 import { ghosttyKeydownAction } from "../terminal/ghosttyKeys";
-import { createXtermKeydownState } from "../terminal/xtermKeyboard";
+import { createXtermKeydownState } from "../terminal/keyEncoding";
 
 // Chord-escape registry. Global chords that must reach the App keymap even
 // from a focused terminal (Command launcher, Settings, Search, New terminal,
