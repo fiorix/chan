@@ -4289,6 +4289,93 @@ mod tests {
         }
     }
 
+    // A read-only folder below the filesystem layer's depth, whose node only
+    // the tree layer makes, carries its class and is a dead end, under the
+    // listing cap and over it: an indexed note inside it is joined to it by
+    // no `contains` edge, while one in an open folder beside it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_folder_below_the_filesystem_layers_depth_is_classified_and_a_dead_end() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "a/b/locked/hidden.md", b"# Hidden\n");
+        put(root.path(), "a/b/open/seen.md", b"# Seen\n");
+        workspace.index_file("a/b/locked/hidden.md").unwrap();
+        workspace.index_file("a/b/open/seen.md").unwrap();
+        let locked = root.path().join("a/b/locked");
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+
+        let class_of = |view: &GraphViewResponse, folder: &str| {
+            view.nodes.iter().find_map(|node| match node {
+                GraphNodeView::Directory { id, path_class, .. } if id == folder => {
+                    Some(path_class.clone())
+                }
+                _ => None,
+            })
+        };
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            let locked_class = class_of(&view, "directory:a/b/locked");
+            assert!(
+                matches!(
+                    &locked_class,
+                    Some(Some(class)) if class.permission == PathPermission::ReadOnly
+                ),
+                "{when}, the deep read-only folder's class: {locked_class:?}"
+            );
+            let open_class = class_of(&view, "directory:a/b/open");
+            assert!(
+                matches!(open_class, Some(Some(_))),
+                "{when}, the deep open folder's class: {open_class:?}"
+            );
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "contains"
+                    && edge.source == "directory:a/b/open"
+                    && edge.target == "a/b/open/seen.md"),
+                "fixture: {when}, the note in the open folder is not joined to it"
+            );
+            assert!(
+                !view
+                    .edges
+                    .iter()
+                    .any(|edge| edge.kind == "contains" && edge.target == "a/b/locked/hidden.md"),
+                "{when}, the note inside the deep read-only folder is joined to it"
+            );
+        }
+    }
+
     // A file the index holds below a folder the scope has left since (a
     // stale index, until the reconcile it requested runs) has a node and no
     // folder under the cap, since the listing lists neither. Over the cap the
@@ -4461,6 +4548,40 @@ mod tests {
         }
     }
 
+    // A source file only the filesystem layer holds (nothing indexes or
+    // links it) carries its report bucket in the answer: that layer draws
+    // it with none, and the tree layer's merge fills it on the held node.
+    #[test]
+    fn a_file_only_the_filesystem_layer_holds_carries_its_report_bucket() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(
+            root.path(),
+            "src/lib.rs",
+            b"pub fn f() -> u32 {\n    1\n}\n",
+        );
+        workspace.index_file("top.md").unwrap();
+        let mut emit = None;
+        let view = build_graph_view(
+            Arc::clone(&workspace),
+            GraphParams {
+                scope: GraphScope::Workspace,
+                path: String::new(),
+                depth: 6,
+            },
+            &mut emit,
+        )
+        .unwrap();
+        let bucket = view.nodes.iter().find_map(|node| match node {
+            GraphNodeView::File { id, bucket, .. } if id == "src/lib.rs" => Some(bucket.clone()),
+            _ => None,
+        });
+        assert!(
+            matches!(bucket, Some(Some(_))),
+            "the source file the filesystem layer holds has no report bucket: {bucket:?}"
+        );
+    }
+
     /// The shared graph's load of `app` in its JSON form, the `tree` of each
     /// `meta` of its stream form in order (`null` where it is absent), and
     /// whether every `meta` comes before the stream's first `nodes` event.
@@ -4599,6 +4720,151 @@ mod tests {
             ahead,
             "with the folders over the cap too, a meta follows the first node batch"
         );
+    }
+
+    // Over the listing cap, while the build reads and walks for longer than
+    // the keep-alive (held here after the opening `meta`, as a long walk
+    // holds it), the client reads empty `nodes` events and no node ahead of
+    // the `meta` that carries the mark: on the wire, `meta`, empty batches,
+    // the `meta` with `tree`, then the nodes.
+    #[tokio::test]
+    async fn over_the_listing_cap_no_node_reaches_a_client_ahead_of_the_streams_tree_mark() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let held = stream_hold::hold(workspace.root());
+        stream_hold::KEEPALIVE
+            .with(|period| period.set(Some(std::time::Duration::from_millis(100))));
+
+        let request = axum::http::Request::builder()
+            .uri("/api/graph?stream=1")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        let held_lines = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while text.lines().count() < 3 {
+                let chunk = body
+                    .next()
+                    .await
+                    .expect("the stream ended while the server was held")
+                    .expect("a body chunk");
+                text.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        })
+        .await;
+        stream_hold::KEEPALIVE.with(|period| period.set(None));
+        assert!(held_lines.is_ok(), "the held stream went silent: {text:?}");
+        drop(held);
+        while let Some(chunk) = body.next().await {
+            text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+        drop(limit);
+
+        let events = graph_stream_events(&text);
+        let batch = |event: &serde_json::Value| {
+            (event["type"] == "nodes").then(|| event["nodes"].as_array().unwrap().len())
+        };
+        let order: Vec<String> = events
+            .iter()
+            .map(|event| match event["type"].as_str().unwrap() {
+                "meta" => format!("meta(tree={})", event["tree"]),
+                "nodes" => format!("nodes({})", batch(event).unwrap()),
+                "edges" => format!("edges({})", event["edges"].as_array().unwrap().len()),
+                other => other.to_string(),
+            })
+            .collect();
+        let metas: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["type"] == "meta")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(metas.len(), 2, "the stream's metas: {order:?}");
+        let mark = metas[1];
+        assert_eq!(
+            (metas[0], &events[0]["tree"]),
+            (0, &serde_json::Value::Null),
+            "the stream opens with its meta, with no tree: {order:?}"
+        );
+        assert_eq!(
+            events[mark]["tree"], "folders",
+            "the second meta's tree: {order:?}"
+        );
+        assert!(
+            mark > 1,
+            "fixture: the keep-alive sent no empty batch ahead of the mark: {order:?}"
+        );
+        assert!(
+            events[1..mark].iter().all(|event| batch(event) == Some(0)),
+            "ahead of the mark the client reads something other than empty batches: {order:?}"
+        );
+        assert!(
+            events[mark + 1..]
+                .iter()
+                .any(|event| batch(event).is_some_and(|len| len > 0)),
+            "fixture: no node follows the mark: {order:?}"
+        );
+        assert_eq!(
+            events.last().map(|event| &event["type"]),
+            Some(&serde_json::json!("done")),
+            "{order:?}"
+        );
+    }
+
+    // The mark is the workspace scope's alone: over the listing cap a
+    // file-scope answer carries no `tree`, and a directory-scope or
+    // file-scope stream sends its one `meta`, with none.
+    #[tokio::test]
+    async fn over_the_listing_cap_a_file_scope_answer_and_a_scoped_stream_say_nothing_of_the_tree()
+    {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let file: serde_json::Value = serde_json::from_str(
+            &graph_route_body(&app, "/api/graph?scope=file&path=notes/index.md").await,
+        )
+        .unwrap();
+        let directory_stream =
+            graph_route_body(&app, "/api/graph?scope=directory&path=notes&stream=1").await;
+        let file_stream =
+            graph_route_body(&app, "/api/graph?scope=file&path=notes/index.md&stream=1").await;
+        drop(limit);
+
+        assert!(
+            file["nodes"]
+                .as_array()
+                .is_some_and(|nodes| nodes.iter().any(|node| node["id"] == "notes/index.md")),
+            "fixture: the file-scope answer does not hold its file: {file}"
+        );
+        assert_eq!(
+            file["tree"],
+            serde_json::Value::Null,
+            "over the cap, the file-scope answer's tree"
+        );
+        for (scope, stream) in [("directory", directory_stream), ("file", file_stream)] {
+            let metas: Vec<serde_json::Value> = graph_stream_events(&stream)
+                .into_iter()
+                .filter(|event| event["type"] == "meta")
+                .map(|event| event["tree"].clone())
+                .collect();
+            assert_eq!(
+                metas,
+                vec![serde_json::Value::Null],
+                "over the cap, the {scope}-scope stream's metas"
+            );
+        }
     }
 
     // A graph load bounds its directories-only walk at the listing cap
