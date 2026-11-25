@@ -164,6 +164,12 @@ function olderRanges(term: Terminal, search: Search, count: number) {
 // 115, so its active-area search takes in the page above and lists that
 // page's matches first.
 const paged = (needles: number, lines = 120) => Array.from({ length: lines }, () => 'needle '.repeat(needles).padEnd(300, 'x')).join('\r\n');
+// 240 such lines with one match each on a 20-row screen: the screen spans
+// the last two pages (rows 460 to 479, the last page opens at row 462) and
+// the page above them soft-wraps into them, so the core lists three pages,
+// oldest first. Lines 221 to 230 hold no needle, so the middle page's
+// newest match, row 440, is in the history.
+const threePaged = Array.from({ length: 240 }, (_, i) => (i <= 220 || i >= 231 ? 'needle ' : 'plain ').padEnd(300, 'x')).join('\r\n');
 // The first match the core itself lists, in its own order.
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
@@ -319,6 +325,24 @@ describe('widget search', () => {
     }
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
     expect(active(term)).toEqual([newest]);
+  });
+
+  test('find lands on the newest where the core lists three pages, from inside the middle one', async () => {
+    const { term } = await create(threePaged, 200, 20, 10_000_000);
+    const rows = coreRows(term, 'needle', 230);
+    expect(rows.slice(0, 116).every(row => row <= 230), 'the core lists the first page first').toBe(true);
+    expect(rows.slice(116, 221).every(row => row >= 232 && row <= 440), 'then the page the screen starts in').toBe(true);
+    expect(rows.slice(221), 'then the last page, newest first').toEqual([478, 476, 474, 472, 470, 468, 466, 464, 462]);
+    // Placement stops inside the middle page's entries.
+    placementStopsAt(200);
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(active(term), 'the first frame lands on the last page\'s first entry').toEqual([range(478, 0)]);
+    expect(search.state.index, 'placement has not reached the match').toBeNull();
+    settle(search);
+    expect(active(term)).toEqual([range(478, 0)]);
+    expect(search.state).toEqual({ index: 1, total: 230, partial: false });
   });
 
   test("a resize right after find's first activation keeps the unplaced newest until the rescan places it", async () => {
