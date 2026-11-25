@@ -34,8 +34,9 @@ const LINKED = {
   bodyMarkdown: "Review https://example.com/pull/1 or [the notes](https://example.com/notes) first.",
 };
 /// A body of raw HTML the sanitizer keeps, with one element of each kind a
-/// browser can put in the Tab order, each named by its `data-kind`, and the
-/// embed the markdown makes of a video link, named by its tag.
+/// browser can put in the Tab order, each named by its `data-kind`, the
+/// embed the markdown makes of a video link, named by its tag, and an
+/// element written as `contenteditable`, which the rule has no term for.
 const EVERY_KIND = {
   ...SURVEY,
   bodyMarkdown: [
@@ -55,6 +56,7 @@ const EVERY_KIND = {
     '<div data-kind="scroller" style="overflow-y: auto; height: 2em">a<br>b<br>c<br>d</div>',
     '<div data-kind="scroller-x" style="overflow-x: scroll; width: 4em; white-space: nowrap">a long line</div>',
     'A <span data-kind="tabindex" tabindex="0">note</span>.',
+    '<div data-editable contenteditable="true">edit</div>',
     "![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)",
   ].join("\n\n"),
 };
@@ -220,6 +222,10 @@ describe("a survey over a terminal whose pane is not focused", () => {
   test("every kind of focusable its body keeps leaves the Tab order, and each returns with its pane", async () => {
     const card = await surveyOverUnfocusedPane(EVERY_KIND);
     expect(Object.keys(kindTabIndexes(card)), "the body renders one element of each kind").toEqual(KINDS);
+    const editable = card.querySelector(".survey-body [data-editable]");
+    expect(editable?.textContent, "the body renders the element written as contenteditable").toBe("edit");
+    expect(editable?.hasAttribute("contenteditable"), "the sanitizer strips contenteditable, which the rule has no term for")
+      .toBe(false);
     const held = Object.fromEntries(KINDS.map((kind) => [kind, "-1"]));
     expect(kindTabIndexes(card), "every kind out of the Tab order while the other pane is focused").toEqual(held);
     expect(tabbables(card), "nothing in the card reads as tabbable").toEqual([]);
