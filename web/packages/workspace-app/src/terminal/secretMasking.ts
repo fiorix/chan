@@ -1,5 +1,3 @@
-import { DEVSERVER_TOKEN_MARKER } from "./snapshotCache";
-
 /// The cell a painter's buffer line hands back: what the span mapping
 /// reads of it. Both xterm.js's IBufferCell and ghostty-web's satisfy it.
 export type MaskCell = {
@@ -65,6 +63,9 @@ const NAME_RUN = /[A-Za-z_][A-Za-z0-9_]*/g;
 const WORD_CHAR = /[A-Za-z0-9_]/;
 const WHITESPACE = /\s/;
 
+// chan-server's locked DEVSERVER_TOKEN_MARKER wire string: a devserver
+// prints its bearer token on a line that starts with it.
+const DEVSERVER_TOKEN_MARKER = "CHAN_DEVSERVER_TOKEN=";
 // The name chan prints a devserver's bearer token under, on the line below
 // the launch URL that carries the same token: the marker without its `=`.
 const DEVSERVER_TOKEN_NAME = DEVSERVER_TOKEN_MARKER.slice(0, -1).toUpperCase();

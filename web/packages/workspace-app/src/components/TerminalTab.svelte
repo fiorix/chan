@@ -132,16 +132,8 @@
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
   import type { TmuxPaneRef } from "../state/tmux";
   import { terminalProgramFromWire, type TerminalProgram } from "../state/terminalProgram";
-  import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
+  import { windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
-  import {
-    readTerminalSnapshot,
-    writeTerminalSnapshot,
-    clearTerminalSnapshot,
-    MAX_ONE_SNAPSHOT_BYTES,
-    SNAPSHOT_SCROLLBACK_LINES,
-    type TerminalSnapshot,
-  } from "../terminal/snapshotCache";
   import {
     PtyWriteTracker,
     type PtyWriteOrigin,
@@ -358,8 +350,8 @@
         id: string;
         seq: number;
         /// This session incarnation's epoch. A restart reuses the id but bumps
-        /// it (and resets `seq`), so a cached scrollback snapshot whose
-        /// generation no longer matches is discarded and the server full-replays.
+        /// it (and resets `seq`), so a redial's cursor from an older
+        /// generation is refused and the server replays the whole ring.
         generation: number;
         missed_bytes?: number;
         /// Ring bytes before the alternate-screen and mode preludes; absent on older servers.
@@ -537,14 +529,10 @@
   let heldFor: { id: string | undefined; generation: number | null } | null = null;
   // Set while a key press that interrupts is being dispatched.
   let interruptKeyPress = false;
-  // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
-  // loaded at connect time, primed into the xterm on the attach prelude only
-  // when the frame keeps the cached session id and the server confirms the
-  // same generation + no missed bytes; otherwise discarded for a full replay.
-  // `receivedSeq` tracks the server byte cursor
-  // (prelude `seq` + live bytes since) so a capture knows where to resume from.
-  // `serverGeneration` is the live session epoch (null until the first prelude).
-  let pendingSnapshot: TerminalSnapshot | null = null;
+  // Resume state. `receivedSeq` tracks the server byte cursor (prelude `seq`
+  // + live bytes since) so a redial of the screen this terminal still shows
+  // knows where to resume from. `serverGeneration` is the live session epoch
+  // (null until the first prelude).
   let receivedSeq = 0;
   // Reports each frame as the ghostty core takes it, in the same task as its
   // parse; xterm.js queues its writes, so that backend never dials with `ack`
@@ -614,10 +602,10 @@
   // Set when a socket is closed between a session frame and its `ready`
   // (closeSocket, which every redial's connect runs first, marks it): the
   // screen holds part of a replay and `receivedSeq` names the end of it, so
-  // neither the live cursor nor a snapshot is a place to resume from. The
-  // redial asks for the whole ring. A nonempty replay with a byte count
-  // starts on a reset screen; an empty or unmarked replay keeps it. The
-  // next `ready` clears the cut.
+  // the live cursor is no place to resume from. The redial asks for the
+  // whole ring. A nonempty replay with a byte count starts on a reset
+  // screen; an empty or unmarked replay keeps it. The next `ready` clears
+  // the cut.
   let replayCut = false;
   // The keyboard protocol as it stood when the current replay began, which
   // the reset write restores after its parser handlers have run and before
@@ -1687,36 +1675,13 @@
     let resetBeforeReplay = false;
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
-    // Try to resume from either this live xterm or a cached scrollback
-    // snapshot. Snapshot resume is only for a reattach to a known session AND
-    // when the cached geometry still matches the live xterm -- a serialized
-    // screen written into a different width reflows wrong (absolute cursor +
-    // hard-wrap baked at the old cols).
-    // On a live socket reconnect, the xterm instance still contains the screen
-    // it had before the drop, so resume from the in-memory cursor. On a remount
-    // or reload the xterm is brand-new; then only a cached snapshot may carry a
-    // cursor, because its ANSI content is primed alongside the cursor.
-    pendingSnapshot = null;
-    let resumeSince: number | undefined;
-    let resumeGeneration: number | undefined;
-    if (liveResumeSince !== undefined) {
-      resumeSince = liveResumeSince;
-      resumeGeneration = liveResumeGeneration;
-    } else {
+    // On a live socket reconnect the terminal still shows the screen it had
+    // before the drop, so the dial resumes from the in-memory cursor. On a
+    // remount or reload the terminal is new and empty, so it asks for the
+    // whole ring.
+    if (liveResumeSince === undefined) {
       receivedSeq = 0;
       serverGeneration = null;
-    }
-    // Snapshot priming is xterm-only: the cached ANSI is a SerializeAddon
-    // dump and the ghostty backend never captures one (serialize stays
-    // null there), so a reattach under ghostty lets the server ring
-    // replay restore the screen instead.
-    if (resumeSince === undefined && !replayCut && reattaching && tab.terminalSessionId && !viewStarted) {
-      const cached = readTerminalSnapshot(tab.terminalSessionId);
-      if (cached && cached.cols === term.cols && cached.rows === term.rows) {
-        pendingSnapshot = cached;
-        resumeSince = cached.lastSeq;
-        resumeGeneration = cached.generation;
-      }
     }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const declareGrid = active && reattaching ? gridMeasured : hostGridKnown;
@@ -1732,8 +1697,8 @@
         side,
         tabId: tab.id,
         sessionId: tab.terminalSessionId,
-        since: resumeSince,
-        generation: resumeGeneration,
+        since: liveResumeSince,
+        generation: liveResumeGeneration,
         cwd: reattaching ? undefined : tab.cwd,
         command: reattaching ? undefined : tab.spawnCommand,
         env: reattaching ? undefined : tab.spawnEnv,
@@ -1876,16 +1841,7 @@
         // A successful attach proves the session + path healthy: reset the
         // backoff ramp.
         reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
-        // Adopt the server's byte cursor + epoch for this incarnation. Prime the
-        // cached snapshot ONLY when the server confirms the SAME generation and
-        // no ring bytes were lost: then the replay chunks that follow are just
-        // the delta past the cached cursor and append cleanly on top. On any
-        // mismatch the server has already fallen back to a full replay, so drop
-        // the stale snapshot and let those chunks repaint from scratch. A
-        // snapshot cached under the old session id is another session's
-        // screen: a fresh id drops it with the wrong modes it carries. Written
-        // inside the replay window so xterm's device-report replies stay
-        // suppressed (see attachPtyWriteOrigin / connection.ts).
+        // Adopt the server's byte cursor + epoch for this incarnation.
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
         streamAck.adopt(frame);
@@ -1904,28 +1860,6 @@
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
           writeParsedPtyOutput(new TextEncoder().encode(freshShellResetSequence()), "replay");
         }
-        if (
-          pendingSnapshot &&
-          frame.id === priorId &&
-          frame.generation === pendingSnapshot.generation &&
-          (frame.missed_bytes ?? 0) === 0
-        ) {
-          if (mouseFilter) {
-            // A SerializeAddon snapshot captured in mouse mode carries the
-            // mouse-enable DECSETs; route it through the same filter as
-            // live output so a restore can't re-enter capture.
-            const filtered = mouseFilter.push(
-              new TextEncoder().encode(pendingSnapshot.ansi),
-            );
-            if (filtered.length) writeParsedPtyOutput(filtered, "replay");
-          } else {
-            writeParsedPtyOutput(
-              new TextEncoder().encode(pendingSnapshot.ansi),
-              "replay",
-            );
-          }
-        }
-        pendingSnapshot = null;
         // A session prelude supersedes any unconfirmed proposal from the
         // prior connection. Unregister before adopting a replacement id so
         // the old session's pending proposal can be failed accurately.
@@ -2042,10 +1976,6 @@
         // fail any in-flight prompt so the bubble unlocks with its text.
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
-        // Drop the scrollback snapshot cached for this session id so a closed
-        // terminal holds no cache budget. A parked PTY keeps the id below, and
-        // the reattach after the reload then asks for a full replay.
-        if (tab.terminalSessionId) clearTerminalSnapshot(tab.terminalSessionId);
         clearTerminalMetadataSink();
         // A parked PTY keeps the id, so every later save still names
         // the session and the reloaded window reattaches to the PTY the next
@@ -2248,70 +2178,6 @@
     if (!shouldForwardGeneratedTerminalInput(ptyWrites)) return;
     sendInput(data);
   }
-
-  /// Capture a bounded SerializeAddon snapshot of the current screen +
-  /// scrollback into localStorage so the NEXT reload restores it instantly and
-  /// the server only streams the delta past `receivedSeq`. Keyed by the
-  /// server session id + its generation; a capture over the per-snapshot byte
-  /// budget is dropped (the reattach falls back to a full replay) rather than
-  /// evicting other terminals. Synchronous, for the pagehide/unload path.
-  function captureSnapshot(): void {
-    // A control terminal never persists scrollback: it carries the
-    // CHAN_DEVSERVER_TOKEN= marker the desktop re-scrapes. The rule lives
-    // in windowModeAllowsSnapshot so it is unit-testable without a mount.
-    if (!windowModeAllowsSnapshot({ terminalControl: ui.terminalControl })) return;
-    // An ended session's screen closes with the line this tab wrote below the
-    // PTY's output, so it is no snapshot of the session.
-    if (status === "exited") return;
-    // A replay that has not reached its `ready` has painted part of the
-    // session under a cursor that names the end of it.
-    if (attachReplayActive) return;
-    const sessionId = tab.terminalSessionId;
-    if (!term || !serialize || !sessionId || serverGeneration === null) return;
-    // Never throw out of a pagehide/beforeunload handler: this fires globally
-    // (any navigation/unload, including unrelated downloads), so a serialize on
-    // a mid-teardown xterm must degrade to "no snapshot", not an uncaught error.
-    try {
-      const lines = Math.min(scrollbackLines, SNAPSHOT_SCROLLBACK_LINES);
-      const ansi = serialize.serialize({ scrollback: lines });
-      if (!ansi || ansi.length > MAX_ONE_SNAPSHOT_BYTES) return;
-      writeTerminalSnapshot(sessionId, {
-        ansi,
-        generation: serverGeneration,
-        lastSeq: receivedSeq,
-        cols: term.cols,
-        rows: term.rows,
-        updatedAt: Date.now(),
-      });
-    } catch (e) {
-      console.warn("[chan] terminal snapshot capture failed", e);
-    }
-  }
-
-  // Persist a scrollback snapshot when the page is hidden/reloaded so the
-  // reattach after the reload resumes from it. pagehide is the
-  // mobile-safe variant; beforeunload covers desktop reloads. Synchronous --
-  // async work in these handlers is unreliable.
-  $effect(() => {
-    const onHide = () => captureSnapshot();
-    window.addEventListener("pagehide", onHide);
-    window.addEventListener("beforeunload", onHide);
-    return () => {
-      window.removeEventListener("pagehide", onHide);
-      window.removeEventListener("beforeunload", onHide);
-    };
-  });
-
-  // A control terminal never snapshots (guard above); also remove anything a
-  // pre-guard build persisted for this session, on attach and on teardown.
-  // Sessions a control window never reopens are covered by the load-time
-  // sweep in pruneTerminalSnapshots.
-  $effect(() => {
-    const sessionId = tab.terminalSessionId;
-    if (!ui.terminalControl || !sessionId) return;
-    clearTerminalSnapshot(sessionId);
-    return () => clearTerminalSnapshot(sessionId);
-  });
 
   /// Rich Prompt + team-lead-identity submit path: send `data` over the existing
   /// terminal WS as a `prompt` frame so the server ENQUEUES it into this

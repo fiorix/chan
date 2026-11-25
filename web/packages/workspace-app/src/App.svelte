@@ -173,7 +173,7 @@
   import { tmuxPaneModeRequests, type TmuxCall } from "./state/tmuxResize";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
-  import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
+  import { sweepTerminalSnapshots } from "./terminal/snapshotCache";
   import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
@@ -1810,10 +1810,11 @@
 
   // Prune stale or over-cap editor-buffer entries from localStorage at app
   // load. editorBuffer self-prunes on quota-exceeded too, but an up-front
-  // sweep keeps storage tidy for long-lived sessions.
+  // sweep keeps storage tidy for long-lived sessions. The terminal snapshots
+  // older builds kept there go whole.
   onMount(() => {
     pruneEditorBuffers();
-    pruneTerminalSnapshots();
+    sweepTerminalSnapshots();
   });
 
   // Synchronously put every tab's unsaved input in its recovery buffer before

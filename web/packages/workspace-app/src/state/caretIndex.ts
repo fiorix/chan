@@ -10,7 +10,7 @@
 /// the in-memory tab id (tab ids are regenerated per load), mirroring
 /// editorBuffer.ts. A distinct prefix and a small cap keep this from starving
 /// the editor-buffer hang-recovery store within the WebView origin's
-/// localStorage quota; the terminal-snapshot store caps separately again.
+/// localStorage quota.
 ///
 /// Best-effort: storage-unavailable, quota, or a missing/malformed entry all
 /// fall back to top silently.
@@ -214,7 +214,7 @@ export function rekeyCaret(from: string, to: string): void {
 }
 
 /// Eviction sweep over this store's prefix only (never touches the editor
-/// buffer or terminal snapshot stores). Runs at app load and on a
+/// buffer store). Runs at app load and on a
 /// quota-exceeded write retry. Two passes: TTL, then oldest-first size cap.
 /// Returns the number of evicted entries.
 export function pruneCaretIndex(): number {
