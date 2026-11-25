@@ -120,6 +120,15 @@ function slowFeed() {
     now += 5;
   });
 }
+// A feed that spends a frame's placement slice, as one does on the largest
+// history, so a frame that follows a write places nothing.
+function feedSpendsSlice() {
+  const feed = VtSearch.prototype.feed;
+  vi.spyOn(VtSearch.prototype, 'feed').mockImplementation(function (this: VtSearch) {
+    feed.call(this);
+    now += 9;
+  });
+}
 // One placement batch per frame, far inside the one-second wait cap.
 function batchPerFrame() {
   const read = VtSearch.prototype.readMatches;
@@ -521,6 +530,66 @@ describe('widget search', () => {
     settle(search);
     expect(active(term)).toEqual([newest]);
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
+  });
+
+  test('under output every frame, find lands on the newest at once where the core lists one page and no frame places a match', async () => {
+    const { term } = await create(numbered(100), 40, 6, 10_000_000);
+    const newest = range(99, 0);
+    expect(coreFirst(term, 'needle').startRow, 'the core lists its active area in order').toBe(99);
+    feedSpendsSlice();
+    const search = searchOf(term);
+    search.find('needle');
+    for (let i = 0; i < 120; i++) {
+      term.write('x');
+      now += 11;
+      frame();
+      expect(active(term), `frame ${i}: find has landed on the newest`).toEqual([newest]);
+    }
+    expect(all(term) ?? [], 'no frame of the output placed a match').toHaveLength(0);
+    settle(search);
+    expect(active(term)).toEqual([newest]);
+    expect(search.state).toEqual({ index: 1, total: 100, partial: false });
+  });
+
+  test('under output every frame, older from the oldest wraps at once where the core lists one page and no frame places a match', async () => {
+    const { term } = await create(numbered(100), 40, 6, 10_000_000);
+    const newest = range(99, 0);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    feedSpendsSlice();
+    term.write('x');
+    search.step('needle', 'older');
+    expect(active(term), 'the wrap lands in the call').toEqual([newest]);
+    for (let i = 0; i < 120; i++) {
+      term.write('x');
+      now += 11;
+      frame();
+      expect(active(term), `frame ${i}: the wrap stays on the newest`).toEqual([newest]);
+    }
+    expect(all(term) ?? [], 'no frame of the output placed a match').toHaveLength(0);
+    settle(search);
+    expect(active(term)).toEqual([newest]);
+    expect(search.state).toEqual({ index: 1, total: 100, partial: false });
+  });
+
+  test('a search that lists nothing reads no active-area count while output arrives every frame', async () => {
+    const { term } = await create(Array.from({ length: 20000 }, (_, i) => `line ${i}`).join('\r\n'), 40, 6, 10_000_000);
+    const searches = vi.spyOn(VtTerminal.prototype, 'createSearch');
+    const search = searchOf(term);
+    search.find('absent');
+    expect(searches).toHaveBeenCalledOnce();
+    let partial = 0;
+    for (let i = 0; i < 20; i++) {
+      term.write('x');
+      now += 11;
+      frame();
+      if (search.state.partial) partial++;
+    }
+    expect(partial, 'find waited on the scan for most of the output').toBeGreaterThan(10);
+    expect(searches, 'and made no search beside its own').toHaveBeenCalledOnce();
   });
 
   test("after output, a step waits while the screen page's matches are placed behind the page above", async () => {
