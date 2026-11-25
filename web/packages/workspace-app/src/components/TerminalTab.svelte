@@ -146,7 +146,7 @@
     PtyWriteTracker,
     type PtyWriteOrigin,
     type TerminalByteWriter,
-    routeXtermData,
+    routeTerminalData,
     shouldForwardGeneratedTerminalInput,
     terminalMessageBytes,
     terminalMouseReport,
@@ -1543,7 +1543,7 @@
     } else {
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
-    term.onData(backend === "ghostty" ? handleGhosttyData : handleXtermData);
+    term.onData(backend === "ghostty" ? handleGhosttyData : handleTerminalData);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
       publishLocalSize(cols, rows);
@@ -2538,12 +2538,12 @@
     } else if (mouseReport === "sgr") {
       sendUserInput(data);
     } else {
-      handleXtermData(data);
+      handleTerminalData(data);
     }
   }
 
-  function handleXtermData(data: string): void {
-    routeXtermData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
+  function handleTerminalData(data: string): void {
+    routeTerminalData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
   }
 
   /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and

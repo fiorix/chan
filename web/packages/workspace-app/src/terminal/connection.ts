@@ -63,7 +63,7 @@ export function terminalMouseReport(data: string): "x10" | "sgr" | null {
 /// whole broadcast group whatever the terminal's output is doing, except a
 /// lone focus report, which keeps the route below. An unmarked chunk, a
 /// terminal-generated reply among them, takes the route below.
-export function routeXtermData(
+export function routeTerminalData(
   data: string,
   writes: PtyWriteTracker,
   sendInput: (data: string) => void,
