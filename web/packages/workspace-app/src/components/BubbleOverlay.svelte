@@ -54,6 +54,30 @@
   // the pane makes itself the focused one on the press first.
   const buttonTabIndex = $derived(ownsKeyboard() ? 0 : -1);
 
+  // The body's markup can hold focusables of its own (a link, a bare URL the
+  // markdown links, raw HTML the sanitizer keeps), which leave the Tab order
+  // with the buttons and get their own tabindex back when the survey owns the
+  // keyboard. A negative tabindex still lets a press focus and follow them.
+  const BODY_FOCUSABLE =
+    "a[href], area[href], button, input, select, textarea, iframe, summary, " +
+    "audio[controls], video[controls], [tabindex], [contenteditable]";
+  let body = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    // A new body replaces the markup, so the hold moves to the new elements.
+    active?.bodyMarkdown;
+    if (!body || ownsKeyboard()) return;
+    const held = [...body.querySelectorAll<HTMLElement>(BODY_FOCUSABLE)].map(
+      (el) => [el, el.getAttribute("tabindex")] as const,
+    );
+    for (const [el] of held) el.tabIndex = -1;
+    return () => {
+      for (const [el, own] of held) {
+        if (own === null) el.removeAttribute("tabindex");
+        else el.setAttribute("tabindex", own);
+      }
+    };
+  });
+
   // A visible survey owns the keyboard only in its focused pane. Retain its
   // first return target across tab and pane switches. Read live ownership in
   // the effect and its queued callbacks, since docking can move the terminal
@@ -214,7 +238,7 @@
            so {@html} is safe for the agent-supplied body. `breaks: true` so a
            single authored newline renders as a line break (survey bodies are
            hand-written multi-line prompts). -->
-      <div class="survey-body">{@html renderMarkdownWithBreaks(active.bodyMarkdown)}</div>
+      <div class="survey-body" bind:this={body}>{@html renderMarkdownWithBreaks(active.bodyMarkdown)}</div>
       <ul class="survey-options">
         {#each active.options as option, i (i)}
           <li>

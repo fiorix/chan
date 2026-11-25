@@ -152,6 +152,24 @@ describe("a survey over a terminal whose pane is not focused", () => {
     expect(tabbables(card), "out again when the other pane is focused again").toEqual([]);
   });
 
+  test("a body replaced while its pane is unfocused leaves the Tab order too, and each element keeps its own tabindex", async () => {
+    await surveyOverUnfocusedPane(LINKED);
+    showSurvey({
+      ...LINKED,
+      surveyId: "unfocused-pane-next",
+      bodyMarkdown: 'See [the log](https://example.com/log), <span tabindex="0">a note</span> and <span tabindex="-1">an aside</span>.',
+    }, TERMINAL);
+    await settleLong();
+    const card = pane(TOP).querySelector<HTMLElement>(".survey-card")!;
+    expect(card.querySelector(".survey-body")?.textContent, "the new body shows").toContain("an aside");
+    expect(tabbables(card), "the new body's focusables are out of the Tab order").toEqual([]);
+
+    setActivePane(TOP);
+    await settleLong();
+    expect(tabbables(card), "each back as its markup has it, the aside still out")
+      .toEqual(["a the log", "span a note", ...buttons(card).map(named)]);
+  });
+
   test.each([
     ["1", "Digit1"],
     ["F", "KeyF"],
