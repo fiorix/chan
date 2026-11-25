@@ -204,14 +204,31 @@ export default {
 
       // The card's column: with Details open, the card takes the hidden
       // terminal area's place in the row and centres in the terminal's column
-      // beside the inspector, and the area shows nothing. Details opens on
-      // the focused pane's active terminal, which the failed one still is.
+      // beside the inspector, and the area shows nothing. Details is toggled
+      // the way a user does it, from the Details row of the tab's menu.
       const column = { tabId };
       details.legs.column = column;
-      const toggleDetails = () =>
-        page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.details" } })));
+      const toggleDetails = async (open) => {
+        const strip = await page.evaluateHandle((name) => {
+          const tabs = [...document.querySelectorAll(".pane .tab")]
+            .filter((tab) => tab.querySelector(".tab-label")?.textContent?.includes(name));
+          return tabs.length === 1 ? tabs[0] : null;
+        }, NAME);
+        assert.ok(await strip.evaluate((tab) => tab !== null), `one ${NAME} tab in the strip`);
+        await strip.asElement().click({ button: "right" });
+        await page.waitForSelector(".terminal-tab-menu-bubble", { visible: true, timeout: WAIT_MS });
+        const row = await page.$$eval(".terminal-tab-menu-bubble button.mbtn", (rows) => {
+          const found = rows.find((button) => button.querySelector(".mbtn-label")?.textContent.trim() === "Details");
+          const checked = found?.getAttribute("aria-checked") ?? null;
+          found?.click();
+          return { found: !!found, checked };
+        });
+        assert.ok(row.found, "the tab's menu offers Details");
+        assert.equal(row.checked, String(!open), `the Details row reads ${open ? "off before it opens" : "on before it closes"}`);
+        await page.waitForFunction(() => !document.querySelector(".terminal-tab-menu-bubble"), { timeout: WAIT_MS });
+      };
       const inspectorSelector = `.terminal-tab[data-terminal-tab-id="${tabId}"] .terminal-main aside.inspector`;
-      await toggleDetails();
+      await toggleDetails(true);
       await page.waitForSelector(inspectorSelector, { visible: true, timeout: WAIT_MS });
       column.boxes = await page.evaluate((id) => {
         const tab = document.querySelector(`.terminal-tab[data-terminal-tab-id="${id}"]`);
@@ -239,7 +256,7 @@ export default {
         `the card lies in the terminal's column, clear of Details: ${JSON.stringify(column.boxes)}`);
       column.offCentre = (card.left + card.right) / 2 - (main.left + columnRight) / 2;
       assert.ok(Math.abs(column.offCentre) <= 2, `the card centres in the terminal's column: ${JSON.stringify(column)}`);
-      await toggleDetails();
+      await toggleDetails(false);
       await page.waitForFunction((selector) => !document.querySelector(selector), { timeout: WAIT_MS }, inspectorSelector);
 
       // The window around it still works: a file opens in a new pane.
