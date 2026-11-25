@@ -180,6 +180,46 @@ export default {
       failed.sessions = await sessions();
       assert.deepEqual(failed.sessions, [], "no PTY was spawned for the failed terminal");
 
+      // The card's column: with Details open, the card takes the hidden
+      // terminal area's place in the row and centres in the terminal's column
+      // beside the inspector, and the area shows nothing. Details opens on
+      // the focused pane's active terminal, which the failed one still is.
+      const column = { tabId };
+      details.legs.column = column;
+      const toggleDetails = () =>
+        page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.details" } })));
+      const inspectorSelector = `.terminal-tab[data-terminal-tab-id="${tabId}"] .terminal-main aside.inspector`;
+      await toggleDetails();
+      await page.waitForSelector(inspectorSelector, { visible: true, timeout: WAIT_MS });
+      column.boxes = await page.evaluate((id) => {
+        const tab = document.querySelector(`.terminal-tab[data-terminal-tab-id="${id}"]`);
+        const box = (el) => {
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+        };
+        const inspector = tab?.querySelector(".terminal-main aside.inspector");
+        return {
+          main: box(tab?.querySelector(".terminal-main")),
+          area: box(tab?.querySelector(".terminal-host")),
+          card: box(tab?.querySelector(".terminal-main [role=alert]")),
+          inspector: box(inspector),
+          inspectorMarginLeft: inspector ? parseFloat(getComputedStyle(inspector).marginLeft) || 0 : null,
+        };
+      }, tabId);
+      await ctx.shot("347-card-column");
+      const { main, area, card, inspector, inspectorMarginLeft } = column.boxes;
+      assert.ok(main && area && card && inspector, `every box reads: ${JSON.stringify(column.boxes)}`);
+      assert.equal(area.width * area.height, 0, `the terminal's area shows nothing: ${JSON.stringify(column.boxes)}`);
+      assert.ok(card.width > 0 && card.height > 0, "the card shows");
+      const columnRight = inspector.left - inspectorMarginLeft;
+      assert.ok(card.left >= main.left && card.right <= columnRight,
+        `the card lies in the terminal's column, clear of Details: ${JSON.stringify(column.boxes)}`);
+      column.offCentre = (card.left + card.right) / 2 - (main.left + columnRight) / 2;
+      assert.ok(Math.abs(column.offCentre) <= 2, `the card centres in the terminal's column: ${JSON.stringify(column)}`);
+      await toggleDetails();
+      await page.waitForFunction((selector) => !document.querySelector(selector), { timeout: WAIT_MS }, inspectorSelector);
+
       // The window around it still works: a file opens in a new pane.
       const panes = async () => JSON.parse((await shell(["pane", "list", "--json"])).stdout).panes;
       const [first] = await panes();

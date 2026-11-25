@@ -469,6 +469,31 @@ describe("what a terminal's load error says and offers", () => {
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 
+  test("a failure under an open dialog leaves the keyboard with the dialog", async () => {
+    const core = serveCore();
+    const answer = core.holdNext();
+    page = await openPage();
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+    await vi.waitFor(() => expect(core.requests(), "the core is asked for").toBe(1));
+    // A confirm opens while the core loads and owns the keyboard; its
+    // button holds it.
+    const dialogButton = document.createElement("button");
+    document.body.append(dialogButton);
+    const confirmed = page.confirm.uiConfirm({ title: "Close?", message: "Close the tab?", confirmLabel: "Close" });
+    dialogButton.focus();
+
+    answer("fail");
+    const error = await shownLoadError(target);
+    expect(actions(error), "a retryable failure").toEqual(waysOut(page, tab!, true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(document.activeElement, "the dialog keeps the keyboard").toBe(dialogButton);
+
+    page.confirm.resolveConfirm(false);
+    await confirmed;
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
+  });
+
   test("the error's action gives up the keyboard when its tab stops being the focused pane's active tab", async () => {
     const core = serveCore();
     core.failNext();
@@ -548,6 +573,43 @@ describe("a terminal whose view fails after the core loads", () => {
     } finally {
       runner.process.off("unhandledRejection", onRejection);
     }
+  });
+
+  test("a wiring step that fails after the widget opened releases the opened terminal, and Retry opens one", async () => {
+    serveCore();
+    page = await openPage();
+    // The terminal's area watcher refuses the host once: a step start()
+    // wires after the widget's open() has put its canvas in the area.
+    const Watcher = globalThis.ResizeObserver;
+    let refused = 0;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class extends Watcher {
+        observe(target: Element) {
+          if (refused === 0 && target instanceof HTMLElement && target.classList.contains("terminal-host")) {
+            refused += 1;
+            throw new Error("the area watcher refused the host");
+          }
+          super.observe(target);
+        }
+      },
+    );
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target } = page.open(tab!);
+
+    const error = await shownLoadError(target);
+    expect(refused, "the step failed once").toBe(1);
+    expect(actions(error), "the next open can pass").toEqual(waysOut(page, tab!, true));
+    expect(error.textContent, "the error says why").toContain("the area watcher refused the host");
+    expect(terminalArea(target).querySelector("canvas"), "the opened terminal left its area").toBeNull();
+    expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
+
+    action(error, "Retry").click();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the retry dialed its PTY").toHaveLength(1));
+    expect(loadError(target), "the error is gone").toBeNull();
+    expect(terminalArea(target).querySelectorAll("canvas"), "one terminal in its area").toHaveLength(1);
+    expect(areaWatchers(page, target), "wired once").toBe(1);
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 });
 
