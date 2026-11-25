@@ -185,11 +185,19 @@ const threePaged = Array.from({ length: 240 }, (_, i) => (i <= 220 || i >= 231 ?
 const threeStraddled = Array.from({ length: 240 }, (_, i) => i === 115
   ? 'needle '.padEnd(197, 'y') + 'needle' + 'z'.repeat(97) : 'needle '.padEnd(300, 'x')).join('\r\n');
 // Lines of one row at 80 columns, 573 to a page of the core's history,
-// with matches on the last 286 only: the screen spans the boundary between
-// the last two pages, both hold matches on it, and the `pages` pages above
-// them hold none.
-const screenPaged = (pages: number) => Array.from({ length: 573 * (pages + 1) + 13 }, (_, i) =>
-  (i >= 573 * pages + 300 ? 'needle ' : 'plain ') + i).join('\r\n');
+// with matches on the last 286 only, less `quiet` lines at the end of the
+// page above the last: the screen, the last 24 rows, spans the boundary
+// between the last two pages, both hold matches on it, and the `pages`
+// pages above them hold none.
+const screenPaged = (pages: number, quiet = 0) => Array.from({ length: 573 * (pages + 1) + 13 }, (_, i) =>
+  (i >= 573 * pages + 300 && (i < 573 * (pages + 1) - quiet || i >= 573 * (pages + 1)) ? 'needle ' : 'plain ') + i).join('\r\n');
+// The same rows with the page above the last ending in a match wrapped
+// across the screen's first row, from 77 columns into the row above it.
+const screenTopWrapped = (pages: number) => {
+  const wrapped = 573 * (pages + 1) - 12;
+  return Array.from({ length: 573 * (pages + 1) + 12 }, (_, i) => i === wrapped ? `${'x'.repeat(77)}needle ${i}`
+    : (i >= 573 * pages + 300 && (i < wrapped || i >= 573 * (pages + 1) - 1) ? 'needle ' : 'plain ') + i).join('\r\n');
+};
 // The first match the core itself lists, in its own order.
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
@@ -365,25 +373,30 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 1, total: 230, partial: false });
   });
 
-  test('where the screen spans two pages and nothing above them matches, find knows the index and a step lands at once', async () => {
-    const pages = 8;
-    const { term } = await create(screenPaged(pages), 80, 24, 10_000_000);
-    const last = 573 * (pages + 1) + 12;
-    const rows = coreRows(term, 'needle', 286);
-    expect(rows.slice(0, 273), 'the core lists the page the screen starts in first').toEqual(Array.from({ length: 273 }, (_, i) => last - 13 - i));
-    expect(rows[0], "that page's newest is on the screen").toBeGreaterThanOrEqual(term.getScrollbackLength());
-    expect(rows.slice(273), 'then the last page, newest first').toEqual(Array.from({ length: 13 }, (_, i) => last - i));
+  test.each([
+    { name: 'inside the screen', input: () => screenPaged(8), total: 286, start: 10, end: 10 },
+    { name: "on the screen's first row", input: () => screenPaged(8, 10), total: 276, start: 0, end: 0 },
+    { name: "across the screen's first row", input: () => screenTopWrapped(8), total: 275, start: -1, end: 0 },
+  ])('where the screen spans two pages and nothing above them matches, find knows the index and a step lands at once, the first page ending $name', async ({ input, total, start, end }) => {
+    const { term } = await create(input(), 80, 24, 10_000_000);
+    const last = 573 * 9 + 12;
+    const rows = coreRows(term, 'needle', total);
+    expect(rows.slice(total - 13), 'the core lists the last page last, newest first').toEqual(Array.from({ length: 13 }, (_, i) => last - i));
+    expect(rows.slice(0, total - 13).every((row, i) => row < last - 12 && (i === 0 || row < rows[i - 1])), 'after the page the screen starts in').toBe(true);
+    const first = coreFirst(term, 'needle');
+    const history = term.getScrollbackLength();
+    expect({ start: first.startRow - history, end: first.endRow - history }, "that page's newest against the screen's first row").toEqual({ start, end });
     const search = searchOf(term);
     search.find('needle');
     frame();
-    expect(search.state, 'the first frame places the matches and knows the index while the scan goes on').toEqual({ index: 1, total: 286, partial: true });
+    expect(search.state, 'the first frame places the matches and knows the index while the scan goes on').toEqual({ index: 1, total, partial: true });
     expect(active(term)).toEqual([range(last, 0)]);
     search.step('needle', 'older');
     expect(active(term), 'older lands in the call').toEqual([range(last - 1, 0)]);
     expect(search.state.index).toBe(2);
     settle(search);
     expect(active(term)).toEqual([range(last - 1, 0)]);
-    expect(search.state).toEqual({ index: 2, total: 286, partial: false });
+    expect(search.state).toEqual({ index: 2, total, partial: false });
   });
 
   test("a resize right after find's first activation keeps the unplaced newest until the rescan places it", async () => {
@@ -420,6 +433,38 @@ describe('widget search', () => {
     }
     expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
     expect(active(term)).toEqual([newest]);
+  });
+
+  test('a first newer step with a new query waits for the oldest where the core lists a page ahead', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    batchPerFrame();
+    const search = searchOf(term);
+    search.step('needle', 'newer');
+    expect(active(term), 'the listed newest is not for newer').toBeUndefined();
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      if (active(term)) expect(active(term), `frame ${i} activates only the oldest match`).toEqual([range(0, 0)]);
+    }
+    expect(active(term)).toEqual([range(0, 0)]);
+    expect(search.state).toEqual({ index: 2400, total: 2400, partial: false });
+  });
+
+  test('where the core cannot place an entry the listing is read from, find follows the ordering rule', async () => {
+    const { term } = await create(paged(20), 200, 5, 10_000_000);
+    const newest = range(238, 133);
+    batchPerFrame();
+    vi.spyOn(VtSearch.prototype, 'matchAt').mockReturnValue(null);
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(all(term)?.length, "the first frame places a batch of the page above's matches").toBe(256);
+    expect(active(term), 'and lands on none of them').toBeUndefined();
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      if (active(term)) expect(active(term), `frame ${i} activates only the newest match`).toEqual([newest]);
+    }
+    expect(active(term)).toEqual([newest]);
+    expect(search.state).toEqual({ index: 1, total: 2400, partial: false });
   });
 
   test('a wrap to the newest during a restarted scan lands on the bottom-most match', async () => {
@@ -764,6 +809,34 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 125, total: 241, partial: false });
   });
 
+  test('a window ends at the first page of the list being placed, not of a list placed before the output', async () => {
+    const lines = threeStraddled.split('\r\n');
+    const { term } = await create(lines.slice(0, 100).join('\r\n'), 200, 20, 10_000_000);
+    const wrapped = range(230, 197, 231, 2);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    expect(active(term), "the first list's first entry, in what becomes the first listed page").toEqual([range(198, 0)]);
+    term.write('\r\n' + lines.slice(100).join('\r\n'));
+    settle(search);
+    for (let i = 0; i < 18; i++) search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 124, total: 241, partial: false });
+    placementStopsAt(236);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').not.toBeNull();
+    term.write('\x1b[m');
+    slowFeed();
+    search.step('needle', 'older');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([range(232, 0), wrapped], `frame ${i}: the press waits on its match or lands on its neighbour`).toContainEqual(active(term)?.[0]);
+      frame();
+    }
+    expect(active(term)).toEqual([wrapped]);
+    expect(search.state).toEqual({ index: 125, total: 241, partial: false });
+  });
+
   test.each([
     { name: 'two', input: () => paged(1), rows: 5, steps: 1, from: 236, cut: 118, want: 234, index: 3, total: 120 },
     { name: 'three', input: () => threePaged, rows: 20, steps: 2, from: 474, cut: 224, want: 472, index: 4, total: 230 },
@@ -826,6 +899,35 @@ describe('widget search', () => {
     }
     expect(active(term)).toEqual([wrapped]);
     expect(search.state).toEqual({ index, total: 121, partial: false });
+  });
+
+  test.each([
+    { name: 'read from the listing', placeable: true },
+    { name: 'where the core cannot place the entries the listing is read from', placeable: false },
+  ])("find knows the newest's index once placement has read the entry after the active-area entries, $name", async ({ placeable }) => {
+    const { term } = await create(straddled, 200, 5, 10_000_000);
+    const raw = term.core!.createSearch();
+    raw.setNeedle('needle');
+    raw.feed();
+    const head = raw.state().total;
+    raw.free();
+    placementStopsAt(head + 1);
+    if (!placeable) vi.spyOn(VtSearch.prototype, 'matchAt').mockReturnValue(null);
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(all(term), 'the first frame places the active-area entries alone').toHaveLength(head);
+    expect(active(term), 'find lands on the newest from the listing, or waits for the rule').toEqual(placeable ? [range(238, 0)] : undefined);
+    expect(search.state.index, 'the index waits for the wrapped match').toBeNull();
+    for (let i = 0; i < 100 && all(term)!.length === head; i++) {
+      frame();
+      if (all(term)!.length === head) expect(search.state.index, `frame ${i}: the index still waits`).toBeNull();
+    }
+    expect(all(term), 'the scan lists the wrapped match and placement stops after it').toHaveLength(head + 1);
+    expect(active(term)).toEqual([range(238, 0)]);
+    expect(search.state.index, 'the list placed so far is the head of the whole one').toBe(1);
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 121, partial: false });
   });
 
   test.each([117, 118, 119])("after output, newer from the page above's newest waits for the screen page's oldest, placement stopped at entry %i", async cut => {
