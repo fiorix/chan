@@ -19,7 +19,18 @@ import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } 
 import { ABI } from "@chan/ghostty-web-ng/vt";
 import { takeShownLoadFailures } from "../../vitest.setup";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+// Every xterm.js terminal any page makes. A mocked module outlives the page's
+// module graph, so a record kept in a module of that graph would see only
+// the first page's terminals; this one is the file's, and each page starts it
+// empty.
+const xtermTerminals = vi.hoisted(() => [] as unknown[]);
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class {
+    constructor() {
+      xtermTerminals.push(this);
+    }
+  },
+}));
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
 vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
@@ -65,7 +76,9 @@ async function openPage() {
   harness.installTerminalDom();
   widget.installSoftwareCanvas();
   store.__testSetStandalonePreferences(terminalPreferences());
-  // The mocked module outlives the page's module graph, and so do its calls.
+  // The mocked modules outlive the page's module graph, and so do their
+  // records and calls.
+  xtermTerminals.splice(0);
   vi.mocked(reloadWindow).mockClear();
   const mounts: Array<Record<string, unknown>> = [];
   return {
@@ -232,7 +245,7 @@ describe("a terminal whose core fails to load", () => {
     const error = await shownLoadError(target);
     expect(actions(error), "the next load can pass").toEqual(waysOut(page, tab!, true));
     expect(error.textContent, "the error says why").toContain("Failed to fetch");
-    expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
+    expect(xtermTerminals, "no other terminal opened in its place").toHaveLength(0);
     expect(terminalArea(target).querySelector("canvas"), "no terminal in its area").toBeNull();
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
     expect(areaWatchers(page, target), "nothing wired for a terminal").toBe(0);
@@ -256,7 +269,7 @@ describe("a terminal whose core fails to load", () => {
     await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the retry dialed its PTY").toHaveLength(1));
     expect(loadError(target), "the error is gone").toBeNull();
     expect(terminalArea(target).querySelectorAll("canvas"), "one terminal in its area").toHaveLength(1);
-    expect(page.harness.xterm.terminals, "no other terminal").toHaveLength(0);
+    expect(xtermTerminals, "no other terminal").toHaveLength(0);
     expect(core.requests(), "the retry fetched the core again").toBe(2);
     expect(compile, "and compiled it once").toHaveBeenCalledTimes(1);
     expect(areaWatchers(page, target), "wired once").toBe(1);
@@ -298,7 +311,7 @@ describe("a terminal whose core fails to load", () => {
     const error = await shownLoadError(target);
     expect(actions(error), "only a reload can help").toEqual(waysOut(page, first!, false));
     expect(error.textContent, "the error says why").toContain("unsupported SIMD");
-    expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
+    expect(xtermTerminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
 
     action(error, "Reload window").click();
@@ -307,7 +320,7 @@ describe("a terminal whose core fails to load", () => {
     const next = page.open(second!);
     expect(actions(await shownLoadError(next.target)), "the next terminal").toEqual(waysOut(page, second!, false));
     expect(core.requests(), "the failure was kept").toBe(1);
-    expect(page.harness.xterm.terminals).toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
     expect(takeShownLoadFailures(), "two errors shown").toBe(2);
   });
 
@@ -329,7 +342,7 @@ describe("a terminal whose core fails to load", () => {
     const error = await shownLoadError(target);
     expect(actions(error), "the next instance can pass").toEqual(waysOut(page, tab!, true));
     expect(error.textContent).toContain("Out of memory");
-    expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
+    expect(xtermTerminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
 
     action(error, "Retry").click();
@@ -351,7 +364,7 @@ describe("a terminal whose core fails to load", () => {
     const error = await shownLoadError(target);
     expect(actions(error), "only a corrected build can help").toEqual(waysOut(page, tab!, false));
     expect(error.textContent, "the error names the core").toContain("libghostty-vt 2.x");
-    expect(page.harness.xterm.terminals, "no other terminal opened in its place").toHaveLength(0);
+    expect(xtermTerminals, "no other terminal opened in its place").toHaveLength(0);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
@@ -572,7 +585,7 @@ describe("a terminal closed or restarted while its core loads", () => {
 
     expect(made, "no instance for the closed terminal").toHaveBeenCalledTimes(1);
     expect(page.harness.TerminalSocket.all, "no PTY was dialed").toHaveLength(0);
-    expect(page.harness.xterm.terminals).toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
     expect(loadReports(), "nothing failed").toHaveLength(0);
     expect(takeShownLoadFailures()).toBe(0);
   });
@@ -590,7 +603,7 @@ describe("a terminal closed or restarted while its core loads", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(loadReports(), "no report for a terminal nobody shows").toHaveLength(0);
-    expect(page.harness.xterm.terminals).toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
     expect(page.harness.TerminalSocket.all).toHaveLength(0);
     expect(takeShownLoadFailures()).toBe(0);
   });
@@ -616,7 +629,7 @@ describe("a terminal closed or restarted while its core loads", () => {
     expect(made, "the check and one instance for the terminal").toHaveBeenCalledTimes(2);
     expect(areaWatchers(page, target), "wired once").toBe(1);
     expect(loadError(target)).toBeNull();
-    expect(page.harness.xterm.terminals).toHaveLength(0);
+    expect(xtermTerminals).toHaveLength(0);
     expect(takeShownLoadFailures()).toBe(0);
   });
 
