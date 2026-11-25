@@ -1235,6 +1235,38 @@ describe("the workspace tree", () => {
     expect(filesOfA()).toEqual(["a/x.md"]);
   });
 
+  test("a depth change leaves a folder whose read failed to its retry", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.dir("bad")],
+      edges: [
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "directory:a/b", "contains"),
+        g.edge("", "directory:bad", "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.dir("bad"), fsg.file("a/x.md"), fsg.file("bad/z.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md"), fsg.contains("", "bad"), fsg.contains("bad", "bad/z.md")],
+    };
+    graphServer.tree = "folders";
+    graphServer.fsFail = (path) => (path === "bad" ? new TypeError("Failed to fetch") : null);
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true, bad: true } }));
+    await settle(20);
+    expect(levelReads("bad"), "its read and one retry").toBe(2);
+    expect(target.querySelector(".spine-warning")?.textContent?.trim()).toBe("Could not read directory bad: Failed to fetch");
+
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.value).toBe("1");
+    await slideTo(slider, 0);
+    expect(tab.expanded.a, "lowered").toBeUndefined();
+    await slideTo(slider, 1);
+    expect(tab.expanded.a, "raised").toBe(true);
+    await settle(20);
+    expect(levelReads("bad"), "neither depth change reads it").toBe(2);
+  });
+
   test("a tab whose spine lands after an answer over the listing cap reads each opened folder once", async () => {
     serveFoldersWithoutFiles();
     graphServer.tree = "folders";
@@ -1283,6 +1315,45 @@ describe("the workspace tree", () => {
     }
     await settle(20);
     expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 2, a: 1 });
+    expect(visibleIds()).toContain("a/x.md");
+  });
+
+  test("an answer over the listing cap taken over a spine whose root read failed reads nothing until the spine is fetched again", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+    // A change that names no path fetches the spine whole, and its root
+    // read fails. The fetch asks for the levels it lists ahead of the
+    // root's answer, `a` among them.
+    const changeNamingNoPath = async (): Promise<void> => {
+      graphReloadSignal.paths = [];
+      graphReloadSignal.nonce += 1;
+      await new Promise((r) => setTimeout(r, 400));
+      await settle(20);
+    };
+    const reads = () => ({ root: levelReads(""), a: levelReads("a") });
+    graphServer.fsFail = (path) => (path === "" ? new TypeError("Failed to fetch") : null);
+    await changeNamingNoPath();
+    const failed = reads();
+    expect(failed.root, "the failed whole fetch").toBe(2);
+
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+    };
+    graphServer.tree = "folders";
+    await refreshGraph();
+    await settle(20);
+    expect(graphData.tree).toBe("folders");
+    expect(reads(), "the answer leaves the failed spine to the next fetch").toEqual(failed);
+
+    graphServer.fsFail = null;
+    await changeNamingNoPath();
+    expect(reads(), "the next whole fetch reads the root and the opened folder").toEqual({ root: failed.root + 1, a: failed.a + 1 });
     expect(visibleIds()).toContain("a/x.md");
   });
 
@@ -1342,6 +1413,31 @@ describe("the workspace tree", () => {
     expect(tab.expanded["a/b"], "closed and opened again").toBe(true);
     expect(levelReads("a/b"), "a level read stays read").toBe(1);
     expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+  });
+
+  test("a change in an opened folder the spine holds no node of reads nothing and draws nothing again", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    // A file only the spine holds, so the drawn nodes are a list of the
+    // tab's own and a spine laid out again is a new one.
+    graphServer.fs.nodes.push(fsg.file("r.txt"));
+    graphServer.fs.edges.push(fsg.contains("", "r.txt"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    await doubleClick("directory:a/b");
+    await settle();
+    const calls = graphServer.fsGraphCalls.length;
+    const drawn = canvas.props!.nodes;
+
+    graphServer.fs.nodes.push(fsg.file("a/b/y.md"));
+    graphServer.fs.edges.push(fsg.contains("a/b", "a/b/y.md"));
+    graphReloadSignal.paths = ["a/b/y.md"];
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle();
+    expect(graphServer.fsGraphCalls.length, "the patch skips a/b").toBe(calls);
+    expect(canvas.props!.nodes, "a patch that read no level does not lay the spine out again").toBe(drawn);
   });
 
   test("the depth reads a double-click on the selected directory", async () => {

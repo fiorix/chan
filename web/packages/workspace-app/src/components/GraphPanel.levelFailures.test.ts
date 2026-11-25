@@ -29,7 +29,7 @@ import {
 } from "../__tests__/graphPanel";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { directoryNodeId } from "../graph/canvasNodes";
-import { invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
 import { graphReloadSignal, indexStatus } from "../state/store.svelte";
 import { layout } from "../state/tabs.svelte";
 
@@ -182,6 +182,49 @@ describe("a failed nonroot filesystem level", () => {
     expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
     expect.soft(target.querySelector(".placeholder.error")).toBeNull();
     expect.soft(target.querySelector(".cy.dim")).toBeNull();
+  });
+
+  test("a whole spine fetch that lands under an answer over the listing cap leaves a failed folder to its retry", async () => {
+    coverNotes();
+    graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
+    graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
+    graphServer.tree = "folders";
+    failLevel("notes");
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    releaseStreams.push(release);
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
+    expect({ partial: graphData.partial, tree: graphData.tree }, "the answer is taken before the spine lands").toEqual({ partial: false, tree: "folders" });
+
+    release();
+    await settle();
+    expect(reads("notes"), "its read and one retry").toBe(2);
+    expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+  });
+
+  test("a folder whose read failed twice under an answer over the listing cap is read again when a double-click opens it", async () => {
+    const release = holdSharedGraph();
+    coverNotes();
+    graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
+    graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
+    graphServer.tree = "folders";
+    failLevel("notes", 2);
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
+    release();
+    await settle();
+    expect(reads("notes"), "the first read and its retry").toBe(2);
+    expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+
+    for (const open of [false, true]) {
+      canvas.props!.onSelect(directoryNodeId("notes"));
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.notes === true, "the double-click closes notes, then opens it").toBe(open);
+    }
+    expect(reads("notes"), "the opening reads it again").toBe(3);
+    expect(visibleIds()).toContain("notes/a.md");
+    expect(target.querySelector(".spine-warning")).toBeNull();
   });
 
   test.each([
