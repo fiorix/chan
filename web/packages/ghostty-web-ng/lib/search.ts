@@ -416,8 +416,6 @@ export class SearchOwner {
       // completed list without it is what loses it.
       this.kept = range;
       if (this.index === null && this.complete) this.forget();
-    } else if (this.kept) {
-      this.forget();
     }
   }
 
