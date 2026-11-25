@@ -301,9 +301,9 @@ const DEFAULT_BG = 0x000000;
 const MODE_GRAPHEME_CLUSTER = 2027;
 
 /// Whether a reply is upstream's answer to an OSC 4, 10, 11 or 12 color
-/// query, or to an OSC 21 query of kitty's color protocol. chan answers none, on either backend (ghostty-web's build never
-/// did, and xtermReports.ts suppresses xterm.js's): a program that exits
-/// before reading the reply leaves the PTY to echo it into the next prompt.
+/// query, or to an OSC 21 query of kitty's color protocol. chan answers
+/// none, as ghostty-web's build never did: a program that exits before
+/// reading the reply leaves the PTY to echo it into the next prompt.
 /// Upstream writes each query's answer as one reply that starts with the
 /// query's own OSC number.
 function isColorReport(reply: Uint8Array): boolean {
@@ -314,7 +314,8 @@ function isColorReport(reply: Uint8Array): boolean {
   return ident === "4" || ident === "10" || ident === "11" || ident === "12" || ident === "21";
 }
 
-/// chan's xterm.js path leaves XTVERSION unanswered too.
+/// Upstream answers XTVERSION (`CSI > q`) with its own name, `libghostty`.
+/// chan's terminals give no version reply, as ghostty-web's build gave none.
 function isVersionReport(reply: Uint8Array): boolean {
   return reply[0] === 0x1b && reply[1] === 0x50 && reply[2] === 0x3e && reply[3] === 0x7c;
 }
@@ -437,9 +438,10 @@ class VtWasm {
 
   /// Refuses a core this binding does not drive. The tables and calls in
   /// this module are libghostty-vt's 1.x ABI, which a minor only adds to,
-  /// and the ghostty backend needs the search feature Ghostty's wasm builds
+  /// and chan's terminals need the search feature Ghostty's wasm builds
   /// carry. Either mismatch would fail inside a user's terminal; failing
-  /// here lets the loader fall back to xterm.js instead.
+  /// here lets the app show the refusal on the failure card in that
+  /// terminal's place before the terminal opens.
   private checkBuild(): void {
     const B = ABI.GhosttyBuildInfo;
     const out = this.alloc(8);
