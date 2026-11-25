@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, type SurveySpec } from "../api/client";
 import { ApiError } from "../api/errors";
 import BubbleOverlay from "../components/BubbleOverlay.svelte";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { setNotifyHandler } from "./notify.svelte";
 import {
   showSurvey,
@@ -149,6 +150,9 @@ describe("survey store", () => {
 
   test("x, X and Escape on the survey card dismiss it, and the button names its key", async () => {
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    // TerminalTab mounts a terminal's survey over its own tab, and the card
+    // answers its keys only while that tab is the focused pane's active one.
+    resetLayout([terminalTab({ id: "t1" })]);
     for (const key of ["x", "X", "Escape"]) {
       showSurvey(spec({ surveyId: `survey-${key}` }), "t1");
       const target = document.createElement("div");
