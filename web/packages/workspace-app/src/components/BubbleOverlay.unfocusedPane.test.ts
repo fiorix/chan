@@ -52,13 +52,14 @@ const EVERY_KIND = {
     'Media <audio data-kind="audio" controls src="https://example.com/a.mp3"></audio> ' +
       '<video data-kind="video" controls src="https://example.com/a.mp4"></video>',
     '<div data-kind="scroller" style="overflow-y: auto; height: 2em">a<br>b<br>c<br>d</div>',
+    '<div data-kind="scroller-x" style="overflow-x: scroll; width: 4em; white-space: nowrap">a long line</div>',
     'A <span data-kind="tabindex" tabindex="0">note</span>.',
     "![](https://www.youtube.com/watch?v=dQw4w9WgXcQ)",
   ].join("\n\n"),
 };
 const KINDS = [
   "link", "button", "input", "select", "textarea", "summary", "details", "area",
-  "svg-xlink", "svg-href", "audio", "video", "scroller", "tabindex", "iframe",
+  "svg-xlink", "svg-href", "audio", "video", "scroller", "scroller-x", "tabindex", "iframe",
 ];
 
 beforeEach(async () => {
@@ -270,6 +271,9 @@ describe("a survey over a terminal whose pane is not focused", () => {
     expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
   });
 
+  // jsdom dispatches the press at the link whatever covers it (`inert`,
+  // `pointer-events`), so hit-testing is read by a browser check, which
+  // presses the link through the page.
   test("a press on a link in its body makes its pane the focused one and leaves the link its click", async () => {
     const card = await surveyOverUnfocusedPane(LINKED);
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
