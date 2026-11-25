@@ -2075,23 +2075,23 @@ async fn a_released_view_flooding_frames_is_closed_within_the_bound() {
         }
     });
     let deadline = flooded_at + NO_PROGRESS_LIMIT + SHORT_ACK_SLACK;
-    let closed_at = loop {
-        match tokio::time::timeout_at(deadline, stream.next()).await {
-            Err(_) => break None,
-            Ok(Some(Ok(ClientMessage::Close(frame)))) => {
-                assert_stall_close(frame.as_ref());
-                break Some(tokio::time::Instant::now());
-            }
-            Ok(Some(Ok(ClientMessage::Text(text)))) => {
-                let frame: Value = serde_json::from_str(&text).expect("control JSON");
-                panic!("a flooding view waiting for its client gets no {frame}");
-            }
-            Ok(Some(Ok(other))) => {
-                panic!("a flooding view is sent nothing but its close: {other:?}")
-            }
-            Ok(Some(Err(error))) => panic!("the socket ended without a close frame: {error}"),
-            Ok(None) => panic!("the socket ended without a close frame"),
+    // The flood gets no reply, so the first frame the view is sent is its
+    // close.
+    let closed_at = match tokio::time::timeout_at(deadline, stream.next()).await {
+        Err(_) => None,
+        Ok(Some(Ok(ClientMessage::Close(frame)))) => {
+            assert_stall_close(frame.as_ref());
+            Some(tokio::time::Instant::now())
         }
+        Ok(Some(Ok(ClientMessage::Text(text)))) => {
+            let frame: Value = serde_json::from_str(&text).expect("control JSON");
+            panic!("a flooding view waiting for its client gets no {frame}");
+        }
+        Ok(Some(Ok(other))) => {
+            panic!("a flooding view is sent nothing but its close: {other:?}")
+        }
+        Ok(Some(Err(error))) => panic!("the socket ended without a close frame: {error}"),
+        Ok(None) => panic!("the socket ended without a close frame"),
     };
     flood.abort();
     let frames = frames.load(Ordering::Relaxed);
