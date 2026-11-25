@@ -633,6 +633,41 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 4, total: 230, partial: false });
   });
 
+  // Line 115 wraps a needle across the boundary between the page above
+  // (rows up to 230) and the screen page (from row 231); the core lists
+  // that match first in its history, right after its active-area entries.
+  const straddled = Array.from({ length: 120 }, (_, i) => i === 115
+    ? 'needle '.padEnd(197, 'y') + 'needle' + 'z'.repeat(97) : 'needle '.padEnd(300, 'x')).join('\r\n');
+  test.each([
+    { name: 'older from row 232', from: range(232, 0), direction: 'older' as const, steps: 3, index: 5 },
+    { name: 'newer from row 230', from: range(230, 0), direction: 'newer' as const, steps: 5, index: 5 },
+  ])('after output, $name waits for the match wrapped across the page boundary', async ({ from, direction, steps, index }) => {
+    const { term } = await create(straddled, 200, 5, 10_000_000);
+    const wrapped = range(230, 197, 231, 2);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < steps; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([from]);
+    const raw = term.core!.createSearch();
+    raw.setNeedle('needle');
+    raw.feed();
+    const head = raw.state().total;
+    raw.free();
+    expect(coreRows(term, 'needle', head + 1).slice(head - 4), 'the screen page ends the active-area entries, then the wrapped match').toEqual([238, 236, 234, 232, 230]);
+    // Placement stops right after the active-area entries.
+    placementStopsAt(head);
+    term.write('\x1b[m');
+    search.step('needle', direction);
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      const at = active(term)?.[0];
+      expect([from, wrapped], `frame ${i}: the press waits on its match or lands on its neighbour`).toContainEqual(at);
+      frame();
+    }
+    expect(active(term)).toEqual([wrapped]);
+    expect(search.state).toEqual({ index, total: 121, partial: false });
+  });
+
   test.each([117, 118, 119])("after output, newer from the page above's newest waits for the screen page's oldest, placement stopped at entry %i", async cut => {
     const { term } = await create(paged(1), 200, 5, 10_000_000);
     const search = searchOf(term);
