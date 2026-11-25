@@ -64,13 +64,12 @@ describe("attach replay secret-mask scans", () => {
     scans.begin(scanAll);
     const replayComplete = scans.track(true);
     scans.ready();
-
     const liveComplete = scans.track(false);
-    liveComplete();
-    expect(scanAll).not.toHaveBeenCalled();
 
     replayComplete();
-    expect(scanAll).toHaveBeenCalledOnce();
+    expect(scanAll, "the live write still parsing does not hold the scan").toHaveBeenCalledOnce();
+    liveComplete();
+    expect(scanAll, "and its end runs no second one").toHaveBeenCalledOnce();
   });
 
   test("a new attach supersedes callbacks from an abandoned replay", () => {
