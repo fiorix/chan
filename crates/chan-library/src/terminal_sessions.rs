@@ -6203,9 +6203,11 @@ impl Session {
                     self.private_mode_recovery_prelude(alt_screen)
                 }
                 Resume::Live(_) => Vec::new(),
-                // A client cursor the ring has moved past names a screen
-                // that parsed bytes this replay no longer holds. A fresh
-                // view, dialed at 0, has no such screen.
+                // A client cursor the replay misses bytes for names a screen
+                // that parsed bytes this replay does not hold: a cursor the
+                // ring has moved past, or a lossy-restore client's cursor
+                // ahead of what the restore kept. A fresh view, dialed at 0,
+                // has no such screen.
                 Resume::Since(Some(since)) if since > 0 && missed_bytes > 0 => {
                     self.private_mode_recovery_prelude(alt_screen)
                 }
