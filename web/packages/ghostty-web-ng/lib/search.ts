@@ -58,9 +58,13 @@ export class SearchOwner {
   private head: number | null = null;
   // Whether those entries list a page ahead of a newer one; null until read.
   private inverted: boolean | null = null;
-  // The core's first entry in the list being placed: where it lists a page
-  // ahead, the page above's newest.
-  private firstListed: MatchRange | null = null;
+  // While a list is placed: the first entry the core listed of the page it
+  // is listing, the first of the page it listed before that, which is that
+  // page's newest match, and the last entry read. An entry newer than the
+  // one listed before it starts a page.
+  private listedPage: MatchRange | null = null;
+  private pageAbove: MatchRange | null = null;
+  private lastListed: MatchRange | null = null;
   // The scan starts from scratch at its next feed (a new needle, a restart,
   // a resize), which lists only the core's active area at first.
   private fresh = false;
@@ -200,7 +204,7 @@ export class SearchOwner {
     this.starts = [];
     this.total = 0;
     this.readCursor = 0;
-    this.firstListed = null;
+    this.listedPage = this.pageAbove = this.lastListed = null;
     this.index = null;
     this.complete = false;
     this.highlights.clear('search-all');
@@ -254,7 +258,7 @@ export class SearchOwner {
     this.lastTotal = 0;
     this.readCursor = 0;
     this.head = this.inverted = null;
-    this.firstListed = null;
+    this.listedPage = this.pageAbove = this.lastListed = null;
     this.waiting = [];
     this.askedOver = null;
     this.complete = true;
@@ -309,11 +313,14 @@ export class SearchOwner {
 
   /**
    * Whether the list placed so far is the head of the whole list in
-   * position order: complete, past the core's active-area entries, or
-   * those entries list no page ahead of a newer one. With `measure` an
-   * unknown count of them is read from a scratch search's first feed,
-   * which lists the same active area alone, a cost only a press pays;
-   * without it an unknown count reads as passed.
+   * position order: complete, past the core's active-area entries and,
+   * where they list a page ahead, the entry after them, or those entries
+   * list no page ahead of a newer one. A match wrapped across the boundary
+   * between the page above and the next page is in neither page's entries:
+   * the core lists it first in its history. With `measure` an unknown
+   * count of them is read from a scratch search's first feed, which lists
+   * the same active area alone, a cost only a press pays; without it an
+   * unknown count reads as passed.
    */
   private ordered(measure: boolean): boolean {
     if (this.complete) return true;
@@ -321,7 +328,7 @@ export class SearchOwner {
       if (!measure) return true;
       this.head = this.activeCount();
     }
-    if (this.readCursor >= this.head) return true;
+    if (this.readCursor > this.head || this.head === 0) return true;
     this.inverted ??= this.listsAhead(this.head);
     return !this.inverted;
   }
@@ -345,6 +352,33 @@ export class SearchOwner {
     const first = this.search!.matchAt(0);
     const last = this.search!.matchAt(head - 1);
     return !first || !last || order(last, highlight(first)) > 0;
+  }
+
+  /**
+   * The newest match, read from the core's listing, while the list placed
+   * so far is not the head of the whole one; null once it is, where its
+   * first entry is the newest. The active-area entries list their pages
+   * oldest first, each newest first, so the last page's entries are the
+   * ones not older than the last entry, and the first of them is the
+   * newest; a binary search finds it. An entry the core cannot place gives
+   * null, which leaves the press to the ordering rule.
+   */
+  private listedNewest(): MatchRange | null {
+    if (this.ordered(true)) return null;
+    const search = this.search!;
+    const last = search.matchAt(this.head! - 1);
+    if (!last) return null;
+    const oldest = highlight(last);
+    let lo = 0;
+    let hi = this.head! - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const range = search.matchAt(mid);
+      if (!range) return null;
+      if (order(range, oldest) >= 0) hi = mid;
+      else lo = mid + 1;
+    }
+    return search.matchAt(lo);
   }
 
   private checked(): number {
@@ -401,12 +435,16 @@ export class SearchOwner {
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
     while (this.readCursor < state.total && performance.now() < deadline) {
       const batch = search.readMatches(this.readCursor, deadline - performance.now());
-      if (this.readCursor === 0) this.firstListed = batch.ranges[0] ?? null;
       this.readCursor = batch.next;
       const added: HighlightRange[] = [];
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
+        if (!this.lastListed || compare(range, this.lastListed) > 0) {
+          this.pageAbove = this.listedPage;
+          this.listedPage = range;
+        }
+        this.lastListed = range;
         const painted = this.place(range);
         if (painted) added.push(painted);
       }
@@ -525,6 +563,17 @@ export class SearchOwner {
         selected = true;
         continue;
       }
+      // From no active match older lands on the newest, read from the
+      // core's listing while the placed list is not yet the head of the
+      // whole one, so no count of placed entries decides it.
+      const newest = direction === 'older' && this.index === null ? this.listedNewest() : null;
+      if (newest) {
+        this.waiting.shift();
+        this.index = this.placedIndex(newest);
+        this.keep(newest);
+        selected = true;
+        continue;
+      }
       const total = this.total;
       // A press lands among the placed matches once they are the head of
       // the whole list in position order; from no active match older lands
@@ -575,10 +624,11 @@ export class SearchOwner {
     let from = Math.max(0, index - BEFORE_REACH);
     let to = Math.min(this.total, index + BEFORE_REACH + 1);
     // With the count of the core's active-area entries unknown, a list the
-    // core lists a page ahead can lack screen-page matches newer than the
-    // page above's newest, the core's first entry, while placing them, so
-    // the window ends at that entry on the side away from the active match.
-    const split = this.head === null && !this.complete && this.firstListed ? this.indexOf(this.firstListed) : undefined;
+    // core lists pages ahead in can lack the matches of the page being
+    // placed that lie between its placed ones and the newest match of the
+    // page listed before it, so the window ends at that match on the side
+    // away from the active match.
+    const split = this.head === null && !this.complete && this.pageAbove ? this.indexOf(this.pageAbove) : undefined;
     if (split !== undefined && split > 0) {
       if (index < split) to = Math.min(to, split);
       else from = Math.max(from, split);
@@ -702,6 +752,10 @@ function highlight(range: MatchRange): HighlightRange {
 // Positive when `a` comes after `b` in text order: nearer the prompt.
 function order(a: MatchRange, b: HighlightRange): number {
   return a.startRow - b.start.absoluteRow || a.startCol - b.start.col || a.endRow - b.end.absoluteRow || a.endCol - b.end.col;
+}
+// The same order between two match ranges.
+function compare(a: MatchRange, b: MatchRange): number {
+  return a.startRow - b.startRow || a.startCol - b.startCol || a.endRow - b.endRow || a.endCol - b.endCol;
 }
 function learned(estimate: number, measured: number, floor: number): number {
   return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);
