@@ -301,6 +301,23 @@ describe("differential: the binding against ghostty-web's recorded build", () =>
     }
   });
 
+  // The widget forwards every core reply to the program, so an answer to
+  // Kitty's drag and drop protocol (OSC 72) would claim drops chan's
+  // terminal never delivers.
+  test("drag and drop queries get no reply while device attributes after them still answer", async () => {
+    const t = (await upstream()).createTerminal(80, 24);
+    try {
+      t.write("\x1b]72;t=q:i=3\x1b\\");
+      expect(t.readResponse(), "a query").toBeNull();
+      t.write("\x1b]72;t=r:x=1\x1b\\");
+      expect(t.readResponse(), "a request").toBeNull();
+      t.write("\x1b]72;t=q:i=4\x1b\\\x1b[c");
+      expect(t.readResponse()).toBe("\x1b[?62;22c");
+    } finally {
+      t.free();
+    }
+  });
+
   test("color queries get no reply, as from ghostty-web's build", async () => {
     const t = (await upstream()).createTerminal(80, 24, { fgColor: 0x24292f, bgColor: 0xffffff });
     for (const { query, reply } of oracle.colorQueries) {
@@ -495,6 +512,28 @@ describe("upstream's terminal through the binding", () => {
     expect(String.fromCodePoint(cells.at(2)!.codepoint)).toBe("x");
     t.write("\r\n\r\n\r\n");
     expect(row(t, 0, true).at(0)?.cluster).toBe(family);
+  });
+
+  test("under grapheme clustering a skin tone makes an emoji that is text by default two cells wide", async () => {
+    const vt = await upstream();
+    const toned = vt.createTerminal(20, 3);
+    const bare = vt.createTerminal(20, 3);
+    try {
+      expect(toned.getMode(2027), "grapheme clustering is on").toBe(true);
+      toned.write("\u261D\u{1F3FB}|");
+      const cells = row(toned, 0);
+      expect(cells.at(0)?.cluster).toBe("\u261D\u{1F3FB}");
+      expect(cells.at(0)?.width).toBe(2);
+      expect(cells.at(1)?.width, "a spacer holds the second cell").toBe(0);
+      expect(String.fromCodePoint(cells.at(2)!.codepoint)).toBe("|");
+      expect(toned.getCursor().x).toBe(3);
+      bare.write("\u261D|");
+      expect(row(bare, 0).at(0)?.width, "the emoji alone takes one cell").toBe(1);
+      expect(bare.getCursor().x).toBe(2);
+    } finally {
+      toned.free();
+      bare.free();
+    }
   });
 
   test.each(["screen", "history"])("a cluster beyond the scratch capacity reads whole from %s", async (surface) => {
