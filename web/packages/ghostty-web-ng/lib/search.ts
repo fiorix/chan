@@ -1,8 +1,8 @@
 import type { MatchRange, VtSearch } from '../vt/ghosttyVt';
 import { EventEmitter } from './event-emitter';
-import type { HighlightRange, HighlightsManager } from './highlights';
+import type { HighlightRange, HighlightsManager, HighlightStyle } from './highlights';
 import type {
-  TerminalChange, TerminalCore, TerminalCoreTrackedCell, TerminalSearchState, TerminalViewport,
+  ITheme, TerminalChange, TerminalCore, TerminalCoreTrackedCell, TerminalSearchState, TerminalViewport,
 } from './interfaces';
 
 const SCAN_BUDGET_MS = 4;
@@ -31,6 +31,7 @@ type Before = {
   ranges: HighlightRange[]; offset: number; total: number; complete: boolean; index: number; history: number;
   anchor: TerminalCoreTrackedCell | null;
 };
+type Styles = { all: HighlightStyle; active: HighlightStyle };
 type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell; before: Before | null };
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
@@ -84,6 +85,7 @@ export class SearchOwner {
   private held = 0;
   private count = EMPTY;
   private disposed = false;
+  private styles: Styles;
   private readonly changes = new EventEmitter<TerminalSearchState>();
   private readonly stopResizing: () => void;
   readonly onChange = this.changes.event;
@@ -95,7 +97,9 @@ export class SearchOwner {
     private alternateScreen: boolean,
     private readonly selection: () => HighlightRange | null,
     private readonly createSearch: () => VtSearch,
+    private readonly theme: () => ITheme,
   ) {
+    this.styles = searchStyles(theme());
     this.stopResizing = core.beforeResize(({ rows }) => {
       const start = this.keptStart?.point();
       const top = this.core.getScrollbackLength() - Math.floor(this.viewport.offset);
@@ -133,6 +137,13 @@ export class SearchOwner {
   close(): void {
     this.release();
     this.publish();
+  }
+
+  /** Takes the theme's search colours. The terminal calls it on a theme change, ahead of its repaint. */
+  restyle(): void {
+    this.styles = searchStyles(this.theme());
+    this.highlights.restyle('search-all', this.styles.all);
+    if (this.kept) this.highlightActive();
   }
 
   dispose(): void {
@@ -348,7 +359,7 @@ export class SearchOwner {
         const painted = this.place(range);
         if (painted) added.push(painted);
       }
-      this.highlights.append('search-all', added, { background: '#806d36' });
+      this.highlights.append('search-all', added, this.styles.all);
       if (performance.now() >= deadline) break;
     }
     this.complete = state.complete && this.readCursor >= state.total;
@@ -573,7 +584,7 @@ export class SearchOwner {
   }
 
   private highlightActive(): void {
-    if (this.kept) this.highlights.set('search-active', [highlight(this.kept)], { background: '#ffb454', foreground: '#000000' });
+    if (this.kept) this.highlights.set('search-active', [highlight(this.kept)], this.styles.active);
     else this.highlights.clear('search-active');
   }
 
@@ -606,6 +617,14 @@ export class SearchOwner {
   }
 }
 
+function searchStyles(theme: ITheme): Styles {
+  const all: HighlightStyle = { background: theme.searchMatchBackground ?? '#806d36' };
+  if (theme.searchMatchForeground !== undefined) all.foreground = theme.searchMatchForeground;
+  return {
+    all,
+    active: { background: theme.searchActiveMatchBackground ?? '#ffb454', foreground: theme.searchActiveMatchForeground ?? '#000000' },
+  };
+}
 function matchRange(range: HighlightRange): MatchRange {
   return { startRow: range.start.absoluteRow, startCol: range.start.col, endRow: range.end.absoluteRow, endCol: range.end.col };
 }

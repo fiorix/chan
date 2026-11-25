@@ -65,9 +65,12 @@ export interface FontMetrics {
 /**
  * A theme with every color the renderer needs. The selection foreground is
  * the one it does without: a theme that names none leaves selected text in
- * its own color, as xterm.js does.
+ * its own color, as xterm.js does. Find's colours reach the painter as the
+ * styles of its highlight layers, so the renderer needs none of them.
  */
-type RendererTheme = Required<Omit<ITheme, 'selectionForeground' | 'contrastBackdrop'>> &
+type SearchColorKey = 'searchMatchBackground' | 'searchMatchForeground' |
+  'searchActiveMatchBackground' | 'searchActiveMatchForeground';
+type RendererTheme = Required<Omit<ITheme, 'selectionForeground' | 'contrastBackdrop' | SearchColorKey>> &
   Pick<ITheme, 'selectionForeground' | 'contrastBackdrop'>;
 
 export const DEFAULT_THEME: RendererTheme = {

@@ -88,6 +88,14 @@ export class HighlightsManager implements TerminalHighlights {
     }
   }
 
+  /** Replaces a layer's style, keeping its ranges and its place; internal, for find's theme colours. */
+  restyle(name: string, style: HighlightStyle): void {
+    const layer = this.layers.get(name);
+    if (!layer) return;
+    layer.style = { ...style };
+    this.invalidate(layer);
+  }
+
   clear(name: string): boolean {
     const layer = this.layers.get(name);
     if (!layer) return false;
