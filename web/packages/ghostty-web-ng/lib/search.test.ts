@@ -175,6 +175,12 @@ const threePaged = Array.from({ length: 240 }, (_, i) => (i <= 220 || i >= 231 ?
 // to 230) and the middle one (from row 231), at 230:197 to 231:2.
 const threeStraddled = Array.from({ length: 240 }, (_, i) => i === 115
   ? 'needle '.padEnd(197, 'y') + 'needle' + 'z'.repeat(97) : 'needle '.padEnd(300, 'x')).join('\r\n');
+// Lines of one row at 80 columns, 573 to a page of the core's history,
+// with matches on the last 286 only: the screen spans the boundary between
+// the last two pages, both hold matches on it, and the `pages` pages above
+// them hold none.
+const screenPaged = (pages: number) => Array.from({ length: 573 * (pages + 1) + 13 }, (_, i) =>
+  (i >= 573 * pages + 300 ? 'needle ' : 'plain ') + i).join('\r\n');
 // The first match the core itself lists, in its own order.
 function coreFirst(term: Terminal, needle: string) {
   const raw = term.core!.createSearch();
@@ -348,6 +354,27 @@ describe('widget search', () => {
     settle(search);
     expect(active(term)).toEqual([range(478, 0)]);
     expect(search.state).toEqual({ index: 1, total: 230, partial: false });
+  });
+
+  test('where the screen spans two pages and nothing above them matches, find knows the index and a step lands at once', async () => {
+    const pages = 8;
+    const { term } = await create(screenPaged(pages), 80, 24, 10_000_000);
+    const last = 573 * (pages + 1) + 12;
+    const rows = coreRows(term, 'needle', 286);
+    expect(rows.slice(0, 273), 'the core lists the page the screen starts in first').toEqual(Array.from({ length: 273 }, (_, i) => last - 13 - i));
+    expect(rows[0], "that page's newest is on the screen").toBeGreaterThanOrEqual(term.getScrollbackLength());
+    expect(rows.slice(273), 'then the last page, newest first').toEqual(Array.from({ length: 13 }, (_, i) => last - i));
+    const search = searchOf(term);
+    search.find('needle');
+    frame();
+    expect(search.state, 'the first frame places the matches and knows the index while the scan goes on').toEqual({ index: 1, total: 286, partial: true });
+    expect(active(term)).toEqual([range(last, 0)]);
+    search.step('needle', 'older');
+    expect(active(term), 'older lands in the call').toEqual([range(last - 1, 0)]);
+    expect(search.state.index).toBe(2);
+    settle(search);
+    expect(active(term)).toEqual([range(last - 1, 0)]);
+    expect(search.state).toEqual({ index: 2, total: 286, partial: false });
   });
 
   test("a resize right after find's first activation keeps the unplaced newest until the rescan places it", async () => {
