@@ -121,6 +121,21 @@ function slowFeed() {
   });
 }
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
+const numbered = (n: number) => Array.from({ length: n }, (_, i) => `needle ${i}`).join('\r\n');
+// Needles on irregular rows and columns, so a wrong row or a wrong entry
+// cannot land on a needle by accident.
+const irregular = (n: number) => Array.from({ length: n }, (_, i) =>
+  i % 7 === 0 || i % 7 === 3 ? `${' '.repeat(i % 5)}needle ${i}` : `line ${i}`).join('\r\n');
+// The active ranges of the next `count` older steps, stepping back after.
+function olderRanges(term: Terminal, search: Search, count: number) {
+  const out: (Range[] | undefined)[] = [];
+  for (let i = 0; i < count; i++) {
+    search.step('needle', 'older');
+    out.push(active(term));
+  }
+  for (let i = 0; i < count; i++) search.step('needle', 'newer');
+  return out;
+}
 // Lines of 300 cells at 200 columns, two rows each, with `needles`
 // matches at the start of each line's first row, 7 cells apart: the last
 // page of the core's history opens on a wrapped row, the second of line
@@ -563,6 +578,184 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 2, total: 95, partial: false });
   });
 
+  test('window steps follow irregular matches, and a write after placed steps takes a new window', async () => {
+    const { term } = await create(irregular(6000), 40, 6, 9000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 700; i++) search.step('needle', 'older');
+    const first = olderRanges(term, search, 3);
+    const start = active(term);
+    slowPlacement();
+    const stream = () => { term.write('tick\r\n'); frame(); };
+    for (const expected of first) {
+      stream();
+      search.step('needle', 'older');
+      expect(search.state.index, 'the index is unplaced').toBeNull();
+      expect(active(term)).toEqual(expected);
+    }
+    expect(active(term)).not.toEqual(start);
+    // Placement catches up, placed steps move on, and the next write takes
+    // a new window around the match they reached.
+    vi.mocked(VtSearch.prototype.readMatches).mockRestore();
+    settle(search);
+    for (let i = 0; i < 5; i++) search.step('needle', 'older');
+    const second = olderRanges(term, search, 2);
+    slowPlacement();
+    stream();
+    search.step('needle', 'older');
+    expect(search.state.index, 'the index is unplaced again').toBeNull();
+    expect(active(term)).toEqual(second[0]);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual(second[1]);
+  });
+
+  test('a window step counts only the history pruned since its list was placed', async () => {
+    const { term } = await create(numbered(2900), 80, 5, 3000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 1899; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle 1000');
+    const placedAt = active(term)![0].start.absoluteRow;
+    // Output prunes the history, and the list is placed again after it.
+    for (let i = 0; i < 40 && active(term)![0].start.absoluteRow === placedAt; i++) term.write('filler\r\n'.repeat(40));
+    expect(active(term)![0].start.absoluteRow, 'output pruned history above the kept match').toBeLessThan(placedAt);
+    settle(search);
+    expect(search.state.index).toBe(1900);
+    slowPlacement();
+    term.write('tick\r\n');
+    frame();
+    search.step('needle', 'older');
+    expect(search.state.index, 'the index is unplaced').toBeNull();
+    expect(activeLine(term)).toBe('needle 999');
+  });
+
+  test('older onto a neighbour pruned since the list was placed waits, then wraps', async () => {
+    const lines = Array.from({ length: 2900 }, (_, i) => i === 5 ? 'needle A' : i === 1500 ? 'needle B' : i === 2890 ? 'needle C' : `line ${i}`);
+    const { term } = await create(lines.join('\r\n'), 80, 5, 3000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle B');
+    const placedAt = active(term)![0].start.absoluteRow;
+    slowFeed();
+    for (let i = 0; i < 40 && active(term)![0].start.absoluteRow === placedAt; i++) term.write('filler\r\n'.repeat(40));
+    expect(active(term)![0].start.absoluteRow).toBeLessThan(placedAt);
+    expect(term.getScrollbackText().includes('needle A'), 'the older neighbour was pruned').toBe(false);
+    search.step('needle', 'older');
+    expect(activeLine(term), 'the press waits').toBe('needle B');
+    now += 1000;
+    frame();
+    settle(search);
+    expect(activeLine(term)).toBe('needle C');
+  });
+
+  test('older from the last placed entry of a partial list waits', async () => {
+    const { term } = await create(numbered(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 255; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle 1744');
+    slowPlacement();
+    slowFeed();
+    term.write('tick\r\n');
+    frame();
+    expect(search.state).toEqual({ index: 256, total: 2000, partial: true });
+    term.write('tick\r\n');
+    search.step('needle', 'older');
+    expect(activeLine(term), 'the press waits for the unplaced neighbour').toBe('needle 1744');
+  });
+
+  test('presses step from one window up to 1,024 matches away, and the next waits its second', async () => {
+    const { term } = await create(numbered(4000), 40, 6, 9000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 1500; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle 2499');
+    slowPlacement();
+    for (let i = 1; i <= 1024; i++) {
+      term.write('tick\r\n');
+      frame();
+      search.step('needle', 'older');
+      if (activeLine(term) !== `needle ${2499 - i}`) throw new Error(`press ${i} read ${activeLine(term)}`);
+    }
+    term.write('tick\r\n');
+    frame();
+    const pressed = now;
+    search.step('needle', 'older');
+    expect(activeLine(term), 'press 1,025 waits').toBe('needle 1475');
+    expect(now - pressed).toBeLessThan(1000);
+    while (now - pressed < 1000) {
+      term.write('tick\r\n');
+      frame();
+    }
+    term.write('tick\r\n');
+    frame();
+    expect(activeLine(term), 'then it applies from no active match').toMatch(/^needle 399\d/);
+  });
+
+  test('a neighbour rewritten on the screen and then scrolled into history waits', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(1997, 0)]);
+    slowFeed();
+    // Erase the newer neighbour on the screen, then scroll the screen away.
+    term.write('\x1b[4;1H\x1b[2K\x1b[6;1H' + 'x\r\n'.repeat(8));
+    expect(term.getScrollbackLength()).toBeGreaterThan(1998);
+    expect(active(term)).toEqual([range(1997, 0)]);
+    search.step('needle', 'newer');
+    expect(active(term), 'the press waits: the neighbour was on the screen when its list was read').toEqual([range(1997, 0)]);
+    settle(search);
+    expect(activeText(term)).toBe('needle');
+  });
+
+  test('after the scrollback is erased, a screen neighbour is not taken for history', async () => {
+    const { term } = await create('needle\r\n'.repeat(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    term.write('\x1b[3J');
+    settle(search);
+    expect(term.getScrollbackLength()).toBe(0);
+    search.step('needle', 'older');
+    search.step('needle', 'older');
+    const kept = active(term);
+    expect(kept).toEqual([range(2, 0)]);
+    slowFeed();
+    term.write('\x1b[2;1H\x1b[2K');
+    search.step('needle', 'older');
+    expect(active(term), 'the press waits: its neighbour is on the screen').toEqual(kept);
+  });
+
+  test('a history neighbour erased with the scrollback waits for placement', async () => {
+    const { term } = await create(numbered(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 5; i++) search.step('needle', 'older');
+    // The oldest match on the screen, whose older neighbour is in history.
+    expect(activeLine(term)).toBe('needle 1994');
+    expect(active(term)![0].start.absoluteRow).toBe(term.getScrollbackLength());
+    slowFeed();
+    term.write('\x1b[3J');
+    expect(term.getScrollbackLength()).toBe(0);
+    expect(activeLine(term), 'the active match stays on the screen').toBe('needle 1994');
+    search.step('needle', 'older');
+    expect(search.state.index).toBeNull();
+    expect(activeLine(term), 'the press waits: its neighbour went with the history').toBe('needle 1994');
+    settle(search);
+    expect(activeLine(term), 'placed, the press wraps from the oldest match left').toBe('needle 1999');
+    expect(search.state).toEqual({ index: 1, total: 6, partial: false });
+  });
+
   test('under output every frame, a step whose neighbour was on the screen waits no longer than its cap', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);
@@ -992,6 +1185,42 @@ describe('widget search', () => {
     expect(changed).not.toHaveBeenCalled();
     expect(search.state).toEqual({ index: 0, total: 0, partial: false });
     for (const result of tracked.mock.results) if (result.value) expect(result.value.point()).toBeNull();
+  });
+
+  test('find frees the history cells of its windows when it replaces them and when it closes', async () => {
+    const tracked = vi.spyOn(VtTerminal.prototype, 'trackCell');
+    const { term } = await create(numbered(100));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    for (let i = 0; i < 3; i++) {
+      term.write('\r\ntick');
+      settle(search);
+    }
+    const cells = tracked.mock.results.filter(r => r.value).map(r => r.value as VtTrackedCell);
+    expect(cells.filter(c => c.point() !== null), 'the active pair, the backlog cell, the list cell and one window cell').toHaveLength(5);
+    search.close();
+    for (const cell of cells) expect(cell.point()).toBeNull();
+  });
+
+  test.each(['query', 'close', 'dispose'] as const)('a %s frees the set-aside primary cells and window', async how => {
+    const tracked = vi.spyOn(VtTerminal.prototype, 'trackCell');
+    const { term } = await create('x needle\r\n' + 'filler\r\n'.repeat(8) + 'yy needle other');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)![0].start.absoluteRow, 'the active match is in the history').toBeLessThan(term.getScrollbackLength());
+    term.write('\x1b[?1049h');
+    term.write('alt text');
+    settle(search);
+    const cells = tracked.mock.results.filter(r => r.value).map(r => r.value as VtTrackedCell);
+    expect(cells.filter(c => c.point() !== null), 'the set-aside pair, its window cell and the backlog cell').toHaveLength(4);
+    if (how === 'query') search.find('other');
+    else if (how === 'close') search.close();
+    else term.dispose();
+    for (const cell of cells) expect(cell.point()).toBeNull();
   });
 
   test('a stable frozen facade does not retain requests or listeners before open', async () => {
