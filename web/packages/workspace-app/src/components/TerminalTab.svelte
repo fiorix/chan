@@ -173,6 +173,7 @@
   import type { UserInputTracker } from "../terminal/xtermUserInput";
   import {
     ghosttyLoadIsFinal,
+    onGhosttyKitLoaded,
     loadGhosttyKit,
     type GhosttyKit,
     type TerminalBackend,
@@ -780,6 +781,14 @@
     return teardown;
   });
   $effect(() => () => terminalConnection.dispose());
+  // A load another terminal made has passed, so this terminal's failed load
+  // may pass too: a fetch the window's terminals failed together takes one
+  // Retry, not one per terminal. A final failure stays for the page.
+  $effect(() =>
+    onGhosttyKitLoaded(() => {
+      if (loadFailure && !loadFailure.final) retryLoad();
+    }),
+  );
 
   $effect(() => {
     const unregisterInput = registerTerminalInputSink(tab.id, (data, binary, interrupt) => {

@@ -32,7 +32,8 @@
 /// cannot cure a failure of the instance. A terminal whose load fails shows
 /// the failure in its own area and opens no other terminal in its place;
 /// `ghosttyLoadIsFinal` tells it whether a retry can pass or only a reload
-/// can.
+/// can, and `onGhosttyKitLoaded` tells it when a load another terminal made
+/// has passed.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
@@ -69,6 +70,16 @@ let kitPromise: Promise<GhosttyKit> | null = null;
 let compiledKit: GhosttyKit | null = null;
 /// The failure the load keeps for the page's life, once it has one.
 let finalFailure: { error: unknown } | null = null;
+const loadedListeners = new Set<() => void>();
+
+/// Call `listener` each time a load of the kit passes: at the first spawn,
+/// and after a failed load, when the next one does. A cached answer is not
+/// a load, so a terminal that retries on this and fails again on its own
+/// instance does not start another round. Returns the removal.
+export function onGhosttyKitLoaded(listener: () => void): () => void {
+  loadedListeners.add(listener);
+  return () => void loadedListeners.delete(listener);
+}
 
 /// Whether `error`, from `loadGhosttyKit` or a kit's `instantiate`, stays
 /// the answer for the page's life, so only a reload, with a corrected
@@ -103,9 +114,14 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
       });
       return kit;
     })();
-    kitPromise.catch(() => {
-      if (!permanent) kitPromise = null;
-    });
+    kitPromise.then(
+      () => {
+        for (const listener of [...loadedListeners]) listener();
+      },
+      () => {
+        if (!permanent) kitPromise = null;
+      },
+    );
   }
   return kitPromise;
 }
