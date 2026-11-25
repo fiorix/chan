@@ -631,6 +631,70 @@ describe('widget search', () => {
     expect(activeLine(term)).toBe('needle 999');
   });
 
+  test('a window step onto the oldest history row lands at once', async () => {
+    const { term } = await create(numbered(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    search.step('needle', 'newer');
+    expect(activeLine(term)).toBe('needle 1');
+    slowPlacement();
+    term.write('tick\r\n');
+    frame();
+    search.step('needle', 'older');
+    expect(search.state.index, 'the index is unplaced').toBeNull();
+    expect(active(term), 'the press lands on row 0').toEqual([range(0, 0, 0, 5)]);
+  });
+
+  test('a newer neighbour on the first screen row of its list waits', async () => {
+    const { term } = await create(numbered(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 6; i++) search.step('needle', 'older');
+    // The last history row; its newer neighbour is the first screen row.
+    expect(activeLine(term)).toBe('needle 1993');
+    expect(active(term)![0].start.absoluteRow).toBe(term.getScrollbackLength() - 1);
+    slowFeed();
+    term.write('\x1b[1;1H\x1b[2K');
+    search.step('needle', 'newer');
+    expect(search.state.index).toBeNull();
+    expect(activeLine(term), 'the press waits: the screen row was rewritten').toBe('needle 1993');
+  });
+
+  test('a window step lands on a neighbour placement has reached with its index', async () => {
+    const { term } = await create(numbered(2000));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 512; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle 1487');
+    slowPlacement();
+    term.write('tick\r\n');
+    frame();
+    // The press places the second batch, which ends at the newer neighbour.
+    search.step('needle', 'newer');
+    expect(activeLine(term)).toBe('needle 1488');
+    expect(search.state.index, 'the landed neighbour is placed').toBe(512);
+  });
+
+  test('a press after a write and a resize waits for the reflowed list', async () => {
+    const { term } = await create(Array.from({ length: 2000 }, (_, i) => `needle ${i} `.padEnd(36, 'x')).join('\r\n'));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 999; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toMatch(/^needle 1000 x+$/);
+    slowPlacement();
+    term.write('tick\r\n');
+    frame();
+    term.resize(30, 6);
+    search.step('needle', 'older');
+    expect(search.state.index).toBeNull();
+    expect(activeLine(term), 'the press waits for placement').toMatch(/^needle 1000 x+$/);
+  });
+
   test('older onto a neighbour pruned since the list was placed waits, then wraps', async () => {
     const lines = Array.from({ length: 2900 }, (_, i) => i === 5 ? 'needle A' : i === 1500 ? 'needle B' : i === 2890 ? 'needle C' : `line ${i}`);
     const { term } = await create(lines.join('\r\n'), 80, 5, 3000);
