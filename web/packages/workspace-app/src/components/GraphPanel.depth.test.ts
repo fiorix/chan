@@ -1249,6 +1249,43 @@ describe("the workspace tree", () => {
     expect(visibleIds()).toContain("a/x.md");
   });
 
+  test("a folder opened while the spine is fetched whole is read once that fetch lands under an answer over the listing cap", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(levelReads("")).toBe(1);
+
+    // A change that names no path fetches the spine whole; it is held at
+    // the root, its list of levels taken before `a` opens.
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      graphReloadSignal.paths = [];
+      graphReloadSignal.nonce += 1;
+      await new Promise((r) => setTimeout(r, 400));
+      await settle();
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+      graphServer.view = {
+        nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+        edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+      };
+      graphServer.tree = "folders";
+      await refreshGraph();
+      await settle();
+      expect(graphData.tree).toBe("folders");
+      expect({ root: levelReads(""), a: levelReads("a") }, "taken while the fetch is in flight, the answer starts no other").toEqual({ root: 2, a: 0 });
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 2, a: 1 });
+    expect(visibleIds()).toContain("a/x.md");
+  });
+
   test("taking an answer of the whole tree reads no opened folder", async () => {
     graphServer.view = {
       nodes: [g.dir(""), g.dir("a"), g.file("a/x.md")],
