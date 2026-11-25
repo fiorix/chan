@@ -168,13 +168,11 @@ impl Pacing {
         let (seq, published_events) = (state.seq, state.events);
         let mut credit = maximum;
         let mut deadline: Option<Instant> = None;
-        for view in state.views.values_mut().filter(|view| !view.released) {
-            let Some(acked) = view.acked_position() else {
+        for view in state.views.values_mut() {
+            let Some(remaining) = self.view_credit(view, seq, published_events) else {
                 continue;
             };
-            let remaining = self.window.saturating_sub(seq.saturating_sub(acked));
-            let events = published_events.saturating_sub(view.events);
-            if remaining > 0 && events < EVENT_CREDIT {
+            if remaining > 0 {
                 // The clock measures a hold, so an idle view never expires.
                 view.blocked_since = None;
                 credit = credit.min(usize::try_from(remaining).unwrap_or(usize::MAX));
@@ -192,6 +190,35 @@ impl Pacing {
             Some(deadline) => Admission::Wait(deadline),
             None => Admission::Read(credit),
         }
+    }
+
+    /// The bytes `view` lets the reader take: `None` for a view that does
+    /// not pace it (released, or not acknowledging), and zero once it has
+    /// used its window or its events.
+    fn view_credit(&self, view: &View, seq: u64, events: u64) -> Option<u64> {
+        if view.released {
+            return None;
+        }
+        let acked = view.acked_position()?;
+        let remaining = self.window.saturating_sub(seq.saturating_sub(acked));
+        let unconsumed = events.saturating_sub(view.events);
+        Some(if unconsumed < EVENT_CREDIT {
+            remaining
+        } else {
+            0
+        })
+    }
+
+    /// Whether a read now would wait for a view. Unlike [`Pacing::credit`]
+    /// this starts no view's clock: the clock measures a hold, and a reader
+    /// with nothing to read holds no program.
+    pub(super) fn would_hold(&self) -> bool {
+        let state = self.state.lock().expect("terminal pacing poisoned");
+        !state.bypass
+            && state
+                .views
+                .values()
+                .any(|view| self.view_credit(view, state.seq, state.events) == Some(0))
     }
 
     /// When the reader last stopped waiting for credit, in Unix milliseconds

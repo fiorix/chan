@@ -317,11 +317,13 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
                 calls: usize,
                 sizes: Vec<usize>,
             }
+            // The window's worth, then the next byte the reader holds behind
+            // the view, then the end of the program's output.
             impl Read for Reader {
                 fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
                     self.calls += 1;
                     self.sizes.push(buf.len());
-                    if self.calls == 1 {
+                    if self.calls <= 2 {
                         buf.fill(b'x');
                         Ok(buf.len())
                     } else {
@@ -355,12 +357,98 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
     );
     assert_eq!(
         sizes,
-        vec![512, PTY_READ_BYTES],
-        "exit drain releases the reader without pacing its final read"
+        vec![512, 1, PTY_READ_BYTES],
+        "the reader takes the next byte before it waits, and the exit drain \
+         releases it without pacing its final read"
     );
     assert_eq!(
         *attached.lifecycle_rx.borrow(),
         Some(SessionLifecycle::Exit(TerminalExit::Code { code: 0 }))
+    );
+}
+
+/// A reader that has not seen the PTY readable and that a view would hold
+/// asks the program for one byte before it waits. While the program has
+/// nothing pending the write queue sees no hold and the view's clock does
+/// not run; once a byte arrives it waits for the view like any read.
+#[test]
+fn a_reader_with_nothing_to_read_waits_for_output_before_it_waits_for_a_view() {
+    struct Quiet {
+        asked: std::sync::mpsc::Sender<usize>,
+        bytes: std::sync::mpsc::Receiver<u8>,
+    }
+    impl Read for Quiet {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.asked.send(buf.len());
+            match self.bytes.recv() {
+                Ok(byte) => {
+                    buf[0] = byte;
+                    Ok(1)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+    let mut session = test_session_with_ring(1024);
+    Arc::get_mut(&mut session).expect("one owner").id = "pacing-nothing-to-read".into();
+    let attached = attach_acked(&session, None);
+    let progress = attached.output_progress().expect("lease");
+    session.record_output(&[b'x'; 512]);
+    assert!(
+        session.pacing.would_hold(),
+        "the view is a full window behind"
+    );
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let (bytes_tx, bytes_rx) = std::sync::mpsc::channel();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting_tx.send(());
+        },
+    );
+    let worker = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let mut reader = Quiet {
+                asked: asked_tx,
+                bytes: bytes_rx,
+            };
+            let mut buf = vec![0u8; PTY_READ_BYTES];
+            let read = session.paced_read(&mut reader, &mut buf, false);
+            (read.expect("read"), buf[0])
+        })
+    };
+    let asked = asked_rx.recv_timeout(Duration::from_secs(2));
+    let quiet_hold = session.pacing.credit_wait_ended_at().is_none();
+    let quiet_clock = progress
+        .with_view(|view| view.blocked_since.is_some())
+        .expect("live view");
+    bytes_tx.send(b'y').expect("the reader is reading");
+    let waited = waiting_rx.recv_timeout(Duration::from_secs(2));
+    let pending_hold = session.pacing.credit_wait_ended_at().is_none();
+    progress.acknowledge(512);
+    // Release a reader that never waited before joining it.
+    session.pacing.bypass();
+    drop(bytes_tx);
+    let (read, byte) = worker.join().expect("reader thread");
+    assert_eq!(
+        asked.expect("the reader reads before it waits"),
+        1,
+        "a reader a view would hold asks the program for one byte"
+    );
+    assert!(!quiet_hold, "a program with nothing pending is not held");
+    assert!(
+        !quiet_clock,
+        "the view's clock does not run while the program is quiet"
+    );
+    waited.expect("the program's next byte waits for the view");
+    assert!(pending_hold, "a program with output pending is held");
+    assert_eq!(
+        (read, byte),
+        (1, b'y'),
+        "the byte is read once, under credit"
     );
 }
 

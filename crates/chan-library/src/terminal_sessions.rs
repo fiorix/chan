@@ -137,9 +137,10 @@ const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 // and awaits the agent's generation-START before the next drain. The signal is
 // the quiescence of VISIBLE output (`last_output_at`): a TUI that repaints an
 // unchanged screen writes colour resets and cursor moves with no text, and
-// counting those would hold its queue for as long as it runs. A reader waiting
-// for a view's credit has the program blocked mid-output, so no delivery
-// happens during that wait and the quiet period counts from its end.
+// counting those would hold its queue for as long as it runs. A reader waits
+// for a view's credit only with the program's output pending, so it has the
+// program held mid-output: no delivery happens during that wait and the quiet
+// period counts from its end.
 const WRITE_QUEUE_CAP: usize = 100;
 /// Output-idle threshold: the agent is considered done generating when no
 /// visible output has arrived for this long. Conservative to ride over brief
@@ -5990,6 +5991,12 @@ impl Session {
     ) {
         #[cfg(target_os = "linux")]
         let mut wait = ReaderWait::default();
+        // Only a Linux reader with a master to poll knows, before it reads,
+        // that the program has output for it.
+        #[cfg(target_os = "linux")]
+        let polled = self.master_fd.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let polled = false;
         let mut buf = vec![0u8; PTY_READ_BYTES];
         let ended = loop {
             #[cfg(target_os = "linux")]
@@ -6004,15 +6011,12 @@ impl Session {
                 .lock()
                 .expect("terminal tmux gate poisoned")
                 .in_control_mode();
-            let credit = if control_mode {
-                buf.len()
+            let read = if control_mode {
+                reader.read(&mut buf)
             } else {
-                self.pacing.credit(buf.len(), || {
-                    #[cfg(any(test, feature = "test-util"))]
-                    fire_attach_seam(&self.id, AttachSeam::ReaderWaitingForProgress);
-                })
+                self.paced_read(reader, &mut buf, polled)
             };
-            match reader.read(&mut buf[..credit]) {
+            match read {
                 Ok(0) => break imported,
                 Ok(n) => {
                     #[cfg(any(test, feature = "test-util"))]
@@ -6033,6 +6037,34 @@ impl Session {
         if ended {
             self.record_terminal_exit(TerminalExit::Unknown, registry_last_exit);
         }
+    }
+
+    /// One read of the program's output under the views' credit. A reader
+    /// that has not seen the PTY readable (`polled` false) and that a view
+    /// would hold first blocks for the program's next byte: until the
+    /// program has output pending it is not held, and a wait for credit
+    /// would start the view's clock and mark the program's silence as a
+    /// hold for the write queue. That byte is then admitted like any read,
+    /// so a view that has used its window still holds it.
+    fn paced_read(
+        &self,
+        reader: &mut (impl Read + ?Sized),
+        buf: &mut [u8],
+        polled: bool,
+    ) -> std::io::Result<usize> {
+        let on_wait = || {
+            #[cfg(any(test, feature = "test-util"))]
+            fire_attach_seam(&self.id, AttachSeam::ReaderWaitingForProgress);
+        };
+        if !polled && self.pacing.would_hold() {
+            let read = reader.read(&mut buf[..1])?;
+            if read > 0 {
+                self.pacing.credit(read, on_wait);
+            }
+            return Ok(read);
+        }
+        let credit = self.pacing.credit(buf.len(), on_wait);
+        reader.read(&mut buf[..credit])
     }
 
     #[cfg(target_os = "linux")]
