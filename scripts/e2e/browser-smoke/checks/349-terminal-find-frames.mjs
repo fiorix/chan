@@ -30,13 +30,21 @@
 //               stream prunes it).
 //   WRAP     -- twice, find steps to the oldest match with the count
 //               complete, and then, in one page task so that no frame runs
-//               between them, lines of the same shape are written to the
-//               terminal until the core lists the wanted shape, and older
-//               is pressed. The first reading wants the core to list a page
-//               ahead of the newest match (its first entry is not the
-//               buffer's last "e"), the second the screen in order (its
-//               first entry is that "e"). When the call returns the active
-//               match must be the buffer's last "e". A reading counts only
+//               between them, lines are written to the terminal until the
+//               core lists the wanted shape, and older is pressed. The
+//               first reading wants the core to list a page ahead of the
+//               newest match (its first entry is not the buffer's last
+//               "e") and writes lines of the streams' shape. The second
+//               wants the screen in order (its first entry is that "e")
+//               and writes one-row lines of one segment: the core's
+//               active-area search lists the page above first whenever
+//               that page's last row soft-wraps into the last page, and
+//               with two-row lines every page boundary can fall inside a
+//               line, as it does in Chrome at this geometry, so that
+//               listing never comes; a one-row line wraps nowhere, so it
+//               comes once the first page they open holds the screen.
+//               When the call returns the active match must be the
+//               buffer's last "e". A reading counts only
 //               when its instrument holds: the shape was reached, the
 //               count was partial and `search-all` was empty before the
 //               press (the write emptied the list and nothing placed it
@@ -99,6 +107,10 @@ const PREFIX = 9;
 const TARGET_MS = 12;
 // Lines per fast stream: several seconds of output at the largest history.
 const STREAM = 100_000;
+// Lines a WRAP reading writes at most before its instrument fails: the
+// screen-in-order reading may need a page of the core's history (a few
+// hundred rows at this width) and then the screen.
+const WRAP_LINES = 1_000;
 const FILL = 60_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -340,7 +352,7 @@ export default {
       for (const shape of ["ahead", "order"]) {
         await term.evaluate((t) => t.search.step("e", "newer"));
         const start = await search();
-        const reading = await term.evaluate((t, [shape, tail, from]) => {
+        const reading = await term.evaluate((t, [shape, line, from, max]) => {
           const f = window.__find349;
           const coreFirst = () => {
             const raw = t.core.createSearch();
@@ -357,8 +369,8 @@ export default {
           let n = from;
           let first = null;
           let last = null;
-          for (let i = 0; i < 400; i++) {
-            t.write(`\r\n9:${String(++n).padStart(6, "0")} ${tail}`);
+          for (let i = 0; i < max; i++) {
+            t.write(`\r\n9:${String(++n).padStart(6, "0")} ${line}`);
             first = coreFirst();
             last = f.lastBefore();
             if ((shape === "order") === isLast(first, last)) break;
@@ -371,7 +383,7 @@ export default {
             shape, lines: n - from, coreFirst: first, last, reached: (shape === "order") === isLast(first, last), before, ms,
             after: t.highlights.get("search-active")?.ranges?.[0] ?? null, state: t.search.state, expected: f.lastBefore(),
           };
-        }, [shape, tail, written]);
+        }, [shape, shape === "order" ? SEGMENT : tail, written, WRAP_LINES]);
         written += reading.lines;
         reading.start = start;
         reading.landed = onCell(reading.after, reading.expected);
