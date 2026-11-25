@@ -850,6 +850,47 @@ describe('widget search', () => {
     expect(active(term), 'a step goes on from the returned match').toEqual([range(1, 3)]);
   });
 
+  test('a step after an alternate screen excursion steps from the list placed before it', async () => {
+    const { term } = await create(Array.from({ length: 2000 }, (_, i) => `needle ${i}`).join('\r\n'));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 999; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toBe('needle 1000');
+    slowPlacement();
+    term.write('\x1b[?1049h');
+    term.write('alt text');
+    frame();
+    term.write('\x1b[?1049l');
+    expect(activeLine(term), 'the primary match returns with its screen').toBe('needle 1000');
+    search.step('needle', 'older');
+    expect(search.state.index, 'the rescan has not placed the returned match').toBeNull();
+    expect(activeLine(term), 'the press lands on the neighbour at once').toBe('needle 999');
+    search.step('needle', 'newer');
+    search.step('needle', 'newer');
+    expect(activeLine(term)).toBe('needle 1001');
+    settle(search);
+    expect(search.state).toEqual({ index: 999, total: 2000, partial: false });
+  });
+
+  test('a step after a resize on the alternate screen waits for the reflowed list', async () => {
+    // Lines that rewrap when narrowed, so the rows before the resize are wrong after it.
+    const { term } = await create(Array.from({ length: 2000 }, (_, i) => `needle ${i} `.padEnd(36, 'x')).join('\r\n'));
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    for (let i = 0; i < 999; i++) search.step('needle', 'older');
+    expect(activeLine(term)).toMatch(/^needle 1000 x+$/);
+    slowPlacement();
+    term.write('\x1b[?1049h');
+    term.resize(30, 6);
+    term.write('\x1b[?1049l');
+    expect(activeLine(term), 'the primary match returns reflowed').toMatch(/^needle 1000 x+$/);
+    search.step('needle', 'older');
+    expect(search.state.index).toBeNull();
+    expect(activeLine(term), 'the press waits for placement').toMatch(/^needle 1000 x+$/);
+  });
+
   test('pruning discards the active match instead of reusing its old coordinates', async () => {
     const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(900) + 'needle', 80, 5, 1000);
     const search = searchOf(term);
