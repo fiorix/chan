@@ -191,9 +191,11 @@
   }
 
   /// Double-click a graph node: a directory opens or closes in place, as a
-  /// File Browser's does. The loaded graph holds the whole tree, so this
-  /// only flips the directory's flag in the opened set and the drawn set
-  /// follows; closing keeps what was opened below it for the next opening.
+  /// File Browser's does. This flips the directory's flag in the opened set
+  /// and the drawn set follows; an opened directory whose level the drawn
+  /// graph is not known to hold, as under an answer over the listing cap,
+  /// is read (`loadOpenedChildren`). Closing keeps what was opened below it
+  /// for the next opening.
   /// The preceding tap already set the selection, so this reads it. The
   /// window's session follows the tab's opened set as a whole, not each
   /// key, so this schedules its saves.
