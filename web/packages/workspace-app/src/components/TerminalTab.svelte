@@ -2897,10 +2897,10 @@
 
   function openFind(): void {
     closeTabMenu();
-    // xterm finds through its SearchAddon and ghostty through libghostty-vt's
-    // search on chan's binding. A ghostty terminal on any other core has no
-    // search, and its bar stays closed.
-    if (viewStarted && !ghosttyFinder()) return;
+    // Find searches the terminal through libghostty-vt's search on chan's
+    // binding: with no terminal shown, or a core without search, the bar
+    // stays closed.
+    if (!ghosttyFinder()) return;
     findOpen = true;
     void tick().then(() => {
       if (searchInput && mayFocus(searchInput)) searchInput.focus();
