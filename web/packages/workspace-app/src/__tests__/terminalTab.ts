@@ -254,17 +254,6 @@ export function openSocket(): TerminalSocket {
   return socket;
 }
 
-/// Type a key into the stand-in and return whether xterm goes on to handle
-/// it (false: the component consumed it): `init` goes straight to the
-/// handler the component registered, as xterm hands it a key before it
-/// processes one. A key typed into the widget is `pressInGhostty` in
-/// `./ghosttyTab`, read by what the terminal sent.
-export function pressInTerminal(term: FakeTerminal, init: KeyboardEventInit): { event: KeyboardEvent; handled: boolean } {
-  if (!term.keyHandler) throw new Error("no key handler registered");
-  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
-  return { event, handled: term.keyHandler(event) };
-}
-
 /// Deliver a server control frame on the socket.
 export async function receive(socket: TerminalSocket, frame: Record<string, unknown>): Promise<void> {
   await socket.onmessage?.({ data: JSON.stringify(frame) });
