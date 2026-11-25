@@ -493,6 +493,67 @@ describe("a terminal whose view fails after the core loads", () => {
   });
 });
 
+describe("terminals that failed one load together", () => {
+  test("one Retry answers a failed fetch the terminals shared: the others retry once the load passes", async () => {
+    const core = serveCore();
+    core.failNext();
+    const made = vi.spyOn(WebAssembly, "instantiate");
+    page = await openPage();
+    const [first, second] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1" }),
+      page.harness.terminalTab({ id: "term-2" }),
+    ]);
+    const a = page.open(first!);
+    const b = page.place(second!, { active: true, focused: false });
+    const errorA = await shownLoadError(a.target);
+    await shownLoadError(b.target);
+    expect(core.requests(), "one fetch failed both").toBe(1);
+
+    action(errorA, "Retry").click();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "both terminals dialed").toHaveLength(2));
+    expect(loadError(b.target), "the other terminal's error is gone").toBeNull();
+    expect(terminalArea(b.target).querySelectorAll("canvas"), "and it opened").toHaveLength(1);
+    expect(core.requests(), "on the one load the Retry made").toBe(2);
+    expect(b.target.contains(document.activeElement), "the unfocused pane's terminal takes no keyboard").toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(page.harness.TerminalSocket.all, "one PTY each").toHaveLength(2);
+    expect(made, "the check and one instance each").toHaveBeenCalledTimes(3);
+    expect(takeShownLoadFailures(), "two errors shown").toBe(2);
+  });
+
+  test("a terminal the passing load retried that fails again waits for its own Retry", async () => {
+    const core = serveCore();
+    core.failNext();
+    let instances = 0;
+    const made = vi.spyOn(WebAssembly, "instantiate").mockImplementation(((module: WebAssembly.Module) => {
+      instances += 1;
+      // The check and the first terminal's instance pass; any later one fails.
+      if (instances > 2) return Promise.reject(new RangeError("Out of memory: Cannot allocate Wasm memory for new instance"));
+      return instantiate(module, {});
+    }) as typeof WebAssembly.instantiate);
+    page = await openPage();
+    const [first, second] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1" }),
+      page.harness.terminalTab({ id: "term-2" }),
+    ]);
+    const a = page.open(first!);
+    const b = page.place(second!, { active: true, focused: false });
+    const errorA = await shownLoadError(a.target);
+    await shownLoadError(b.target);
+
+    action(errorA, "Retry").click();
+    await vi.waitFor(() => expect(made, "the other terminal retried").toHaveBeenCalledTimes(3));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const failed = [a.target, b.target].filter((target) => loadError(target) !== null);
+    expect(failed, "one terminal opened and one shows its error again").toHaveLength(1);
+    expect(loadError(failed[0]!)!.textContent).toContain("Out of memory");
+    expect(made, "and nothing retries it until asked").toHaveBeenCalledTimes(3);
+    expect(page.harness.TerminalSocket.all, "one PTY").toHaveLength(1);
+    expect(core.requests()).toBe(2);
+    expect(takeShownLoadFailures(), "two errors, then one again").toBe(3);
+  });
+});
+
 describe("a terminal closed or restarted while its core loads", () => {
   test("closing the tab while the core loads makes no instance for it and dials nothing", async () => {
     const core = serveCore();
