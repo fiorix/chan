@@ -152,7 +152,7 @@ command = "codex"</code></pre>
       <li><code>--submit</code> encodes one agent per command, so a group of mixed agents needs one write per agent.</li>
       <li>Writes are queued and delivered when the terminal goes quiet, at most 4096 bytes each. Put longer text in a file and send its path.</li>
       <li>A survey waits 600 seconds by default, then exits 124. <strong>[F]</strong> answers that you will follow up later.</li>
-      <li>A survey over a terminal takes the keyboard when that terminal is visible in the focused pane. In another pane it stays visible and you can click an answer while typing continues in the focused pane. Returning to its pane gives the survey the keyboard.</li>
+      <li>A survey over a terminal takes the keyboard when that terminal is visible in the focused pane. In another pane it stays visible and is answered only by a click, which also makes its pane the focused one: Tab passes it by and its keys answer nothing, while typing continues in the focused pane. Returning to its pane gives the survey the keyboard.</li>
     </ul>
   </details>
 </section>
