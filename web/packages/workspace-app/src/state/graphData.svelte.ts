@@ -10,7 +10,7 @@
 // while the graph route answered empty during recovery. A graph
 // answer marked gated also waits for the next idle index-status poll.
 
-import { api } from "../api/client";
+import { api, type GraphTreeCoverage } from "../api/client";
 import type { GraphView, GraphViewEdge, GraphViewNode } from "../api/types";
 
 class GraphState {
@@ -25,6 +25,11 @@ class GraphState {
   /// completed, as after that load fails: a reader shows it as incomplete,
   /// and the next load streams afresh instead of refreshing it as complete.
   partial = $state(false);
+  /// What the answer `view` came from holds of the tree: null when it holds
+  /// all of it, or the mark of an answer over the listing cap, which holds
+  /// every folder but not every file. A reader that takes the view takes
+  /// this with it.
+  tree = $state<GraphTreeCoverage | null>(null);
 }
 
 export const graphData = new GraphState();
@@ -88,6 +93,7 @@ function loadGraph(): Promise<void> {
   inflight = (async () => {
     try {
       let gated = false;
+      let tree: GraphTreeCoverage | null = null;
       if (mode === "first") {
         graphData.view = { nodes: [], edges: [] };
         graphData.partial = true;
@@ -97,9 +103,15 @@ function loadGraph(): Promise<void> {
         {
           signal: abort.signal,
           onProgress: progress,
+          // The mark comes on a second `meta`, ahead of the first node. A
+          // first load's partial views are this answer's, so it is published
+          // as it arrives; a refresh shows the previous answer until it
+          // completes, so its mark waits for the view it describes.
           onMeta(meta) {
             if (seq !== inflightSeq) return;
             gated = meta.gated === true;
+            tree = meta.tree ?? null;
+            if (mode === "first") graphData.tree = tree;
           },
           // A refresh needs only the completed snapshot. With no observer,
           // the stream accumulates its batches without materializing views.
@@ -114,6 +126,7 @@ function loadGraph(): Promise<void> {
         graphData.view = view;
         graphData.partial = false;
         graphData.gated = gated;
+        graphData.tree = tree;
         graphData.error = null;
       }
     } catch (e) {
@@ -191,6 +204,7 @@ export function invalidateGraph(): void {
   graphData.view = null;
   graphData.error = null;
   graphData.gated = false;
+  graphData.tree = null;
   graphData.partial = false;
   // The dropped load's own finally skips it as stale.
   graphData.loading = false;

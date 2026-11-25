@@ -310,3 +310,57 @@ test("abort refuses buffered events before any final snapshot", async () => {
   expect(clock.callbacks.size).toBe(0);
   expect(count()).toBe(0);
 });
+
+test("a first load over the listing cap publishes its tree mark when the second meta comes, behind a keep-alive's empty batch", async () => {
+  const source = stream();
+  const clock = frames();
+  const load = ensureGraphLoaded();
+  source.send([meta, { type: "nodes", nodes: [] }]);
+  await drain();
+  clock.run();
+  expect(graphData.tree, "the opening meta never carries the mark").toBeNull();
+
+  source.send([{ ...meta, tree: "folders" }]);
+  await drain();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.tree, "published as it arrives, ahead of the first node").toBe("folders");
+
+  source.send(batches);
+  await drain();
+  clock.run();
+  expect(graphData.view).toEqual(completed);
+  expect(graphData.tree).toBe("folders");
+
+  source.send([done]);
+  source.close();
+  await load;
+  expect(graphData.partial).toBe(false);
+  expect(graphData.tree).toBe("folders");
+
+  invalidateGraph();
+  expect(graphData.tree).toBeNull();
+});
+
+test("a refresh keeps the drawn answer's tree mark until its own answer replaces the view", async () => {
+  const first = stream();
+  frames();
+  const loaded = ensureGraphLoaded();
+  first.send([meta, { ...meta, tree: "folders" }, ...batches, done]);
+  first.close();
+  await loaded;
+  const previous = graphData.view;
+  expect(graphData.tree).toBe("folders");
+
+  const next = stream();
+  const refreshed = refreshGraph();
+  next.send([meta, ...batches]);
+  await drain();
+  expect(graphData.view, "a refresh keeps the previous view on screen").toBe(previous);
+  expect(graphData.tree, "and the mark of the answer that view came from").toBe("folders");
+
+  next.send([done]);
+  next.close();
+  await refreshed;
+  expect(graphData.view).not.toBe(previous);
+  expect(graphData.tree, "an answer that holds the whole tree carries no mark").toBeNull();
+});

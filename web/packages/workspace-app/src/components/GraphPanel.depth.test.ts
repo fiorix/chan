@@ -994,6 +994,49 @@ describe("the workspace tree", () => {
     expect(graphServer.graphStreamCalls, "the tree was already loaded").toBe(streams);
   });
 
+  /// Folder `a` holds `a/x.md` and subfolder `a/b`; the shared graph holds
+  /// both folders and no file of `a`, as an answer over the listing cap does
+  /// for a folder whose files the index does not hold.
+  function serveFoldersWithoutFiles(): void {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md")],
+    };
+  }
+
+  test("a double-click on a folder an answer over the listing cap holds without its files reads its level", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(graphServer.fsGraphCalls.map((call) => call.path)).not.toContain("a");
+
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.a).toBe(true);
+    expect(graphServer.fsGraphCalls.map((call) => call.path), "the subfolder does not prove the files are drawn").toContain("a");
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
+  });
+
+  test("a double-click on a folder an answer of the whole tree holds a child of reads nothing", async () => {
+    serveFoldersWithoutFiles();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const reads = graphServer.fsGraphCalls.length;
+
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.a).toBe(true);
+    expect(graphServer.fsGraphCalls.length, "the shared graph holds the folder's level").toBe(reads);
+    expect(visibleIds()).toContain("directory:a/b");
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
