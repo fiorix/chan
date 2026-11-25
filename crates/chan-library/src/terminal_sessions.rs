@@ -1530,6 +1530,9 @@ pub enum AttachSeam {
     AttachBeforeRingLock,
     /// In `Session::attach`, just after it releases the ring lock.
     AttachAfterRingLock,
+    /// In an attach of a live session by its id, before the session is
+    /// looked up.
+    ResumeBeforeLookup,
     /// In an attach of a live session by its id, after the resume is
     /// chosen against the session and before that session is attached.
     ResumeBeforeAttach,
@@ -3290,6 +3293,8 @@ impl Registry {
         choose: impl FnOnce(&Session) -> Resume,
         flow: Option<OutputFlow>,
     ) -> Option<AttachHandle> {
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(id, AttachSeam::ResumeBeforeLookup);
         let session = self
             .sessions
             .lock()

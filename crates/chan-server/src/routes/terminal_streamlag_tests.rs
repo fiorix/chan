@@ -1473,19 +1473,35 @@ async fn a_redial_across_a_restart_gets_the_restart_reset() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_a_restart_overtakes_before_its_lookup_gets_the_restart_reset() {
+    let _gate = pty_test_lock();
+    a_restart_overtakes_a_redial_at(AttachSeam::ResumeBeforeLookup).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redial_a_restart_overtakes_before_its_attach_gets_the_restart_reset() {
     let _gate = pty_test_lock();
+    a_restart_overtakes_a_redial_at(AttachSeam::ResumeBeforeAttach).await;
+}
+
+/// A restart overtakes a redial inside its attach, at `seam`: before the
+/// attach looks the session up, or once the redial's resume is chosen and
+/// before that session is attached. A generation read by a lookup of its
+/// own ahead of the attach's would be stale at the first point, and a
+/// session taken by a second lookup after the choice at the second. At
+/// either, the redial gets the restart's reset and the next life's replay
+/// from its start.
+async fn a_restart_overtakes_a_redial_at(seam: AttachSeam) {
     let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
     let shown = b"\x1b[?1049h\x1b[?1000h";
     let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
-    // The session restarts once the redial's resume is chosen and before
-    // its attach, and the next life prints past the old life's cursor, so
-    // that cursor would fall inside the next life's output.
+    // The next life prints past the old life's cursor, so that cursor
+    // would fall inside the next life's output.
     let next_life = vec![b'n'; 2 * cursor as usize];
     let registry = rig.state.terminal_sessions.clone();
     let id = rig.handle.id().to_owned();
     let printed = next_life.clone();
-    arm_attach_seam(&id.clone(), AttachSeam::ResumeBeforeAttach, move || {
+    arm_attach_seam(&id.clone(), seam, move || {
         assert!(registry
             .restart(&id, RestartOverrides::default())
             .expect("restart controlled child"));
