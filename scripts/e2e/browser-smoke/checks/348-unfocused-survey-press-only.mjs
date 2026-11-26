@@ -150,16 +150,16 @@ function expectNoBytes(result, label, targetBytes, awayBytes) {
   }
 }
 
-async function runEngine(ctx, backend, directory, save) {
+async function runSurvey(ctx, directory, save) {
   const run = {
-    backend, setup: "pending", setupErrors: [], pageErrors: [], cleanupErrors: [], legs: [],
+    setup: "pending", setupErrors: [], pageErrors: [], cleanupErrors: [], legs: [],
   };
   save(run);
   const page = await ctx.browser.newPage();
   page.on("pageerror", (error) => run.pageErrors.push(describeError(error)));
-  const suffix = `${backend}-${Date.now().toString(36)}`;
+  const suffix = Date.now().toString(36);
   const names = { target: `Survey348A-${suffix}`, away: `Survey348B-${suffix}` };
-  const files = { target: join(directory, `${backend}-a.bytes`), away: join(directory, `${backend}-b.bytes`) };
+  const files = { target: join(directory, "a.bytes"), away: join(directory, "b.bytes") };
   const url = new URL(ctx.serverUrl);
   const token = url.searchParams.get("t") ?? "";
   const windowId = `surveypress-348-${suffix}`;
@@ -290,18 +290,18 @@ async function runEngine(ctx, backend, directory, save) {
         result.failures.push(`pane A's survey buttons read tabIndex ${JSON.stringify(result.tabIndexes)} while pane B is focused; expected [-1,-1,-1,-1]`);
       }
       await chord(page, ["Shift"], "Tab");
-      result.backtabBytes = await recordedSince(`${backend} B's backtab`, files.away, offsets.away, "5a");
+      result.backtabBytes = await recordedSince("B's backtab", files.away, offsets.away, "5a");
       if (!same(result.backtabBytes, ["1b", "5b", "5a"])) result.failures.push(`B's PTY read ${JSON.stringify(result.backtabBytes)} for Shift+Tab, expected ["1b","5b","5a"]`);
       result.afterBacktab = await read();
       if (result.afterBacktab.keyboard !== "away") result.failures.push(`Shift+Tab in B's terminal moved the keyboard to ${result.afterBacktab.keyboard}`);
       await page.keyboard.press("1");
-      result.awayBytes = await recordedSince(`${backend} B's 1`, files.away, offsets.away, "31");
+      result.awayBytes = await recordedSince("B's 1", files.away, offsets.away, "31");
       if (!same(result.awayBytes, ["1b", "5b", "5a", "31"])) result.failures.push(`B's PTY read ${JSON.stringify(result.awayBytes)}, expected ["1b","5b","5a","31"]`);
       result.unsolicitedReply = await unsolicitedReply(handle, 1_000);
       if (result.unsolicitedReply) result.failures.push(`typing in pane B answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
       result.targetBytes = bytes(files.target, offsets.target);
       if (result.targetBytes.length) result.failures.push(`A's PTY took ${JSON.stringify(result.targetBytes)}`);
-      result.screenshot = basename(await ctx.shot(`348-${backend}-terminal`, page));
+      result.screenshot = basename(await ctx.shot("348-terminal", page));
 
       await clickTab(page, names.target);
       result.returned = await until("selecting A's tab gives its survey the keyboard", async () => {
@@ -316,7 +316,7 @@ async function runEngine(ctx, backend, directory, save) {
     async "strip-walk"(result, handle, offsets) {
       await expectBodyLinks(result);
       await walkBackPastCard(result);
-      result.screenshot = basename(await ctx.shot(`348-${backend}-strip-walk`, page));
+      result.screenshot = basename(await ctx.shot("348-strip-walk", page));
       result.unsolicitedReply = await unsolicitedReply(handle, 500);
       if (result.unsolicitedReply) result.failures.push(`the walk answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
       expectNoBytes(result, "the walk", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
@@ -325,7 +325,7 @@ async function runEngine(ctx, backend, directory, save) {
     async "shape-walk"(result, handle, offsets) {
       await expectBodyShapes(result);
       await walkBackPastCard(result);
-      result.screenshot = basename(await ctx.shot(`348-${backend}-shape-walk`, page));
+      result.screenshot = basename(await ctx.shot("348-shape-walk", page));
 
       // The control: with A focused its survey takes the keyboard on its
       // card, and Tab from the card reaches each shape in body order, then
@@ -365,7 +365,7 @@ async function runEngine(ctx, backend, directory, save) {
       result.afterKey = await read();
       if (result.afterKey.focusedPane !== result.afterKey.awayPane) result.failures.push(`the key moved the focused pane to ${result.afterKey.focusedPane}`);
       expectNoBytes(result, "the 1 at the card", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
-      result.screenshot = basename(await ctx.shot(`348-${backend}-card-key`, page));
+      result.screenshot = basename(await ctx.shot("348-card-key", page));
 
       await clickTab(page, names.away);
       result.afterPulse = await until("selecting B's tab gives B's terminal the keyboard", async () => {
@@ -374,7 +374,7 @@ async function runEngine(ctx, backend, directory, save) {
       }).catch(async () => ({ ...(await read()), timedOut: true }));
       if (result.afterPulse.timedOut) result.failures.push(`after the pulse the keyboard belongs to ${result.afterPulse.keyboard}, expected B's terminal`);
       await page.keyboard.press("1");
-      result.awayBytes = await recordedSince(`${backend} B's 1 after the pulse`, files.away, offsets.away, "31");
+      result.awayBytes = await recordedSince("B's 1 after the pulse", files.away, offsets.away, "31");
       if (!same(result.awayBytes, ["31"])) result.failures.push(`B's PTY read ${JSON.stringify(result.awayBytes)}, expected ["31"]`);
       result.targetBytes = bytes(files.target, offsets.target);
       if (result.targetBytes.length) result.failures.push(`A's PTY took ${JSON.stringify(result.targetBytes)}`);
@@ -423,7 +423,7 @@ async function runEngine(ctx, backend, directory, save) {
       result.unsolicitedReply = await unsolicitedReply(handle, 1_000);
       if (result.unsolicitedReply) result.failures.push(`the press on the body link answered the survey: ${JSON.stringify(result.unsolicitedReply)}`);
       expectNoBytes(result, "the press on the body link", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
-      result.screenshot = basename(await ctx.shot(`348-${backend}-link-press`, page));
+      result.screenshot = basename(await ctx.shot("348-link-press", page));
     },
 
     async pointer(result, handle, offsets) {
@@ -434,7 +434,7 @@ async function runEngine(ctx, backend, directory, save) {
       result.afterAnswer = await read();
       if (result.afterAnswer.focusedPane !== result.afterAnswer.targetPane) result.failures.push(`the click left pane ${result.afterAnswer.focusedPane} focused, expected pane A`);
       expectNoBytes(result, "the click", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
-      result.screenshot = basename(await ctx.shot(`348-${backend}-pointer`, page));
+      result.screenshot = basename(await ctx.shot("348-pointer", page));
     },
   };
 
@@ -453,7 +453,7 @@ async function runEngine(ctx, backend, directory, save) {
       result.observed = true;
     } catch (error) {
       result.interactionErrors.push(describeError(error));
-      result.screenshot = basename(await ctx.shot(`348-${backend}-${kind}-failure`, page).catch(() => "unavailable"));
+      result.screenshot = basename(await ctx.shot(`348-${kind}-failure`, page).catch(() => "unavailable"));
     } finally {
       try {
         const dismiss = await page.$(`${terminalSelector(target.tab)} .survey-dismiss`);
@@ -484,7 +484,7 @@ async function runEngine(ctx, backend, directory, save) {
     await until("A's recorder starts", () => existsSync(files.target));
     await clickTerminal(page, target.tab);
     await page.keyboard.press("t");
-    run.targetControl = await recordedSince(`${backend} A control`, files.target, 0, "74");
+    run.targetControl = await recordedSince("A control", files.target, 0, "74");
     if (!same(run.targetControl, ["74"])) throw new Error(`A control bytes ${JSON.stringify(run.targetControl)}`);
     await dispatchCommand(page, "app.pane.splitDown");
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
@@ -495,7 +495,7 @@ async function runEngine(ctx, backend, directory, save) {
     await until("B's recorder starts", () => existsSync(files.away));
     await clickTerminal(page, away.tab);
     await page.keyboard.press("a");
-    run.awayControl = await recordedSince(`${backend} B control`, files.away, 0, "61");
+    run.awayControl = await recordedSince("B control", files.away, 0, "61");
     if (!same(run.awayControl, ["61"])) throw new Error(`B control bytes ${JSON.stringify(run.awayControl)}`);
     run.initial = await read();
     if (!run.initial.targetPane || !run.initial.awayPane || run.initial.targetPane === run.initial.awayPane) throw new Error(`terminals are not in two panes: ${JSON.stringify(run.initial)}`);
@@ -504,7 +504,7 @@ async function runEngine(ctx, backend, directory, save) {
   } catch (error) {
     run.setupErrors.push(describeError(error));
     run.setup = "incomplete";
-    await ctx.shot(`348-${backend}-setup-failure`, page).catch(() => {});
+    await ctx.shot("348-setup-failure", page).catch(() => {});
   } finally {
     for (const name of requested.reverse()) {
       try { await cs(["close", "--tab-name", name]); }
@@ -529,26 +529,27 @@ export default {
   name: "unfocused-survey-press-only",
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
-    const report = { engines: [], cleanupErrors: [] };
-    const save = (engine) => {
-      if (engine) report.engines.push(engine);
+    const report = { run: null, cleanupErrors: [] };
+    const save = (run) => {
+      if (run) report.run = run;
       writeFileSync(join(ctx.outDir, "348-unfocused-survey-press-only.json"), JSON.stringify(report, null, 2) + "\n");
     };
     const directory = mkdtempSync(join(ctx.workspaceDir, ".surveypress-348-"));
     try {
-      await runEngine(ctx, "ghostty", directory, save);
+      await runSurvey(ctx, directory, save);
     } finally {
       try { rmSync(directory, { recursive: true, force: true }); }
       catch (error) { report.cleanupErrors.push(describeError(error)); }
       save();
     }
-    const failed = report.engines.filter((engine) => engine.setup !== "observed" || engine.setupErrors.length || engine.pageErrors.length || engine.cleanupErrors.length || engine.legs.length !== LEG_COUNT ||
-      engine.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length));
-    if (failed.length || !same(report.engines.map((engine) => engine.backend), ["ghostty"]) || report.cleanupErrors.length) {
-      const reasons = report.engines.flatMap((engine) => [
-        ...engine.setupErrors.map((error) => `setup: ${error.split("\n")[0]}`),
-        ...engine.legs.flatMap((leg) => [...leg.failures, ...leg.interactionErrors.map((error) => error.split("\n")[0])].map((reason) => `${leg.kind}: ${reason}`)),
-      ]);
+    const { run } = report;
+    const failed = !run || run.setup !== "observed" || run.setupErrors.length || run.pageErrors.length || run.cleanupErrors.length || run.legs.length !== LEG_COUNT ||
+      run.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length);
+    if (failed || report.cleanupErrors.length) {
+      const reasons = run ? [
+        ...run.setupErrors.map((error) => `setup: ${error.split("\n")[0]}`),
+        ...run.legs.flatMap((leg) => [...leg.failures, ...leg.interactionErrors.map((error) => error.split("\n")[0])].map((reason) => `${leg.kind}: ${reason}`)),
+      ] : [];
       throw Object.assign(new Error(`unfocused survey press-only contract failed: ${reasons.join("; ") || "incomplete run or cleanup"}`), { smokeDetails: report });
     }
     return report;
