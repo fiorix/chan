@@ -195,7 +195,7 @@ export type VtCell = {
 /// A view holds one row at a time: a reader that needs two rows at once keeps
 /// a view for each.
 export class VtCells {
-  private readonly cells: VtCell[] = [];
+  readonly #cells: VtCell[] = [];
   /// The cells of the row read last; `at` answers for `0` to `length - 1`.
   length = 0;
   /// Where the row was read from: history row `row`, 0 the oldest, or screen
@@ -204,25 +204,25 @@ export class VtCells {
   row = -1;
   /// The terminal and the version of the row it was read at, so a read of
   /// the row before it changes reads nothing.
-  private source: object | null = null;
-  private version = -1;
+  #source: object | null = null;
+  #version = -1;
 
   /// The cell at column `x`, or undefined outside the row.
   at(x: number): VtCell | undefined {
-    return x >= 0 && x < this.length ? this.cells[x] : undefined;
+    return x >= 0 && x < this.length ? this.#cells[x] : undefined;
   }
 
   /// Whether the view holds the row a reader is asked for, read from `source`
   /// at `version`. For `VtTerminal`'s readers.
   holds(source: object, history: boolean, row: number, version: number): boolean {
-    return this.source === source && this.version === version && this.history === history && this.row === row;
+    return this.#source === source && this.#version === version && this.history === history && this.row === row;
   }
 
   /// Takes the view for a row of `length` cells and returns its cells, whose
   /// first `length` a reader fills, every one. For `VtTerminal`'s readers.
   fill(source: object, history: boolean, row: number, version: number, length: number): VtCell[] {
-    while (this.cells.length < length) {
-      this.cells.push({
+    while (this.#cells.length < length) {
+      this.#cells.push({
         codepoint: 0,
         cluster: null,
         width: 1,
@@ -235,17 +235,17 @@ export class VtCells {
         hyperlink: 0,
       });
     }
-    this.source = source;
+    this.#source = source;
     this.history = history;
     this.row = row;
-    this.version = version;
+    this.#version = version;
     this.length = length;
-    return this.cells;
+    return this.#cells;
   }
 
   /// Forgets the row, as when a read fails partway.
   drop(): void {
-    this.source = null;
+    this.#source = null;
     this.length = 0;
     this.row = -1;
   }
@@ -416,10 +416,10 @@ export class GhosttyVtRefusal extends Error {}
 class VtWasm {
   readonly fn: Fns;
   readonly memory: WebAssembly.Memory;
-  private readonly table: WebAssembly.Table;
-  private buffer: ArrayBuffer | null = null;
-  private u8 = new Uint8Array(0);
-  private dv = new DataView(new ArrayBuffer(0));
+  readonly #table: WebAssembly.Table;
+  #buffer: ArrayBuffer | null = null;
+  #u8 = new Uint8Array(0);
+  #dv = new DataView(new ArrayBuffer(0));
 
   constructor(instance: WebAssembly.Instance) {
     const exports = instance.exports;
@@ -431,8 +431,8 @@ class VtWasm {
     }
     this.fn = fn as Fns;
     this.memory = exports.memory as WebAssembly.Memory;
-    this.table = exports.__indirect_function_table as WebAssembly.Table;
-    this.checkBuild();
+    this.#table = exports.__indirect_function_table as WebAssembly.Table;
+    this.#checkBuild();
   }
 
   /// Refuses a core this binding does not drive. The tables and calls in
@@ -440,7 +440,7 @@ class VtWasm {
   /// and the ghostty backend needs the search feature Ghostty's wasm builds
   /// carry. Either mismatch would fail inside a user's terminal; failing
   /// here lets the loader fall back to xterm.js instead.
-  private checkBuild(): void {
+  #checkBuild(): void {
     const B = ABI.GhosttyBuildInfo;
     const out = this.alloc(8);
     try {
@@ -462,21 +462,21 @@ class VtWasm {
   /// Views over the live memory. Any export that allocates can grow it
   /// and detach the previous buffer, so callers reacquire after calls.
   bytes(): Uint8Array {
-    this.refresh();
-    return this.u8;
+    this.#refresh();
+    return this.#u8;
   }
 
   view(): DataView {
-    this.refresh();
-    return this.dv;
+    this.#refresh();
+    return this.#dv;
   }
 
-  private refresh(): void {
+  #refresh(): void {
     const buffer = this.memory.buffer;
-    if (buffer !== this.buffer) {
-      this.buffer = buffer;
-      this.u8 = new Uint8Array(buffer);
-      this.dv = new DataView(buffer);
+    if (buffer !== this.#buffer) {
+      this.#buffer = buffer;
+      this.#u8 = new Uint8Array(buffer);
+      this.#dv = new DataView(buffer);
     }
   }
 
@@ -524,8 +524,8 @@ class VtWasm {
     ]);
     const module = new WebAssembly.Module(bytes);
     const wrapped = new WebAssembly.Instance(module, { e: { f } }).exports.f;
-    const index = this.table.grow(1);
-    this.table.set(index, wrapped);
+    const index = this.#table.grow(1);
+    this.#table.set(index, wrapped);
     return index;
   }
 }
@@ -551,7 +551,7 @@ export type VtHost = {
 /// The core ghostty-web's `Terminal` takes as its `ghostty` option.
 export class GhosttyVt {
   private readonly wasm: VtWasm;
-  private readonly terminals = new Map<number, VtTerminal>();
+  readonly #terminals = new Map<number, VtTerminal>();
   readonly writePtyCallback: number;
   readonly deviceAttributesCallback: number;
 
@@ -559,7 +559,7 @@ export class GhosttyVt {
     this.wasm = new VtWasm(instance);
     this.writePtyCallback = this.wasm.addFunction(
       (terminal, _userdata, data, len) => {
-        this.terminals.get(terminal >>> 0)?.queueReply(data >>> 0, len >>> 0);
+        this.#terminals.get(terminal >>> 0)?.queueReply(data >>> 0, len >>> 0);
       },
       4,
       false,
@@ -615,11 +615,11 @@ export class GhosttyVt {
   }
 
   register(handle: number, terminal: VtTerminal): void {
-    this.terminals.set(handle, terminal);
+    this.#terminals.set(handle, terminal);
   }
 
   unregister(handle: number): void {
-    this.terminals.delete(handle);
+    this.#terminals.delete(handle);
   }
 }
 
@@ -706,108 +706,108 @@ export class VtTerminal {
     registerTerminalInternals((t) => ({
       wasm: t.wasm,
       handle: t.handle,
-      scratch: t.scratch,
-      writeBuf: t.writeBuf,
-      writeCap: t.writeCap,
-      trackedCells: t.trackedCells,
+      scratch: t.#scratch,
+      writeBuf: t.#writeBuf,
+      writeCap: t.#writeCap,
+      trackedCells: t.#trackedCells,
     }));
   }
 
   private readonly wasm: VtWasm;
-  private readonly owner: GhosttyVt;
+  readonly #owner: GhosttyVt;
   private handle: number;
-  private renderState: number;
-  private rowIterator: number;
-  private rowCells: number;
-  private readonly scratch: number;
-  private writeBuf = 0;
-  private writeCap = 0;
-  private _cols: number;
-  private _rows: number;
+  #renderState: number;
+  #rowIterator: number;
+  #rowCells: number;
+  readonly #scratch: number;
+  #writeBuf = 0;
+  #writeCap = 0;
+  #_cols: number;
+  #_rows: number;
 
   /// What changed since the last `endFrame`: the render state's dirty
   /// state, and the rows the core listed dirty while it was partial.
-  private dirty = 0;
-  private rowDirty = new Uint8Array(0);
+  #dirty = 0;
+  #rowDirty = new Uint8Array(0);
   /// Writes or a resize since the render state was last updated.
-  private stale = true;
+  #stale = true;
   /// Updates of the render state so far. A view holds a history row read
   /// at one count, and the row iterator was filled at one.
-  private generation = 0;
+  #generation = 0;
   /// Each screen row's version: a new one at every update that lists the
   /// row changed, every row's at an update that changes the whole screen.
   /// A row keeps its version, and a view holding it stays current, through
   /// the updates that leave it as it was.
-  private rowVersions = new Uint32Array(0);
-  private versions = 0;
-  private iteratorGeneration = -1;
+  #rowVersions = new Uint32Array(0);
+  #versions = 0;
+  #iteratorGeneration = -1;
   /// The row the iterator stands on, -1 before its first row.
-  private iteratorRow = -1;
+  #iteratorRow = -1;
   /// The styles a row's read has met, by style id: flags, foreground,
   /// background and whether that is the default, the underline's style and
   /// its colour (-1 for the glyph's).
-  private readonly styleIds = new Int32Array(ROW_STYLES);
-  private readonly styleFlags = new Uint16Array(ROW_STYLES);
-  private readonly styleFg = new Int32Array(ROW_STYLES);
-  private readonly styleBg = new Int32Array(ROW_STYLES);
-  private readonly styleDefaultBg = new Uint8Array(ROW_STYLES);
-  private readonly styleUnderline = new Uint8Array(ROW_STYLES);
-  private readonly styleUnderlineColor = new Int32Array(ROW_STYLES);
-  private styleCount = 0;
+  readonly #styleIds = new Int32Array(ROW_STYLES);
+  readonly #styleFlags = new Uint16Array(ROW_STYLES);
+  readonly #styleFg = new Int32Array(ROW_STYLES);
+  readonly #styleBg = new Int32Array(ROW_STYLES);
+  readonly #styleDefaultBg = new Uint8Array(ROW_STYLES);
+  readonly #styleUnderline = new Uint8Array(ROW_STYLES);
+  readonly #styleUnderlineColor = new Int32Array(ROW_STYLES);
+  #styleCount = 0;
   /// The content tag and content of the raw cell `rawCell` read last.
-  private rawTag = 0;
-  private rawContent = 0;
+  #rawTag = 0;
+  #rawContent = 0;
   /// The history's length at an update, for the reads after it.
-  private historyGeneration = -1;
-  private historyRows = 0;
+  #historyGeneration = -1;
+  #historyRows = 0;
   /// Writes and resizes taken so far. A search compares it with the count
   /// at its last feed to tell whether the matches it holds are current.
-  private changes = 0;
+  #changes = 0;
   /// The default colours as 0xRRGGBB and the palette, as of the last update.
-  private fg = 0xcccccc;
-  private bg = 0x000000;
-  private palette = new Uint8Array(768);
-  private replies: Uint8Array[] = [];
+  #fg = 0xcccccc;
+  #bg = 0x000000;
+  #palette = new Uint8Array(768);
+  #replies: Uint8Array[] = [];
   /// The cells tracked on this terminal and not freed yet; the terminal
   /// frees them with itself.
-  private readonly trackedCells = new Set<VtTrackedCell>();
-  private readonly cellOwner: TrackedCellOwner;
+  readonly #trackedCells = new Set<VtTrackedCell>();
+  readonly #cellOwner: TrackedCellOwner;
   private readonly resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
 
   constructor(wasm: VtWasm, owner: GhosttyVt, cols: number, rows: number, config?: VtTerminalConfig) {
     this.wasm = wasm;
-    this.owner = owner;
-    this._cols = cols;
-    this._rows = rows;
-    this.cellOwner = {
+    this.#owner = owner;
+    this.#_cols = cols;
+    this.#_rows = rows;
+    this.#cellOwner = {
       handle: () => this.handle,
-      point: (row, col) => this.writePoint(ABI.GhosttyPointTag.SCREEN, col, row),
-      coordinate: () => this.scratch + SCRATCH.slot,
-      release: (cell) => void this.trackedCells.delete(cell),
+      point: (row, col) => this.#writePoint(ABI.GhosttyPointTag.SCREEN, col, row),
+      coordinate: () => this.#scratch + SCRATCH.slot,
+      release: (cell) => void this.#trackedCells.delete(cell),
     };
     const fn = wasm.fn;
-    this.scratch = wasm.alloc(SCRATCH.size);
+    this.#scratch = wasm.alloc(SCRATCH.size);
     this.handle = wasm.newHandle((slot) => fn.ghostty_terminal_new(0, slot, cols, rows), "terminal");
     owner.register(this.handle, this);
-    this.renderState = wasm.newHandle((slot) => fn.ghostty_render_state_new(0, slot), "render state");
-    this.rowIterator = wasm.newHandle((slot) => fn.ghostty_render_state_row_iterator_new(0, slot), "row iterator");
-    this.rowCells = wasm.newHandle((slot) => fn.ghostty_render_state_row_cells_new(0, slot), "row cells");
+    this.#renderState = wasm.newHandle((slot) => fn.ghostty_render_state_new(0, slot), "render state");
+    this.#rowIterator = wasm.newHandle((slot) => fn.ghostty_render_state_row_iterator_new(0, slot), "row iterator");
+    this.#rowCells = wasm.newHandle((slot) => fn.ghostty_render_state_row_cells_new(0, slot), "row cells");
 
     fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.WRITE_PTY, owner.writePtyCallback);
     fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.DEVICE_ATTRIBUTES, owner.deviceAttributesCallback);
-    this.setMode(MODE_GRAPHEME_CLUSTER, false, true);
-    this.applyConfig(config);
-    this.writeMultiArgs();
-    this.rowDirty = new Uint8Array(rows);
-    this.rowVersions = new Uint32Array(rows);
+    this.#setMode(MODE_GRAPHEME_CLUSTER, false, true);
+    this.#applyConfig(config);
+    this.#writeMultiArgs();
+    this.#rowDirty = new Uint8Array(rows);
+    this.#rowVersions = new Uint32Array(rows);
   }
 
   get cols(): number {
-    return this._cols;
+    return this.#_cols;
   }
 
   get rows(): number {
-    return this._rows;
+    return this.#_rows;
   }
 
   // ------------------------------------------------------------------
@@ -817,41 +817,41 @@ export class VtTerminal {
   write(data: string | Uint8Array): void {
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
     if (bytes.length === 0) return;
-    if (bytes.length > this.writeCap) {
+    if (bytes.length > this.#writeCap) {
       const cap = Math.max(bytes.length, 4096);
       const buf = this.wasm.alloc(cap);
-      this.wasm.free(this.writeBuf, this.writeCap);
-      this.writeCap = cap;
-      this.writeBuf = buf;
+      this.wasm.free(this.#writeBuf, this.#writeCap);
+      this.#writeCap = cap;
+      this.#writeBuf = buf;
     }
-    this.wasm.bytes().set(bytes, this.writeBuf);
-    this.stale = true;
-    this.changes++;
-    this.wasm.fn.ghostty_terminal_vt_write(this.handle, this.writeBuf, bytes.length);
+    this.wasm.bytes().set(bytes, this.#writeBuf);
+    this.#stale = true;
+    this.#changes++;
+    this.wasm.fn.ghostty_terminal_vt_write(this.handle, this.#writeBuf, bytes.length);
   }
 
   resize(cols: number, rows: number): void {
-    if (cols === this._cols && rows === this._rows) return;
-    const from = { cols: this._cols, rows: this._rows };
+    if (cols === this.#_cols && rows === this.#_rows) return;
+    const from = { cols: this.#_cols, rows: this.#_rows };
     for (const listener of this.resizeListeners) listener(from);
-    this._cols = cols;
-    this._rows = rows;
-    this.changes++;
-    const cell = this.owner.host?.cellSize();
+    this.#_cols = cols;
+    this.#_rows = rows;
+    this.#changes++;
+    const cell = this.#owner.host?.cellSize();
     this.wasm.fn.ghostty_terminal_resize(
       this.handle, cols, rows,
       Math.round(cell?.width ?? 0), Math.round(cell?.height ?? 0),
     );
     // The render state's next update redraws every row; until then, nothing
     // is dirty at the new size, and no view holds a row of it.
-    this.rowDirty = new Uint8Array(rows);
-    this.rowVersions = new Uint32Array(rows);
-    this.stale = true;
+    this.#rowDirty = new Uint8Array(rows);
+    this.#rowVersions = new Uint32Array(rows);
+    this.#stale = true;
     // ghostty-web drains after writes only; a resize can produce its own
     // mode 2048 report while the program is otherwise silent.
-    if (this.owner.host) {
+    if (this.#owner.host) {
       const reply = this.readResponse();
-      if (reply !== null) this.owner.host.onResizeReply(reply);
+      if (reply !== null) this.#owner.host.onResizeReply(reply);
     }
   }
 
@@ -870,16 +870,16 @@ export class VtTerminal {
 
   free(): void {
     const fn = this.wasm.fn;
-    for (const cell of [...this.trackedCells]) cell.free();
-    this.owner.unregister(this.handle);
-    fn.ghostty_render_state_row_cells_free(this.rowCells);
-    fn.ghostty_render_state_row_iterator_free(this.rowIterator);
-    fn.ghostty_render_state_free(this.renderState);
+    for (const cell of [...this.#trackedCells]) cell.free();
+    this.#owner.unregister(this.handle);
+    fn.ghostty_render_state_row_cells_free(this.#rowCells);
+    fn.ghostty_render_state_row_iterator_free(this.#rowIterator);
+    fn.ghostty_render_state_free(this.#renderState);
     fn.ghostty_terminal_free(this.handle);
-    this.wasm.free(this.writeBuf, this.writeCap);
-    this.wasm.free(this.scratch, SCRATCH.size);
-    this.handle = this.renderState = this.rowIterator = this.rowCells = 0;
-    this.writeBuf = this.writeCap = 0;
+    this.wasm.free(this.#writeBuf, this.#writeCap);
+    this.wasm.free(this.#scratch, SCRATCH.size);
+    this.handle = this.#renderState = this.#rowIterator = this.#rowCells = 0;
+    this.#writeBuf = this.#writeCap = 0;
   }
 
   // ------------------------------------------------------------------
@@ -892,23 +892,23 @@ export class VtTerminal {
   /// `isRowDirty` names, FULL every row. Cheap to call again: without a write
   /// or a resize in between it reads nothing.
   beginFrame(): number {
-    this.sync();
-    return this.dirty;
+    this.#sync();
+    return this.#dirty;
   }
 
   /// Whether screen row `y` changed since the last `endFrame`, as of the
   /// last `beginFrame` or read.
   isRowDirty(y: number): boolean {
-    return this.dirty === ABI.GhosttyRenderStateDirty.FULL || this.rowDirty[y] === 1;
+    return this.#dirty === ABI.GhosttyRenderStateDirty.FULL || this.#rowDirty[y] === 1;
   }
 
   /// Ends a frame: what changed so far counts as painted, in the core's
   /// render state too.
   endFrame(): void {
-    if (this.dirty === ABI.GhosttyRenderStateDirty.FALSE || !this.handle) return;
-    this.wasm.fn.ghostty_render_state_clean(this.renderState);
-    this.dirty = ABI.GhosttyRenderStateDirty.FALSE;
-    this.rowDirty.fill(0);
+    if (this.#dirty === ABI.GhosttyRenderStateDirty.FALSE || !this.handle) return;
+    this.wasm.fn.ghostty_render_state_clean(this.#renderState);
+    this.#dirty = ABI.GhosttyRenderStateDirty.FALSE;
+    this.#rowDirty.fill(0);
   }
 
   /// Reads screen row `y` into `into` from the render state, brought up to
@@ -917,56 +917,56 @@ export class VtTerminal {
   /// outside the screen or once the terminal is freed. A view that holds the
   /// row already, as no update since has changed it, is left as it is.
   readRow(y: number, into: VtCells): boolean {
-    if (y < 0 || y >= this._rows || !this.handle) return false;
-    this.sync();
-    if (into.holds(this, false, y, this.rowVersions[y])) return true;
+    if (y < 0 || y >= this.#_rows || !this.handle) return false;
+    this.#sync();
+    if (into.holds(this, false, y, this.#rowVersions[y])) return true;
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     const ok = ABI.GhosttyResult.SUCCESS;
     const V = LAYOUT.GhosttyCellsView.fields;
-    if (!this.seekRow(y) || fn.ghostty_render_state_row_get_multi(this.rowIterator, 2, s + SCRATCH.rowKeys, s + SCRATCH.rowValues, 0) !== ok) {
+    if (!this.#seekRow(y) || fn.ghostty_render_state_row_get_multi(this.#rowIterator, 2, s + SCRATCH.rowKeys, s + SCRATCH.rowValues, 0) !== ok) {
       into.drop();
       return false;
     }
     let view = this.wasm.view();
     const raw = view.getUint32(s + SCRATCH.cellsView + V.ptr, true);
     const len = view.getUint32(s + SCRATCH.cellsView + V.len, true);
-    const cells = into.fill(this, false, y, this.rowVersions[y], this._cols);
+    const cells = into.fill(this, false, y, this.#rowVersions[y], this.#_cols);
     const T = ABI.GhosttyCellContentTag;
-    this.styleCount = 0;
-    for (let x = 0; x < this._cols; x++) {
+    this.#styleCount = 0;
+    for (let x = 0; x < this.#_cols; x++) {
       const cell = cells[x];
       if (x >= len) {
-        this.blank(cell);
+        this.#blank(cell);
         continue;
       }
-      const styleId = this.rawCell(cell, view.getUint32(raw + x * 8, true), view.getUint32(raw + x * 8 + 4, true));
-      let style = styleId === 0 ? -1 : this.knownStyle(styleId);
-      const grapheme = this.rawTag === T.CODEPOINT_GRAPHEME;
+      const styleId = this.#rawCell(cell, view.getUint32(raw + x * 8, true), view.getUint32(raw + x * 8 + 4, true));
+      let style = styleId === 0 ? -1 : this.#knownStyle(styleId);
+      const grapheme = this.#rawTag === T.CODEPOINT_GRAPHEME;
       if ((styleId !== 0 && style < 0) || grapheme) {
         // One call for what the cell needs read: its style, its cluster or
         // both (the keys are STYLE then GRAPHEMES_BUF).
         const wantStyle = styleId !== 0 && style < 0;
         const first = wantStyle ? 0 : 1;
         const count = (wantStyle ? 1 : 0) + (grapheme ? 1 : 0);
-        if (grapheme) this.clearCodepoints();
-        const selected = fn.ghostty_render_state_row_cells_select(this.rowCells, x) === ok;
+        if (grapheme) this.#clearCodepoints();
+        const selected = fn.ghostty_render_state_row_cells_select(this.#rowCells, x) === ok;
         const result = selected
-          ? fn.ghostty_render_state_row_cells_get_multi(this.rowCells, count, s + SCRATCH.cellKeys + first * 4, s + SCRATCH.cellValues + first * 4, s + SCRATCH.slot)
+          ? fn.ghostty_render_state_row_cells_get_multi(this.#rowCells, count, s + SCRATCH.cellKeys + first * 4, s + SCRATCH.cellValues + first * 4, s + SCRATCH.slot)
           : ABI.GhosttyResult.NO_VALUE;
         view = this.wasm.view();
         const written = selected ? view.getUint32(s + SCRATCH.slot, true) : 0;
-        if (wantStyle && written >= 1) style = this.rememberStyle(styleId, view, s + SCRATCH.style);
+        if (wantStyle && written >= 1) style = this.#rememberStyle(styleId, view, s + SCRATCH.style);
         if (grapheme && selected) {
           // A cluster longer than the scratch holds reads again into a
           // buffer of its own.
-          const cps = result === ok ? this.scratchCodepoints() : this.rowCellCluster();
+          const cps = result === ok ? this.#scratchCodepoints() : this.#rowCellCluster();
           view = this.wasm.view();
           if (cps && cps.length > 1) cell.cluster = String.fromCodePoint(...cps);
         }
       }
-      if (style >= 0) this.applyStyle(cell, style);
-      this.contentBackground(cell);
+      if (style >= 0) this.#applyStyle(cell, style);
+      this.#contentBackground(cell);
     }
     return true;
   }
@@ -978,36 +978,36 @@ export class VtTerminal {
   /// already, read since the last update, is left as it is.
   readHistoryRow(offset: number, into: VtCells): boolean {
     if (offset < 0 || !this.handle) return false;
-    this.sync();
-    if (this.historyGeneration !== this.generation) {
-      this.historyRows = this.getScrollbackLength();
-      this.historyGeneration = this.generation;
+    this.#sync();
+    if (this.#historyGeneration !== this.#generation) {
+      this.#historyRows = this.getScrollbackLength();
+      this.#historyGeneration = this.#generation;
     }
-    if (offset >= this.historyRows) return false;
-    if (into.holds(this, true, offset, this.generation)) return true;
+    if (offset >= this.#historyRows) return false;
+    if (into.holds(this, true, offset, this.#generation)) return true;
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     const ok = ABI.GhosttyResult.SUCCESS;
     const T = ABI.GhosttyCellContentTag;
-    const cells = into.fill(this, true, offset, this.generation, this._cols);
-    this.styleCount = 0;
-    for (let x = 0; x < this._cols; x++) {
+    const cells = into.fill(this, true, offset, this.#generation, this.#_cols);
+    this.#styleCount = 0;
+    for (let x = 0; x < this.#_cols; x++) {
       const cell = cells[x];
-      if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, x, offset) || fn.ghostty_grid_ref_cell(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ok) {
-        this.blank(cell);
+      if (!this.#gridRef(ABI.GhosttyPointTag.HISTORY, x, offset) || fn.ghostty_grid_ref_cell(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ok) {
+        this.#blank(cell);
         continue;
       }
       let view = this.wasm.view();
-      const styleId = this.rawCell(cell, view.getUint32(s + SCRATCH.raw, true), view.getUint32(s + SCRATCH.raw + 4, true));
-      let style = styleId === 0 ? -1 : this.knownStyle(styleId);
+      const styleId = this.#rawCell(cell, view.getUint32(s + SCRATCH.raw, true), view.getUint32(s + SCRATCH.raw + 4, true));
+      let style = styleId === 0 ? -1 : this.#knownStyle(styleId);
       if (styleId !== 0 && style < 0 && fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, s + SCRATCH.style) === ok) {
         view = this.wasm.view();
-        style = this.rememberStyle(styleId, view, s + SCRATCH.style);
+        style = this.#rememberStyle(styleId, view, s + SCRATCH.style);
       }
-      if (style >= 0) this.applyStyle(cell, style);
-      this.contentBackground(cell);
-      if (this.rawTag === T.CODEPOINT_GRAPHEME) {
-        const text = this.gridGraphemes();
+      if (style >= 0) this.#applyStyle(cell, style);
+      this.#contentBackground(cell);
+      if (this.#rawTag === T.CODEPOINT_GRAPHEME) {
+        const text = this.#gridGraphemes();
         if (text && [...text].length > 1) cell.cluster = text;
       }
     }
@@ -1017,12 +1017,12 @@ export class VtTerminal {
   /// The cursor's cell on the screen and whether the program shows it.
   /// Its shape and blinking are the widget's own options.
   getCursor(): { x: number; y: number; visible: boolean } {
-    this.sync();
+    this.#sync();
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.CURSOR_X, s + SCRATCH.slot);
     fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.CURSOR_Y, s + SCRATCH.slot2);
-    fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.CURSOR_VISIBLE, s + SCRATCH.rgb);
+    fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.CURSOR_VISIBLE, s + SCRATCH.rgb);
     const view = this.wasm.view();
     const x = view.getUint16(s + SCRATCH.slot, true);
     const y = view.getUint16(s + SCRATCH.slot2, true);
@@ -1036,8 +1036,8 @@ export class VtTerminal {
   /// in Ghostty. The next update reads the new colors and reports a full
   /// redraw.
   setColors(config?: VtTerminalConfig): void {
-    this.writeColors(config);
-    this.stale = true;
+    this.#writeColors(config);
+    this.#stale = true;
   }
 
   // ------------------------------------------------------------------
@@ -1045,11 +1045,11 @@ export class VtTerminal {
   // ------------------------------------------------------------------
 
   getDimensions(): { cols: number; rows: number } {
-    return { cols: this._cols, rows: this._rows };
+    return { cols: this.#_cols, rows: this.#_rows };
   }
 
   getMode(mode: number, isAnsi = false): boolean {
-    const ptr = this.scratch + SCRATCH.mode;
+    const ptr = this.#scratch + SCRATCH.mode;
     const F = LAYOUT.GhosttyTerminalModeConfig.fields;
     const view = this.wasm.view();
     view.setUint16(ptr + F.mode, packMode(mode, isAnsi), true);
@@ -1059,7 +1059,7 @@ export class VtTerminal {
   }
 
   isAlternateScreen(): boolean {
-    const ptr = this.scratch + SCRATCH.slot;
+    const ptr = this.#scratch + SCRATCH.slot;
     this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.ACTIVE_SCREEN, ptr);
     return this.wasm.view().getInt32(ptr, true) === ABI.GhosttyTerminalScreen.ALTERNATE;
   }
@@ -1072,7 +1072,7 @@ export class VtTerminal {
   /// bracketed paste mode (2004), by the core's own paste encoder; see
   /// `GhosttyVt.encodePaste`.
   encodePaste(text: string): string {
-    return this.owner.encodePaste(text, this.hasBracketedPaste());
+    return this.#owner.encodePaste(text, this.hasBracketedPaste());
   }
 
   hasFocusEvents(): boolean {
@@ -1104,14 +1104,14 @@ export class VtTerminal {
   /// when the core cannot format it.
   plainText(range?: TextRange): string | null {
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     let selection = 0;
     let formatter = 0;
     try {
       if (range) {
-        const last = this.getScrollbackLength() + this._rows - 1;
+        const last = this.getScrollbackLength() + this.#_rows - 1;
         if (Math.min(range.startRow, range.endRow) > last) return "";
-        selection = this.selection(range, last);
+        selection = this.#selection(range, last);
         if (!selection) return null;
       }
       // A new formatter emits plain text of the whole screen. Its default
@@ -1123,8 +1123,8 @@ export class VtTerminal {
         (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle),
         "formatter",
       );
-      if (!this.setFormatterFlag(formatter, ABI.GhosttyFormatterOption.UNWRAP, true)) return null;
-      if (!this.setFormatterFlag(formatter, ABI.GhosttyFormatterOption.TRIM, true)) return null;
+      if (!this.#setFormatterFlag(formatter, ABI.GhosttyFormatterOption.UNWRAP, true)) return null;
+      if (!this.#setFormatterFlag(formatter, ABI.GhosttyFormatterOption.TRIM, true)) return null;
       if (selection && fn.ghostty_formatter_set(formatter, ABI.GhosttyFormatterOption.SELECTION, selection) !== ABI.GhosttyResult.SUCCESS) {
         return null;
       }
@@ -1148,27 +1148,27 @@ export class VtTerminal {
   }
 
   /// Set the bool `option` of `formatter`; false when the core refuses it.
-  private setFormatterFlag(formatter: number, option: number, on: boolean): boolean {
-    const ptr = this.scratch + SCRATCH.slot;
+  #setFormatterFlag(formatter: number, option: number, on: boolean): boolean {
+    const ptr = this.#scratch + SCRATCH.slot;
     this.wasm.view().setUint8(ptr, on ? 1 : 0);
     return this.wasm.fn.ghostty_formatter_set(formatter, option, ptr) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// A `GhosttySelection` over `range`, its rows clamped to `last`, in a
   /// block the caller frees; 0 when a corner is outside the screen.
-  private selection(range: TextRange, last: number): number {
+  #selection(range: TextRange, last: number): number {
     const S = LAYOUT.GhosttySelection;
     const R = LAYOUT.GhosttyGridRef;
     const history = this.getScrollbackLength();
-    const col = (x: number) => Math.max(0, Math.min(x, this._cols - 1));
+    const col = (x: number) => Math.max(0, Math.min(x, this.#_cols - 1));
     const corner = (x: number, row: number, at: number): boolean => {
       const y = Math.max(0, Math.min(row, last));
       const found =
         y < history
-          ? this.gridRef(ABI.GhosttyPointTag.HISTORY, col(x), y)
-          : this.gridRef(ABI.GhosttyPointTag.ACTIVE, col(x), y - history);
+          ? this.#gridRef(ABI.GhosttyPointTag.HISTORY, col(x), y)
+          : this.#gridRef(ABI.GhosttyPointTag.ACTIVE, col(x), y - history);
       if (found) {
-        const from = this.scratch + SCRATCH.gridRef;
+        const from = this.#scratch + SCRATCH.gridRef;
         this.wasm.bytes().copyWithin(at, from, from + R.size);
       }
       return found;
@@ -1184,7 +1184,7 @@ export class VtTerminal {
   }
 
   getScrollbackLength(): number {
-    const ptr = this.scratch + SCRATCH.slot;
+    const ptr = this.#scratch + SCRATCH.slot;
     this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.SCROLLBACK_ROWS, ptr);
     return this.wasm.view().getUint32(ptr, true);
   }
@@ -1192,19 +1192,19 @@ export class VtTerminal {
   /// Whether row `row` continues the row above it, the meaning xterm's
   /// `isWrapped` has and ghostty-web's buffer API passes on.
   isRowWrapped(row: number): boolean {
-    return this.continuesRowAbove(ABI.GhosttyPointTag.ACTIVE, row);
+    return this.#continuesRowAbove(ABI.GhosttyPointTag.ACTIVE, row);
   }
 
   /// Whether history row `offset`, 0 the oldest, continues the row above
   /// it. ghostty-web's buffer reads every history row as unwrapped.
   isScrollbackRowWrapped(offset: number): boolean {
-    return this.continuesRowAbove(ABI.GhosttyPointTag.HISTORY, offset);
+    return this.#continuesRowAbove(ABI.GhosttyPointTag.HISTORY, offset);
   }
 
-  private continuesRowAbove(tag: number, y: number): boolean {
-    if (!this.gridRef(tag, 0, y)) return false;
+  #continuesRowAbove(tag: number, y: number): boolean {
+    if (!this.#gridRef(tag, 0, y)) return false;
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     if (fn.ghostty_grid_ref_row(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ABI.GhosttyResult.SUCCESS) return false;
     const raw = this.wasm.view().getBigUint64(s + SCRATCH.raw, true);
     if (fn.ghostty_row_get(raw, ABI.GhosttyRowData.WRAP_CONTINUATION, s + SCRATCH.slot) !== ABI.GhosttyResult.SUCCESS) return false;
@@ -1212,11 +1212,11 @@ export class VtTerminal {
   }
 
   getHyperlinkUri(row: number, col: number): string | null {
-    return this.hyperlinkAt(ABI.GhosttyPointTag.ACTIVE, col, row);
+    return this.#hyperlinkAt(ABI.GhosttyPointTag.ACTIVE, col, row);
   }
 
   getScrollbackHyperlinkUri(offset: number, col: number): string | null {
-    return this.hyperlinkAt(ABI.GhosttyPointTag.HISTORY, col, offset);
+    return this.#hyperlinkAt(ABI.GhosttyPointTag.HISTORY, col, offset);
   }
 
   // ------------------------------------------------------------------
@@ -1225,7 +1225,7 @@ export class VtTerminal {
 
   /// A search of this terminal on the core's engine; see `VtSearch`.
   createSearch(): VtSearch {
-    return new VtSearch(this.wasm, { handle: () => this.handle, changes: () => this.changes });
+    return new VtSearch(this.wasm, { handle: () => this.handle, changes: () => this.#changes });
   }
 
   /// Tracks the cell at SCREEN row `row` and column `col` of the screen
@@ -1234,11 +1234,11 @@ export class VtTerminal {
   /// or column, written unsigned, is outside the screen too.
   trackCell(row: number, col: number): VtTrackedCell | null {
     if (!this.handle) return null;
-    const point = this.writePoint(ABI.GhosttyPointTag.SCREEN, col, row);
-    const out = this.scratch + SCRATCH.slot;
+    const point = this.#writePoint(ABI.GhosttyPointTag.SCREEN, col, row);
+    const out = this.#scratch + SCRATCH.slot;
     if (this.wasm.fn.ghostty_terminal_grid_ref_track(this.handle, point, out) !== ABI.GhosttyResult.SUCCESS) return null;
-    const cell = new VtTrackedCell(this.wasm, this.cellOwner, this.wasm.view().getUint32(out, true));
-    this.trackedCells.add(cell);
+    const cell = new VtTrackedCell(this.wasm, this.#cellOwner, this.wasm.view().getUint32(out, true));
+    this.#trackedCells.add(cell);
     return cell;
   }
 
@@ -1249,21 +1249,21 @@ export class VtTerminal {
   queueReply(ptr: number, len: number): void {
     const reply = this.wasm.bytes().slice(ptr, ptr + len);
     if (isColorReport(reply) || isVersionReport(reply) || isKittyKeyboardReport(reply)) return;
-    this.replies.push(reply);
+    this.#replies.push(reply);
   }
 
   /// Everything upstream asked to write back since the last read, as one
   /// string, or null when nothing is pending.
   readResponse(): string | null {
-    if (this.replies.length === 0) return null;
-    const total = this.replies.reduce((n, r) => n + r.length, 0);
+    if (this.#replies.length === 0) return null;
+    const total = this.#replies.reduce((n, r) => n + r.length, 0);
     const joined = new Uint8Array(total);
     let at = 0;
-    for (const reply of this.replies) {
+    for (const reply of this.#replies) {
       joined.set(reply, at);
       at += reply.length;
     }
-    this.replies = [];
+    this.#replies = [];
     return new TextDecoder().decode(joined);
   }
 
@@ -1271,9 +1271,9 @@ export class VtTerminal {
   // Internals
   // ------------------------------------------------------------------
 
-  private applyConfig(config?: VtTerminalConfig): void {
+  #applyConfig(config?: VtTerminalConfig): void {
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     const O = ABI.GhosttyTerminalOption;
     // A supplied byte budget replaces the line ceiling. Without one,
     // SIZE_MAX lifts the core's default byte cap so only lines limit history.
@@ -1286,13 +1286,13 @@ export class VtTerminal {
     } else {
       fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, 0);
     }
-    this.writeColors(config);
+    this.#writeColors(config);
   }
 
   /// Writes the configured defaults, clearing any omitted override.
-  private writeColors(config?: VtTerminalConfig): void {
+  #writeColors(config?: VtTerminalConfig): void {
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     const O = ABI.GhosttyTerminalOption;
     const setColor = (option: number, rgb: number) => {
       const view = this.wasm.view();
@@ -1328,8 +1328,8 @@ export class VtTerminal {
     }
   }
 
-  private setMode(mode: number, ansi: boolean, value: boolean): void {
-    const ptr = this.scratch + SCRATCH.mode;
+  #setMode(mode: number, ansi: boolean, value: boolean): void {
+    const ptr = this.#scratch + SCRATCH.mode;
     const F = LAYOUT.GhosttyTerminalModeConfig.fields;
     const view = this.wasm.view();
     view.setUint16(ptr + F.mode, packMode(mode, ansi), true);
@@ -1343,14 +1343,14 @@ export class VtTerminal {
   /// Writes the key and value arrays of the multi-get calls a row's read
   /// makes, which stay put: the row's raw cells and its cells handle, and a
   /// cell's style and cluster.
-  private writeMultiArgs(): void {
+  #writeMultiArgs(): void {
     const view = this.wasm.view();
-    const s = this.scratch;
+    const s = this.#scratch;
     view.setInt32(s + SCRATCH.rowKeys, ABI.GhosttyRenderStateRowData.CELLS_RAW, true);
     view.setInt32(s + SCRATCH.rowKeys + 4, ABI.GhosttyRenderStateRowData.CELLS, true);
     view.setUint32(s + SCRATCH.rowValues, s + SCRATCH.cellsView, true);
     view.setUint32(s + SCRATCH.rowValues + 4, s + SCRATCH.rowCells, true);
-    view.setUint32(s + SCRATCH.rowCells, this.rowCells, true);
+    view.setUint32(s + SCRATCH.rowCells, this.#rowCells, true);
     view.setInt32(s + SCRATCH.cellKeys, ABI.GhosttyRenderStateRowCellsData.STYLE, true);
     view.setInt32(s + SCRATCH.cellKeys + 4, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, true);
     view.setUint32(s + SCRATCH.cellValues, s + SCRATCH.style, true);
@@ -1364,70 +1364,70 @@ export class VtTerminal {
   /// iteration lists every row changed since then. It reports the whole
   /// screen changed after a resize, a switch of screens, new colours and
   /// output that scrolled.
-  private sync(): void {
-    if (!this.stale || !this.handle) return;
-    this.stale = false;
-    this.generation++;
+  #sync(): void {
+    if (!this.#stale || !this.handle) return;
+    this.#stale = false;
+    this.#generation++;
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     const D = ABI.GhosttyRenderStateDirty;
-    fn.ghostty_render_state_update(this.renderState, this.handle);
-    fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.DIRTY, s + SCRATCH.slot);
+    fn.ghostty_render_state_update(this.#renderState, this.handle);
+    fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.DIRTY, s + SCRATCH.slot);
     let dirty = this.wasm.view().getInt32(s + SCRATCH.slot, true);
     // Every cell's colours resolve against the defaults and the palette read
     // here, so a change to them repaints every row whatever the core says.
-    if (this.readColors()) dirty = D.FULL;
-    if (dirty === D.PARTIAL) this.readDirtyRows();
-    else if (dirty === D.FULL) this.rowVersions.fill(++this.versions);
-    if (dirty > this.dirty) this.dirty = dirty;
+    if (this.#readColors()) dirty = D.FULL;
+    if (dirty === D.PARTIAL) this.#readDirtyRows();
+    else if (dirty === D.FULL) this.#rowVersions.fill(++this.#versions);
+    if (dirty > this.#dirty) this.#dirty = dirty;
     // The update moved the rows the iterator was filled with.
-    this.iteratorGeneration = -1;
+    this.#iteratorGeneration = -1;
   }
 
   /// Marks the rows the core's dirty iteration lists.
-  private readDirtyRows(): void {
+  #readDirtyRows(): void {
     const fn = this.wasm.fn;
-    const s = this.scratch;
-    this.wasm.view().setUint32(s + SCRATCH.slot, this.rowIterator, true);
-    fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
-    while (fn.ghostty_render_state_row_iterator_next_dirty(this.rowIterator, s + SCRATCH.dirtyY)) {
+    const s = this.#scratch;
+    this.wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
+    fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
+    while (fn.ghostty_render_state_row_iterator_next_dirty(this.#rowIterator, s + SCRATCH.dirtyY)) {
       const y = this.wasm.view().getUint16(s + SCRATCH.dirtyY, true);
-      if (y >= this.rowDirty.length) continue;
-      this.rowDirty[y] = 1;
-      this.rowVersions[y] = ++this.versions;
+      if (y >= this.#rowDirty.length) continue;
+      this.#rowDirty[y] = 1;
+      this.#rowVersions[y] = ++this.#versions;
     }
   }
 
   /// Moves the row iterator to screen row `y`, filling it again when the
   /// render state was updated since or the row is above it; rows are read
   /// top to bottom in a frame, so a frame steps it down the screen once.
-  private seekRow(y: number): boolean {
+  #seekRow(y: number): boolean {
     const fn = this.wasm.fn;
-    if (this.iteratorGeneration !== this.generation || y < this.iteratorRow) {
-      const s = this.scratch;
-      this.wasm.view().setUint32(s + SCRATCH.slot, this.rowIterator, true);
-      fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
-      this.iteratorGeneration = this.generation;
-      this.iteratorRow = -1;
+    if (this.#iteratorGeneration !== this.#generation || y < this.#iteratorRow) {
+      const s = this.#scratch;
+      this.wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
+      fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
+      this.#iteratorGeneration = this.#generation;
+      this.#iteratorRow = -1;
     }
-    while (this.iteratorRow < y) {
-      if (!fn.ghostty_render_state_row_iterator_next(this.rowIterator)) {
-        this.iteratorGeneration = -1;
+    while (this.#iteratorRow < y) {
+      if (!fn.ghostty_render_state_row_iterator_next(this.#rowIterator)) {
+        this.#iteratorGeneration = -1;
         return false;
       }
-      this.iteratorRow++;
+      this.#iteratorRow++;
     }
     return true;
   }
 
   /// A cell nothing was written to, in the default colours.
-  private blank(cell: VtCell): void {
+  #blank(cell: VtCell): void {
     cell.codepoint = 0;
     cell.cluster = null;
     cell.width = 1;
     cell.flags = 0;
-    cell.fg = this.fg;
-    cell.bg = this.bg;
+    cell.fg = this.#fg;
+    cell.bg = this.#bg;
     cell.defaultBg = true;
     cell.underline = ABI.GhosttySgrUnderline.NONE;
     cell.underlineColor = null;
@@ -1438,18 +1438,18 @@ export class VtTerminal {
   /// its width, its link and the default colours. Keeps the value's content
   /// tag and content for the reader's next steps, decoding each field once,
   /// and returns its style id.
-  private rawCell(cell: VtCell, lo: number, hi: number): number {
+  #rawCell(cell: VtCell, lo: number, hi: number): number {
     const T = ABI.GhosttyCellContentTag;
     const tag = cellBits(lo, hi, CELL_BITS.content_tag);
     const content = cellBits(lo, hi, CELL_BITS.content);
-    this.rawTag = tag;
-    this.rawContent = content;
+    this.#rawTag = tag;
+    this.#rawContent = content;
     cell.codepoint = tag === T.CODEPOINT || tag === T.CODEPOINT_GRAPHEME ? content & 0x1fffff : 0;
     cell.cluster = null;
     cell.width = cellWidth(cellBits(lo, hi, CELL_BITS.wide));
     cell.flags = 0;
-    cell.fg = this.fg;
-    cell.bg = this.bg;
+    cell.fg = this.#fg;
+    cell.bg = this.#bg;
     cell.defaultBg = true;
     cell.underline = ABI.GhosttySgrUnderline.NONE;
     cell.underlineColor = null;
@@ -1459,104 +1459,104 @@ export class VtTerminal {
 
   /// The background a cell with no text carries in its raw value (the one
   /// `rawCell` read last), over its style's.
-  private contentBackground(cell: VtCell): void {
+  #contentBackground(cell: VtCell): void {
     const T = ABI.GhosttyCellContentTag;
-    if (this.rawTag === T.BG_COLOR_PALETTE) {
-      cell.bg = this.paletteColor(this.rawContent & 0xff);
+    if (this.#rawTag === T.BG_COLOR_PALETTE) {
+      cell.bg = this.#paletteColor(this.#rawContent & 0xff);
       cell.defaultBg = false;
-    } else if (this.rawTag === T.BG_COLOR_RGB) {
-      const c = this.rawContent;
+    } else if (this.#rawTag === T.BG_COLOR_RGB) {
+      const c = this.#rawContent;
       cell.bg = ((c & 0xff) << 16) | (c & 0xff00) | ((c >>> 16) & 0xff);
       cell.defaultBg = false;
     }
   }
 
   /// The slot of style `id` among the styles this row's read has met, or -1.
-  private knownStyle(id: number): number {
-    for (let i = 0; i < this.styleCount; i++) if (this.styleIds[i] === id) return i;
+  #knownStyle(id: number): number {
+    for (let i = 0; i < this.#styleCount; i++) if (this.#styleIds[i] === id) return i;
     return -1;
   }
 
   /// Keeps the `GhosttyStyle` at `ptr` as style `id`, resolved against the
   /// palette and the defaults, and returns its slot. Past ROW_STYLES styles
   /// in a row the last slot serves each new one in turn.
-  private rememberStyle(id: number, view: DataView, ptr: number): number {
+  #rememberStyle(id: number, view: DataView, ptr: number): number {
     const L = LAYOUT.GhosttyStyle.fields;
-    const slot = this.styleCount < ROW_STYLES ? this.styleCount++ : ROW_STYLES - 1;
+    const slot = this.#styleCount < ROW_STYLES ? this.#styleCount++ : ROW_STYLES - 1;
     const flags = view.getUint16(ptr + L.flags, true);
-    this.styleIds[slot] = id;
-    this.styleFlags[slot] = flags;
-    this.styleFg[slot] = this.styleColor(view, ptr + L.fg_color) ?? this.fg;
-    const bg = this.styleColor(view, ptr + L.bg_color);
-    this.styleBg[slot] = bg ?? this.bg;
-    this.styleDefaultBg[slot] = bg === null ? 1 : 0;
-    this.styleUnderline[slot] = (flags & VtFlag.UNDERLINE) >> STYLE_FLAG_BITS.underline[0];
-    this.styleUnderlineColor[slot] = this.styleColor(view, ptr + L.underline_color) ?? -1;
+    this.#styleIds[slot] = id;
+    this.#styleFlags[slot] = flags;
+    this.#styleFg[slot] = this.#styleColor(view, ptr + L.fg_color) ?? this.#fg;
+    const bg = this.#styleColor(view, ptr + L.bg_color);
+    this.#styleBg[slot] = bg ?? this.#bg;
+    this.#styleDefaultBg[slot] = bg === null ? 1 : 0;
+    this.#styleUnderline[slot] = (flags & VtFlag.UNDERLINE) >> STYLE_FLAG_BITS.underline[0];
+    this.#styleUnderlineColor[slot] = this.#styleColor(view, ptr + L.underline_color) ?? -1;
     return slot;
   }
 
-  private applyStyle(cell: VtCell, slot: number): void {
-    cell.flags = this.styleFlags[slot];
-    cell.fg = this.styleFg[slot];
-    cell.bg = this.styleBg[slot];
-    cell.defaultBg = this.styleDefaultBg[slot] === 1;
-    cell.underline = this.styleUnderline[slot];
-    const underlineColor = this.styleUnderlineColor[slot];
+  #applyStyle(cell: VtCell, slot: number): void {
+    cell.flags = this.#styleFlags[slot];
+    cell.fg = this.#styleFg[slot];
+    cell.bg = this.#styleBg[slot];
+    cell.defaultBg = this.#styleDefaultBg[slot] === 1;
+    cell.underline = this.#styleUnderline[slot];
+    const underlineColor = this.#styleUnderlineColor[slot];
     cell.underlineColor = underlineColor < 0 ? null : underlineColor;
   }
 
   /// Points the codepoint buffer of a cell's multi-get at the scratch room.
-  private clearCodepoints(): void {
+  #clearCodepoints(): void {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
     const view = this.wasm.view();
-    const cb = this.scratch + SCRATCH.codepoints;
-    view.setUint32(cb + B.ptr, this.scratch + SCRATCH.graphemes, true);
+    const cb = this.#scratch + SCRATCH.codepoints;
+    view.setUint32(cb + B.ptr, this.#scratch + SCRATCH.graphemes, true);
     view.setUint32(cb + B.cap, GRAPHEME_CAP, true);
     view.setUint32(cb + B.len, 0, true);
   }
 
   /// The codepoints a cell's multi-get wrote to the scratch room.
-  private scratchCodepoints(): number[] {
+  #scratchCodepoints(): number[] {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
     const view = this.wasm.view();
-    const len = Math.min(view.getUint32(this.scratch + SCRATCH.codepoints + B.len, true), GRAPHEME_CAP);
+    const len = Math.min(view.getUint32(this.#scratch + SCRATCH.codepoints + B.len, true), GRAPHEME_CAP);
     const cps: number[] = [];
-    for (let i = 0; i < len; i++) cps.push(view.getUint32(this.scratch + SCRATCH.graphemes + i * 4, true));
+    for (let i = 0; i < len; i++) cps.push(view.getUint32(this.#scratch + SCRATCH.graphemes + i * 4, true));
     return cps;
   }
 
   /// Reads the default colors and the palette; true when any of them
   /// differs from the last read.
-  private readColors(): boolean {
-    const s = this.scratch;
+  #readColors(): boolean {
+    const s = this.#scratch;
     const C = LAYOUT.GhosttyRenderStateColors;
     const ptr = s + SCRATCH.colors;
     this.wasm.view().setUint32(ptr + C.fields.size, C.size, true);
-    this.wasm.fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.COLORS, ptr);
+    this.wasm.fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.COLORS, ptr);
     const view = this.wasm.view();
     const bg = readRgb(view, ptr + C.fields.background);
     const fg = readRgb(view, ptr + C.fields.foreground);
     const palette = this.wasm.bytes().subarray(ptr + C.fields.palette, ptr + C.fields.palette + 768);
-    let changed = bg !== this.bg || fg !== this.fg;
-    for (let i = 0; i < 768 && !changed; i++) changed = palette[i] !== this.palette[i];
-    this.bg = bg;
-    this.fg = fg;
-    if (changed) this.palette.set(palette);
+    let changed = bg !== this.#bg || fg !== this.#fg;
+    for (let i = 0; i < 768 && !changed; i++) changed = palette[i] !== this.#palette[i];
+    this.#bg = bg;
+    this.#fg = fg;
+    if (changed) this.#palette.set(palette);
     return changed;
   }
 
   /// Points the scratch grid ref at a cell; false when the point is
   /// outside the screen.
-  private gridRef(tag: number, x: number, y: number): boolean {
-    const point = this.writePoint(tag, x, y);
-    return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, this.scratch + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
+  #gridRef(tag: number, x: number, y: number): boolean {
+    const point = this.#writePoint(tag, x, y);
+    return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, this.#scratch + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// Writes a `GhosttyPoint` to the scratch area and returns its address; a
   /// point is passed by value, which wasm32 does by address.
-  private writePoint(tag: number, x: number, y: number): number {
+  #writePoint(tag: number, x: number, y: number): number {
     const view = this.wasm.view();
-    const point = this.scratch + SCRATCH.point;
+    const point = this.#scratch + SCRATCH.point;
     const coord = point + LAYOUT.GhosttyPoint.fields.value;
     view.setInt32(point + LAYOUT.GhosttyPoint.fields.tag, tag, true);
     view.setUint16(coord + LAYOUT.GhosttyPointCoordinate.fields.x, x, true);
@@ -1566,16 +1566,16 @@ export class VtTerminal {
 
   /// The 0xRRGGBB of the `GhosttyStyleColor` at `ptr`, or null when it
   /// names no colour.
-  private styleColor(view: DataView, ptr: number): number | null {
+  #styleColor(view: DataView, ptr: number): number | null {
     const C = LAYOUT.GhosttyStyleColor.fields;
     const tag = view.getUint8(ptr + C.tag);
-    if (tag === ABI.GhosttyStyleColorTag.PALETTE) return this.paletteColor(view.getUint8(ptr + C.value));
+    if (tag === ABI.GhosttyStyleColorTag.PALETTE) return this.#paletteColor(view.getUint8(ptr + C.value));
     if (tag === ABI.GhosttyStyleColorTag.RGB) return readRgb(view, ptr + C.value);
     return null;
   }
 
-  private paletteColor(index: number): number {
-    const p = this.palette;
+  #paletteColor(index: number): number {
+    const p = this.#palette;
     return (p[index * 3] << 16) | (p[index * 3 + 1] << 8) | p[index * 3 + 2];
   }
 
@@ -1583,12 +1583,12 @@ export class VtTerminal {
   /// up to `cap` of them at `buf` and reports the result and the cluster's
   /// length. The scratch room serves a cluster that fits it; a longer one
   /// is read again into a buffer of its own.
-  private cluster(read: (buf: number, cap: number) => [result: number, len: number]): number[] | null {
+  #cluster(read: (buf: number, cap: number) => [result: number, len: number]): number[] | null {
     let want = GRAPHEME_CAP;
     for (let attempt = 0; attempt < 2; attempt++) {
       const cap = want;
       const own = cap > GRAPHEME_CAP ? this.wasm.alloc(cap * 4) : 0;
-      const buf = own || this.scratch + SCRATCH.graphemes;
+      const buf = own || this.#scratch + SCRATCH.graphemes;
       try {
         const [result, len] = read(buf, cap);
         if (result === ABI.GhosttyResult.OUT_OF_SPACE && len > cap) {
@@ -1608,35 +1608,35 @@ export class VtTerminal {
   }
 
   /// The cluster of the row cells iterator's current cell.
-  private rowCellCluster(): number[] | null {
+  #rowCellCluster(): number[] | null {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
-    const cb = this.scratch + SCRATCH.codepoints;
-    return this.cluster((buf, cap) => {
+    const cb = this.#scratch + SCRATCH.codepoints;
+    return this.#cluster((buf, cap) => {
       const view = this.wasm.view();
       view.setUint32(cb + B.ptr, buf, true);
       view.setUint32(cb + B.cap, cap, true);
       view.setUint32(cb + B.len, 0, true);
       const result = this.wasm.fn.ghostty_render_state_row_cells_get(
-        this.rowCells, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, cb,
+        this.#rowCells, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, cb,
       );
       return [result, this.wasm.view().getUint32(cb + B.len, true)];
     });
   }
 
   /// The full cluster at the scratch grid ref, base codepoint first.
-  private gridGraphemes(): string | null {
-    const s = this.scratch;
-    const cps = this.cluster((buf, cap) => {
+  #gridGraphemes(): string | null {
+    const s = this.#scratch;
+    const cps = this.#cluster((buf, cap) => {
       const result = this.wasm.fn.ghostty_grid_ref_graphemes(s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot);
       return [result, this.wasm.view().getUint32(s + SCRATCH.slot, true)];
     });
     return cps ? String.fromCodePoint(...cps) : null;
   }
 
-  private hyperlinkAt(tag: number, x: number, y: number): string | null {
-    if (!this.gridRef(tag, x, y)) return null;
+  #hyperlinkAt(tag: number, x: number, y: number): string | null {
+    if (!this.#gridRef(tag, x, y)) return null;
     const fn = this.wasm.fn;
-    const s = this.scratch;
+    const s = this.#scratch;
     let want = 2048;
     for (let attempt = 0; attempt < 2; attempt++) {
       const cap = want;
@@ -1696,22 +1696,22 @@ type SearchTerminal = { handle(): number; changes(): number };
 export class VtSearch {
   // The package's white-box tests read these through ./internal.
   static {
-    registerSearchInternals((s) => ({ wasm: s.wasm, handle: s.handle }));
+    registerSearchInternals((s) => ({ wasm: s.#wasm, handle: s.#handle }));
   }
 
-  private readonly wasm: VtWasm;
-  private readonly terminal: SearchTerminal;
-  private handle: number;
-  private readonly scratch: number;
+  readonly #wasm: VtWasm;
+  readonly #terminal: SearchTerminal;
+  #handle: number;
+  readonly #scratch: number;
   /// The terminal's change count at the last feed. A match the core hands
   /// out is a snapshot into the terminal's pages as of that feed, which a
   /// later write may have moved or pruned, so a read after a change feeds
   /// first rather than resolve a stale snapshot.
-  private fed: number;
-  private needle = "";
-  private matchBuffer = 0;
-  private matchCapacity = 0;
-  private matchCount = -1;
+  #fed: number;
+  #needle = "";
+  #matchBuffer = 0;
+  #matchCapacity = 0;
+  #matchCount = -1;
   /// Milliseconds the unit of `step` that last completed a scan took, on
   /// the clock `step` was given; null until a scan completes in `step`. The
   /// core checks every match it holds against the terminal's pages as a
@@ -1721,27 +1721,27 @@ export class VtSearch {
   completingUnitMs: number | null = null;
 
   constructor(wasm: VtWasm, terminal: SearchTerminal) {
-    this.wasm = wasm;
-    this.terminal = terminal;
-    this.scratch = wasm.alloc(SEARCH_SCRATCH.size);
+    this.#wasm = wasm;
+    this.#terminal = terminal;
+    this.#scratch = wasm.alloc(SEARCH_SCRATCH.size);
     try {
-      this.handle = wasm.newHandle((slot) => wasm.fn.ghostty_search_new(0, slot, terminal.handle()), "search");
+      this.#handle = wasm.newHandle((slot) => wasm.fn.ghostty_search_new(0, slot, terminal.handle()), "search");
     } catch (error) {
       // A terminal outlives many searches, each find bar opening makes one,
       // so a search the core fails to make gives its block back.
-      wasm.free(this.scratch, SEARCH_SCRATCH.size);
+      wasm.free(this.#scratch, SEARCH_SCRATCH.size);
       throw error;
     }
-    this.fed = terminal.changes();
+    this.#fed = terminal.changes();
     // ghostty-web scrolls in JS and upstream's viewport never moves, so the
     // render state this binding reads is the active screen (see
     // `VtTerminal`). The core's default policy, IF_NEEDED, scrolls that
     // viewport to a selected match in history, and the render state then
     // shows history rows as the active screen, where every later write
     // lands too. The find bar scrolls ghostty-web to the match instead.
-    const scroll = this.scratch + SEARCH_SCRATCH.scroll;
+    const scroll = this.#scratch + SEARCH_SCRATCH.scroll;
     wasm.view().setInt32(scroll, ABI.GhosttySearchScroll.NONE, true);
-    const result = wasm.fn.ghostty_search_set(this.handle, ABI.GhosttySearchOption.SELECT_SCROLL, scroll);
+    const result = wasm.fn.ghostty_search_set(this.#handle, ABI.GhosttySearchOption.SELECT_SCROLL, scroll);
     if (result !== ABI.GhosttyResult.SUCCESS) {
       this.free();
       throw new Error(`ghostty-vt: setting the search's scroll policy failed (${result})`);
@@ -1756,25 +1756,25 @@ export class VtSearch {
   /// An empty needle returns the search to idle: no matches, no selection,
   /// complete.
   setNeedle(needle: string): void {
-    if (!this.live()) return;
-    this.matchCount = -1;
+    if (!this.#live()) return;
+    this.#matchCount = -1;
     const S = LAYOUT.GhosttyString;
     const bytes = new TextEncoder().encode(needle);
     // One block: the `GhosttyString` header, then the bytes it points at,
     // which the core copies. A null string clears the needle.
     const len = bytes.length ? S.size + bytes.length : 0;
-    const str = len ? this.wasm.alloc(len) : 0;
+    const str = len ? this.#wasm.alloc(len) : 0;
     try {
       if (str) {
-        this.wasm.bytes().set(bytes, str + S.size);
-        const view = this.wasm.view();
+        this.#wasm.bytes().set(bytes, str + S.size);
+        const view = this.#wasm.view();
         view.setUint32(str + S.fields.ptr, str + S.size, true);
         view.setUint32(str + S.fields.len, bytes.length, true);
       }
-      this.check("setting the needle", this.wasm.fn.ghostty_search_set(this.handle, ABI.GhosttySearchOption.NEEDLE, str));
-      this.needle = needle;
+      this.#check("setting the needle", this.#wasm.fn.ghostty_search_set(this.#handle, ABI.GhosttySearchOption.NEEDLE, str));
+      this.#needle = needle;
     } finally {
-      this.wasm.free(str, len);
+      this.#wasm.free(str, len);
     }
   }
 
@@ -1783,12 +1783,12 @@ export class VtSearch {
   /// newest output up in budgeted units. Cheap however many matches the
   /// search held.
   restart(): void {
-    const needle = this.needle;
+    const needle = this.#needle;
     if (!needle) return;
     this.setNeedle("");
     // Kept before the set, so a set that fails leaves the next restart
     // something to set again.
-    this.needle = needle;
+    this.#needle = needle;
     this.setNeedle(needle);
   }
 
@@ -1799,15 +1799,15 @@ export class VtSearch {
   /// asks for another call. "complete" means caught up with the terminal as
   /// of the last feed; a later write needs another feed.
   step(budgetMs: number, now: () => number = () => performance.now()): "running" | "complete" {
-    if (!this.live()) return "complete";
+    if (!this.#live()) return "complete";
     const S = ABI.GhosttySearchStatus;
     let unitStart = now();
     const deadline = unitStart + budgetMs;
-    let status = this.status();
+    let status = this.#status();
     while (status !== S.COMPLETE) {
       if (status === S.FEED_REQUIRED) this.feed();
-      else this.check("scanning", this.wasm.fn.ghostty_search_tick(this.handle, 0));
-      status = this.status();
+      else this.#check("scanning", this.#wasm.fn.ghostty_search_tick(this.#handle, 0));
+      status = this.#status();
       const unitEnd = now();
       if (status === S.COMPLETE) this.completingUnitMs = unitEnd - unitStart;
       if (unitEnd >= deadline) break;
@@ -1821,10 +1821,10 @@ export class VtSearch {
   /// learns of a write. Bounded work, which can leave the search running;
   /// `step` finishes it.
   feed(): void {
-    if (!this.live()) return;
-    this.matchCount = -1;
-    this.fed = this.terminal.changes();
-    this.check("feeding", this.wasm.fn.ghostty_search_feed(this.handle));
+    if (!this.#live()) return;
+    this.#matchCount = -1;
+    this.#fed = this.#terminal.changes();
+    this.#check("feeding", this.#wasm.fn.ghostty_search_feed(this.#handle));
   }
 
   /// Selects the next match toward older output: the newest match first,
@@ -1834,21 +1834,21 @@ export class VtSearch {
   /// selection stays on its match while `step` completes the scan. False
   /// when there is no match.
   selectNext(): boolean {
-    return this.select(true);
+    return this.#select(true);
   }
 
   /// Selects the next match toward newer output, wrapping from the newest
   /// to the oldest; otherwise as `selectNext`.
   selectPrev(): boolean {
-    return this.select(false);
+    return this.#select(false);
   }
 
   /// Whether the scan had caught up with the terminal as of the last feed,
   /// read without feeding: a reader deciding how to bring the search up to
   /// date asks this first. After the terminal was freed: true.
   caughtUp(): boolean {
-    if (!this.live()) return true;
-    return this.status() === ABI.GhosttySearchStatus.COMPLETE;
+    if (!this.#live()) return true;
+    return this.#status() === ABI.GhosttySearchStatus.COMPLETE;
   }
 
   /// The count, the selected match and whether the scan is complete. When
@@ -1856,16 +1856,16 @@ export class VtSearch {
   /// range is never read from a snapshot the change invalidated. After the
   /// terminal was freed: no matches, nothing selected, complete.
   state(): SearchState {
-    if (!this.live()) return { total: 0, index: null, active: null, complete: true };
-    this.catchUp();
+    if (!this.#live()) return { total: 0, index: null, active: null, complete: true };
+    this.#catchUp();
     const D = ABI.GhosttySearchData;
-    const selection = this.scratch + SEARCH_SCRATCH.selection;
-    const selected = this.wasm.fn.ghostty_search_get(this.handle, D.SELECTED_MATCH, selection) === ABI.GhosttyResult.SUCCESS;
+    const selection = this.#scratch + SEARCH_SCRATCH.selection;
+    const selected = this.#wasm.fn.ghostty_search_get(this.#handle, D.SELECTED_MATCH, selection) === ABI.GhosttyResult.SUCCESS;
     return {
-      total: this.count(D.TOTAL_MATCHES) ?? 0,
-      index: this.count(D.SELECTED_INDEX),
-      active: selected ? this.range(selection) : null,
-      complete: this.status() === ABI.GhosttySearchStatus.COMPLETE,
+      total: this.#count(D.TOTAL_MATCHES) ?? 0,
+      index: this.#count(D.SELECTED_INDEX),
+      active: selected ? this.#range(selection) : null,
+      complete: this.#status() === ABI.GhosttySearchStatus.COMPLETE,
     };
   }
 
@@ -1876,13 +1876,13 @@ export class VtSearch {
   /// in a long history costs a placement per match below it.
   matchesBetween(firstRow: number, lastRow: number, cap: number): MatchRange[] {
     const found: MatchRange[] = [];
-    if (cap <= 0 || !this.live()) return found;
+    if (cap <= 0 || !this.#live()) return found;
     const F = LAYOUT.GhosttySelection.fields;
-    this.eachMatch((sel) => {
-      const start = this.screenPoint(sel + F.start);
+    this.#eachMatch((sel) => {
+      const start = this.#screenPoint(sel + F.start);
       // Newer than the window: the match starts below it.
       if (!start || start.y > lastRow) return true;
-      const end = this.screenPoint(sel + F.end);
+      const end = this.#screenPoint(sel + F.end);
       if (!end) return true;
       // Older than the window, and every match after it is older still.
       if (end.y < firstRow) return false;
@@ -1901,13 +1901,13 @@ export class VtSearch {
   readMatches(start: number, budgetMs: number): { ranges: MatchRange[]; next: number; total: number } {
     if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('Invalid match offset');
     const ranges: MatchRange[] = [];
-    if (!this.live()) return { ranges, next: 0, total: 0 };
+    if (!this.#live()) return { ranges, next: 0, total: 0 };
     const deadline = performance.now() + Math.max(0, budgetMs);
-    const count = this.listed();
+    const count = this.#listed();
     let next = Math.min(start, count);
     const end = Math.min(next + 256, count);
     while (next < end) {
-      const range = this.range(this.matchBuffer + next++ * LAYOUT.GhosttySelection.size);
+      const range = this.#range(this.#matchBuffer + next++ * LAYOUT.GhosttySelection.size);
       if (range) ranges.push(range);
       if (performance.now() >= deadline) break;
     }
@@ -1921,34 +1921,34 @@ export class VtSearch {
   /// snapshot copies nothing.
   matchAt(index: number): MatchRange | null {
     if (!Number.isSafeInteger(index) || index < 0) throw new RangeError('Invalid match offset');
-    if (!this.live() || index >= this.listed()) return null;
-    return this.range(this.matchBuffer + index * LAYOUT.GhosttySelection.size);
+    if (!this.#live() || index >= this.#listed()) return null;
+    return this.#range(this.#matchBuffer + index * LAYOUT.GhosttySelection.size);
   }
 
   /// Brings the match snapshot up to date with the terminal and returns its
   /// length, copying the core's whole selection buffer when its count
   /// changed.
-  private listed(): number {
-    this.catchUp();
-    const total = this.count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
-    if (total === this.matchCount) return total;
+  #listed(): number {
+    this.#catchUp();
+    const total = this.#count(ABI.GhosttySearchData.TOTAL_MATCHES) ?? 0;
+    if (total === this.#matchCount) return total;
     const S = LAYOUT.GhosttySelection;
-    if (total > this.matchCapacity) {
-      const capacity = Math.max(total, this.matchCapacity * 2, 256);
-      const buffer = this.wasm.alloc(capacity * S.size);
-      if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * S.size);
-      this.matchBuffer = buffer;
-      this.matchCapacity = capacity;
+    if (total > this.#matchCapacity) {
+      const capacity = Math.max(total, this.#matchCapacity * 2, 256);
+      const buffer = this.#wasm.alloc(capacity * S.size);
+      if (this.#matchBuffer) this.#wasm.free(this.#matchBuffer, this.#matchCapacity * S.size);
+      this.#matchBuffer = buffer;
+      this.#matchCapacity = capacity;
     }
     const B = LAYOUT.GhosttySelectionBuffer.fields;
-    const buf = this.scratch + SEARCH_SCRATCH.buffer;
-    const view = this.wasm.view();
-    view.setUint32(buf + B.ptr, this.matchBuffer, true);
-    view.setUint32(buf + B.cap, this.matchCapacity, true);
+    const buf = this.#scratch + SEARCH_SCRATCH.buffer;
+    const view = this.#wasm.view();
+    view.setUint32(buf + B.ptr, this.#matchBuffer, true);
+    view.setUint32(buf + B.cap, this.#matchCapacity, true);
     view.setUint32(buf + B.len, 0, true);
-    this.check('listing incremental matches', this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf));
-    this.matchCount = this.wasm.view().getUint32(buf + B.len, true);
-    return this.matchCount;
+    this.#check('listing incremental matches', this.#wasm.fn.ghostty_search_get(this.#handle, ABI.GhosttySearchData.MATCHES, buf));
+    this.#matchCount = this.#wasm.view().getUint32(buf + B.len, true);
+    return this.#matchCount;
   }
 
   /// The index of the match that starts at SCREEN row `row` and column
@@ -1958,11 +1958,11 @@ export class VtSearch {
   /// until it reaches the cell, so a match high in a long history costs a
   /// placement per match below it.
   indexOfMatchAt(row: number, col: number): number | null {
-    if (!this.live()) return null;
+    if (!this.#live()) return null;
     const F = LAYOUT.GhosttySelection.fields;
     let index: number | null = null;
-    this.eachMatch((sel, i) => {
-      const start = this.screenPoint(sel + F.start);
+    this.#eachMatch((sel, i) => {
+      const start = this.#screenPoint(sel + F.start);
       // Newer than the cell: below its row, or right of it on the row,
       // since the core lists a row's matches right to left.
       if (!start || start.y > row || (start.y === row && start.x > col)) return true;
@@ -1975,106 +1975,106 @@ export class VtSearch {
   /// Releases the search. Safe after the terminal was freed, and again
   /// after itself.
   free(): void {
-    if (!this.handle) return;
-    if (this.matchBuffer) this.wasm.free(this.matchBuffer, this.matchCapacity * LAYOUT.GhosttySelection.size);
-    this.matchBuffer = this.matchCapacity = 0;
-    this.wasm.fn.ghostty_search_free(this.handle);
-    this.wasm.free(this.scratch, SEARCH_SCRATCH.size);
-    this.handle = 0;
+    if (!this.#handle) return;
+    if (this.#matchBuffer) this.#wasm.free(this.#matchBuffer, this.#matchCapacity * LAYOUT.GhosttySelection.size);
+    this.#matchBuffer = this.#matchCapacity = 0;
+    this.#wasm.fn.ghostty_search_free(this.#handle);
+    this.#wasm.free(this.#scratch, SEARCH_SCRATCH.size);
+    this.#handle = 0;
   }
 
   /// Whether the search and its terminal are both still allocated. The
   /// core detaches a search when its terminal is freed: every call that
   /// reads the terminal then fails, and the match snapshots the search still
   /// holds point into freed pages.
-  private live(): boolean {
-    return this.handle !== 0 && this.terminal.handle() !== 0;
+  #live(): boolean {
+    return this.#handle !== 0 && this.#terminal.handle() !== 0;
   }
 
-  private check(what: string, result: number): void {
+  #check(what: string, result: number): void {
     if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: ${what} of a search failed (${result})`);
   }
 
   /// Feeds when the terminal changed since the last feed.
-  private catchUp(): void {
-    if (this.fed !== this.terminal.changes()) this.feed();
+  #catchUp(): void {
+    if (this.#fed !== this.#terminal.changes()) this.feed();
   }
 
   /// Calls `visit` with the address of each match's `GhosttySelection` and
   /// its index, newest first, until it returns false. The core copies the
   /// list into a block that lives for the call. Feeds first when the
   /// terminal changed.
-  private eachMatch(visit: (sel: number, index: number) => boolean): void {
-    this.catchUp();
+  #eachMatch(visit: (sel: number, index: number) => boolean): void {
+    this.#catchUp();
     const S = LAYOUT.GhosttySelection;
     const B = LAYOUT.GhosttySelectionBuffer.fields;
-    const buf = this.scratch + SEARCH_SCRATCH.buffer;
+    const buf = this.#scratch + SEARCH_SCRATCH.buffer;
     const list = (ptr: number, capacity: number): number => {
-      const view = this.wasm.view();
+      const view = this.#wasm.view();
       view.setUint32(buf + B.ptr, ptr, true);
       view.setUint32(buf + B.cap, capacity, true);
       view.setUint32(buf + B.len, 0, true);
-      return this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf);
+      return this.#wasm.fn.ghostty_search_get(this.#handle, ABI.GhosttySearchData.MATCHES, buf);
     };
     // A null buffer asks how many there are; none is a success.
     const asked = list(0, 0);
     if (asked === ABI.GhosttyResult.SUCCESS) return;
-    if (asked !== ABI.GhosttyResult.OUT_OF_SPACE) this.check("counting the matches", asked);
-    const count = this.wasm.view().getUint32(buf + B.len, true);
-    const arr = this.wasm.alloc(count * S.size);
+    if (asked !== ABI.GhosttyResult.OUT_OF_SPACE) this.#check("counting the matches", asked);
+    const count = this.#wasm.view().getUint32(buf + B.len, true);
+    const arr = this.#wasm.alloc(count * S.size);
     try {
-      this.check("listing the matches", list(arr, count));
-      const len = this.wasm.view().getUint32(buf + B.len, true);
+      this.#check("listing the matches", list(arr, count));
+      const len = this.#wasm.view().getUint32(buf + B.len, true);
       for (let i = 0; i < len; i++) if (!visit(arr + i * S.size, i)) break;
     } finally {
-      this.wasm.free(arr, count * S.size);
+      this.#wasm.free(arr, count * S.size);
     }
   }
 
-  private status(): number {
-    const out = this.scratch + SEARCH_SCRATCH.slot;
-    this.check("reading the status", this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.STATUS, out));
-    return this.wasm.view().getUint32(out, true);
+  #status(): number {
+    const out = this.#scratch + SEARCH_SCRATCH.slot;
+    this.#check("reading the status", this.#wasm.fn.ghostty_search_get(this.#handle, ABI.GhosttySearchData.STATUS, out));
+    return this.#wasm.view().getUint32(out, true);
   }
 
   /// A `size_t` field of the search, null when it has no value.
-  private count(data: number): number | null {
-    const out = this.scratch + SEARCH_SCRATCH.slot;
-    const result = this.wasm.fn.ghostty_search_get(this.handle, data, out);
+  #count(data: number): number | null {
+    const out = this.#scratch + SEARCH_SCRATCH.slot;
+    const result = this.#wasm.fn.ghostty_search_get(this.#handle, data, out);
     if (result === ABI.GhosttyResult.NO_VALUE) return null;
-    this.check("reading a count", result);
-    return this.wasm.view().getUint32(out, true);
+    this.#check("reading a count", result);
+    return this.#wasm.view().getUint32(out, true);
   }
 
-  private select(older: boolean): boolean {
-    if (!this.live()) return false;
+  #select(older: boolean): boolean {
+    if (!this.#live()) return false;
     // The core brings the search up to date with the terminal first.
-    this.fed = this.terminal.changes();
-    const fn = this.wasm.fn;
-    const result = older ? fn.ghostty_search_select_next(this.handle) : fn.ghostty_search_select_prev(this.handle);
+    this.#fed = this.#terminal.changes();
+    const fn = this.#wasm.fn;
+    const result = older ? fn.ghostty_search_select_next(this.#handle) : fn.ghostty_search_select_prev(this.#handle);
     if (result === ABI.GhosttyResult.NO_VALUE) return false;
-    this.check("selecting a match", result);
+    this.#check("selecting a match", result);
     return true;
   }
 
   /// The SCREEN rows and columns of the `GhosttySelection` at `sel`, null
   /// when the core cannot place an end on the screen.
-  private range(sel: number): MatchRange | null {
+  #range(sel: number): MatchRange | null {
     const F = LAYOUT.GhosttySelection.fields;
-    const start = this.screenPoint(sel + F.start);
-    const end = start && this.screenPoint(sel + F.end);
+    const start = this.#screenPoint(sel + F.start);
+    const end = start && this.#screenPoint(sel + F.end);
     return start && end ? { startRow: start.y, startCol: start.x, endRow: end.y, endCol: end.x } : null;
   }
 
   /// The SCREEN coordinate of the cell the grid reference at `ref` names,
   /// null when the core cannot place it there.
-  private screenPoint(ref: number): { x: number; y: number } | null {
-    const out = this.scratch + SEARCH_SCRATCH.coord;
-    const result = this.wasm.fn.ghostty_terminal_point_from_grid_ref(
-      this.terminal.handle(), ref, ABI.GhosttyPointTag.SCREEN, out,
+  #screenPoint(ref: number): { x: number; y: number } | null {
+    const out = this.#scratch + SEARCH_SCRATCH.coord;
+    const result = this.#wasm.fn.ghostty_terminal_point_from_grid_ref(
+      this.#terminal.handle(), ref, ABI.GhosttyPointTag.SCREEN, out,
     );
     if (result !== ABI.GhosttyResult.SUCCESS) return null;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const C = LAYOUT.GhosttyPointCoordinate.fields;
     return { x: view.getUint16(out + C.x, true), y: view.getUint32(out + C.y, true) };
   }
@@ -2105,24 +2105,24 @@ type TrackedCellOwner = {
 /// Make one with `VtTerminal.trackCell` and `free` it; a terminal frees the
 /// cells still tracked on it when it is freed.
 export class VtTrackedCell {
-  private readonly wasm: VtWasm;
-  private readonly owner: TrackedCellOwner;
-  private ref: number;
+  readonly #wasm: VtWasm;
+  readonly #owner: TrackedCellOwner;
+  #ref: number;
 
   constructor(wasm: VtWasm, owner: TrackedCellOwner, ref: number) {
-    this.wasm = wasm;
-    this.owner = owner;
-    this.ref = ref;
+    this.#wasm = wasm;
+    this.#owner = owner;
+    this.#ref = ref;
   }
 
   /// Where the cell is now; null once its row was pruned from the history,
   /// or the cell or its terminal was freed.
   point(): CellPoint | null {
-    if (!this.ref) return null;
-    const out = this.owner.coordinate();
-    const result = this.wasm.fn.ghostty_tracked_grid_ref_point(this.ref, ABI.GhosttyPointTag.SCREEN, out);
+    if (!this.#ref) return null;
+    const out = this.#owner.coordinate();
+    const result = this.#wasm.fn.ghostty_tracked_grid_ref_point(this.#ref, ABI.GhosttyPointTag.SCREEN, out);
     if (result !== ABI.GhosttyResult.SUCCESS) return null;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const C = LAYOUT.GhosttyPointCoordinate.fields;
     return { row: view.getUint32(out + C.y, true), col: view.getUint16(out + C.x, true) };
   }
@@ -2131,18 +2131,18 @@ export class VtTrackedCell {
   /// showing now instead; false when no such cell exists, and then the cell
   /// tracked before stays.
   moveTo(row: number, col: number): boolean {
-    if (!this.ref) return false;
-    const point = this.owner.point(row, col);
-    return this.wasm.fn.ghostty_tracked_grid_ref_set(this.ref, this.owner.handle(), point) === ABI.GhosttyResult.SUCCESS;
+    if (!this.#ref) return false;
+    const point = this.#owner.point(row, col);
+    return this.#wasm.fn.ghostty_tracked_grid_ref_set(this.#ref, this.#owner.handle(), point) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// Stops tracking. Safe after the terminal was freed, and again after
   /// itself.
   free(): void {
-    if (!this.ref) return;
-    this.wasm.fn.ghostty_tracked_grid_ref_free(this.ref);
-    this.ref = 0;
-    this.owner.release(this);
+    if (!this.#ref) return;
+    this.#wasm.fn.ghostty_tracked_grid_ref_free(this.#ref);
+    this.#ref = 0;
+    this.#owner.release(this);
   }
 }
 
@@ -2150,43 +2150,43 @@ export class VtTrackedCell {
 /// `Key` numbering is older than upstream's, so keys are renumbered on
 /// the way in (see `KEY_SHIFT_FROM`).
 export class VtKeyEncoder {
-  private readonly wasm: VtWasm;
-  private encoder: number;
+  readonly #wasm: VtWasm;
+  #encoder: number;
 
   constructor(wasm: VtWasm) {
-    this.wasm = wasm;
-    this.encoder = wasm.newHandle((slot) => wasm.fn.ghostty_key_encoder_new(0, slot), "key encoder");
+    this.#wasm = wasm;
+    this.#encoder = wasm.newHandle((slot) => wasm.fn.ghostty_key_encoder_new(0, slot), "key encoder");
   }
 
   /// Takes ghostty-web's option numbering, as its input handler calls it.
   setOption(option: number, value: boolean | number): void {
     const upstream = upstreamKeyEncoderOption(option);
     if (upstream === undefined) throw new Error(`ghostty-vt: unknown key encoder option ${option}`);
-    this.set(upstream, value);
+    this.#set(upstream, value);
   }
 
   setKittyFlags(flags: number): void {
-    this.set(ABI.GhosttyKeyEncoderOption.KITTY_FLAGS, flags);
+    this.#set(ABI.GhosttyKeyEncoderOption.KITTY_FLAGS, flags);
   }
 
   /// Every option set here is one byte: a `bool`, or the kitty flags'
   /// `GhosttyKittyKeyFlags`.
-  private set(option: number, value: boolean | number): void {
-    const ptr = this.wasm.alloc(1);
+  #set(option: number, value: boolean | number): void {
+    const ptr = this.#wasm.alloc(1);
     try {
-      this.wasm.bytes()[ptr] = typeof value === "boolean" ? (value ? 1 : 0) : value;
-      const result = this.wasm.fn.ghostty_key_encoder_set(this.encoder, option, ptr);
+      this.#wasm.bytes()[ptr] = typeof value === "boolean" ? (value ? 1 : 0) : value;
+      const result = this.#wasm.fn.ghostty_key_encoder_set(this.#encoder, option, ptr);
       if (result !== ABI.GhosttyResult.SUCCESS) {
         throw new Error(`ghostty-vt: setting key encoder option ${option} failed (${result})`);
       }
     } finally {
-      this.wasm.free(ptr, 1);
+      this.#wasm.free(ptr, 1);
     }
   }
 
   encode(event: { action: number; key: number; mods: number; utf8?: string }): Uint8Array {
-    const fn = this.wasm.fn;
-    const ev = this.wasm.newHandle((slot) => fn.ghostty_key_event_new(0, slot), "key event");
+    const fn = this.#wasm.fn;
+    const ev = this.#wasm.newHandle((slot) => fn.ghostty_key_event_new(0, slot), "key event");
     // One block: the `GhosttyString` header, then the bytes it points at.
     let text = 0;
     let textLen = 0;
@@ -2201,9 +2201,9 @@ export class VtKeyEncoder {
         const bytes = new TextEncoder().encode(event.utf8);
         const S = LAYOUT.GhosttyString;
         textLen = S.size + bytes.length;
-        text = this.wasm.alloc(textLen);
-        this.wasm.bytes().set(bytes, text + S.size);
-        const view = this.wasm.view();
+        text = this.#wasm.alloc(textLen);
+        this.#wasm.bytes().set(bytes, text + S.size);
+        const view = this.#wasm.view();
         view.setUint32(text + S.fields.ptr, text + S.size, true);
         view.setUint32(text + S.fields.len, bytes.length, true);
         // The string is passed by value, which wasm32 does by address.
@@ -2212,34 +2212,34 @@ export class VtKeyEncoder {
       let want = 64;
       for (let attempt = 0; attempt < 2; attempt++) {
         const cap = want;
-        const buf = this.wasm.alloc(cap);
-        const written = this.wasm.alloc(8);
+        const buf = this.#wasm.alloc(cap);
+        const written = this.#wasm.alloc(8);
         try {
-          const result = fn.ghostty_key_encoder_encode(this.encoder, ev, buf, cap, written);
-          const len = this.wasm.view().getUint32(written, true);
+          const result = fn.ghostty_key_encoder_encode(this.#encoder, ev, buf, cap, written);
+          const len = this.#wasm.view().getUint32(written, true);
           if (result === ABI.GhosttyResult.OUT_OF_SPACE && len > cap) {
             want = len;
             continue;
           }
           if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: encoding a key failed (${result})`);
-          return this.wasm.bytes().slice(buf, buf + len);
+          return this.#wasm.bytes().slice(buf, buf + len);
         } finally {
-          this.wasm.free(buf, cap);
-          this.wasm.free(written, 8);
+          this.#wasm.free(buf, cap);
+          this.#wasm.free(written, 8);
         }
       }
       throw new Error("ghostty-vt: encoding a key failed (out of space)");
     } finally {
       // The event borrows the text until it is freed.
       fn.ghostty_key_event_free(ev);
-      this.wasm.free(text, textLen);
+      this.#wasm.free(text, textLen);
     }
   }
 
   dispose(): void {
-    if (this.encoder) {
-      this.wasm.fn.ghostty_key_encoder_free(this.encoder);
-      this.encoder = 0;
+    if (this.#encoder) {
+      this.#wasm.fn.ghostty_key_encoder_free(this.#encoder);
+      this.#encoder = 0;
     }
   }
 }
