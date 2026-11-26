@@ -20,3 +20,7 @@ Scope: Windows only, since the subclass belongs to wry's WebView2 backend, and c
 ## Acceptance
 
 1. A reading on the Windows VM as the resize leg above: a control terminal hidden in place and shown again, resized with `SetWindowPos`, clicked away from and brought back with Alt+Tab, reads a page the size of the resized client, `hasFocus` true and a ping every 3 s. The same reading is red at the base the fix starts from.
+
+## Closed, 2026-11-26
+
+The owner closed the row on 2026-11-26 ("agree with your list", `dev/v0135-team/decisions.md`, D126 item 3), answering the lead's list, which named it among the terminal rows outside the v0.135.0 team's scope to close, all but the retired key's rejection. Not started: nothing was built. The defect stands as the Record reads it on the local Windows 11 VM at `b3a03cd24` on 2026-11-19: after a hide in place and a show, a control terminal's page stops following the window's size and stops taking the keyboard when the window is activated. Its mechanism in wry 0.57.0 is by reading. Acceptance 1 was not read. The row did not ship.

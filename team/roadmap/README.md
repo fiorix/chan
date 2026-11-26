@@ -47,10 +47,18 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [rejectkey]: v0.135.0/the-retired-terminal-ghostty-key-is-accepted-with-a-warning.md
 [macrepeat]: v0.135.0/a-held-key-in-a-macos-terminal-opens-the-accent-picker-instead-of-repeating.md
 [redialmodes]: v0.135.0/a-redialed-terminal-keeps-a-dead-programs-modes-and-a-short-ack-wedges-a-view.md
+[tabpanes]: v0.135.0/a-tab-walk-lands-in-another-panes-terminal-and-types-into-it-without-making-that-pane-active.md
+[surveypress]: v0.135.0/a-press-beside-a-survey-card-drops-the-keyboard-and-a-survey-body-link-navigates-the-app-away.md
+[stylereach]: v0.135.0/the-markdown-sanitizer-keeps-a-style-element-whose-rules-reach-the-whole-app.md
+[tokenreload]: v0.135.0/a-local-window-cannot-reload-after-webkits-network-process-crashes.md
+[backlinkcap]: v0.135.0/backlinks-list-the-whole-tree-per-call-and-miss-links-to-unindexed-files-over-the-listing-cap.md
+[capselect]: v0.135.0/over-the-listing-cap-a-graph-tab-opened-on-a-file-the-answer-does-not-hold-selects-nothing.md
+[restartmodes]: v0.135.0/a-terminal-across-a-restart-keeps-a-dead-programs-keyboard-protocol-and-a-lossy-restore-draws-its-ring-over-the-kept-screen.md
+[termwrites]: v0.135.0/the-app-terminal-keeps-write-scaffolding-built-for-xterm-js-and-spreads-its-redial-decision-over-six-sites.md
 
 ### v0.135.0
 
-Opened on 2026-11-23, when the owner set v0.134.0 to the Ghostty work and the gateway tunnel fixes merged by then and moved every other row here ("all other roadmap items will move to next version"), each with its state unchanged. Three of the rows moved have work that shipped in v0.134.0 and carry for the rest: the Ghostty migration ([ghosttyng]), whose pointer, focus, selection, paint, theme, scrollback and find work shipped with the fixes its reviews asked for, while the private-field seal and the input modernization stay open; the xterm.js removal ([noxterm]), whose key retirement shipped while the load-failure error UI and the removal of the `@xterm/*` packages stay open; and the redial row ([redialmodes]), of which only the client half of the short ack is fixed. The retired key's rejection ([rejectkey]) waits for the warning period that started with v0.134.0.
+Opened on 2026-11-23, when the owner set v0.134.0 to the Ghostty work and the gateway tunnel fixes merged by then and moved every other row here ("all other roadmap items will move to next version"), each with its state unchanged. Three of the rows moved have work that shipped in v0.134.0 and carry for the rest: the Ghostty migration ([ghosttyng]), whose pointer, focus, selection, paint, theme, scrollback and find work shipped with the fixes its reviews asked for, while the private-field seal and the input modernization stay open; the xterm.js removal ([noxterm]), whose key retirement shipped while the load-failure error UI and the removal of the `@xterm/*` packages stay open; and the redial row ([redialmodes]), of which only the client half of the short ack is fixed. The retired key's rejection ([rejectkey]) waits for the warning period that started with v0.134.0. On 2026-11-26 the owner accepted six rows from the round's candidates ("app and workspace recommendations are good to me"): Tab landing in another pane's terminal ([tabpanes]), a press beside a survey card with a survey body's links ([surveypress]), the sanitizer's kept `<style>` element ([stylereach]), a local window's reload after WebKit's network process crashes ([tokenreload]), backlinks over the listing cap ([backlinkcap]) and a graph tab opened on a file the over-cap answer does not hold ([capselect]); and two terminal rows ("agree with your list, let's set 11 for later cleanup in the next version"), a terminal across a restart ([restartmodes]) and the app terminal's scaffolding as a cleanup with no change of behaviour ([termwrites]); none is built in v0.135.0, so they move to the next version at its GA. The same day the owner closed the four terminal and Ghostty rows this round worked on, with nothing carried, and five terminal rows outside its scope ([conpty], [termredproofs], [exitedtry], [ctlresize], [macrepeat]) on the same list.
 
 In v0.134.0, which opened on 2026-11-20, these rows came in as follows: the owner made the six merged rows the base of v0.133.0 and moved there the nineteen rows v0.133.0 held before them, the parked rows and the Windows and AppImage readings among them, each with its state unchanged ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Two of the nineteen went back and shipped in v0.133.0: the screen lock's holes ([lockholes]) and the fast stream ([streamlag]). On 2026-11-21 the owner added a row so that a script of `cs` commands run from a terminal keeps its focus unless a command passes `--focus` ([csfocus]), and accepted two follow-ups of rows landed in v0.133.0: a YouTube embed keeps playing under the screen lock ([ytlock]), and a queued message waits behind a stopped view of an idle program on macOS and Windows ([queuehold]). On 2026-11-23 the owner took the Ghostty-only plan: xterm.js leaves chan with the `terminal.ghostty` key retired under a warning period ([noxterm]), the key's later rejection is a row of its own that waits for that period ([rejectkey]), and the mouse-mode prelude was deferred until the core's mouse state was measured, then withdrawn on that reading ([mousefamily]). The same day the owner accepted a held key in a macOS terminal opening the accent picker ([macrepeat]) and two inherited stream findings, a redial keeping a dead program's modes and a short ack wedging a view ([redialmodes]).
 
@@ -62,16 +70,16 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [cap: three walks, no folder layer][capwalks] | built | GA |
 | [AppImage children get its environment][appenv] | built | review |
 | [chan drives ghostty-web from outside][ghosttyng] | closed | GA |
-| [ConPTY pulls history into the screen][conpty] | partly built | measure |
+| [ConPTY pulls history into the screen][conpty] | closed | GA |
 | [the index pill covers Dismiss][pillcover] | built | review |
 | [the Windows claim's installed readings][winclaimread] | kit ready | owner |
 | [the TLS rows' Windows readings][tlswin] | kit ready | measure |
-| [terminal browser checks' red proofs][termredproofs] | kit drafted | measure |
-| [try again over an exited terminal][exitedtry] | built | review |
+| [terminal browser checks' red proofs][termredproofs] | closed | GA |
+| [try again over an exited terminal][exitedtry] | closed | GA |
 | [minimized raise unread on Windows][unburywin] | read in part | owner |
 | [Workspace details clears a selection][detailsclear] | built | review |
 | [four places show wikilinks as typed][wikiplaces] | partly built | review |
-| [a hidden control terminal stops resizing][ctlresize] | not started | build |
+| [a hidden control terminal stops resizing][ctlresize] | closed | GA |
 | [an unfocused survey takes Tab and keys][surveytab] | built | GA |
 | [the wake fix unread on macOS][wakemac] | not started | measure |
 | [a cs command takes its terminal's focus][csfocus] | not started | build |
@@ -79,8 +87,16 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a queued message behind a stopped view][queuehold] | closed | GA |
 | [xterm.js as a second backend][noxterm] | closed | GA |
 | [the retired key is still accepted][rejectkey] | not started | later |
-| [a held macOS key opens accents][macrepeat] | not started | measure |
+| [a held macOS key opens accents][macrepeat] | closed | GA |
 | [a redial keeps dead modes][redialmodes] | closed | GA |
+| [Tab lands in another pane's terminal][tabpanes] | not started | later |
+| [a survey's overlay press and body links][surveypress] | not started | later |
+| [a kept style element restyles the app][stylereach] | not started | later |
+| [no reload after WebKit's network crash][tokenreload] | not started | later |
+| [backlinks walk the tree, miss over cap][backlinkcap] | not started | later |
+| [a graph tab on an unheld file over cap][capselect] | not started | later |
+| [restarts keep dead keys, repeat rows][restartmodes] | not started | later |
+| [the app terminal's xterm-era scaffolding][termwrites] | not started | later |
 
 
 ## Completed

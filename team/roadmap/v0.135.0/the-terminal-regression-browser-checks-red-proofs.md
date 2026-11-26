@@ -14,3 +14,7 @@ The current product heals a missed config broadcast through a catch-up refresh w
 
 1. The ordering proof for check 205 as revised, and check 226's barrier, each red under its mutation and green restored.
 2. Check 229's arms each red under the product change it guards, on ghostty and xterm.js, and green restored.
+
+## Closed, 2026-11-26
+
+The owner closed the row on 2026-11-26 ("agree with your list", `dev/v0135-team/decisions.md`, D126 item 3), answering the lead's list, which named it among the terminal rows outside the v0.135.0 team's scope to close, all but the retired key's rejection. At closing, by the sections above: the terminal regression checks merged in v0.131.0 with the vitest half of their proof chain (53 kills), and the search test's clock fix (H6) merged in v0.132.0. Not read: the browser red proofs this row exists for, acceptance 1 (check 205's ordering proof as revised and check 226's barrier, each red under its mutation) and acceptance 2 (check 229's arms, each red under the product change it guards). Their recipes were revised in a second round (`dev/v0132-team/evidence/Tab132/termredproofs-2/` in the development tree), and the pre-flight asked of that round was not run. Check 229 has no xterm.js arm at `aabb9d039`: xterm.js leaves chan in v0.135.0 ([the xterm.js row](chan-carries-xterm-js-as-a-second-terminal-backend.md)). The browser red proofs did not ship.

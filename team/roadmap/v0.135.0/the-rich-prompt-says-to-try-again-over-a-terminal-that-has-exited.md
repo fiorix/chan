@@ -32,3 +32,7 @@ Read at `f453b0b2e`, by reading; not run.
 2. Removing the exited check turns the exited case red, and restoring it turns the case green.
 3. A browser check in a guest, on both backends: a terminal's program exits; a submit from its composer shows the exited note and keeps its text; after Restart terminal a submit reaches the new shell.
 4. `web/packages/workspace-app/src/design.md` and the manual's Rich Prompt page say which note shows when.
+
+## Closed, 2026-11-26
+
+The owner closed the row on 2026-11-26 ("agree with your list", `dev/v0135-team/decisions.md`, D126 item 3), answering the lead's list, which named it among the terminal rows outside the v0.135.0 team's scope to close, all but the retired key's rejection. At closing, by the Status line: built and not merged, on `v0132/exitedtry` at `277f73130`, its second fix round, with check 291's guest runs and one confirm reading owed. The branch stays unmerged. By reading at `aabb9d039`, any refused submit still shows "terminal not connected; try again" (`web/packages/workspace-app/src/components/RichPrompt.svelte:686-688`), an exited terminal's included. The acceptance's second backend no longer exists: xterm.js leaves chan in v0.135.0 ([the xterm.js row](chan-carries-xterm-js-as-a-second-terminal-backend.md)). The row did not ship.

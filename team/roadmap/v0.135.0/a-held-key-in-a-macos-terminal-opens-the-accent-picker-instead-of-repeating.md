@@ -24,3 +24,7 @@ Read at `f5657caab`, by reading; not run on a Mac. The terminal takes keys throu
 1. A diagnosis of where press-and-hold enters on WKWebView, with the change that removes it for the terminal alone.
 2. An automated check where an engine allows it (repeated keydown with `repeat: true` reaching the PTY as repeated bytes), red at the base.
 3. The owner's Mac reading: holding `a` in a terminal repeats it; holding `a` in the editor still offers accents; Japanese IME and a dead key still compose in the terminal.
+
+## Closed, 2026-11-26
+
+The owner closed the row on 2026-11-26 ("agree with your list", `dev/v0135-team/decisions.md`, D126 item 3), answering the lead's list, which named it among the terminal rows outside the v0.135.0 team's scope to close, all but the retired key's rejection. Not started: nothing was built. The owner's report of 2026-11-23 stands. The row's account of where press-and-hold enters is by reading at `f5657caab`, not run on a Mac, and acceptance 1 to 3 (the diagnosis on WKWebView, an automated check, the owner's Mac reading) were not read. The row did not ship.
