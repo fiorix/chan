@@ -451,8 +451,8 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       const parsed = await snapshot(`${variant.name} recovery`);
       expect(parsed.active).toBe("alternate");
       if (variant.recovery === "fresh") {
-        expect(parsed.alternate.rows.filter(Boolean), "the prelude clears the alternate screen").toEqual([]);
-        expect({ x: parsed.alternate.cursorX, y: parsed.alternate.cursorY }, "the prelude homes the cursor").toEqual({ x: 0, y: 0 });
+        expect(parsed.alternate.rows.filter(Boolean), "the remounted view recovers onto an empty alternate screen").toEqual([]);
+        expect({ x: parsed.alternate.cursorX, y: parsed.alternate.cursorY }, "the remounted view recovers with the cursor at home").toEqual({ x: 0, y: 0 });
       } else {
         expect(parsed.alternate, "a continued view keeps its alternate screen and cursor").toEqual(before.alternate);
       }
