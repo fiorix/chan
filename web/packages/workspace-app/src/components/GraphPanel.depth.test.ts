@@ -1759,6 +1759,59 @@ describe("the workspace tree", () => {
     });
   });
 
+  /// Under an answer of the whole tree, `p` holds `p/f.md`, which the shared
+  /// graph holds, and `p/e`, whose one entry `p/e/s.md` only the spine
+  /// carries (a file the shared graph lacks stands in for a symlink). `p` is
+  /// opened after the first fetch, so the spine holds no level of it; `p/e`
+  /// is opened during a whole fetch, which brings its node.
+  test("a folder opened during a whole spine fetch under an answer of the whole tree is read at the next opening, not at the landing", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("p"), g.dir("p/e"), g.file("p/f.md"), g.dir("a"), g.file("a/x.md")],
+      edges: [
+        g.edge("", "directory:p", "contains"),
+        g.edge("directory:p", "directory:p/e", "contains"),
+        g.edge("directory:p", "p/f.md", "contains"),
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "a/x.md", "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("p/e"), fsg.file("p/f.md"), fsg.file("p/e/s.md"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [
+        fsg.contains("", "p"),
+        fsg.contains("p", "p/e"),
+        fsg.contains("p", "p/f.md"),
+        fsg.contains("p/e", "p/e/s.md"),
+        fsg.contains("", "a"),
+        fsg.contains("a", "a/x.md"),
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:p");
+    expect(tab.expanded.p).toBe(true);
+    expect(levelReads("p"), "the whole tree holds p's level").toBe(0);
+    const release = await holdWholeFetch();
+    let during: { root: number; pe: number };
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:p/e");
+      expect(tab.expanded["p/e"]).toBe(true);
+      during = { root: levelReads(""), pe: levelReads("p/e") };
+    } finally {
+      release();
+    }
+    await settle(20);
+    const landed = { root: levelReads(""), p: levelReads("p"), pe: levelReads("p/e") };
+    await doubleClick("directory:a");
+    await settle(20);
+    expect({ during, landed, next: levelReads("p/e"), drawsS: visibleIds().includes("p/e/s.md") }).toEqual({
+      during: { root: 2, pe: 0 },
+      landed: { root: 2, p: 1, pe: 0 },
+      next: 1,
+      drawsS: true,
+    });
+  });
+
   test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
     serveWholeTree();
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
