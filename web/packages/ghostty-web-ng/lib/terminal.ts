@@ -788,21 +788,35 @@ export class Terminal {
       // Resize renderer
       this.#renderer!.resize(cols, rows);
 
-      this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen());
-      this.#changeEmitter.fire({ kind: 'resize' });
-
+      // Each kind of observer hears the resize, the PTY gets the new size and
+      // the screen repaints even when an observer throws. The first error
+      // then reaches the caller, as a write's does once its replies are sent.
+      const errors: unknown[] = [];
+      const notify = (observe: () => void) => {
+        try {
+          observe();
+        } catch (error) {
+          errors.push(error);
+        }
+      };
+      notify(() => this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen()));
+      notify(() => this.#changeEmitter.fire({ kind: 'resize' }));
       // The dimension event also serves PTY size publication.
-      this.#resizeEmitter.fire({ cols, rows });
+      notify(() => this.#resizeEmitter.fire({ cols, rows }));
 
-      // Force full render
-      this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
-    } catch (e) {
-      console.error('Terminal resize failed:', e);
+      // Force full render. A failed paint is reported, as a write's echo
+      // paint is, rather than thrown in place of an observer's error.
+      try {
+        this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
+      } catch (error) {
+        reportPaintError(error);
+      }
+      if (errors.length > 0) throw errors[0];
+    } finally {
+      // Flush any writes that were queued during resize, then restart render loop
+      this.#flushWriteQueue();
+      this.#startRenderLoop();
     }
-
-    // Flush any writes that were queued during resize, then restart render loop
-    this.#flushWriteQueue();
-    this.#startRenderLoop();
   }
 
   /**

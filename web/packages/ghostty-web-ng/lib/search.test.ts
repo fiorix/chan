@@ -1808,8 +1808,11 @@ describe('widget search', () => {
     const paint = vi.fn();
     term.addPaintLayer({ order: 0, paint });
     search.onChange(() => { throw new Error('find bar listener failed'); });
+    const changes: string[] = [];
+    term.onChange(({ kind }) => changes.push(kind));
     let thrown: unknown;
     try { term.resize(30, 6); } catch (error) { thrown = error; }
+    expect(changes, 'change listeners still hear the resize').toEqual(['resize']);
     expect(sizes, 'the PTY hears the new size').toEqual(['30x6']);
     expect(paint, 'the screen repaints at the new size').toHaveBeenCalled();
     expect(thrown, "the listener's error reaches the caller").toEqual(new Error('find bar listener failed'));

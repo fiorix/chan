@@ -274,6 +274,23 @@ describe('content changes', () => {
     expect(thrown, "the listener's error reaches the caller").toEqual(new Error('observer failed'));
   });
 
+  test('a resize runs every observer and its paint before it throws the first error', async () => {
+    const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    const heard: string[] = [];
+    term.onChange(() => { heard.push('change'); throw new Error('change listener failed'); });
+    term.onResize(() => { heard.push('resize'); throw new Error('resize listener failed'); });
+    renderer.render.mockImplementation((_core: unknown, forceAll: boolean) => {
+      if (!forceAll) return;
+      heard.push('paint');
+      throw new Error('paint failed');
+    });
+    expect(() => term.resize(30, 8)).toThrow('change listener failed');
+    expect(heard).toEqual(['change', 'resize', 'paint']);
+    expect(reported, 'a failed paint is reported, as a write reports one').toEqual([new Error('paint failed')]);
+  });
+
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {
     const { term } = await terminal();
     const links = new LinkDetector(term);
