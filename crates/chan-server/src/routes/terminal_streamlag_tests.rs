@@ -2684,6 +2684,33 @@ async fn a_released_view_silent_past_the_bound_stays_open_and_recovers() {
     rig.handle.send_input(b"\n");
 }
 
+/// A released view that sends nothing keeps waiting when its program exits,
+/// as a stopped page does. The exit wakes the socket loop with no client
+/// frame, so the loop creates the view's wait itself, and that wait's clock
+/// starts only at a frame from the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_silent_view_stays_open_when_its_program_exits() {
+    let _gate = pty_test_lock();
+    let (rig, mut view, generation, start, received) = released_view().await;
+    let mut lifecycle = rig.handle.lifecycle_rx.clone();
+    rig.handle.send_input(b"\n");
+    let exited = bounded(
+        "the program exits",
+        lifecycle.wait_for(|lifecycle| matches!(lifecycle, Some(SessionLifecycle::Exit(_)))),
+    )
+    .await
+    .is_ok();
+    assert!(exited, "fixture: the program exits after the release");
+    let silent_until =
+        tokio::time::Instant::now() + NO_PROGRESS_LIMIT + std::time::Duration::from_secs(3);
+    assert_eq!(
+        read_until_closed(&mut view, silent_until).await,
+        None,
+        "a released view whose client sends nothing stays open when its program exits"
+    );
+    assert_recovers_on_its_socket(&mut view, generation, start + received).await;
+}
+
 /// A stopped page's network stack can still answer protocol pings, so they
 /// do not show that the page runs: a released view that only exchanges
 /// them keeps waiting past the bound and recovers once it reports.
