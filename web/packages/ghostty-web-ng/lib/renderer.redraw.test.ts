@@ -125,7 +125,8 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
   context.cell = { width, height };
   if (options.masking) term.addPaintLayer(maskLayer(term));
   // The frames open() painted are kept on the context's default grid; one
-  // full frame puts every cell's picture on the measured one.
+  // full frame puts every cell's picture on the measured one. So the first
+  // frame checked follows a full frame, not a blank canvas.
   term.refresh();
 
   /// One frame of the render loop: the callbacks queued so far, once.
@@ -236,6 +237,9 @@ describe("the ghostty renderer's partial redraws", () => {
     await run("primary text\r\nmore", ["\x1b[?1049h", "\x1b[2J\x1b[Halt one", "\x1b[3;3Halt two", "\x1b[?1049l", " back", "\x1b[?1049h\x1b[2J", "\x1b[?1049l"]);
   });
 
+  // `term.resize` paints a full frame itself, so these steps read the frames
+  // after a resize, not the renderer's own detection of a new size, which
+  // the terminal does not leave to it on this path.
   test("a resize and back", async () => {
     await run(lines(ROWS + 2), [
       (r) => r.term.resize(24, 6),
@@ -247,6 +251,9 @@ describe("the ghostty renderer's partial redraws", () => {
     ]);
   });
 
+  // `term.setTheme` repaints in full itself, so its step cannot see how the
+  // renderer repaints on a theme change; the OSC 4, 11 and 10 steps change
+  // the colours in the core and leave the repaint to the renderer.
   test("the colours change under painted rows", async () => {
     const styled = "\x1b[31mred\x1b[0m \x1b[42mgreen\x1b[0m \x1b[38;5;208m208\x1b[0m plain\r\n\x1b[7minverse\x1b[0m \x1b[2mfaint\x1b[0m";
     await run(styled, [
@@ -338,11 +345,21 @@ describe("the ghostty renderer's partial redraws", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     };
     const leave = (r: Rig) => void r.term.element!.dispatchEvent(new MouseEvent("mouseleave"));
-    // The OSC 8 link on row 0 and the text after it, the URL on row 1 that
-    // wraps onto row 2, and an empty row.
-    const [link, text, url, empty] = [over(1, 0), over(7, 0), over(3, 1), over(0, 5)];
+    // The OSC 8 link on row 0 (`id=one`) and the text after it, the URL on
+    // row 1 that wraps onto row 2, another OSC 8 link on row 3, and rows 5
+    // to 7 filled with the first link's `id=` and URI. Today the core sets
+    // a one-bit link flag (`1`) rather than per-link ids, and sharing `id=`
+    // keeps both spans one link even if it numbers them later; the pointer's
+    // link lookup on row 0 gives a range on row 0 alone. Unhovering or
+    // leaving sets the hovered id to 0, which every row with a cell outside
+    // a link holds, and those rows and their neighbours reach row 5 at most:
+    // rows 6 and 7 lose their underline only as rows of the old id.
+    const [link, text, url, empty] = [over(1, 0), over(7, 0), over(3, 1), over(10, 4)];
+    const open = "\x1b]8;id=one;https://e.x/a\x1b\\";
+    const close = "\x1b]8;;\x1b\\";
     await run(
-      "\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\ text\r\nhttps://plain.example/b\r\n\x1b]8;;https://e.x/c\x1b\\other\x1b]8;;\x1b\\",
+      `${open}link${close} text\r\nhttps://plain.example/b\r\n\x1b]8;;https://e.x/c\x1b\\other${close}` +
+        `\x1b[6;1H${open}${"x".repeat(COLS * 3)}${close}`,
       [link, text, url, empty, link, "\x1b[5;1Hmore", leave],
     );
   });
