@@ -446,6 +446,51 @@ describe("a redial after a socket ended inside a replay that continued the view"
     expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
   });
 
+  test.each([
+    { offset: -1, notices: 1, line21: 1 },
+    { offset: 0, notices: 1, line21: 1 },
+    { offset: 1, notices: 2, line21: 0 },
+  ])(
+    "that missed bytes, re-asked with the ring at the parsed position $offset, skips only repeated bytes and counts only a new gap",
+    async ({ offset, notices, line21 }) => {
+      const { term, socket, cursor } = await viewOnTheNormalScreen();
+      const second = await redialed(socket, cursor);
+      const pasteOff = "\x1b[?2004l";
+      const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\r\n`).join("");
+      const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
+      // The view parses "line 2" of line 21; its next byte is "1".
+      const cut = lines.indexOf("line 21") + "line 2".length;
+      const parsed = program.ringStart + cut;
+      await deliver(second, served(second, program), cut);
+      const third = await redialedAfterCut(second);
+      expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
+      const moved = { ...program, ringStart: parsed + offset };
+      const answer = served(third, moved);
+      expect(answer.frame.missed_bytes, "fixture: the server counts from the echoed cursor").toBe(parsed + offset - cursor);
+      await deliver(third, answer);
+      const buffer = term.buffer.normal;
+      const rows = Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+      expect(
+        rows.filter((row) => row.includes("terminal replay missed")),
+        "one notice unless the ring passed the parsed byte",
+      ).toEqual(
+        notices === 1
+          ? [`terminal replay missed ${pasteOff.length} bytes`]
+          : [`terminal replay missed ${pasteOff.length} bytes`, `terminal replay missed ${offset} bytes`],
+      );
+      const counts = Array.from({ length: 40 }, (_, i) => rows.filter((row) => row === `line ${i + 1}`).length);
+      const expected = Array(40).fill(1);
+      expected[20] = line21;
+      // With line 21's last byte lost, the "line 2" the view parsed of it is
+      // a second "line 2" row.
+      if (line21 === 0) expected[1] = 2;
+      expect(counts, "every line once, line 21 whole unless its last byte was lost").toEqual(expected);
+      expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: cursor + program.written.length });
+    },
+  );
+
   test("that missed bytes and ended after its suffix resumes from the replay's end", async () => {
     const { term, socket } = await viewOnTheAlternateScreen();
     const second = await redialed(socket);
