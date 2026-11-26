@@ -35,8 +35,9 @@
 //    is a string literal. A member that only an app module declares on a
 //    widget class (or a subclass, interface or constrained type parameter
 //    derived from one), by a type-only declaration (an interface or
-//    type-literal member, or a `declare` field) or on an intersection with
-//    the class, is not public to this rule;
+//    type-literal member, an ambient (`declare`) class or member, or an
+//    `abstract` member) or on an intersection with the class (other than an
+//    app subclass's own runtime member), is not public to this rule;
 // 4. patch: a write to a member of a widget class instance (skipping
 //    `#private` names and members that only an app subclass's class body
 //    declares); `Object.assign`, `defineProperty`, `defineProperties`,
@@ -604,13 +605,35 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const declared = (type as ts.TypeReference).target ?? type;
     return declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => classPart(base, depth + 1));
   }
+  /// Whether a declaration is in an ambient context: a `.d.ts` file or a
+  /// `declare` declaration or enclosing block (`declare class`, `declare
+  /// namespace`, `declare` member).
+  const hasAmbientContext = (node: ts.Node): boolean => {
+    if (node.getSourceFile().isDeclarationFile) return true;
+    for (let n: ts.Node | undefined = node; n; n = n.parent) {
+      if (ts.canHaveModifiers(n) && ts.getModifiers(n)?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) return true;
+    }
+    return false;
+  };
   /// Whether a declaration adds a member to the type alone, with nothing at
-  /// run time: a member of an interface or type literal, or an ambient
-  /// (`declare`) class member.
+  /// run time: a member of an interface or type literal, an ambient
+  /// (`declare`) class or member, or an `abstract` member.
   const typeOnly = (d: ts.Declaration) =>
     ts.isInterfaceDeclaration(d.parent) ||
     ts.isTypeLiteralNode(d.parent) ||
-    (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) !== 0;
+    hasAmbientContext(d) ||
+    (ts.getCombinedModifierFlags(d) & (ts.ModifierFlags.Ambient | ts.ModifierFlags.Abstract)) !== 0;
+
+  /// Whether a declaration is a runtime member of an app subclass's own
+  /// class body (including constructor parameter properties), not a
+  /// type-only declaration or an unrelated class intersected onto a widget.
+  const ownSubclassMember = (d: ts.Declaration) => {
+    if (!appDeclared(d) || typeOnly(d)) return false;
+    const host = ts.isParameter(d) && ts.isConstructorDeclaration(d.parent) ? d.parent.parent : d.parent;
+    if (!ts.isClassLike(host)) return false;
+    const sym = host.name ? checker.getSymbolAtLocation(host.name) : checker.getTypeAtLocation(host).getSymbol();
+    return !!sym && classPart(checker.getDeclaredTypeOfSymbol(sym));
+  };
 
   function isWidget(type: ts.Type, depth = 0): boolean {
     if (depth > 4) return false;
@@ -751,7 +774,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         classPart(part) &&
         declarations.some(appDeclared) &&
         !declarations.some((d) => inWidget(d.getSourceFile().fileName)) &&
-        declarations.every((d) => !appDeclared(d) || typeOnly(d) || part.isIntersection())
+        declarations.every((d) => !ownSubclassMember(d))
       ) {
         return true;
       }
@@ -886,13 +909,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (ts.isPropertyAccessExpression(access) && ts.isPrivateIdentifier(access.name)) return;
       const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
       const member = key === undefined ? undefined : checker.getApparentType(widget).getProperty(key);
-      if (
-        !parts(widget).some((p) => p.isIntersection()) &&
-        member?.declarations?.length &&
-        member.declarations.every((d) => appDeclared(d) && !typeOnly(d))
-      ) {
-        return;
-      }
+      if (member?.declarations?.length && member.declarations.every(ownSubclassMember)) return;
       const name = ts.isPropertyAccessExpression(access) ? access.name.getText(sf) : access.argumentExpression.getText(sf);
       report("patch", access, `write ${nameOf(widget)}.${name}`);
     };
@@ -1277,6 +1294,21 @@ const PLANTS = new Map<string, string>([
       "export const dynUrl = (name: string) => new URL(`../../../ghostty-web-ng/lib/${name}.ts`, import.meta.url);",
       "export const dynSafeUrl = (name: string) => new URL(`./local/${name}.ts`, import.meta.url);",
       "export const fromGlobalDts = () => (window.boundaryTerminal as unknown as Raw).isOpen;",
+      "declare class AmbientSub extends Terminal {",
+      "  isOpen: boolean;",
+      "}",
+      "const isAmbientSub = (t: Terminal): t is AmbientSub => t !== null;",
+      "export const viaAmbientSub = (term: Terminal) => (isAmbientSub(term) ? term.isOpen : false);",
+      "abstract class AbstractSub extends Terminal {",
+      "  abstract isOpen: boolean;",
+      "}",
+      "const isAbstractSub = (t: Terminal): t is AbstractSub => t !== null;",
+      "export const viaAbstractSub = (term: Terminal) => (isAbstractSub(term) ? term.isOpen : false);",
+      "class FakeClass {",
+      "  isOpen = true;",
+      "}",
+      "const isFakeClass = (t: Terminal): t is Terminal & FakeClass => t !== null;",
+      "export const viaFakeClass = (term: Terminal) => (isFakeClass(term) ? term.isOpen : false);",
     ].join("\n"),
   ],
   [
@@ -1428,6 +1460,20 @@ const PLANTS = new Map<string, string>([
       "};",
       "export class CustomRefusal extends GhosttyVtRefusal {}",
       'export const reportCustomRefusal = (report: (error: unknown) => void) => report(new CustomRefusal("refused"));',
+      "export class NarrowedSub extends Terminal {",
+      '  label = "main";',
+      "  constructor(public readonly tag: string, opts: ConstructorParameters<typeof Terminal>[0]) {",
+      "    super(opts);",
+      "  }",
+      "}",
+      "const isMountedGen = <T extends Terminal>(t: T): t is T & { element: HTMLElement } => t.element !== undefined;",
+      "export const updateNarrowedSub = (t: NarrowedSub) => {",
+      "  if (isMountedGen(t)) {",
+      '    t.label = "focused";',
+      "    return `${t.label}:${t.tag}`;",
+      "  }",
+      '  return "";',
+      "};",
     ].join("\n"),
   ],
   [
@@ -1624,6 +1670,9 @@ const PLANTED: readonly Site[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 172, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 174, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 174, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 179, key: "AmbientSub.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 184, key: "AbstractSub.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 189, key: "Terminal & FakeClass.isOpen" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
