@@ -61,7 +61,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [cap: three walks, no folder layer][capwalks] | built | review |
 | [AppImage children get its environment][appenv] | built | review |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | owner |
 | [ConPTY pulls history into the screen][conpty] | partly built | measure |
 | [the index pill covers Dismiss][pillcover] | built | review |
 | [the Windows claim's installed readings][winclaimread] | kit ready | owner |
@@ -77,7 +77,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a cs command takes its terminal's focus][csfocus] | not started | build |
 | [a YouTube embed plays under the lock][ytlock] | not started | build |
 | [a queued message behind a stopped view][queuehold] | built | owner |
-| [xterm.js as a second backend][noxterm] | built | GA |
+| [xterm.js as a second backend][noxterm] | built | owner |
 | [the retired key is still accepted][rejectkey] | not started | later |
 | [a held macOS key opens accents][macrepeat] | not started | measure |
 | [a redial keeps dead modes][redialmodes] | built | owner |
