@@ -8,7 +8,6 @@ import { readFileSync } from "node:fs";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { VtSearch } from "@chan/ghostty-web-ng/vt";
 import TerminalTab from "./TerminalTab.svelte";
 import { allCommands } from "../state/commands";
 import { hydrateOverrides } from "../state/keymapOverrides.svelte";
@@ -60,7 +59,7 @@ async function renderGhostty(text = NEEDLES): Promise<Terminal> {
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(text);
-  expect(term.wasmTerm!.plainText()).toContain(text.split("\r\n").at(-1)!);
+  expect(term.core!.plainText()).toContain(text.split("\r\n").at(-1)!);
   await new Promise((resolve) => setTimeout(resolve, 0));
   return term;
 }
@@ -78,7 +77,8 @@ function activeHighlight(term: Terminal) {
 // loop booked before the hold runs once as a task, and books every later
 // one here. `settle` runs frames until the search is complete and two
 // frames in a row change neither its state nor its active match, which
-// leaves a waiting press time to land.
+// leaves a waiting press time to land; it reads `term` unless told which
+// terminal to read.
 async function holdFrames(term: Terminal) {
   const queue = new Map<number, FrameRequestCallback>();
   let next = 1;
@@ -95,16 +95,16 @@ async function holdFrames(term: Terminal) {
     queue.clear();
     for (const run of runs) run(0);
   };
-  const reading = () => JSON.stringify([term.search.state, term.highlights.get("search-active")?.ranges ?? null]);
+  const reading = (on: Terminal) => JSON.stringify([on.search.state, on.highlights.get("search-active")?.ranges ?? null]);
   return {
     frame,
-    settle() {
-      let last = reading();
+    settle(on: Terminal = term) {
+      let last = reading(on);
       for (let i = 0, still = 0; still < 2; i++) {
         if (i > 1000) throw new Error("find never settled");
         frame();
-        const now = reading();
-        still = !term.search.state.partial && now === last ? still + 1 : 0;
+        const now = reading(on);
+        still = !on.search.state.partial && now === last ? still + 1 : 0;
         last = now;
       }
     },
@@ -175,6 +175,12 @@ async function restartTerminal(): Promise<TerminalSocket> {
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(sockets + 1));
   await tick();
   return TerminalSocket.all.at(-1)!;
+}
+
+/// A partial count, "<k> of <n>+", as its numbers; null for any other text.
+function partialCount(text: string | null | undefined): { index: number; total: number } | null {
+  const parts = /^(\d+) of (\d+)\+$/.exec(text ?? "");
+  return parts ? { index: Number(parts[1]), total: Number(parts[2]) } : null;
 }
 
 function pressEnter(input: HTMLInputElement, shiftKey = false): void {
@@ -706,7 +712,11 @@ describe("terminal find in a mounted tab", () => {
     frames.frame();
     await tick();
     expect(activeHighlight(term)).toEqual(match(5));
-    expect(countElement()?.textContent).toMatch(/^1 of \d+\+$/);
+    // How many of the three needles the first frame places is the widget's
+    // placement budget; the buffer bounds the partial total.
+    expect(partialCount(countElement()?.textContent), "the first frame's partial count").toEqual({ index: 1, total: expect.any(Number) });
+    expect(partialCount(countElement()?.textContent)!.total, "some of the three needles counted").toBeGreaterThanOrEqual(1);
+    expect(partialCount(countElement()?.textContent)!.total).toBeLessThanOrEqual(3);
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
@@ -742,7 +752,7 @@ describe("terminal find in a mounted tab", () => {
         shown.push(countElement()!.textContent!);
         heard.push(statusRegion()!.textContent!);
       }
-      const total = term.wasmTerm!.plainText()!.split("needle").length - 1;
+      const total = term.core!.plainText()!.split("needle").length - 1;
       expect(shown, "the shown count is every frame's own").toEqual(read);
       expect(new Set(shown).size, "and it grew over the scan").toBeGreaterThan(3);
       expect(shown.at(-1)).toBe(`1 of ${total}`);
@@ -767,7 +777,10 @@ describe("terminal find in a mounted tab", () => {
       frames.frame();
       await tick();
       const partial = countElement()!.textContent!;
-      expect(partial).toMatch(/^1 of \d+\+$/);
+      const rows = term.core!.plainText()!.split("row 29").length - 1;
+      expect(partialCount(partial), "the held scan's partial count").toEqual({ index: 1, total: expect.any(Number) });
+      expect(partialCount(partial)!.total, "some of the buffer's \"row 29\" counted").toBeGreaterThanOrEqual(1);
+      expect(partialCount(partial)!.total).toBeLessThanOrEqual(rows);
       expect(statusRegion()?.textContent).toBe(`2 of ${total}`);
       vi.advanceTimersByTime(FIND_ANNOUNCE_INTERVAL_MS - 1);
       await tick();
@@ -813,7 +826,7 @@ describe("terminal find in a mounted tab", () => {
       shown.push(countElement()!.textContent!);
       if (shown.at(-1)!.endsWith("+")) expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
     } while (shown.at(-1)!.endsWith("+"));
-    const total = term.wasmTerm!.plainText()!.split("needle").length - 1;
+    const total = term.core!.plainText()!.split("needle").length - 1;
     expect(shown.length).toBeGreaterThan(2);
     for (const text of shown.slice(0, -1)) expect(text).toMatch(/^\? of \d+\+$/);
     expect(shown.at(-1)).toBe(`${total} of ${total}`);
@@ -868,13 +881,13 @@ describe("terminal find in a mounted tab", () => {
   test("Escape closes the bar, clears the highlight and the count, and focuses the terminal", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
-    const free = vi.spyOn(VtSearch.prototype, "free");
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
     expect(activeHighlight(term)).toBeNull();
-    expect(free).toHaveBeenCalledTimes(1);
+    expect(term.highlights.get("search-all")?.ranges ?? [], "every match's highlight is gone").toEqual([]);
+    expect(term.search.state, "the search is closed").toEqual({ index: 0, total: 0, partial: false });
     expect(document.activeElement, "the element the terminal reads keys from").toBe(term.element);
 
     // Reopening shows the kept query with no stale count beside it; Enter
@@ -1084,7 +1097,7 @@ describe("terminal find in a mounted tab", () => {
     expect(countElement()?.textContent).toBe("1 of 1");
 
     await TerminalSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
-    expect(term.wasmTerm!.plainText()).toContain("session ended (idle)");
+    expect(term.core!.plainText()).toContain("session ended (idle)");
     expect(term.search.state.partial, "find heard the line").toBe(true);
     frames.settle();
     await tick();
@@ -1093,16 +1106,16 @@ describe("terminal find in a mounted tab", () => {
     expect(activeHighlight(term)).toEqual(earlier);
   });
 
-  test("a restart closes the bar and frees its search, and the kept query searches the new terminal", async () => {
+  test("a restart closes the bar and disposes the terminal it searched, and the kept query searches the new terminal", async () => {
     const term = await renderGhostty(NEEDLES);
     const { frames } = await findNeedle(term);
-    const free = vi.spyOn(VtSearch.prototype, "free");
+    const dispose = vi.spyOn(term, "dispose");
 
     await restartTerminal();
     frames.settle();
     await vi.waitFor(() => expect(ghosttyFixture.terminals).toHaveLength(2));
     expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
-    expect(free).toHaveBeenCalledTimes(1);
+    expect(dispose, "the restart disposed the terminal it searched").toHaveBeenCalledTimes(1);
 
     const next = await openedGhostty();
     const socket = TerminalSocket.all.at(-1)!;
@@ -1115,7 +1128,7 @@ describe("terminal find in a mounted tab", () => {
     const buffer = new ArrayBuffer(bytes.length);
     new Uint8Array(buffer).set(bytes);
     await socket.onmessage?.({ data: buffer });
-    await vi.waitFor(() => expect(next.wasmTerm!.plainText()).toContain("needle f"));
+    await vi.waitFor(() => expect(next.core!.plainText()).toContain("needle f"));
     expect(document.activeElement, "the new terminal reads the keyboard").toBe(next.element);
 
     fireCommand("app.find.open");
@@ -1124,17 +1137,17 @@ describe("terminal find in a mounted tab", () => {
     expect(findInput()?.value).toBe("needle");
     expect(countElement()?.textContent).toBe("");
     pressEnter(findInput()!);
-    frames.settle();
+    frames.settle(next);
     await tick();
     expect(activeHighlight(next)).toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
   });
 
-  test("the terminal's teardown frees the open bar's search", async () => {
+  test("the tab's teardown disposes its terminal, which ends the open bar's search", async () => {
     const term = await renderGhostty(NEEDLES);
     await findNeedle(term);
-    const free = vi.spyOn(VtSearch.prototype, "free");
+    const dispose = vi.spyOn(term, "dispose");
     resetTerminals();
-    expect(free).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 });
