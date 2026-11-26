@@ -671,11 +671,18 @@ describe("ghostty secret masking over the pinned build", () => {
 
   test("the mask is the widget's one mask layer, and the masker replaces no member of the terminal", async () => {
     const screen = await pinnedTerminal();
-    const own = screen.term as unknown as Record<string, unknown>;
-    const before = Object.getOwnPropertyNames(own).map((name) => [name, own[name]] as const);
+    const members = ["getMetrics", "addPaintLayer", "onChange", "refresh"] as const;
+    const beforeOwn = members.map((name) => [name, Object.getOwnPropertyDescriptor(screen.term, name)] as const);
+    const beforeBuffer = screen.term.buffer;
+    const prototype = Object.getPrototypeOf(screen.term);
+    const beforeProto = Object.getOwnPropertyDescriptors(prototype);
+    expect(Object.keys(beforeProto).length, "fixture: the prototype holds its methods").toBeGreaterThan(0);
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
-    expect(Object.getOwnPropertyNames(own), "the terminal's own members").toEqual(before.map(([name]) => name));
-    for (const [name, value] of before) expect(own[name], `the terminal's ${name}`).toBe(value);
+    for (const [name, descriptor] of beforeOwn) {
+      expect(Object.getOwnPropertyDescriptor(screen.term, name), `the terminal's ${name}`).toEqual(descriptor);
+    }
+    expect(screen.term.buffer, "the terminal's buffer").toBe(beforeBuffer);
+    expect(Object.getOwnPropertyDescriptors(prototype), "the terminal prototype's own descriptors").toEqual(beforeProto);
     expect(() => screen.term.addPaintLayer({ order: "mask", paint() {} }), "the mask is taken").toThrow(/one mask/);
     masker.setEnabled(false);
     const remove = screen.term.addPaintLayer({ order: "mask", paint() {} });

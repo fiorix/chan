@@ -4,6 +4,7 @@
 // it gets, and that its helpers observe what they name.
 
 import { Terminal } from "@chan/ghostty-web-ng";
+import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, expect, test, vi } from "vitest";
 
 vi.mock("../terminal/backend", async (importOriginal) =>
@@ -11,8 +12,10 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 
 import TerminalTab from "../components/TerminalTab.svelte";
 import {
+  ghosttyAlternateScreen,
   ghosttyFixture,
   ghosttyHasFocus,
+  ghosttyTextarea,
   holdGhosttyLoads,
   mountGhosttyTerminal,
   pressInGhostty,
@@ -147,4 +150,28 @@ test("focus inside the terminal follows focus() and blur()", async () => {
   expect(ghosttyHasFocus(term)).toBe(true);
   term.blur();
   expect(ghosttyHasFocus(term)).toBe(false);
+});
+
+test("ghosttyTextarea returns the single input textarea and refuses a host with another or none", async () => {
+  const { term } = await opened();
+  const textarea = ghosttyTextarea(term);
+  expect(textarea.tagName).toBe("TEXTAREA");
+  const extra = document.createElement("textarea");
+  term.element!.append(extra);
+  try {
+    expect(() => ghosttyTextarea(term)).toThrow();
+  } finally {
+    extra.remove();
+  }
+  textarea.remove();
+  expect(() => ghosttyTextarea(term)).toThrow();
+});
+
+test("ghosttyAlternateScreen throws when the widget is unopened or disposed", async () => {
+  const unopened = new Terminal({ ghostty: {} as GhosttyVt });
+  expect(() => ghosttyAlternateScreen(unopened)).toThrow(/not open/);
+  const { term } = await opened();
+  expect(ghosttyAlternateScreen(term)).toBe(false);
+  term.dispose();
+  expect(() => ghosttyAlternateScreen(term)).toThrow(/not open/);
 });

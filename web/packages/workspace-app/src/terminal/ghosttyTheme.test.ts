@@ -297,6 +297,7 @@ describe("a theme switch on a live ghostty terminal", () => {
       history: term.getScrollbackLength(),
       viewport: term.getViewportY(),
       cursor: term.getCursor(),
+      cursorVisible: term.getMode(25),
       selection: term.getSelection(),
       selected: term.hasSelection(),
       focus: document.activeElement,

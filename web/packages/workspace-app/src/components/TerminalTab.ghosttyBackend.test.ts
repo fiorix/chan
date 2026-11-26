@@ -498,7 +498,7 @@ describe("focus recovery after a host resume", () => {
     const { term } = await mountGhostty();
     const paints = observeGhosttyPaints(term);
     canvas.frame();
-    expect(paints.length, "the layer sees the frame its registration invalidated").toBeGreaterThan(0);
+    expect(paints.length, "the first frame after registration paints").toBeGreaterThan(0);
     paints.splice(0);
     const resized = vi.spyOn(term, "resize");
     await resume();
