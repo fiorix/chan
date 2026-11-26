@@ -11,7 +11,10 @@
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
 //    `import.meta.glob` pattern or `new URL(..., import.meta.url)` that
-//    reaches a path inside the package other than its export map's entries;
+//    reaches a path inside the package other than its export map's entries,
+//    by the package's name or by a relative path with its links resolved
+//    (the workspace's `node_modules/@chan/ghostty-web-ng` is a link to the
+//    package, so a path through it reaches the package's own files);
 // 2. cast: a cast of a widget value to a type it does not satisfy or to
 //    one that names none of its members (`any`, `unknown`, `object`,
 //    `{}`), and a cast of a value typed by a type parameter to such a
@@ -142,8 +145,45 @@ const readText = (path: string) => {
 /// The app package: vitest runs in it, as the tests that read the vendored
 /// core by a relative path also assume.
 const APP = normalize(ts.sys.getCurrentDirectory());
-const WIDGET = normalize(`${APP}/../ghostty-web-ng`);
+
+/// A path with its symbolic links resolved, read as TypeScript and Vite
+/// resolve a relative specifier: `.` and `..` by the text, then the links
+/// of the longest part that exists. A planted module has no file, so the
+/// part past its directory is kept as written.
+const realPaths = new Map<string, string>();
+function realPath(path: string): string {
+  const known = realPaths.get(path);
+  if (known !== undefined) return known;
+  if (!ts.sys.realpath) throw new Error("ts.sys cannot resolve symbolic links here");
+  let head = normalize(path);
+  let tail = "";
+  while (head.lastIndexOf("/") > 0 && !ts.sys.fileExists(head) && !ts.sys.directoryExists(head)) {
+    tail = head.slice(head.lastIndexOf("/")) + tail;
+    head = head.slice(0, head.lastIndexOf("/"));
+  }
+  const real = normalize(ts.sys.realpath(head) + tail);
+  realPaths.set(path, real);
+  return real;
+}
+
+const WIDGET = realPath(`${APP}/../ghostty-web-ng`);
 const PACKAGE_NAME = "@chan/ghostty-web-ng";
+/// The links to the package npm's workspaces make in a `node_modules` from
+/// the app up, through which the package name resolves and a relative path
+/// reaches the package under another name.
+const WIDGET_LINKS: readonly string[] = (() => {
+  const links: string[] = [];
+  for (let dir = APP; dir.lastIndexOf("/") > 0; dir = dir.slice(0, dir.lastIndexOf("/"))) {
+    const link = `${dir}/node_modules/${PACKAGE_NAME}`;
+    if (ts.sys.directoryExists(link) && realPath(link) === WIDGET) links.push(link);
+  }
+  return links;
+})();
+/// Whether a path, its links resolved, is the package or inside it.
+const insideWidget = (path: string) => {
+  const real = realPath(path);
+  return real === WIDGET || real.startsWith(`${WIDGET}/`);
+};
 
 /// The specifiers the package's export map serves.
 const ENTRIES = new Set(
@@ -454,10 +494,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   const checker = program.getTypeChecker();
   const findings = new Map<string, Finding>();
 
-  const inWidget = (fileName: string) =>
-    (fileName.startsWith(`${WIDGET}/lib/`) || fileName.startsWith(`${WIDGET}/vt/`)) &&
-    !fileName.endsWith(".test.ts") &&
-    !fileName.includes("/__tests__/");
+  /// Whether a declaration is the package's own: in its `lib/` or `vt/`,
+  /// by whatever path the program read the file, a test excepted.
+  const inWidget = (fileName: string) => {
+    const real = realPath(fileName);
+    return (
+      (real.startsWith(`${WIDGET}/lib/`) || real.startsWith(`${WIDGET}/vt/`)) &&
+      !real.endsWith(".test.ts") &&
+      !real.includes("/__tests__/")
+    );
+  };
   const declaredInWidget = (symbol: ts.Symbol | undefined) =>
     !!symbol?.declarations?.some((d) => inWidget(d.getSourceFile().fileName));
   const widgetClass = (symbol: ts.Symbol | undefined) =>
@@ -587,20 +633,22 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const bare = specifier.replace(/\?.*$/, "");
     if (bare === PACKAGE_NAME || bare.startsWith(`${PACKAGE_NAME}/`)) return !ENTRIES.has(bare);
     if (!bare.startsWith(".")) return false;
-    const target = normalize(`${from.slice(0, from.lastIndexOf("/"))}/${bare}`);
-    return target === WIDGET || target.startsWith(`${WIDGET}/`);
+    return insideWidget(`${from.slice(0, from.lastIndexOf("/"))}/${bare}`);
   };
   /// Whether a Vite glob can match a file in the package: a package
   /// specifier past the export map, or a path whose part before the first
-  /// wildcard is in the package or a directory above it.
+  /// wildcard is in the package, in a link to it, or in a directory above
+  /// either.
   const globReaches = (pattern: string, from: string) => {
     if (pattern.startsWith("!")) return false;
     if (!pattern.startsWith(".") && !pattern.startsWith("/")) return isDeep(pattern, from);
     const wild = pattern.search(/[*?[{(]/);
     const fixed = wild === -1 ? pattern : pattern.slice(0, wild);
     const base = pattern.startsWith("/") ? APP : from.slice(0, from.lastIndexOf("/"));
-    const target = normalize(`${base}/${fixed.slice(0, fixed.lastIndexOf("/") + 1)}`);
-    return target === WIDGET || target.startsWith(`${WIDGET}/`) || WIDGET.startsWith(`${target}/`);
+    const dir = normalize(`${base}/${fixed.slice(0, fixed.lastIndexOf("/") + 1)}`);
+    return [dir, realPath(dir)].some((d) =>
+      [WIDGET, ...WIDGET_LINKS].some((p) => d === p || d.startsWith(`${p}/`) || p.startsWith(`${d}/`)),
+    );
   };
 
   const MOCKS = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
@@ -960,6 +1008,12 @@ const PLANTS = new Map<string, string>([
       'export const twice = (term: Terminal) => [term["canvas"], term["canvas"]];',
       "export const walkedObject = (term: Terminal) => Object.entries(term as object).length;",
       "export const walkedEmpty = (term: Terminal) => Object.entries(term as {}).length;",
+      'import { Terminal as Linked } from "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal";',
+      'import { widgetInternals as linkedFriend } from "../../../../node_modules/@chan/ghostty-web-ng/lib/internal";',
+      "export const linked = (term: Linked) => [linkedFriend(term).isOpen, (term as unknown as Raw).isOpen];",
+      'export const linkedGlob = import.meta.glob("../../../../node_modules/@chan/ghostty-web-ng/lib/*.ts");',
+      'export const linkedScope = import.meta.glob("../../../../node_modules/@chan/*/lib/*.ts");',
+      'export const linkedAsset = new URL("../../../../node_modules/@chan/ghostty-web-ng/lib/renderer.ts", import.meta.url);',
     ].join("\n"),
   ],
   [
@@ -1044,6 +1098,9 @@ const PLANTS = new Map<string, string>([
       "};",
       'const KEY = "assertOpen" as const;',
       "export const reflectedKey = (term: Terminal) => Reflect.get(term, KEY);",
+      'import { widgetInternals as linkedFriend } from "../../../../node_modules/@chan/ghostty-web-ng/lib/internal";',
+      'import type { Terminal as Linked } from "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal";',
+      "export const linked = (term: Linked) => [linkedFriend(term).isOpen, (term as unknown as Raw).isOpen];",
     ].join("\n"),
   ],
 ]);
@@ -1104,6 +1161,13 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 77, key: "Terminal.canvas" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 78, key: "object" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 79, key: "{}" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 80, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 81, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/internal" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 82, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 82, key: "Terminal.isOpen" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 83, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/*.ts" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 84, key: "../../../../node_modules/@chan/*/lib/*.ts" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 85, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/renderer.ts" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
@@ -1136,6 +1200,9 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 27, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 31, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 34, key: "Terminal.assertOpen" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 35, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/internal" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 36, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 37, key: "Terminal.isOpen" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too
