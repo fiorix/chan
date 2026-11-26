@@ -1931,18 +1931,18 @@
         // bubble's own onMount/$effect re-shows it when the view exists.
         reproveRestoredPrompt(tab, frame.queued_prompt_ids ?? []);
         scheduleTerminalSessionSave();
-        missedBytes = Math.max(0, Math.floor(frame.missed_bytes ?? 0));
+        // What the view lost past the position it shows. A dial that asked
+        // again for a loss the view already shows lost only what its replay
+        // starts past the position the view parsed: nothing when the replay
+        // starts at or before it, and the view's parser goes on at its own
+        // byte.
+        missedBytes =
+          continued !== undefined && continuingReplay !== null && continued.since < continued.parsed
+            ? Math.max(0, continuingReplay.start - continued.parsed)
+            : Math.max(0, Math.floor(frame.missed_bytes ?? 0));
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
-        // A dial that asked again for a loss the view already shows, and
-        // whose replay starts at or before what the view parsed, continues
-        // the view's parser at its own byte.
-        const reaskedLoss =
-          continued !== undefined &&
-          continuingReplay !== null &&
-          continued.since < continued.parsed &&
-          continuingReplay.start <= continued.parsed;
-        if (missedBytes > 0 && !resetBeforeReplay && !reaskedLoss) {
+        if (missedBytes > 0 && !resetBeforeReplay) {
           // The lost bytes can end inside a sequence whose rest never comes.
           // CAN on the output path ends it in the core and in every stream
           // observer, as the server's own recovery suffix does after the
