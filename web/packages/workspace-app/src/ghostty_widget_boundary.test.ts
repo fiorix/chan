@@ -124,7 +124,12 @@
 //   `Partial<Terminal>`, `Pick<Terminal, ...>`): `isWidget` sees its type
 //   argument at the call while `classPart` is false on the mapped type, so
 //   rules 4, 6 and 7 miss writes, escapes and ducks through it
-//   (`readonlyEscape`, `partialPatch`);
+//   (`readonlyEscape`, `partialPatch`, `mappedDuck`);
+// - an app subclass's own field named like a member the widget keeps
+//   `#private` and declared without an initializer (`isOpen!: boolean`),
+//   which reads `undefined`: rules 3 and 4 take an app subclass's own
+//   runtime members as its own, and rule 5 sees only its listed names
+//   (`viaShadowSub`);
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
 //   `({ rows: term.rows } = rows)`), a Svelte `bind:` directive
 //   (`bind:this={live.element}`, `bind:value={live.cols}`), or a nested
@@ -1328,6 +1333,11 @@ const PLANTS = new Map<string, string>([
       "export const nestedPatch = (term: Terminal) => patchNested(term);",
       "export const readonlyEscape = (term: Terminal) => ((t: Readonly<Terminal>) => raw(t))(term);",
       "export const partialPatch = (term: Terminal) => ((t: Partial<Terminal>) => { t.cols = 1; })(term);",
+      "export const mappedDuck = (term: Terminal) => ((t: Readonly<Terminal>) => ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t))(term);",
+      "class ShadowSub extends Terminal {",
+      "  isOpen!: boolean;",
+      "}",
+      "export const viaShadowSub = (s: ShadowSub) => s.isOpen;",
     ].join("\n"),
   ],
   [
