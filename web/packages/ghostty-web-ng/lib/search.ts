@@ -36,133 +36,147 @@ type Parked = { start: TerminalCoreTrackedCell; end: TerminalCoreTrackedCell; be
 
 /** Internal search and tracked-cell owner. Terminal exposes only its frozen facade. */
 export class SearchOwner {
-  private search: VtSearch | null = null;
-  private needle = '';
+  readonly #core: TerminalCore;
+  readonly #highlights: HighlightsManager;
+  readonly #viewport: TerminalViewport;
+  #alternateScreen: boolean;
+  readonly #selection: () => HighlightRange | null;
+  readonly #createSearch: () => VtSearch;
+  readonly #theme: () => ITheme;
+  #search: VtSearch | null = null;
+  #needle = '';
   // The canonical list in position order, newest (bottom-most) first, each
   // complete range once. Chunked so growth never copies every known match
   // in one animation frame and an insert moves one chunk: `starts[i]` is
   // the list index of `chunks[i][0]`.
-  private chunks: HighlightRange[][] = [];
-  private starts: number[] = [];
-  private total = 0;
+  #chunks: HighlightRange[][] = [];
+  #starts: number[] = [];
+  #total = 0;
   // The total before a change emptied the list. The count keeps it, as a
   // partial one, until the rebuilt list passes it or completes.
-  private lastTotal = 0;
-  private readCursor = 0;
+  #lastTotal = 0;
+  #readCursor = 0;
   // Entries the core lists for its active area, ahead of its history, in
   // the list being placed. Where the page above soft-wraps into the active
   // area it lists that page's matches ahead of the screen page's, so until
   // placement has passed these entries the list placed so far can lack
   // matches newer than ones it holds. Read at the first feed of a scan;
   // null, unknown, once a write fed it again, until a press reads it.
-  private head: number | null = null;
+  #head: number | null = null;
   // Whether those entries list a page ahead of a newer one; null until read.
-  private inverted: boolean | null = null;
+  #inverted: boolean | null = null;
   // While a list is placed: the first entry the core listed of the page it
   // is listing, the first of the page it listed before that, which is that
   // page's newest match, and the last entry read. An entry newer than the
   // one listed before it starts a page.
-  private listedPage: MatchRange | null = null;
-  private pageAbove: MatchRange | null = null;
-  private lastListed: MatchRange | null = null;
+  #listedPage: MatchRange | null = null;
+  #pageAbove: MatchRange | null = null;
+  #lastListed: MatchRange | null = null;
   // The scan starts from scratch at its next feed (a new needle, a restart,
   // a resize), which lists only the core's active area at first.
-  private fresh = false;
-  private index: number | null = null;
-  private complete = true;
-  private waiting: Waiting[] = [];
-  private askedOver: HighlightRange | null = null;
-  private kept: MatchRange | null = null;
-  private keptStart: TerminalCoreTrackedCell | null = null;
-  private keptEnd: TerminalCoreTrackedCell | null = null;
+  #fresh = false;
+  #index: number | null = null;
+  #complete = true;
+  #waiting: Waiting[] = [];
+  #askedOver: HighlightRange | null = null;
+  #kept: MatchRange | null = null;
+  #keptStart: TerminalCoreTrackedCell | null = null;
+  #keptEnd: TerminalCoreTrackedCell | null = null;
   // The last list that placed the active match, kept across the writes
   // since, so a press can step from it before placement reaches the match.
-  private before: Before | null = null;
+  #before: Before | null = null;
   // History rows when the list being placed was read, and a cell tracked on
   // the last of them for the window taken from that list.
-  private listHistory = 0;
-  private listAnchor: TerminalCoreTrackedCell | null = null;
+  #listHistory = 0;
+  #listAnchor: TerminalCoreTrackedCell | null = null;
   // The primary screen's active match, and the window to step from it,
   // while the alternate screen shows.
-  private parked: Parked | null = null;
-  private backlogCell: TerminalCoreTrackedCell | null = null;
-  private keptOnScreen = false;
-  private dirty = false;
+  #parked: Parked | null = null;
+  #backlogCell: TerminalCoreTrackedCell | null = null;
+  #keptOnScreen = false;
+  #dirty = false;
   // Search work is waiting for the widget's next frame.
-  private due = false;
-  private readMs: number = COST_PRIORS.read;
-  private checkMs: number = COST_PRIORS.check;
-  private completeMs: number = COST_PRIORS.complete;
-  private held = 0;
-  private count = EMPTY;
-  private disposed = false;
-  private styles: Styles;
-  private readonly changes = new EventEmitter<TerminalSearchState>();
-  private readonly stopResizing: () => void;
-  readonly onChange = this.changes.event;
+  #due = false;
+  #readMs: number = COST_PRIORS.read;
+  #checkMs: number = COST_PRIORS.check;
+  #completeMs: number = COST_PRIORS.complete;
+  #held = 0;
+  #count = EMPTY;
+  #disposed = false;
+  #styles: Styles;
+  readonly #changes = new EventEmitter<TerminalSearchState>();
+  readonly #stopResizing: () => void;
+  readonly onChange = this.#changes.event;
 
   constructor(
-    private readonly core: TerminalCore,
-    private readonly highlights: HighlightsManager,
-    private readonly viewport: TerminalViewport,
-    private alternateScreen: boolean,
-    private readonly selection: () => HighlightRange | null,
-    private readonly createSearch: () => VtSearch,
-    private readonly theme: () => ITheme,
+    core: TerminalCore,
+    highlights: HighlightsManager,
+    viewport: TerminalViewport,
+    alternateScreen: boolean,
+    selection: () => HighlightRange | null,
+    createSearch: () => VtSearch,
+    theme: () => ITheme,
   ) {
-    this.styles = searchStyles(theme());
-    this.stopResizing = core.beforeResize(({ rows }) => {
-      const start = this.keptStart?.point();
-      const top = this.core.getScrollbackLength() - Math.floor(this.viewport.offset);
-      this.keptOnScreen = !!start && start.row >= top && start.row < top + rows;
+    this.#core = core;
+    this.#highlights = highlights;
+    this.#viewport = viewport;
+    this.#alternateScreen = alternateScreen;
+    this.#selection = selection;
+    this.#createSearch = createSearch;
+    this.#theme = theme;
+    this.#styles = searchStyles(theme());
+    this.#stopResizing = core.beforeResize(({ rows }) => {
+      const start = this.#keptStart?.point();
+      const top = this.#core.getScrollbackLength() - Math.floor(this.#viewport.offset);
+      this.#keptOnScreen = !!start && start.row >= top && start.row < top + rows;
     });
   }
 
-  get state(): TerminalSearchState { return this.count; }
+  get state(): TerminalSearchState { return this.#count; }
 
   find(query: string): void {
-    if (this.disposed) return;
+    if (this.#disposed) return;
     if (!query) return this.close();
-    if (this.prepare(query)) {
-      this.waiting.push({ direction: 'older', at: performance.now(), newest: true });
-      this.askedOver = this.selection();
+    if (this.#prepare(query)) {
+      this.#waiting.push({ direction: 'older', at: performance.now(), newest: true });
+      this.#askedOver = this.#selection();
     }
-    this.schedule();
-    this.publish();
+    this.#schedule();
+    this.#publish();
   }
 
   step(query: string, direction: Direction): void {
-    if (this.disposed) return;
+    if (this.#disposed) return;
     if (!query) return this.close();
     const deadline = performance.now() + PLACEMENT_BUDGET_MS;
-    this.prepare(query);
-    this.catchUp();
+    this.#prepare(query);
+    this.#catchUp();
     this.readResults(deadline);
-    this.waiting.push({ direction, at: performance.now() });
-    this.askedOver = this.selection();
-    const reveal = this.applyWaiting();
-    this.schedule();
-    this.show(reveal);
+    this.#waiting.push({ direction, at: performance.now() });
+    this.#askedOver = this.#selection();
+    const reveal = this.#applyWaiting();
+    this.#schedule();
+    this.#show(reveal);
   }
 
   close(): void {
-    this.release();
-    this.publish();
+    this.#release();
+    this.#publish();
   }
 
   /** Takes the theme's search colours. The terminal calls it on a theme change, ahead of its repaint. */
   restyle(): void {
-    this.styles = searchStyles(this.theme());
-    this.highlights.restyle('search-all', this.styles.all);
-    if (this.kept) this.highlightActive();
+    this.#styles = searchStyles(this.#theme());
+    this.#highlights.restyle('search-all', this.#styles.all);
+    if (this.#kept) this.#highlightActive();
   }
 
   dispose(): void {
-    this.disposed = true;
-    this.changes.dispose();
-    this.release();
-    this.count = EMPTY;
-    this.stopResizing();
+    this.#disposed = true;
+    this.#changes.dispose();
+    this.#release();
+    this.#count = EMPTY;
+    this.#stopResizing();
   }
 
   /**
@@ -172,143 +186,143 @@ export class SearchOwner {
    * rather than the emptied layer.
    */
   runDue(): void {
-    if (!this.due) return;
-    this.due = false;
+    if (!this.#due) return;
+    this.#due = false;
     this.pump();
   }
 
   /** Called after the core and viewport change, before a synchronous repaint. */
   changed(kind: TerminalChange['kind'], alternate: boolean): void {
-    const switched = alternate !== this.alternateScreen;
-    this.alternateScreen = alternate;
-    if (!this.search) return;
+    const switched = alternate !== this.#alternateScreen;
+    this.#alternateScreen = alternate;
+    if (!this.#search) return;
     // Reflow moves rows unevenly, so only a write keeps a list to step
     // from. The primary screen's waits out the alternate screen with its
     // active match, since the other screen leaves its rows alone.
     if (kind === 'resize') {
-      this.setBefore(null);
-      this.parked?.before?.anchor?.free();
-      if (this.parked) this.parked.before = null;
-    } else if (this.kept && this.index !== null) {
-      this.setBefore(this.window(this.index));
+      this.#setBefore(null);
+      this.#parked?.before?.anchor?.free();
+      if (this.#parked) this.#parked.before = null;
+    } else if (this.#kept && this.#index !== null) {
+      this.#setBefore(this.#window(this.#index));
     }
-    this.markList();
-    this.dirty = true;
+    this.#markList();
+    this.#dirty = true;
     // A resize resets the core's scan; after a write its listing has the
     // history it holds behind a new active area of unknown length.
-    if (kind === 'resize') this.fresh = true;
-    this.head = this.inverted = null;
+    if (kind === 'resize') this.#fresh = true;
+    this.#head = this.#inverted = null;
     // The other screen's total says nothing about this one.
-    this.lastTotal = switched ? 0 : Math.max(this.lastTotal, this.total);
-    this.chunks = [];
-    this.starts = [];
-    this.total = 0;
-    this.readCursor = 0;
-    this.listedPage = this.pageAbove = this.lastListed = null;
-    this.index = null;
-    this.complete = false;
-    this.highlights.clear('search-all');
-    if (switched && alternate) this.park();
-    const range = switched ? null : this.keptRange();
+    this.#lastTotal = switched ? 0 : Math.max(this.#lastTotal, this.#total);
+    this.#chunks = [];
+    this.#starts = [];
+    this.#total = 0;
+    this.#readCursor = 0;
+    this.#listedPage = this.#pageAbove = this.#lastListed = null;
+    this.#index = null;
+    this.#complete = false;
+    this.#highlights.clear('search-all');
+    if (switched && alternate) this.#park();
+    const range = switched ? null : this.#keptRange();
     if (range) {
-      this.kept = range;
-      this.highlightActive();
-      if (kind === 'resize' && this.keptOnScreen) this.viewport.reveal(range.startRow);
+      this.#kept = range;
+      this.#highlightActive();
+      if (kind === 'resize' && this.#keptOnScreen) this.#viewport.reveal(range.startRow);
     } else {
-      const lost = this.kept !== null;
-      this.forget();
-      if (switched && !alternate) this.unpark();
-      if (switched || kind === 'resize' || lost) this.waiting = this.waiting.filter(step => step.newest);
+      const lost = this.#kept !== null;
+      this.#forget();
+      if (switched && !alternate) this.#unpark();
+      if (switched || kind === 'resize' || lost) this.#waiting = this.#waiting.filter(step => step.newest);
     }
-    this.schedule();
-    this.publish();
+    this.#schedule();
+    this.#publish();
   }
 
-  private prepare(query: string): boolean {
-    if (this.search && query === this.needle) return false;
-    this.release();
-    this.search = this.createSearch();
-    this.search.setNeedle(query);
-    this.needle = query;
-    this.complete = false;
-    this.fresh = true;
-    this.markList();
-    this.markBacklog();
+  #prepare(query: string): boolean {
+    if (this.#search && query === this.#needle) return false;
+    this.#release();
+    this.#search = this.#createSearch();
+    this.#search.setNeedle(query);
+    this.#needle = query;
+    this.#complete = false;
+    this.#fresh = true;
+    this.#markList();
+    this.#markBacklog();
     return true;
   }
 
-  private release(): void {
-    this.due = false;
-    this.search?.free();
-    this.search = null;
-    this.forget();
-    this.parked?.start.free();
-    this.parked?.end.free();
-    this.parked?.before?.anchor?.free();
-    this.parked = null;
-    this.backlogCell?.free();
-    this.backlogCell = null;
-    this.listAnchor?.free();
-    this.listAnchor = null;
-    this.highlights.clear('search-all');
-    this.needle = '';
-    this.chunks = [];
-    this.starts = [];
-    this.total = 0;
-    this.lastTotal = 0;
-    this.readCursor = 0;
-    this.head = this.inverted = null;
-    this.listedPage = this.pageAbove = this.lastListed = null;
-    this.waiting = [];
-    this.askedOver = null;
-    this.complete = true;
-    this.dirty = this.fresh = false;
-    this.readMs = COST_PRIORS.read;
-    this.checkMs = COST_PRIORS.check;
-    this.completeMs = COST_PRIORS.complete;
-    this.held = 0;
+  #release(): void {
+    this.#due = false;
+    this.#search?.free();
+    this.#search = null;
+    this.#forget();
+    this.#parked?.start.free();
+    this.#parked?.end.free();
+    this.#parked?.before?.anchor?.free();
+    this.#parked = null;
+    this.#backlogCell?.free();
+    this.#backlogCell = null;
+    this.#listAnchor?.free();
+    this.#listAnchor = null;
+    this.#highlights.clear('search-all');
+    this.#needle = '';
+    this.#chunks = [];
+    this.#starts = [];
+    this.#total = 0;
+    this.#lastTotal = 0;
+    this.#readCursor = 0;
+    this.#head = this.#inverted = null;
+    this.#listedPage = this.#pageAbove = this.#lastListed = null;
+    this.#waiting = [];
+    this.#askedOver = null;
+    this.#complete = true;
+    this.#dirty = this.#fresh = false;
+    this.#readMs = COST_PRIORS.read;
+    this.#checkMs = COST_PRIORS.check;
+    this.#completeMs = COST_PRIORS.complete;
+    this.#held = 0;
   }
 
-  private catchUp(): void {
-    if (this.fresh) return this.feedFresh();
-    if (!this.dirty) return;
-    this.dirty = false;
-    const search = this.search!;
-    const point = this.backlogCell?.point();
-    const rows = !this.backlogCell ? 0 : !point ? Infinity : Math.max(0, this.core.getScrollbackLength() - point.row);
-    const cells = rows * this.core.cols;
-    const checked = this.checked();
-    const check = checked * this.checkMs;
+  #catchUp(): void {
+    if (this.#fresh) return this.#feedFresh();
+    if (!this.#dirty) return;
+    this.#dirty = false;
+    const search = this.#search!;
+    const point = this.#backlogCell?.point();
+    const rows = !this.#backlogCell ? 0 : !point ? Infinity : Math.max(0, this.#core.getScrollbackLength() - point.row);
+    const cells = rows * this.#core.cols;
+    const checked = this.#checked();
+    const check = checked * this.#checkMs;
     const complete = search.caughtUp();
     if (Number.isFinite(rows)) {
-      const read = cells * this.readMs;
-      const completion = checked * this.completeMs;
+      const read = cells * this.#readMs;
+      const completion = checked * this.#completeMs;
       const restart = complete
         ? check + read > FRAME_BUDGET_MS && completion < check + read
         : read >= SCAN_BUDGET_MS && read + completion > FRAME_BUDGET_MS;
       if (restart) {
         search.restart();
-        return this.feedFresh();
+        return this.#feedFresh();
       }
     }
     const started = performance.now();
     search.feed();
     const took = performance.now() - started;
-    this.markBacklog();
+    this.#markBacklog();
     // Learn only complete-scan feeds large enough to exceed clock grain;
     // running scans skip the cost of dropping pruned matches.
     if (!Number.isFinite(rows) || took <= 0 || !complete) return;
-    if (rows >= LEARN_ROWS) this.readMs = learned(this.readMs, Math.max(0, took - check) / cells, COST_PRIORS.read);
-    else if (checked >= LEARN_CHECK) this.checkMs = learned(this.checkMs, took / checked, COST_PRIORS.check);
+    if (rows >= LEARN_ROWS) this.#readMs = learned(this.#readMs, Math.max(0, took - check) / cells, COST_PRIORS.read);
+    else if (checked >= LEARN_CHECK) this.#checkMs = learned(this.#checkMs, took / checked, COST_PRIORS.check);
   }
 
-  private feedFresh(): void {
-    const search = this.search!;
-    this.fresh = this.dirty = false;
+  #feedFresh(): void {
+    const search = this.#search!;
+    this.#fresh = this.#dirty = false;
     search.feed();
-    this.markBacklog();
-    this.head = search.state().total;
-    this.inverted = null;
+    this.#markBacklog();
+    this.#head = search.state().total;
+    this.#inverted = null;
   }
 
   /**
@@ -322,21 +336,21 @@ export class SearchOwner {
    * the same active area alone, a cost only a press pays; without it an
    * unknown count reads as passed.
    */
-  private ordered(measure: boolean): boolean {
-    if (this.complete) return true;
-    if (this.head === null) {
+  #ordered(measure: boolean): boolean {
+    if (this.#complete) return true;
+    if (this.#head === null) {
       if (!measure) return true;
-      this.head = this.activeCount();
+      this.#head = this.#activeCount();
     }
-    if (this.readCursor > this.head || this.head === 0) return true;
-    this.inverted ??= this.listsAhead(this.head);
-    return !this.inverted;
+    if (this.#readCursor > this.#head || this.#head === 0) return true;
+    this.#inverted ??= this.#listsAhead(this.#head);
+    return !this.#inverted;
   }
 
-  private activeCount(): number {
-    const scratch = this.createSearch();
+  #activeCount(): number {
+    const scratch = this.#createSearch();
     try {
-      scratch.setNeedle(this.needle);
+      scratch.setNeedle(this.#needle);
       scratch.feed();
       return scratch.state().total;
     } finally {
@@ -348,9 +362,9 @@ export class SearchOwner {
   // screen page's newest first, so their last is newer than their first
   // exactly when both pages hold matches. An entry the core cannot place
   // reads as listed ahead, which only makes a press wait.
-  private listsAhead(head: number): boolean {
-    const first = this.search!.matchAt(0);
-    const last = this.search!.matchAt(head - 1);
+  #listsAhead(head: number): boolean {
+    const first = this.#search!.matchAt(0);
+    const last = this.#search!.matchAt(head - 1);
     return !first || !last || order(last, highlight(first)) > 0;
   }
 
@@ -363,14 +377,14 @@ export class SearchOwner {
    * newest; a binary search finds it. An entry the core cannot place gives
    * null, which leaves the press to the ordering rule.
    */
-  private listedNewest(): MatchRange | null {
-    if (this.ordered(true)) return null;
-    const search = this.search!;
-    const last = search.matchAt(this.head! - 1);
+  #listedNewest(): MatchRange | null {
+    if (this.#ordered(true)) return null;
+    const search = this.#search!;
+    const last = search.matchAt(this.#head! - 1);
     if (!last) return null;
     const oldest = highlight(last);
     let lo = 0;
-    let hi = this.head! - 1;
+    let hi = this.#head! - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       const range = search.matchAt(mid);
@@ -381,129 +395,129 @@ export class SearchOwner {
     return search.matchAt(lo);
   }
 
-  private checked(): number {
-    return this.held * this.core.getScrollbackLength() * this.core.cols;
+  #checked(): number {
+    return this.#held * this.#core.getScrollbackLength() * this.#core.cols;
   }
 
-  private markBacklog(): void {
-    this.backlogCell = this.retrack(this.backlogCell, this.core.getScrollbackLength(), 0);
+  #markBacklog(): void {
+    this.#backlogCell = this.#retrack(this.#backlogCell, this.#core.getScrollbackLength(), 0);
   }
 
-  private markList(): void {
-    this.listHistory = this.core.getScrollbackLength();
+  #markList(): void {
+    this.#listHistory = this.#core.getScrollbackLength();
     // A list with no history has no history neighbour for a cell to measure.
-    if (this.listHistory > 0) this.listAnchor = this.retrack(this.listAnchor, this.listHistory - 1, 0);
+    if (this.#listHistory > 0) this.#listAnchor = this.#retrack(this.#listAnchor, this.#listHistory - 1, 0);
   }
 
-  private schedule(): void {
-    if (this.search) this.due = true;
+  #schedule(): void {
+    if (this.#search) this.#due = true;
   }
 
   private pump(): void {
-    const search = this.search;
+    const search = this.#search;
     if (!search) return;
     const started = performance.now();
-    this.catchUp();
+    this.#catchUp();
     const scanning = !search.caughtUp();
-    const completion = this.checked() * this.completeMs;
+    const completion = this.#checked() * this.#completeMs;
     const left = FRAME_BUDGET_MS - (performance.now() - started) - completion;
     const budget = completion >= FRAME_BUDGET_MS ? SCAN_BUDGET_MS : Math.min(SCAN_BUDGET_MS, Math.max(STEP_FLOOR_MS, left));
     // Drain discovered results before scanning further. Placement and
     // publication have their own budget, shared across every batch.
-    const pending = this.readCursor < search.state().total;
+    const pending = this.#readCursor < search.state().total;
     const running = pending || performance.now() - started >= SCAN_BUDGET_MS
       ? scanning : search.step(budget) === 'running';
     if (scanning && !running && search.completingUnitMs) {
-      this.held = search.state().total;
-      const checked = this.checked();
-      if (checked >= LEARN_CHECK) this.completeMs = learned(this.completeMs, search.completingUnitMs / checked, COST_PRIORS.complete);
+      this.#held = search.state().total;
+      const checked = this.#checked();
+      if (checked >= LEARN_CHECK) this.#completeMs = learned(this.#completeMs, search.completingUnitMs / checked, COST_PRIORS.complete);
     }
     // A new core snapshot can require a whole-buffer copy. Do not stack it
     // on a spent scan slice; pending placement gets a fresh slice next frame.
     this.readResults(pending
       ? Math.min(started + SCAN_BUDGET_MS + PLACEMENT_BUDGET_MS, performance.now() + PLACEMENT_BUDGET_MS)
       : started + SCAN_BUDGET_MS);
-    const reveal = this.applyWaiting();
+    const reveal = this.#applyWaiting();
     // Schedule before notifying: a subscriber can close or replace the query.
-    if (!this.complete || this.waiting.length > 0) this.schedule();
-    this.show(reveal && this.askStands());
+    if (!this.#complete || this.#waiting.length > 0) this.#schedule();
+    this.#show(reveal && this.#askStands());
   }
 
   private readResults(deadline: number): void {
-    const search = this.search!;
+    const search = this.#search!;
     const state = search.state();
-    this.held = state.complete ? state.total : Math.max(state.total, this.held);
-    while (this.readCursor < state.total && performance.now() < deadline) {
-      const batch = search.readMatches(this.readCursor, deadline - performance.now());
-      this.readCursor = batch.next;
+    this.#held = state.complete ? state.total : Math.max(state.total, this.#held);
+    while (this.#readCursor < state.total && performance.now() < deadline) {
+      const batch = search.readMatches(this.#readCursor, deadline - performance.now());
+      this.#readCursor = batch.next;
       const added: HighlightRange[] = [];
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
-        if (!this.lastListed || compare(range, this.lastListed) > 0) {
-          this.pageAbove = this.listedPage;
-          this.listedPage = range;
+        if (!this.#lastListed || compare(range, this.#lastListed) > 0) {
+          this.#pageAbove = this.#listedPage;
+          this.#listedPage = range;
         }
-        this.lastListed = range;
-        const painted = this.place(range);
+        this.#lastListed = range;
+        const painted = this.#place(range);
         if (painted) added.push(painted);
       }
-      this.highlights.append('search-all', added, this.styles.all);
+      this.#highlights.append('search-all', added, this.#styles.all);
       if (performance.now() >= deadline) break;
     }
-    this.complete = state.complete && this.readCursor >= state.total;
-    if (this.complete) this.lastTotal = 0;
-    const range = this.keptRange();
-    this.index = range ? this.placedIndex(range) : null;
+    this.#complete = state.complete && this.#readCursor >= state.total;
+    if (this.#complete) this.#lastTotal = 0;
+    const range = this.#keptRange();
+    this.#index = range ? this.#placedIndex(range) : null;
     if (range) {
       // The tracked cells hold the match however long placement takes; a
       // completed list without it is what loses it.
-      this.kept = range;
-      if (this.index === null && this.complete) this.forget();
+      this.#kept = range;
+      if (this.#index === null && this.#complete) this.#forget();
     }
   }
 
   /** Adds `range` at its position unless that complete range is listed; returns its highlight when added. */
-  private place(range: MatchRange): HighlightRange | null {
-    const last = this.chunks.at(-1);
+  #place(range: MatchRange): HighlightRange | null {
+    const last = this.#chunks.at(-1);
     // The core lists newest first apart from its active area's pages, so
     // nearly every range is older than everything placed.
     if (!last || order(range, last[last.length - 1]) < 0) {
       const painted = highlight(range);
       if (!last || last.length >= CHUNK) {
-        this.chunks.push([painted]);
-        this.starts.push(this.total);
+        this.#chunks.push([painted]);
+        this.#starts.push(this.#total);
       } else {
         last.push(painted);
       }
-      this.total++;
+      this.#total++;
       return painted;
     }
-    const { chunk, offset, found } = this.locate(range);
+    const { chunk, offset, found } = this.#locate(range);
     if (found) return null;
     const painted = highlight(range);
-    const ranges = this.chunks[chunk];
+    const ranges = this.#chunks[chunk];
     ranges.splice(offset, 0, painted);
-    for (let i = chunk + 1; i < this.starts.length; i++) this.starts[i]++;
+    for (let i = chunk + 1; i < this.#starts.length; i++) this.#starts[i]++;
     if (ranges.length > 2 * CHUNK) {
-      this.chunks.splice(chunk + 1, 0, ranges.splice(CHUNK));
-      this.starts.splice(chunk + 1, 0, this.starts[chunk] + CHUNK);
+      this.#chunks.splice(chunk + 1, 0, ranges.splice(CHUNK));
+      this.#starts.splice(chunk + 1, 0, this.#starts[chunk] + CHUNK);
     }
-    this.total++;
+    this.#total++;
     return painted;
   }
 
   /** Where `range` belongs in a nonempty list: its chunk, its offset there, and whether that entry is the same range. */
-  private locate(range: MatchRange): { chunk: number; offset: number; found: boolean } {
+  #locate(range: MatchRange): { chunk: number; offset: number; found: boolean } {
     let lo = 0;
-    let hi = this.chunks.length - 1;
+    let hi = this.#chunks.length - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      const ranges = this.chunks[mid];
+      const ranges = this.#chunks[mid];
       if (order(range, ranges[ranges.length - 1]) >= 0) hi = mid;
       else lo = mid + 1;
     }
-    const ranges = this.chunks[lo];
+    const ranges = this.#chunks[lo];
     let offset = 0;
     let end = ranges.length;
     while (offset < end) {
@@ -519,75 +533,75 @@ export class SearchOwner {
    * while that list is not yet a prefix of the whole one, where its place
    * is not its index.
    */
-  private placedIndex(range: MatchRange): number | null {
-    return this.ordered(false) ? this.indexOf(range) ?? null : null;
+  #placedIndex(range: MatchRange): number | null {
+    return this.#ordered(false) ? this.#indexOf(range) ?? null : null;
   }
 
-  private indexOf(range: MatchRange): number | undefined {
-    if (this.total === 0) return undefined;
-    const { chunk, offset, found } = this.locate(range);
-    return found ? this.starts[chunk] + offset : undefined;
+  #indexOf(range: MatchRange): number | undefined {
+    if (this.#total === 0) return undefined;
+    const { chunk, offset, found } = this.#locate(range);
+    return found ? this.#starts[chunk] + offset : undefined;
   }
 
-  private at(index: number): HighlightRange {
+  #at(index: number): HighlightRange {
     let lo = 0;
-    let hi = this.starts.length - 1;
+    let hi = this.#starts.length - 1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
-      if (this.starts[mid] <= index) lo = mid;
+      if (this.#starts[mid] <= index) lo = mid;
       else hi = mid - 1;
     }
-    return this.chunks[lo][index - this.starts[lo]];
+    return this.#chunks[lo][index - this.#starts[lo]];
   }
 
-  private applyWaiting(): boolean {
+  #applyWaiting(): boolean {
     let selected = false;
-    while (this.waiting.length) {
-      const { direction, at } = this.waiting[0];
-      if (this.kept !== null && this.index === null) {
+    while (this.#waiting.length) {
+      const { direction, at } = this.#waiting[0];
+      if (this.#kept !== null && this.#index === null) {
         // Output, a restarted scan, a resize or the switch back from the
         // alternate screen has left the active match's index unplaced.
         // Applied from no active match the press would start over from the
         // newest or oldest match, so it steps from the list placed before
         // where it can (a resize keeps none), and otherwise waits for
         // placement up to its cap.
-        const next = this.stepBefore(direction);
+        const next = this.#stepBefore(direction);
         if (next === 'newest' || (next === null && performance.now() - at >= WAIT_CAP_MS)) {
-          this.forget();
+          this.#forget();
           continue;
         }
         if (next === null) break;
-        this.waiting.shift();
-        this.index = this.placedIndex(next);
-        this.keep(next);
+        this.#waiting.shift();
+        this.#index = this.#placedIndex(next);
+        this.#keep(next);
         selected = true;
         continue;
       }
       // From no active match older lands on the newest, read from the
       // core's listing while the placed list is not yet the head of the
       // whole one, so no count of placed entries decides it.
-      const newest = direction === 'older' && this.index === null ? this.listedNewest() : null;
+      const newest = direction === 'older' && this.#index === null ? this.#listedNewest() : null;
       if (newest) {
-        this.waiting.shift();
-        this.index = this.placedIndex(newest);
-        this.keep(newest);
+        this.#waiting.shift();
+        this.#index = this.#placedIndex(newest);
+        this.#keep(newest);
         selected = true;
         continue;
       }
-      const total = this.total;
+      const total = this.#total;
       // A press lands among the placed matches once they are the head of
       // the whole list in position order; from no active match older lands
       // on the newest.
-      const lands = (direction === 'newer' ? this.index !== null && this.index > 0
-        : this.index === null ? total > 0 : this.index < total - 1) && this.ordered(true);
+      const lands = (direction === 'newer' ? this.#index !== null && this.#index > 0
+        : this.#index === null ? total > 0 : this.#index < total - 1) && this.#ordered(true);
       const capped = performance.now() - at >= WAIT_CAP_MS && total > 0;
-      if (!this.complete && !lands && !capped) break;
-      this.waiting.shift();
+      if (!this.#complete && !lands && !capped) break;
+      this.#waiting.shift();
       if (!total) continue;
-      this.index = direction === 'newer'
-        ? this.index === null ? total - 1 : (this.index + total - 1) % total
-        : this.index === null ? 0 : (this.index + 1) % total;
-      this.keep(matchRange(this.at(this.index)));
+      this.#index = direction === 'newer'
+        ? this.#index === null ? total - 1 : (this.#index + total - 1) % total
+        : this.#index === null ? 0 : (this.#index + 1) % total;
+      this.#keep(matchRange(this.#at(this.#index)));
       selected = true;
     }
     return selected;
@@ -603,8 +617,8 @@ export class SearchOwner {
    * may rewrite them, so a neighbour that was on the screen is unknown.
    * Erasing the history drops the anchor with it.
    */
-  private stepBefore(direction: Direction): MatchRange | 'newest' | null {
-    const before = this.before;
+  #stepBefore(direction: Direction): MatchRange | 'newest' | null {
+    const before = this.#before;
     if (!before) return null;
     const next = before.index + (direction === 'older' ? 1 : -1);
     if (next === before.total && before.complete) return 'newest';
@@ -620,118 +634,118 @@ export class SearchOwner {
     };
   }
 
-  private window(index: number): Before {
+  #window(index: number): Before {
     let from = Math.max(0, index - BEFORE_REACH);
-    let to = Math.min(this.total, index + BEFORE_REACH + 1);
+    let to = Math.min(this.#total, index + BEFORE_REACH + 1);
     // With the count of the core's active-area entries unknown, a list the
     // core lists pages ahead in can lack the matches of the page being
     // placed that lie between its placed ones and the newest match of the
     // page listed before it, so the window ends at that match on the side
     // away from the active match.
-    const split = this.head === null && !this.complete && this.pageAbove ? this.indexOf(this.pageAbove) : undefined;
+    const split = this.#head === null && !this.#complete && this.#pageAbove ? this.#indexOf(this.#pageAbove) : undefined;
     if (split !== undefined && split > 0) {
       if (index < split) to = Math.min(to, split);
       else from = Math.max(from, split);
     }
     const ranges: HighlightRange[] = [];
-    for (let i = from; i < to; i++) ranges.push(this.at(i));
+    for (let i = from; i < to; i++) ranges.push(this.#at(i));
     // The window takes the list's anchor; the next list tracks its own.
-    const anchor = this.listAnchor;
-    this.listAnchor = null;
-    return { ranges, offset: from, total: this.total, complete: this.complete, index, history: this.listHistory, anchor };
+    const anchor = this.#listAnchor;
+    this.#listAnchor = null;
+    return { ranges, offset: from, total: this.#total, complete: this.#complete, index, history: this.#listHistory, anchor };
   }
 
-  private setBefore(next: Before | null): void {
-    this.before?.anchor?.free();
-    this.before = next;
+  #setBefore(next: Before | null): void {
+    this.#before?.anchor?.free();
+    this.#before = next;
   }
 
   // The primary screen's active match waits out the alternate screen in its
   // tracked cells, which the core keeps on the primary's rows.
-  private park(): void {
-    if (!this.kept || !this.keptStart || !this.keptEnd) return;
-    this.parked = { start: this.keptStart, end: this.keptEnd, before: this.before };
-    this.keptStart = this.keptEnd = null;
-    this.before = null;
-    this.forget();
+  #park(): void {
+    if (!this.#kept || !this.#keptStart || !this.#keptEnd) return;
+    this.#parked = { start: this.#keptStart, end: this.#keptEnd, before: this.#before };
+    this.#keptStart = this.#keptEnd = null;
+    this.#before = null;
+    this.#forget();
   }
 
-  private unpark(): void {
-    const parked = this.parked;
+  #unpark(): void {
+    const parked = this.#parked;
     if (!parked) return;
-    this.parked = null;
-    this.keptStart = parked.start;
-    this.keptEnd = parked.end;
-    this.before = parked.before;
-    this.kept = this.trackedRange();
-    if (this.kept) this.highlightActive();
-    else this.forget();
+    this.#parked = null;
+    this.#keptStart = parked.start;
+    this.#keptEnd = parked.end;
+    this.#before = parked.before;
+    this.#kept = this.#trackedRange();
+    if (this.#kept) this.#highlightActive();
+    else this.#forget();
   }
 
-  private keep(range: MatchRange): void {
-    this.keptStart = this.retrack(this.keptStart, range.startRow, range.startCol);
-    this.keptEnd = this.retrack(this.keptEnd, range.endRow, range.endCol);
-    this.kept = this.keptStart && this.keptEnd ? range : null;
-    if (!this.kept) this.forget();
+  #keep(range: MatchRange): void {
+    this.#keptStart = this.#retrack(this.#keptStart, range.startRow, range.startCol);
+    this.#keptEnd = this.#retrack(this.#keptEnd, range.endRow, range.endCol);
+    this.#kept = this.#keptStart && this.#keptEnd ? range : null;
+    if (!this.#kept) this.#forget();
   }
 
-  private keptRange(): MatchRange | null {
-    return this.kept ? this.trackedRange() : null;
+  #keptRange(): MatchRange | null {
+    return this.#kept ? this.#trackedRange() : null;
   }
 
-  private trackedRange(): MatchRange | null {
-    const start = this.keptStart?.point();
-    const end = this.keptEnd?.point();
+  #trackedRange(): MatchRange | null {
+    const start = this.#keptStart?.point();
+    const end = this.#keptEnd?.point();
     return start && end ? { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col } : null;
   }
 
-  private retrack(cell: TerminalCoreTrackedCell | null, row: number, col: number): TerminalCoreTrackedCell | null {
+  #retrack(cell: TerminalCoreTrackedCell | null, row: number, col: number): TerminalCoreTrackedCell | null {
     if (cell?.moveTo(row, col)) return cell;
     cell?.free();
-    return this.core.trackCell(row, col);
+    return this.#core.trackCell(row, col);
   }
 
-  private forget(): void {
-    this.keptStart?.free();
-    this.keptEnd?.free();
-    this.keptStart = this.keptEnd = null;
-    this.kept = null;
-    this.index = null;
-    this.setBefore(null);
-    this.highlights.clear('search-active');
+  #forget(): void {
+    this.#keptStart?.free();
+    this.#keptEnd?.free();
+    this.#keptStart = this.#keptEnd = null;
+    this.#kept = null;
+    this.#index = null;
+    this.#setBefore(null);
+    this.#highlights.clear('search-active');
   }
 
-  private highlightActive(): void {
-    if (this.kept) this.highlights.set('search-active', [highlight(this.kept)], this.styles.active);
-    else this.highlights.clear('search-active');
+  #highlightActive(): void {
+    if (this.#kept) this.#highlights.set('search-active', [highlight(this.#kept)], this.#styles.active);
+    else this.#highlights.clear('search-active');
   }
 
-  private askStands(): boolean {
-    const selection = this.selection();
+  #askStands(): boolean {
+    const selection = this.#selection();
     // A delayed step must not pull the viewport away from a new selection.
-    return selection === null || (this.askedOver !== null &&
-      selection.start.absoluteRow === this.askedOver.start.absoluteRow && selection.start.col === this.askedOver.start.col &&
-      selection.end.absoluteRow === this.askedOver.end.absoluteRow && selection.end.col === this.askedOver.end.col);
+    return selection === null || (this.#askedOver !== null &&
+      selection.start.absoluteRow === this.#askedOver.start.absoluteRow && selection.start.col === this.#askedOver.start.col &&
+      selection.end.absoluteRow === this.#askedOver.end.absoluteRow && selection.end.col === this.#askedOver.end.col);
   }
 
-  private show(reveal: boolean): void {
-    this.highlightActive();
-    if (reveal && this.kept) this.viewport.reveal(this.kept.startRow);
-    this.publish();
+  #show(reveal: boolean): void {
+    this.#highlightActive();
+    if (reveal && this.#kept) this.#viewport.reveal(this.#kept.startRow);
+    this.#publish();
   }
 
-  private publish(): void {
-    const total = this.complete ? this.total : Math.max(this.total, this.lastTotal);
+  #publish(): void {
+    const total = this.#complete ? this.#total : Math.max(this.#total, this.#lastTotal);
     const next: TerminalSearchState = Object.freeze({
       // A kept match whose index is unplaced has a position, just not a
       // known one, even before the rescan has counted anything.
-      index: this.index !== null ? this.index + 1 : total === 0 && !this.kept ? 0 : null,
+      index: this.#index !== null ? this.#index + 1 : total === 0 && !this.#kept ? 0 : null,
       total,
-      partial: !this.complete,
+      partial: !this.#complete,
     });
-    if (next.index === this.count.index && next.total === this.count.total && next.partial === this.count.partial) return;
-    this.count = next;
-    this.changes.fire(next);
+    if (next.index === this.#count.index && next.total === this.#count.total && next.partial === this.#count.partial) return;
+    this.#count = next;
+    this.#changes.fire(next);
   }
 }
 
