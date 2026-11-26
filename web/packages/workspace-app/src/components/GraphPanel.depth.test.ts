@@ -1655,6 +1655,90 @@ describe("the workspace tree", () => {
     expect(levelReads("")).toBe(2);
   });
 
+  /// `p`, `p/c` and `a` in the shared graph; on disk `p` holds `p/f.md` and
+  /// `p/c`, which holds `p/c/y.md`, and `a` holds `a/x.md`.
+  function serveParentAndChild(): void {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("p"), g.dir("p/c"), g.dir("a")],
+      edges: [g.edge("", "directory:p", "contains"), g.edge("directory:p", "directory:p/c", "contains"), g.edge("", "directory:a", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("p/c"), fsg.file("p/f.md"), fsg.file("p/c/y.md"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [
+        fsg.contains("", "p"), fsg.contains("p", "p/c"), fsg.contains("p", "p/f.md"), fsg.contains("p/c", "p/c/y.md"),
+        fsg.contains("", "a"), fsg.contains("a", "a/x.md"),
+      ],
+    };
+    graphServer.tree = "folders";
+  }
+
+  test("an opening during a whole spine fetch begun while a patch read a folder's parent and not yet the folder starts no other fetch, over the listing cap", async () => {
+    serveParentAndChild();
+    // `p/c` is open under the closed `p`, and `a` is open.
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true, "p/c": true } }));
+    expect(levelReads("a"), "the first fetch reads a").toBe(1);
+    // The double-click on `p` asks `p` and `p/c` in one patch; once `p`'s
+    // level lands, `p/c`'s read is held, and a whole fetch begins meanwhile.
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => (releaseChild = resolve));
+    graphServer.onFsGraph = (request) => {
+      if (request.path === "p/c") graphServer.fsGate = childGate;
+    };
+    let release: (() => void) | null = null;
+    try {
+      await doubleClick("directory:p");
+      expect({ p: levelReads("p"), "p/c": levelReads("p/c") }, "the patch reads p and waits on p/c").toEqual({ p: 1, "p/c": 1 });
+      graphServer.onFsGraph = null;
+      release = await holdWholeFetch();
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads(""), "the openings start no other fetch").toBe(2);
+    } finally {
+      graphServer.onFsGraph = null;
+      release?.();
+      releaseChild();
+      graphServer.fsGate = null;
+    }
+    await settle(20);
+    expect({ root: levelReads(""), drawsY: visibleIds().includes("p/c/y.md") }).toEqual({ root: 2, drawsY: true });
+  });
+
+  test("a folder whose own read finds it gone after a patch of its parent costs a double-click during a whole spine fetch no other fetch, over the listing cap", async () => {
+    serveParentAndChild();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:p");
+    await doubleClick("directory:p/c");
+    await doubleClick("directory:a");
+    await settle(20);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c"), a: levelReads("a") }).toEqual({ p: 1, "p/c": 1, a: 1 });
+    // A save in `p` patches it while the spine holds `p/c`'s level. `p/c`
+    // then leaves the disk, and the first change to say so names only its
+    // file: the patch reads `p/c` and finds it gone, while `p`'s level still
+    // lists it.
+    await changeNames(["p/f.md"]);
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => !n.path.startsWith("p/c"));
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => !e.target.startsWith("p/c"));
+    await changeNames(["p/c/y.md"]);
+    await settle(20);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c") }).toEqual({ p: 2, "p/c": 2 });
+    expect(tab.expanded["p/c"], "the opened set keeps the gone folder").toBe(true);
+
+    const release = await holdWholeFetch();
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads(""), "the openings start no other fetch").toBe(2);
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect(levelReads("")).toBe(2);
+  });
+
   test("a folder opened under one still being read over the listing cap is read once its parent's level lands", async () => {
     serveFoldersWithoutFiles();
     graphServer.fs.nodes.push(fsg.file("a/b/y.md"));
