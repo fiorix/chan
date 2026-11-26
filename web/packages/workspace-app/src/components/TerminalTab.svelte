@@ -162,7 +162,7 @@
     loadGhosttyKit,
     type GhosttyKit,
   } from "../terminal/backend";
-  import { freshShellResetSequence } from "../terminal/freshShellReset";
+  import { freshShellResetSequence, trackedModesOffSequence } from "../terminal/freshShellReset";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
@@ -1867,6 +1867,12 @@
           // sends only its alternate-screen prelude and mode reassert.
           mouseFilter?.reset();
           osc52Bridge?.reset();
+          // An answer with an empty replay is the prelude and a reassert that
+          // only enables, which would leave on the view a mode the program
+          // turned off since the cut. With the tracked modes cleared first,
+          // the reassert leaves on exactly the ones the program has on; a
+          // replay that starts with a reset clears them again.
+          writeParsedPtyOutput(new TextEncoder().encode(trackedModesOffSequence()), "replay");
         } else if (tab.keyboardProtocol) {
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
         }
