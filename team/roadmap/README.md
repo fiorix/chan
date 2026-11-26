@@ -80,7 +80,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [xterm.js as a second backend][noxterm] | partly built | build |
 | [the retired key is still accepted][rejectkey] | not started | later |
 | [a held macOS key opens accents][macrepeat] | not started | measure |
-| [a redial keeps dead modes][redialmodes] | not started | build |
+| [a redial keeps dead modes][redialmodes] | partly built | build |
 
 
 ## Completed
