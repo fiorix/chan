@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn terminal_config_defaults_scrollback_and_term() {
         let cfg = TerminalConfig::default();
-        assert_eq!(cfg.scrollback_mb, 10);
+        assert_eq!(cfg.scrollback_mb, 50);
         assert_eq!(cfg.default_term, "xterm-256color");
         assert!(cfg.mouse_capture);
         assert_eq!(cfg.secret_masking, None);
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(cfg.terminal.idle_timeout_secs, 600);
         assert_eq!(cfg.terminal.session_cap, 8);
         assert_eq!(cfg.terminal.ring_bytes, 4096);
-        assert_eq!(cfg.terminal.scrollback_mb, 10);
+        assert_eq!(cfg.terminal.scrollback_mb, 50);
         assert_eq!(cfg.terminal.default_term, "xterm-256color");
         assert!(cfg.terminal.mouse_capture);
         assert_eq!(cfg.terminal.secret_masking, None);

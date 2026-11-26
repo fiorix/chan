@@ -246,7 +246,7 @@ fn default_terminal_ring_bytes() -> usize {
 }
 
 fn default_terminal_scrollback_mb() -> u32 {
-    10
+    50
 }
 
 fn default_terminal_default_term() -> String {
@@ -852,6 +852,16 @@ mod tests {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
         assert_eq!(config.background_opacity, TERMINAL_BACKGROUND_OPACITY_MAX);
         assert_eq!(TerminalConfig::default().background_opacity, 100);
+    }
+
+    #[test]
+    fn scrollback_defaults_to_fifty_megabytes() {
+        assert_eq!(TerminalConfig::default().scrollback_mb, 50);
+        let empty: TerminalConfig = toml::from_str("").expect("an empty terminal table loads");
+        assert_eq!(
+            empty.scrollback_mb, 50,
+            "a table without the key takes the default"
+        );
     }
 
     #[test]
