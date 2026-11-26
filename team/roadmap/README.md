@@ -59,7 +59,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | Item | State | Next |
 | --- | --- | --- |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [cap: three walks, no folder layer][capwalks] | built | review |
+| [cap: three walks, no folder layer][capwalks] | built | GA |
 | [AppImage children get its environment][appenv] | built | review |
 | [chan drives ghostty-web from outside][ghosttyng] | closed | GA |
 | [ConPTY pulls history into the screen][conpty] | partly built | measure |
