@@ -69,19 +69,19 @@ export class Terminal {
   // The package's white-box tests set up and read these through ./internal.
   static {
     registerWidgetInternals((term) => ({
-      get canvas() { return term.canvas; },
-      set canvas(canvas) { term.canvas = canvas; },
-      get isOpen() { return term.isOpen; },
-      set isOpen(open) { term.isOpen = open; },
-      get linkDetector() { return term.linkDetector; },
-      set linkDetector(detector) { term.linkDetector = detector; },
-      get targetViewportY() { return term.targetViewportY; },
-      set targetViewportY(target) { term.targetViewportY = target; },
-      get scrollAnimationStartTime() { return term.scrollAnimationStartTime; },
-      set scrollAnimationStartTime(time) { term.scrollAnimationStartTime = time; },
-      get scrollAnimationFrame() { return term.scrollAnimationFrame; },
-      set scrollAnimationFrame(frame) { term.scrollAnimationFrame = frame; },
-      get changeEmitter() { return term.changeEmitter; },
+      get canvas() { return term.#canvas; },
+      set canvas(canvas) { term.#canvas = canvas; },
+      get isOpen() { return term.#isOpen; },
+      set isOpen(open) { term.#isOpen = open; },
+      get linkDetector() { return term.#linkDetector; },
+      set linkDetector(detector) { term.#linkDetector = detector; },
+      get targetViewportY() { return term.#targetViewportY; },
+      set targetViewportY(target) { term.#targetViewportY = target; },
+      get scrollAnimationStartTime() { return term.#scrollAnimationStartTime; },
+      set scrollAnimationStartTime(time) { term.#scrollAnimationStartTime = time; },
+      get scrollAnimationFrame() { return term.#scrollAnimationFrame; },
+      set scrollAnimationFrame(frame) { term.#scrollAnimationFrame = frame; },
+      get changeEmitter() { return term.#changeEmitter; },
       get selectionManager() { return term.selectionManager; },
     }));
   }
@@ -100,7 +100,7 @@ export class Terminal {
   public readonly options!: Required<ITerminalOptions>;
 
   // Components (created on open())
-  private ghostty?: GhosttyVt;
+  #ghostty?: GhosttyVt;
   public wasmTerm: VtTerminal | undefined; // Made public for link providers
   #coreAccess?: ReturnType<typeof createTerminalCore>;
   /** Available from open to dispose; the widget retains ownership of the raw core. */
@@ -108,64 +108,64 @@ export class Terminal {
   public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
-  private highlightsManager?: HighlightsManager;
+  #highlightsManager?: HighlightsManager;
   #searchOwner?: SearchOwner;
   public readonly search: TerminalSearch;
   /** Stable facade; requests before open or after disposal do not retain state. */
   public readonly highlights: TerminalHighlights = {
-    set: (name, ranges, style) => { this.highlightsManager?.set(name, ranges, style); },
-    get: (name) => this.highlightsManager?.get(name),
-    clear: (name) => this.highlightsManager?.clear(name) ?? false,
+    set: (name, ranges, style) => { this.#highlightsManager?.set(name, ranges, style); },
+    get: (name) => this.#highlightsManager?.get(name),
+    clear: (name) => this.#highlightsManager?.clear(name) ?? false,
   };
-  private canvas?: HTMLCanvasElement;
+  #canvas?: HTMLCanvasElement;
 
   // Link detection system
-  private linkDetector?: LinkDetector;
+  #linkDetector?: LinkDetector;
   // The row under the pointer, read for the link its cell carries.
-  private hoverCells = new VtCells();
-  private currentHoveredLink?: ILink;
-  private mouseMoveThrottleTimeout?: number;
-  private pendingMouseMove?: MouseEvent;
+  #hoverCells = new VtCells();
+  #currentHoveredLink?: ILink;
+  #mouseMoveThrottleTimeout?: number;
+  #pendingMouseMove?: MouseEvent;
   // The primary press a click ends, read to tell a link click from the end of
   // a drag or a press the program was sent.
-  private linkPress?: { x: number; y: number; id: number; type: string; reported: boolean; released: boolean };
+  #linkPress?: { x: number; y: number; id: number; type: string; reported: boolean; released: boolean };
 
   // Event emitters
-  private dataEmitter = new EventEmitter<string>();
-  private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
-  private changeEmitter = new EventEmitter<TerminalChange>();
-  private linkEmitter = new EventEmitter<TerminalLinkActivation>();
+  #dataEmitter = new EventEmitter<string>();
+  #resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
+  #changeEmitter = new EventEmitter<TerminalChange>();
+  #linkEmitter = new EventEmitter<TerminalLinkActivation>();
   // Public event accessors (xterm.js compatibility)
-  public readonly onData: IEvent<string> = this.dataEmitter.event;
-  public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
-  public readonly onChange: IEvent<TerminalChange> = this.changeEmitter.event;
+  public readonly onData: IEvent<string> = this.#dataEmitter.event;
+  public readonly onResize: IEvent<{ cols: number; rows: number }> = this.#resizeEmitter.event;
+  public readonly onChange: IEvent<TerminalChange> = this.#changeEmitter.event;
   /**
    * A click on a link: a primary-button click that ends neither a drag nor a
    * double click, and whose press was not reported to a program tracking the
    * mouse (Shift keeps a press from the program). With no listener a click on
    * a link does nothing.
    */
-  public readonly onLinkActivate: IEvent<TerminalLinkActivation> = this.linkEmitter.event;
+  public readonly onLinkActivate: IEvent<TerminalLinkActivation> = this.#linkEmitter.event;
 
   // Lifecycle state
-  private isOpen = false;
-  private isDisposed = false;
-  private animationFrameId?: number;
-  private writeQueue: Uint8Array[] = [];
-  private awaitingEcho = false;
+  #isOpen = false;
+  #isDisposed = false;
+  #animationFrameId?: number;
+  #writeQueue: Uint8Array[] = [];
+  #awaitingEcho = false;
 
   // Phase 1: Custom event handlers
-  private customKeyEventHandler?: (event: KeyboardEvent) => boolean;
+  #customKeyEventHandler?: (event: KeyboardEvent) => boolean;
 
   // Phase 2: Viewport and scrolling state
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
-  private targetViewportY: number = 0; // Target viewport position for smooth scrolling
-  private scrollAnimationStartTime?: number;
-  private scrollAnimationFrame?: number;
-  private customWheelEventHandler?: (event: WheelEvent) => boolean;
+  #targetViewportY: number = 0; // Target viewport position for smooth scrolling
+  #scrollAnimationStartTime?: number;
+  #scrollAnimationFrame?: number;
+  #customWheelEventHandler?: (event: WheelEvent) => boolean;
 
   // Scrollbar interaction state
-  private scrollbarDrag?: {
+  #scrollbarDrag?: {
     id: number;
     type: string;
     lastY: number;
@@ -174,15 +174,15 @@ export class Terminal {
   };
 
   // Scrollbar visibility/auto-hide state
-  private scrollbarVisible: boolean = false;
-  private scrollbarOpacity: number = 0;
-  private scrollbarHideTimeout?: number;
-  private scrollbarAnimationFrame?: number;
-  private readonly SCROLLBAR_HIDE_DELAY_MS = 1500; // Hide after 1.5 seconds
-  private readonly SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
+  #scrollbarVisible: boolean = false;
+  #scrollbarOpacity: number = 0;
+  #scrollbarHideTimeout?: number;
+  #scrollbarAnimationFrame?: number;
+  readonly #SCROLLBAR_HIDE_DELAY_MS = 1500; // Hide after 1.5 seconds
+  readonly #SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
 
   constructor(options: ITerminalOptions) {
-    this.ghostty = options.ghostty;
+    this.#ghostty = options.ghostty;
 
     // Create base options object with all defaults (excluding ghostty)
     const baseOptions = {
@@ -212,8 +212,8 @@ export class Terminal {
         target[prop] = value;
 
         // Apply runtime changes if terminal is open
-        if (this.isOpen) {
-          this.handleOptionChange(prop, value, oldValue);
+        if (this.#isOpen) {
+          this.#handleOptionChange(prop, value, oldValue);
         }
 
         return true;
@@ -237,10 +237,10 @@ export class Terminal {
     this.viewport = {
       get offset() { return terminal.viewportY; },
       followOutput: 'at-bottom',
-      scrollTo: (offset) => this.scrollViewportTo(offset),
-      scrollBy: (rows) => this.scrollViewportTo(this.viewportY + rows),
+      scrollTo: (offset) => this.#scrollViewportTo(offset),
+      scrollBy: (rows) => this.#scrollViewportTo(this.viewportY + rows),
       scrollToBottom: () => this.scrollToBottom(),
-      reveal: (row, align = 'center') => this.revealRow(row, align),
+      reveal: (row, align = 'center') => this.#revealRow(row, align),
     };
   }
 
@@ -252,7 +252,7 @@ export class Terminal {
    * Handle runtime option changes (called when options are modified after terminal is open)
    * This enables xterm.js compatibility where options can be changed at runtime
    */
-  private handleOptionChange(key: string, newValue: any, oldValue: any): void {
+  #handleOptionChange(key: string, newValue: any, oldValue: any): void {
     if (newValue === oldValue) return;
 
     switch (key) {
@@ -279,14 +279,14 @@ export class Terminal {
       case 'fontSize':
         if (this.renderer) {
           this.renderer.setFontSize(this.options.fontSize);
-          this.handleFontChange();
+          this.#handleFontChange();
         }
         break;
 
       case 'fontFamily':
         if (this.renderer) {
           this.renderer.setFontFamily(this.options.fontFamily);
-          this.handleFontChange();
+          this.#handleFontChange();
         }
         break;
 
@@ -302,8 +302,8 @@ export class Terminal {
    * Handle font changes (fontSize or fontFamily)
    * Updates canvas size to match new font metrics and forces a full re-render
    */
-  private handleFontChange(): void {
-    if (!this.renderer || !this.wasmTerm || !this.canvas) return;
+  #handleFontChange(): void {
+    if (!this.renderer || !this.wasmTerm || !this.#canvas) return;
 
     // Clear any active selection since pixel positions have changed
     if (this.selectionManager) {
@@ -314,10 +314,10 @@ export class Terminal {
     this.renderer.resize(this.cols, this.rows);
 
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this.#paintScrollbarOpacity());
   }
 
-  private parseColorToHex(color?: string): number | undefined {
+  #parseColorToHex(color?: string): number | undefined {
     const parsed = parseColor(color);
     if (!parsed) return undefined;
     return (Math.round(parsed[0]) << 16) | (Math.round(parsed[1]) << 8) | Math.round(parsed[2]);
@@ -342,30 +342,30 @@ export class Terminal {
     // Order: black, red, green, yellow, blue, magenta, cyan, white,
     //        brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite
     const palette = [
-      this.parseColorToHex(theme?.black),
-      this.parseColorToHex(theme?.red),
-      this.parseColorToHex(theme?.green),
-      this.parseColorToHex(theme?.yellow),
-      this.parseColorToHex(theme?.blue),
-      this.parseColorToHex(theme?.magenta),
-      this.parseColorToHex(theme?.cyan),
-      this.parseColorToHex(theme?.white),
-      this.parseColorToHex(theme?.brightBlack),
-      this.parseColorToHex(theme?.brightRed),
-      this.parseColorToHex(theme?.brightGreen),
-      this.parseColorToHex(theme?.brightYellow),
-      this.parseColorToHex(theme?.brightBlue),
-      this.parseColorToHex(theme?.brightMagenta),
-      this.parseColorToHex(theme?.brightCyan),
-      this.parseColorToHex(theme?.brightWhite),
+      this.#parseColorToHex(theme?.black),
+      this.#parseColorToHex(theme?.red),
+      this.#parseColorToHex(theme?.green),
+      this.#parseColorToHex(theme?.yellow),
+      this.#parseColorToHex(theme?.blue),
+      this.#parseColorToHex(theme?.magenta),
+      this.#parseColorToHex(theme?.cyan),
+      this.#parseColorToHex(theme?.white),
+      this.#parseColorToHex(theme?.brightBlack),
+      this.#parseColorToHex(theme?.brightRed),
+      this.#parseColorToHex(theme?.brightGreen),
+      this.#parseColorToHex(theme?.brightYellow),
+      this.#parseColorToHex(theme?.brightBlue),
+      this.#parseColorToHex(theme?.brightMagenta),
+      this.#parseColorToHex(theme?.brightCyan),
+      this.#parseColorToHex(theme?.brightWhite),
     ];
 
     return {
       scrollbackLimit: scrollback,
       scrollbackMaxBytes,
-      fgColor: this.parseColorToHex(theme?.foreground),
-      bgColor: this.parseColorToHex(theme?.background),
-      cursorColor: this.parseColorToHex(theme?.cursor),
+      fgColor: this.#parseColorToHex(theme?.foreground),
+      bgColor: this.#parseColorToHex(theme?.background),
+      cursorColor: this.#parseColorToHex(theme?.cursor),
       palette,
     };
   }
@@ -381,16 +381,16 @@ export class Terminal {
    * Requires a pre-loaded Ghostty instance passed to the constructor.
    */
   open(parent: HTMLElement): void {
-    if (this.isOpen) {
+    if (this.#isOpen) {
       throw new Error('Terminal is already open');
     }
-    if (this.isDisposed) {
+    if (this.#isDisposed) {
       throw new Error('Terminal has been disposed');
     }
 
     // Store parent element
     this.element = parent;
-    this.isOpen = true;
+    this.#isOpen = true;
 
     try {
       // Make parent focusable if it isn't already
@@ -402,7 +402,7 @@ export class Terminal {
       // this as an input element and don't intercept keyboard events.
       parent.setAttribute('contenteditable', 'true');
       // Prevent actual content editing - we handle input ourselves
-      parent.addEventListener('beforeinput', this.handleBeforeInput);
+      parent.addEventListener('beforeinput', this.#handleBeforeInput);
 
       // Add accessibility attributes for screen readers and extensions
       parent.setAttribute('role', 'textbox');
@@ -411,15 +411,15 @@ export class Terminal {
 
       // Create WASM terminal with current dimensions and config
       const config = this.buildWasmConfig();
-      this.wasmTerm = this.ghostty!.createTerminal(this.cols, this.rows, config);
+      this.wasmTerm = this.#ghostty!.createTerminal(this.cols, this.rows, config);
       this.#coreAccess = createTerminalCore(this.wasmTerm);
 
       // Create canvas element
-      this.canvas = document.createElement('canvas');
-      this.canvas.style.display = 'block';
-      this.canvas.style.cursor = 'text';
+      this.#canvas = document.createElement('canvas');
+      this.#canvas.style.display = 'block';
+      this.#canvas.style.cursor = 'text';
 
-      parent.appendChild(this.canvas);
+      parent.appendChild(this.#canvas);
 
       // Create hidden textarea for keyboard input (must be inside parent for event bubbling)
       this.textarea = document.createElement('textarea');
@@ -445,11 +445,11 @@ export class Terminal {
       parent.appendChild(this.textarea);
 
       // Focus textarea on interaction - preventDefault before focus
-      this.canvas.addEventListener('mousedown', this.handleCanvasFocus);
-      this.canvas.addEventListener('touchend', this.handleCanvasFocus);
+      this.#canvas.addEventListener('mousedown', this.#handleCanvasFocus);
+      this.#canvas.addEventListener('touchend', this.#handleCanvasFocus);
 
       // Create renderer
-      this.renderer = new CanvasRenderer(this.canvas, {
+      this.renderer = new CanvasRenderer(this.#canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
         cursorStyle: this.options.cursorStyle,
@@ -464,7 +464,7 @@ export class Terminal {
       this.renderer.resize(this.cols, this.rows);
 
       // Create mouse tracking configuration
-      const canvas = this.canvas;
+      const canvas = this.#canvas;
       const renderer = this.renderer;
       const wasmTerm = this.wasmTerm;
       const mouseConfig: MouseTrackingConfig = {
@@ -483,7 +483,7 @@ export class Terminal {
 
       // Create input handler
       this.inputHandler = new InputHandler(
-        this.ghostty!,
+        this.#ghostty!,
         parent,
         (data: string, isUserInput = true) => {
           // Check if stdin is disabled
@@ -493,7 +493,7 @@ export class Terminal {
           // Mouse reports share this callback but leave a reader in history.
           if (isUserInput && data) {
             this.scrollToBottom();
-            this.awaitingEcho = true;
+            this.#awaitingEcho = true;
           }
           // Reports clear stale selection, but cannot cancel a local drag,
           // and the pointer passing over the grid is not a reason to clear.
@@ -501,11 +501,11 @@ export class Terminal {
             this.selectionManager?.clearSelection();
           }
           // Input handler fires data events
-          this.dataEmitter.fire(data);
+          this.#dataEmitter.fire(data);
         },
         () => {},
         undefined,
-        this.customKeyEventHandler,
+        this.#customKeyEventHandler,
         (mode: number) => {
           // Query terminal mode state (e.g., mode 1 for application cursor mode)
           return this.wasmTerm?.getMode(mode, false) ?? false;
@@ -525,19 +525,19 @@ export class Terminal {
         this.wasmTerm,
         this.textarea,
         {
-          claimScrollbarPress: (event) => this.claimScrollbarPress(event),
+          claimScrollbarPress: (event) => this.#claimScrollbarPress(event),
           press: (event, reported) => {
-            this.handleLinkPress(event, reported);
+            this.#handleLinkPress(event, reported);
             this.inputHandler?.handleMouseDown(event, reported);
           },
           move: (event, reportMotion) => {
-            if (this.scrollbarDrag) return;
-            this.checkLinkDrag(event);
+            if (this.#scrollbarDrag) return;
+            this.#checkLinkDrag(event);
             this.inputHandler?.handleMouseMove(event, reportMotion);
           },
           release: (event) => this.inputHandler?.handleMouseUp(event),
           end: (event) => {
-            this.finishLinkPress(event);
+            this.#finishLinkPress(event);
             this.inputHandler?.endMouseGesture(event);
           },
         }
@@ -545,40 +545,40 @@ export class Terminal {
 
       // Connect selection manager to renderer
       this.renderer.setSelectionManager(this.selectionManager);
-      this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
-      this.renderer.setHighlights(this.highlightsManager);
-      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlightsManager, this.viewport,
+      this.#highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
+      this.renderer.setHighlights(this.#highlightsManager);
+      this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.#highlightsManager, this.viewport,
         this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch(),
         () => this.options.theme);
 
       // Initialize link detection system
-      this.linkDetector = new LinkDetector(this);
+      this.#linkDetector = new LinkDetector(this);
 
       // Register link providers
       // OSC8 first (explicit hyperlinks take precedence)
-      this.linkDetector.registerProvider(new OSC8LinkProvider(this));
+      this.#linkDetector.registerProvider(new OSC8LinkProvider(this));
       // URL regex second (fallback for plain text URLs)
-      this.linkDetector.registerProvider(new UrlRegexProvider(this));
+      this.#linkDetector.registerProvider(new UrlRegexProvider(this));
 
       // Clear an abandoned click before selection resolves the next press.
-      parent.addEventListener('pointerdown', this.handlePointerDown, { capture: true });
-      parent.addEventListener('pointermove', this.handlePointerMove);
-      parent.addEventListener('pointerup', this.handlePointerEnd);
-      parent.addEventListener('pointercancel', this.handlePointerEnd);
-      parent.addEventListener('lostpointercapture', this.handlePointerEnd);
-      parent.addEventListener('mousemove', this.handleMouseMove);
-      parent.addEventListener('mouseleave', this.handleMouseLeave);
-      parent.addEventListener('click', this.handleClick);
+      parent.addEventListener('pointerdown', this.#handlePointerDown, { capture: true });
+      parent.addEventListener('pointermove', this.#handlePointerMove);
+      parent.addEventListener('pointerup', this.#handlePointerEnd);
+      parent.addEventListener('pointercancel', this.#handlePointerEnd);
+      parent.addEventListener('lostpointercapture', this.#handlePointerEnd);
+      parent.addEventListener('mousemove', this.#handleMouseMove);
+      parent.addEventListener('mouseleave', this.#handleMouseLeave);
+      parent.addEventListener('click', this.#handleClick);
 
       // Setup wheel event handling for scrolling (Phase 2)
       // Use capture phase to ensure we get the event before browser scrolling
-      parent.addEventListener('wheel', this.handleWheel, { passive: false, capture: true });
+      parent.addEventListener('wheel', this.#handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this.paintScrollbarOpacity());
+      this.renderer.render(this.wasmTerm, true, this.viewportY, this.#paintScrollbarOpacity());
 
       // Start render loop
-      this.startRenderLoop();
+      this.#startRenderLoop();
 
       // No focus here, as xterm.js's open() takes none: a terminal can open
       // where it is not the one being typed into, and taking the keyboard
@@ -586,8 +586,8 @@ export class Terminal {
       // edit there. The caller focuses the terminal when it should have it.
     } catch (error) {
       // Clean up on error
-      this.isOpen = false;
-      this.cleanupComponents();
+      this.#isOpen = false;
+      this.#cleanupComponents();
       throw new Error(`Failed to open terminal: ${error}`);
     }
   }
@@ -596,23 +596,23 @@ export class Terminal {
    * Write data to terminal
    */
   write(data: string | Uint8Array, callback?: () => void): void {
-    this.assertOpen();
+    this.#assertOpen();
 
-    this.writeInternal(data, callback);
+    this.#writeInternal(data, callback);
   }
 
   /**
    * Internal write implementation (extracted from write())
    */
-  private writeInternal(data: string | Uint8Array, callback?: () => void): void {
+  #writeInternal(data: string | Uint8Array, callback?: () => void): void {
     if (data.length === 0) {
       if (callback) requestAnimationFrame(callback);
       return;
     }
     const core = this.wasmTerm!;
     const viewportBefore = this.viewportY;
-    const targetBefore = this.targetViewportY;
-    const scrolling = this.scrollAnimationStartTime !== undefined;
+    const targetBefore = this.#targetViewportY;
+    const scrolling = this.#scrollAnimationStartTime !== undefined;
     const scrollbackBefore = this.getScrollbackLength();
     const primary = !core.isAlternateScreen();
     // History length can shrink while new rows arrive because the core
@@ -637,9 +637,9 @@ export class Terminal {
         const targetPosition = targetAnchor?.point();
         const target = targetBefore < 1 ? targetBefore
           : targetPosition ? scrollbackAfter - targetPosition.row + targetBefore % 1 : scrollbackAfter;
-        this.targetViewportY = Math.max(0, Math.min(scrollbackAfter, target));
+        this.#targetViewportY = Math.max(0, Math.min(scrollbackAfter, target));
       } else {
-        this.targetViewportY = this.viewportY;
+        this.#targetViewportY = this.viewportY;
       }
     } finally {
       anchor?.free();
@@ -647,21 +647,21 @@ export class Terminal {
     }
 
     this.selectionManager?.syncSelection();
-    this.highlightsManager?.observeScreen(core.isAlternateScreen());
+    this.#highlightsManager?.observeScreen(core.isAlternateScreen());
 
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
-    this.processTerminalResponses();
+    this.#processTerminalResponses();
 
     // Invalidate link cache (content changed)
-    this.linkDetector?.invalidateCache();
+    this.#linkDetector?.invalidateCache();
 
     // Observers see the current links and view, with replies already sent,
     // before an echo or scrollbar animation can paint synchronously.
     this.#searchOwner?.changed('write', core.isAlternateScreen());
-    this.changeEmitter.fire({ kind: 'write' });
+    this.#changeEmitter.fire({ kind: 'write' });
 
-    if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
+    if (viewportBefore > 0 && scrollbackAfter > 0) this.#showScrollbar();
 
     // Call callback if provided
     if (callback) {
@@ -669,14 +669,14 @@ export class Terminal {
       requestAnimationFrame(callback);
     }
 
-    if (this.awaitingEcho) {
-      this.awaitingEcho = false;
+    if (this.#awaitingEcho) {
+      this.#awaitingEcho = false;
       if (this.renderer && this.wasmTerm) {
         // The core has taken the bytes and the observers have run, so a
         // failed paint is reported rather than thrown at the writer.
         try {
           this.#searchOwner?.runDue();
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
         } catch (error) {
           reportPaintError(error);
         }
@@ -706,7 +706,7 @@ export class Terminal {
    * Paste text into terminal (triggers bracketed paste if supported)
    */
   paste(data: string): void {
-    this.assertOpen();
+    this.#assertOpen();
 
     // Don't paste if stdin is disabled
     if (this.options.disableStdin) {
@@ -718,9 +718,9 @@ export class Terminal {
     // keys into spaces; an empty text without bracketed paste sends nothing.
     const encoded = this.wasmTerm!.encodePaste(data);
     if (!encoded) return;
-    this.awaitingEcho = true;
+    this.#awaitingEcho = true;
     this.scrollToBottom();
-    this.dataEmitter.fire(encoded);
+    this.#dataEmitter.fire(encoded);
   }
 
   /**
@@ -730,7 +730,7 @@ export class Terminal {
    * @param wasUserInput - If true, triggers onData event (default: false for compat with some apps)
    */
   input(data: string, wasUserInput: boolean = false): void {
-    this.assertOpen();
+    this.#assertOpen();
 
     // Don't input if stdin is disabled
     if (this.options.disableStdin) {
@@ -740,10 +740,10 @@ export class Terminal {
     if (wasUserInput) {
       if (data) {
         this.scrollToBottom();
-        this.awaitingEcho = true;
+        this.#awaitingEcho = true;
       }
       // Trigger onData event as if user typed it
-      this.dataEmitter.fire(data);
+      this.#dataEmitter.fire(data);
     } else {
       // Just write to terminal without triggering onData
       this.write(data);
@@ -754,7 +754,7 @@ export class Terminal {
    * Resize terminal
    */
   resize(cols: number, rows: number): void {
-    this.assertOpen();
+    this.#assertOpen();
 
     if (cols === this.cols && rows === this.rows) {
       return; // No change
@@ -764,7 +764,7 @@ export class Terminal {
     // views while WASM reallocates buffers. We restart it after resize completes.
     // This avoids the background-tab regression of using an isResizing flag
     // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
-    this.cancelRenderLoop();
+    this.#cancelRenderLoop();
 
     try {
       // Update dimensions
@@ -774,28 +774,28 @@ export class Terminal {
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
       this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
-      this.targetViewportY = Math.min(this.targetViewportY, this.getScrollbackLength());
+      this.#targetViewportY = Math.min(this.#targetViewportY, this.getScrollbackLength());
       this.selectionManager?.syncSelection();
-      this.highlightsManager?.observeScreen(this.wasmTerm!.isAlternateScreen());
+      this.#highlightsManager?.observeScreen(this.wasmTerm!.isAlternateScreen());
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
 
       this.#searchOwner?.changed('resize', this.wasmTerm!.isAlternateScreen());
-      this.changeEmitter.fire({ kind: 'resize' });
+      this.#changeEmitter.fire({ kind: 'resize' });
 
       // The dimension event also serves PTY size publication.
-      this.resizeEmitter.fire({ cols, rows });
+      this.#resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.#paintScrollbarOpacity());
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
 
     // Flush any writes that were queued during resize, then restart render loop
-    this.flushWriteQueue();
-    this.startRenderLoop();
+    this.#flushWriteQueue();
+    this.#startRenderLoop();
   }
 
   /**
@@ -803,7 +803,7 @@ export class Terminal {
    * while detached or after disposal are ignored; no later retry takes focus.
    */
   focus(): void {
-    if (this.isOpen && this.element?.isConnected) {
+    if (this.#isOpen && this.element?.isConnected) {
       this.element.focus({ preventScroll: true });
     }
   }
@@ -812,7 +812,7 @@ export class Terminal {
    * Blur terminal (remove focus)
    */
   blur(): void {
-    if (this.isOpen && this.element) {
+    if (this.#isOpen && this.element) {
       // A press on the canvas can leave the hidden textarea holding focus
       // rather than the element, and blur() acts only on the focused element,
       // so blur whichever of the two holds it. Focus outside stays put.
@@ -912,7 +912,7 @@ export class Terminal {
    * cursor moves synchronously; undefined before open and after disposal.
    */
   public getCursor(): Readonly<{ x: number; y: number }> | undefined {
-    if (!this.isOpen || !this.wasmTerm) return undefined;
+    if (!this.#isOpen || !this.wasmTerm) return undefined;
     const { x, y } = this.wasmTerm.getCursor();
     return { x, y };
   }
@@ -929,7 +929,7 @@ export class Terminal {
 
   /** Add a layer above the widget; an unopened terminal retains no registration. */
   public addPaintLayer(layer: PaintLayer): () => void {
-    if (!this.isOpen) return () => {};
+    if (!this.#isOpen) return () => {};
     return this.renderer!.addPaintLayer(layer);
   }
 
@@ -938,8 +938,8 @@ export class Terminal {
    * callback, request a full next frame instead of recursively rendering.
    */
   public refresh(): void {
-    if (!this.isOpen) return;
-    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.paintScrollbarOpacity());
+    if (!this.#isOpen) return;
+    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.#paintScrollbarOpacity());
   }
 
   /**
@@ -948,18 +948,18 @@ export class Terminal {
    * A paint callback requesting a theme change gets a full next frame.
    */
   public setTheme(theme: ITheme): void {
-    if (this.isDisposed) return;
+    if (this.#isDisposed) return;
     this.options.theme = Object.fromEntries(Object.entries(theme).filter(([, value]) => value !== undefined));
   }
 
   /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */
   public getMetrics(): Readonly<FontMetrics> | undefined {
-    return this.isOpen ? this.renderer!.getMetrics() : undefined;
+    return this.#isOpen ? this.renderer!.getMetrics() : undefined;
   }
 
-  private paintScrollbarOpacity(): number {
+  #paintScrollbarOpacity(): number {
     const fixed = this.options.testHooks?.scrollbarOpacity;
-    return fixed !== undefined ? Math.max(0, Math.min(1, fixed)) : this.scrollbarOpacity;
+    return fixed !== undefined ? Math.max(0, Math.min(1, fixed)) : this.#scrollbarOpacity;
   }
 
   // ==========================================================================
@@ -975,7 +975,7 @@ export class Terminal {
   public attachCustomKeyEventHandler(
     customKeyEventHandler: (event: KeyboardEvent) => boolean
   ): void {
-    this.customKeyEventHandler = customKeyEventHandler;
+    this.#customKeyEventHandler = customKeyEventHandler;
     // Update input handler if already created
     if (this.inputHandler) {
       this.inputHandler.setCustomKeyEventHandler(customKeyEventHandler);
@@ -989,7 +989,7 @@ export class Terminal {
   public attachCustomWheelEventHandler(
     customWheelEventHandler?: (event: WheelEvent) => boolean
   ): void {
-    this.customWheelEventHandler = customWheelEventHandler;
+    this.#customWheelEventHandler = customWheelEventHandler;
   }
 
   // ==========================================================================
@@ -1021,7 +1021,7 @@ export class Terminal {
 
       // Show scrollbar when scrolling (with auto-hide)
       if (scrollbackLength > 0) {
-        this.showScrollbar();
+        this.#showScrollbar();
       }
     }
   }
@@ -1030,53 +1030,53 @@ export class Terminal {
    * Scroll viewport to the bottom (current output)
    */
   public scrollToBottom(): void {
-    this.targetViewportY = 0;
-    if (this.scrollAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
+    this.#targetViewportY = 0;
+    if (this.#scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.#scrollAnimationFrame);
+      this.#scrollAnimationFrame = undefined;
     }
-    this.scrollAnimationStartTime = undefined;
+    this.#scrollAnimationStartTime = undefined;
     if (this.viewportY !== 0) {
       this.viewportY = 0;
       // Show scrollbar briefly when scrolling to bottom
       if (this.getScrollbackLength() > 0) {
-        this.showScrollbar();
+        this.#showScrollbar();
       }
     }
   }
 
-  private scrollViewportTo(offset: number): void {
+  #scrollViewportTo(offset: number): void {
     const scrollbackLength = this.getScrollbackLength();
     const newViewportY = Math.max(0, Math.min(scrollbackLength, offset));
-    this.targetViewportY = newViewportY;
-    if (this.scrollAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
+    this.#targetViewportY = newViewportY;
+    if (this.#scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.#scrollAnimationFrame);
+      this.#scrollAnimationFrame = undefined;
     }
-    this.scrollAnimationStartTime = undefined;
+    this.#scrollAnimationStartTime = undefined;
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
 
       if (scrollbackLength > 0) {
-        this.showScrollbar();
+        this.#showScrollbar();
       }
     }
   }
 
-  private revealRow(row: number, align: 'start' | 'center' | 'end'): void {
+  #revealRow(row: number, align: 'start' | 'center' | 'end'): void {
     const history = this.getScrollbackLength();
     const onScreen = row - history + Math.max(0, Math.floor(this.viewportY));
     if (onScreen >= 0 && onScreen < this.rows) return;
     const at = align === 'start' ? 0 : align === 'end' ? this.rows - 1 : Math.floor(this.rows / 2);
-    this.scrollViewportTo(history - row + at);
+    this.#scrollViewportTo(history - row + at);
   }
 
   /**
    * Smoothly scroll to a target viewport position
    * @param targetY Target viewport Y position (in lines, can be fractional)
    */
-  private smoothScrollTo(targetY: number): void {
+  #smoothScrollTo(targetY: number): void {
     if (!this.wasmTerm) return;
 
     const scrollbackLength = this.getScrollbackLength();
@@ -1089,56 +1089,56 @@ export class Terminal {
     const duration = this.options.smoothScrollDuration ?? 100;
     if (duration === 0) {
       this.viewportY = newTarget;
-      this.targetViewportY = newTarget;
+      this.#targetViewportY = newTarget;
 
       if (scrollbackLength > 0) {
-        this.showScrollbar();
+        this.#showScrollbar();
       }
       return;
     }
 
     // Update target (accumulate if animation running)
-    this.targetViewportY = newTarget;
+    this.#targetViewportY = newTarget;
 
     // If animation is already running, don't restart it
     // Just let it continue toward the updated target
     // This prevents choppy restarts during continuous scrolling
-    if (this.scrollAnimationFrame) {
+    if (this.#scrollAnimationFrame) {
       return;
     }
 
     // Start new animation
-    this.scrollAnimationStartTime = Date.now();
-    this.animateScroll();
+    this.#scrollAnimationStartTime = Date.now();
+    this.#animateScroll();
   }
 
   /**
    * Animation loop for smooth scrolling
    * Uses asymptotic approach - moves a fraction of remaining distance each frame
    */
-  private animateScroll = (): void => {
-    if (!this.wasmTerm || this.scrollAnimationStartTime === undefined) {
+  #animateScroll = (): void => {
+    if (!this.wasmTerm || this.#scrollAnimationStartTime === undefined) {
       return;
     }
 
     const duration = this.options.smoothScrollDuration ?? 100;
 
     // Calculate distance to target
-    const distance = this.targetViewportY - this.viewportY;
+    const distance = this.#targetViewportY - this.viewportY;
     const absDistance = Math.abs(distance);
 
     // If very close, snap to target
     if (absDistance < 0.01) {
-      this.viewportY = this.targetViewportY;
+      this.viewportY = this.#targetViewportY;
 
       const scrollbackLength = this.getScrollbackLength();
       if (scrollbackLength > 0) {
-        this.showScrollbar();
+        this.#showScrollbar();
       }
 
       // Animation complete
-      this.scrollAnimationFrame = undefined;
-      this.scrollAnimationStartTime = undefined;
+      this.#scrollAnimationFrame = undefined;
+      this.#scrollAnimationStartTime = undefined;
       return;
     }
 
@@ -1152,11 +1152,11 @@ export class Terminal {
     // Show scrollbar during animation
     const scrollbackLength = this.getScrollbackLength();
     if (scrollbackLength > 0) {
-      this.showScrollbar();
+      this.#showScrollbar();
     }
 
     // Continue animation
-    this.scrollAnimationFrame = requestAnimationFrame(this.animateScroll);
+    this.#scrollAnimationFrame = requestAnimationFrame(this.#animateScroll);
   };
 
   // ==========================================================================
@@ -1167,38 +1167,38 @@ export class Terminal {
    * Dispose terminal and clean up resources
    */
   dispose(): void {
-    if (this.isDisposed) {
+    if (this.#isDisposed) {
       return;
     }
 
-    this.isDisposed = true;
-    this.isOpen = false;
+    this.#isDisposed = true;
+    this.#isOpen = false;
 
     // Stop render loop and clear write queue
-    this.cancelRenderLoop();
-    this.writeQueue.length = 0;
+    this.#cancelRenderLoop();
+    this.#writeQueue.length = 0;
 
     // Stop smooth scroll animation
-    if (this.scrollAnimationFrame) {
-      cancelAnimationFrame(this.scrollAnimationFrame);
-      this.scrollAnimationFrame = undefined;
+    if (this.#scrollAnimationFrame) {
+      cancelAnimationFrame(this.#scrollAnimationFrame);
+      this.#scrollAnimationFrame = undefined;
     }
 
     // Clear mouse move throttle timeout
-    if (this.mouseMoveThrottleTimeout) {
-      clearTimeout(this.mouseMoveThrottleTimeout);
-      this.mouseMoveThrottleTimeout = undefined;
+    if (this.#mouseMoveThrottleTimeout) {
+      clearTimeout(this.#mouseMoveThrottleTimeout);
+      this.#mouseMoveThrottleTimeout = undefined;
     }
-    this.pendingMouseMove = undefined;
+    this.#pendingMouseMove = undefined;
 
     // Clean up components
-    this.cleanupComponents();
+    this.#cleanupComponents();
 
     // Dispose event emitters
-    this.dataEmitter.dispose();
-    this.resizeEmitter.dispose();
-    this.changeEmitter.dispose();
-    this.linkEmitter.dispose();
+    this.#dataEmitter.dispose();
+    this.#resizeEmitter.dispose();
+    this.#changeEmitter.dispose();
+    this.#linkEmitter.dispose();
   }
 
   // ==========================================================================
@@ -1208,19 +1208,19 @@ export class Terminal {
   /**
    * Cancel the render loop
    */
-  private cancelRenderLoop(): void {
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = undefined;
+  #cancelRenderLoop(): void {
+    if (this.#animationFrameId) {
+      cancelAnimationFrame(this.#animationFrameId);
+      this.#animationFrameId = undefined;
     }
   }
 
   /**
    * Flush any writes that were queued during resize
    */
-  private flushWriteQueue(): void {
-    while (this.writeQueue.length > 0) {
-      const data = this.writeQueue.shift()!;
+  #flushWriteQueue(): void {
+    while (this.#writeQueue.length > 0) {
+      const data = this.#writeQueue.shift()!;
       this.wasmTerm!.write(data);
     }
   }
@@ -1228,13 +1228,13 @@ export class Terminal {
   /**
    * Start the render loop
    */
-  private startRenderLoop(): void {
-    if (this.animationFrameId) return; // already running
+  #startRenderLoop(): void {
+    if (this.#animationFrameId) return; // already running
     // Search work belongs to animation frames, not to the open or resize
     // call that starts the loop with a paint of its own.
     let inFrame = false;
     const loop = () => {
-      if (!this.isDisposed && this.isOpen) {
+      if (!this.#isDisposed && this.#isOpen) {
         // Render using the core's own dirty tracking
         // The render() method:
         // 1. Begins a frame on the terminal (beginFrame), which brings its
@@ -1245,9 +1245,9 @@ export class Terminal {
           // Search runs first, so this paint shows its results.
           if (inFrame) this.#searchOwner?.runDue();
           inFrame = true;
-          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.paintScrollbarOpacity());
+          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.#paintScrollbarOpacity());
         } finally {
-          if (!this.isDisposed && this.isOpen) this.animationFrameId = requestAnimationFrame(loop);
+          if (!this.#isDisposed && this.#isOpen) this.#animationFrameId = requestAnimationFrame(loop);
         }
       }
     };
@@ -1265,21 +1265,21 @@ export class Terminal {
   /**
    * Clean up components (called on dispose or error)
    */
-  private cleanupComponents(): void {
+  #cleanupComponents(): void {
     this.#searchOwner?.dispose();
     this.#searchOwner = undefined;
     this.#coreAccess?.dispose();
     this.#coreAccess = undefined;
-    this.endScrollbarDrag();
-    this.cancelRenderLoop();
-    if (this.scrollbarAnimationFrame !== undefined) cancelAnimationFrame(this.scrollbarAnimationFrame);
-    this.scrollbarAnimationFrame = undefined;
-    this.linkPress = undefined;
-    this.currentHoveredLink = undefined;
-    this.hoverCells = new VtCells();
+    this.#endScrollbarDrag();
+    this.#cancelRenderLoop();
+    if (this.#scrollbarAnimationFrame !== undefined) cancelAnimationFrame(this.#scrollbarAnimationFrame);
+    this.#scrollbarAnimationFrame = undefined;
+    this.#linkPress = undefined;
+    this.#currentHoveredLink = undefined;
+    this.#hoverCells = new VtCells();
 
-    this.highlightsManager?.dispose();
-    this.highlightsManager = undefined;
+    this.#highlightsManager?.dispose();
+    this.#highlightsManager = undefined;
 
     // Dispose selection manager
     if (this.selectionManager) {
@@ -1299,11 +1299,11 @@ export class Terminal {
       this.renderer = undefined;
     }
 
-    if (this.canvas) {
-      this.canvas.removeEventListener('mousedown', this.handleCanvasFocus);
-      this.canvas.removeEventListener('touchend', this.handleCanvasFocus);
-      this.canvas.remove();
-      this.canvas = undefined;
+    if (this.#canvas) {
+      this.#canvas.removeEventListener('mousedown', this.#handleCanvasFocus);
+      this.#canvas.removeEventListener('touchend', this.#handleCanvasFocus);
+      this.#canvas.remove();
+      this.#canvas = undefined;
     }
 
     // Remove textarea from DOM
@@ -1314,16 +1314,16 @@ export class Terminal {
 
     // Remove event listeners
     if (this.element) {
-      this.element.removeEventListener('beforeinput', this.handleBeforeInput);
-      this.element.removeEventListener('wheel', this.handleWheel, { capture: true });
-      this.element.removeEventListener('pointerdown', this.handlePointerDown, { capture: true });
-      this.element.removeEventListener('pointermove', this.handlePointerMove);
-      this.element.removeEventListener('pointerup', this.handlePointerEnd);
-      this.element.removeEventListener('pointercancel', this.handlePointerEnd);
-      this.element.removeEventListener('lostpointercapture', this.handlePointerEnd);
-      this.element.removeEventListener('mousemove', this.handleMouseMove);
-      this.element.removeEventListener('mouseleave', this.handleMouseLeave);
-      this.element.removeEventListener('click', this.handleClick);
+      this.element.removeEventListener('beforeinput', this.#handleBeforeInput);
+      this.element.removeEventListener('wheel', this.#handleWheel, { capture: true });
+      this.element.removeEventListener('pointerdown', this.#handlePointerDown, { capture: true });
+      this.element.removeEventListener('pointermove', this.#handlePointerMove);
+      this.element.removeEventListener('pointerup', this.#handlePointerEnd);
+      this.element.removeEventListener('pointercancel', this.#handlePointerEnd);
+      this.element.removeEventListener('lostpointercapture', this.#handlePointerEnd);
+      this.element.removeEventListener('mousemove', this.#handleMouseMove);
+      this.element.removeEventListener('mouseleave', this.#handleMouseLeave);
+      this.element.removeEventListener('click', this.#handleClick);
 
       // Remove contenteditable and accessibility attributes added in open()
       this.element.removeAttribute('contenteditable');
@@ -1333,15 +1333,15 @@ export class Terminal {
     }
 
     // Clean up scrollbar timers
-    if (this.scrollbarHideTimeout) {
-      window.clearTimeout(this.scrollbarHideTimeout);
-      this.scrollbarHideTimeout = undefined;
+    if (this.#scrollbarHideTimeout) {
+      window.clearTimeout(this.#scrollbarHideTimeout);
+      this.#scrollbarHideTimeout = undefined;
     }
 
     // Dispose link detector
-    if (this.linkDetector) {
-      this.linkDetector.dispose();
-      this.linkDetector = undefined;
+    if (this.#linkDetector) {
+      this.#linkDetector.dispose();
+      this.#linkDetector = undefined;
     }
 
     // Free WASM terminal
@@ -1351,7 +1351,7 @@ export class Terminal {
     }
 
     // Clear references
-    this.ghostty = undefined;
+    this.#ghostty = undefined;
     this.element = undefined;
     this.textarea = undefined;
   }
@@ -1359,11 +1359,11 @@ export class Terminal {
   /**
    * Assert terminal is open (throw if not)
    */
-  private assertOpen(): void {
-    if (this.isDisposed) {
+  #assertOpen(): void {
+    if (this.#isDisposed) {
       throw new Error('Terminal has been disposed');
     }
-    if (!this.isOpen) {
+    if (!this.#isOpen) {
       throw new Error('Terminal must be opened before use. Call terminal.open(parent) first.');
     }
   }
@@ -1371,27 +1371,27 @@ export class Terminal {
   /**
    * Throttle link hover detection while leaving captured moves synchronous.
    */
-  private handleMouseMove = (e: MouseEvent): void => {
-    if (!this.canvas || !this.renderer || !this.wasmTerm) return;
+  #handleMouseMove = (e: MouseEvent): void => {
+    if (!this.#canvas || !this.renderer || !this.wasmTerm) return;
 
-    if (this.scrollbarDrag) return;
+    if (this.#scrollbarDrag) return;
 
-    if (!this.linkDetector) return;
+    if (!this.#linkDetector) return;
 
     // Throttle to ~60fps (16ms) to avoid blocking scroll/other events
-    if (this.mouseMoveThrottleTimeout) {
-      this.pendingMouseMove = e;
+    if (this.#mouseMoveThrottleTimeout) {
+      this.#pendingMouseMove = e;
       return;
     }
 
-    this.processMouseMove(e);
+    this.#processMouseMove(e);
 
-    this.mouseMoveThrottleTimeout = window.setTimeout(() => {
-      this.mouseMoveThrottleTimeout = undefined;
-      if (this.pendingMouseMove) {
-        const pending = this.pendingMouseMove;
-        this.pendingMouseMove = undefined;
-        this.processMouseMove(pending);
+    this.#mouseMoveThrottleTimeout = window.setTimeout(() => {
+      this.#mouseMoveThrottleTimeout = undefined;
+      if (this.#pendingMouseMove) {
+        const pending = this.#pendingMouseMove;
+        this.#pendingMouseMove = undefined;
+        this.#processMouseMove(pending);
       }
     }, 16);
   };
@@ -1399,11 +1399,11 @@ export class Terminal {
   /**
    * Process mouse move for link detection (internal, called by throttled handler)
    */
-  private processMouseMove(e: MouseEvent): void {
-    if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+  #processMouseMove(e: MouseEvent): void {
+    if (!this.#canvas || !this.renderer || !this.#linkDetector || !this.wasmTerm) return;
 
     // Convert mouse coordinates to terminal cell position
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.#canvas.getBoundingClientRect();
     const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
     const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
 
@@ -1425,18 +1425,18 @@ export class Terminal {
       if (viewportRow < viewportY) {
         // Mouse is over scrollback content
         const scrollbackOffset = scrollbackLength - viewportY + viewportRow;
-        read = this.wasmTerm.readHistoryRow(scrollbackOffset, this.hoverCells);
+        read = this.wasmTerm.readHistoryRow(scrollbackOffset, this.#hoverCells);
       } else {
         // Mouse is over screen content (bottom part of viewport)
         const screenRow = viewportRow - viewportY;
-        read = this.wasmTerm.readRow(screenRow, this.hoverCells);
+        read = this.wasmTerm.readRow(screenRow, this.#hoverCells);
       }
     } else {
       // At bottom - just use screen buffer
-      read = this.wasmTerm.readRow(viewportRow, this.hoverCells);
+      read = this.wasmTerm.readRow(viewportRow, this.#hoverCells);
     }
 
-    const cell = read ? this.hoverCells.at(x) : undefined;
+    const cell = read ? this.#hoverCells.at(x) : undefined;
     if (cell) {
       hyperlinkId = cell.hyperlink;
     }
@@ -1471,21 +1471,21 @@ export class Terminal {
     }
 
     // Make async call non-blocking - don't await
-    this.linkDetector
+    this.#linkDetector
       .getLinkAt(x, bufferRow)
       .then((link) => {
         // Update hover state for cursor changes and click handling
-        if (link !== this.currentHoveredLink) {
+        if (link !== this.#currentHoveredLink) {
           // Update current link
-          this.currentHoveredLink = link;
+          this.#currentHoveredLink = link;
 
           // Update cursor style on both container and canvas
           const cursorStyle = link ? 'pointer' : 'text';
           if (this.element) {
             this.element.style.cursor = cursorStyle;
           }
-          if (this.canvas) {
-            this.canvas.style.cursor = cursorStyle;
+          if (this.#canvas) {
+            this.#canvas.style.cursor = cursorStyle;
           }
 
           // Update renderer for underline (for regex URLs without hyperlink_id)
@@ -1526,71 +1526,71 @@ export class Terminal {
   /**
    * Handle mouse leave to clear link hover
    */
-  private handleMouseLeave = (): void => {
+  #handleMouseLeave = (): void => {
     // Clear both underlines: the OSC 8 link's and the matched URL's.
     if (this.renderer && this.wasmTerm) {
       this.renderer.setHoveredHyperlinkId(0);
       this.renderer.setHoveredLinkRange(null);
     }
 
-    if (this.currentHoveredLink) {
+    if (this.#currentHoveredLink) {
       // Clear hovered link
-      this.currentHoveredLink = undefined;
+      this.#currentHoveredLink = undefined;
 
       // Reset cursor
       if (this.element) {
         this.element.style.cursor = 'text';
-        if (this.canvas) {
-          this.canvas.style.cursor = 'text';
+        if (this.#canvas) {
+          this.#canvas.style.cursor = 'text';
         }
       }
     }
   };
 
-  private handleBeforeInput = (event: Event): void => {
+  #handleBeforeInput = (event: Event): void => {
     if (event.target === this.element) event.preventDefault();
   };
 
-  private handleCanvasFocus = (event: Event): void => {
+  #handleCanvasFocus = (event: Event): void => {
     event.preventDefault();
     this.textarea?.focus({ preventScroll: true });
   };
 
-  private handlePointerDown = (event: PointerEvent): void => {
+  #handlePointerDown = (event: PointerEvent): void => {
     if (!event.isPrimary || (event.pointerType !== 'mouse' && event.pointerType !== 'pen')) return;
-    const press = this.linkPress;
+    const press = this.#linkPress;
     if (press && (press.released || (press.id === event.pointerId && press.type === event.pointerType))) {
-      this.linkPress = undefined;
+      this.#linkPress = undefined;
     }
   };
 
-  private checkLinkDrag(event: MouseEvent): void {
-    const press = this.linkPress;
+  #checkLinkDrag(event: MouseEvent): void {
+    const press = this.#linkPress;
     if (!press || !this.renderer) return;
     const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
     const dx = event.clientX - press.x;
     const dy = event.clientY - press.y;
-    if (dx * dx + dy * dy >= threshold * threshold) this.linkPress = undefined;
+    if (dx * dx + dy * dy >= threshold * threshold) this.#linkPress = undefined;
   }
 
-  private finishLinkPress(event?: MouseEvent): void {
-    if (event?.type !== 'pointerup' || !this.canvas?.isConnected) {
-      this.linkPress = undefined;
+  #finishLinkPress(event?: MouseEvent): void {
+    if (event?.type !== 'pointerup' || !this.#canvas?.isConnected) {
+      this.#linkPress = undefined;
       return;
     }
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.#canvas.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX >= rect.right ||
         event.clientY < rect.top || event.clientY >= rect.bottom) {
-      this.linkPress = undefined;
+      this.#linkPress = undefined;
       return;
     }
-    this.checkLinkDrag(event);
-    if (this.linkPress) this.linkPress.released = true;
+    this.#checkLinkDrag(event);
+    if (this.#linkPress) this.#linkPress.released = true;
   }
 
   // Record disposition before synchronous input listeners can change tracking.
-  private handleLinkPress = (e: PointerEvent, reported: boolean): void => {
-    this.linkPress =
+  #handleLinkPress = (e: PointerEvent, reported: boolean): void => {
+    this.#linkPress =
       e.button === 0
         ? {
             x: e.clientX,
@@ -1606,19 +1606,19 @@ export class Terminal {
   /**
    * Handle mouse click for link activation
    */
-  private handleClick = async (e: MouseEvent): Promise<void> => {
+  #handleClick = async (e: MouseEvent): Promise<void> => {
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
-    if (!this.canvas || !this.renderer || !this.linkDetector || !this.wasmTerm) return;
+    if (!this.#canvas || !this.renderer || !this.#linkDetector || !this.wasmTerm) return;
 
-    const press = this.linkPress;
-    this.linkPress = undefined;
+    const press = this.#linkPress;
+    this.#linkPress = undefined;
     // The second click of a double click selects a word, and a click whose
     // press went to the program is the program's.
     if (e.button !== 0 || e.detail > 1 || !press?.released || press.reported) return;
 
     // Get click position
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.#canvas.getBoundingClientRect();
     const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
     const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
 
@@ -1642,10 +1642,10 @@ export class Terminal {
       bufferRow = scrollbackLength + viewportRow;
     }
 
-    const link = await this.linkDetector.getLinkAt(x, bufferRow);
-    if (!link || this.isDisposed) return;
+    const link = await this.#linkDetector.getLinkAt(x, bufferRow);
+    if (!link || this.#isDisposed) return;
     const { start, end } = link.range;
-    this.linkEmitter.fire({
+    this.#linkEmitter.fire({
       target: link.target,
       kind: link.kind,
       range: { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y } },
@@ -1656,13 +1656,13 @@ export class Terminal {
   /**
    * Handle wheel events for scrolling (Phase 2)
    */
-  private handleWheel = (e: WheelEvent): void => {
+  #handleWheel = (e: WheelEvent): void => {
     // Always prevent default browser scrolling
     e.preventDefault();
     e.stopPropagation();
 
     // Allow custom handler to override
-    if (this.customWheelEventHandler && this.customWheelEventHandler(e)) {
+    if (this.#customWheelEventHandler && this.#customWheelEventHandler(e)) {
       return;
     }
 
@@ -1678,9 +1678,9 @@ export class Terminal {
 
       for (let i = 0; i < count; i++) {
         if (direction === 'up') {
-          this.dataEmitter.fire('\x1B[A'); // Up arrow
+          this.#dataEmitter.fire('\x1B[A'); // Up arrow
         } else {
-          this.dataEmitter.fire('\x1B[B'); // Down arrow
+          this.#dataEmitter.fire('\x1B[B'); // Down arrow
         }
       }
     } else {
@@ -1710,13 +1710,13 @@ export class Terminal {
         // deltaY > 0 = scroll down (decrease viewportY)
         // deltaY < 0 = scroll up (increase viewportY)
         const targetY = this.viewportY - deltaLines;
-        this.smoothScrollTo(targetY);
+        this.#smoothScrollTo(targetY);
       }
     }
   };
 
-  private scrollbarGeometry() {
-    const canvas = this.canvas;
+  #scrollbarGeometry() {
+    const canvas = this.#canvas;
     const history = this.getScrollbackLength();
     if (!canvas || history === 0) return;
     const rect = canvas.getBoundingClientRect();
@@ -1726,21 +1726,21 @@ export class Terminal {
     return { rect, track, thumb, travel, history, top: 4 + travel * (1 - this.viewportY / history) };
   }
 
-  private matchesScrollbarPointer(event: PointerEvent): boolean {
-    const drag = this.scrollbarDrag;
+  #matchesScrollbarPointer(event: PointerEvent): boolean {
+    const drag = this.#scrollbarDrag;
     return !!drag && event.isPrimary && event.pointerId === drag.id && event.pointerType === drag.type;
   }
 
-  private claimScrollbarPress(event: PointerEvent): boolean {
-    if (this.scrollbarDrag) {
-      const captured = this.canvas?.isConnected && this.canvas.hasPointerCapture(this.scrollbarDrag.id);
-      if (captured && !this.matchesScrollbarPointer(event)) return true;
-      this.endScrollbarDrag();
+  #claimScrollbarPress(event: PointerEvent): boolean {
+    if (this.#scrollbarDrag) {
+      const captured = this.#canvas?.isConnected && this.#canvas.hasPointerCapture(this.#scrollbarDrag.id);
+      if (captured && !this.#matchesScrollbarPointer(event)) return true;
+      this.#endScrollbarDrag();
     }
     if (event.button !== 0 || !event.isPrimary ||
         (event.pointerType !== 'mouse' && event.pointerType !== 'pen') ||
-        this.paintScrollbarOpacity() <= 0 || !this.canvas?.isConnected) return false;
-    const geometry = this.scrollbarGeometry();
+        this.#paintScrollbarOpacity() <= 0 || !this.#canvas?.isConnected) return false;
+    const geometry = this.#scrollbarGeometry();
     if (!geometry) return false;
     const { rect, track, thumb, history, top } = geometry;
     const x = event.clientX - rect.left;
@@ -1750,14 +1750,14 @@ export class Terminal {
     // Selection sees the claim, while the page still receives menu-closing presses.
     event.preventDefault();
     if (y >= top && y <= top + thumb) {
-      const canvas = this.canvas;
+      const canvas = this.#canvas;
       try {
         canvas.setPointerCapture(event.pointerId);
         if (!canvas.hasPointerCapture(event.pointerId)) return true;
       } catch {
         return true;
       }
-      this.scrollbarDrag = {
+      this.#scrollbarDrag = {
         id: event.pointerId, type: event.pointerType, lastY: event.clientY,
         userSelect: canvas.style.userSelect, webkitUserSelect: canvas.style.webkitUserSelect,
       };
@@ -1765,21 +1765,21 @@ export class Terminal {
       canvas.style.webkitUserSelect = 'none';
       // Cancel smooth motion before it can change the position under the held thumb.
       this.viewport.scrollTo(this.viewportY);
-      this.showScrollbar();
+      this.#showScrollbar();
     } else if (track > 0) {
       this.viewport.scrollTo(Math.round((1 - (y - 4) / track) * history));
     }
     return true;
   }
 
-  private handlePointerMove = (event: PointerEvent): void => {
-    if (!this.matchesScrollbarPointer(event)) return;
-    const drag = this.scrollbarDrag!;
-    if (event.buttons === 0 || !this.canvas?.isConnected || !this.canvas.hasPointerCapture(drag.id)) {
-      this.endScrollbarDrag();
+  #handlePointerMove = (event: PointerEvent): void => {
+    if (!this.#matchesScrollbarPointer(event)) return;
+    const drag = this.#scrollbarDrag!;
+    if (event.buttons === 0 || !this.#canvas?.isConnected || !this.#canvas.hasPointerCapture(drag.id)) {
+      this.#endScrollbarDrag();
       return;
     }
-    const geometry = this.scrollbarGeometry();
+    const geometry = this.#scrollbarGeometry();
     const delta = event.clientY - drag.lastY;
     // Every move rebases at the actual clamped viewport. Writes can re-anchor
     // that viewport between moves, so neither output nor overshoot is replayed.
@@ -1788,15 +1788,15 @@ export class Terminal {
     this.viewport.scrollTo(this.viewportY - delta * geometry.history / geometry.travel);
   };
 
-  private handlePointerEnd = (event: PointerEvent): void => {
-    if (this.matchesScrollbarPointer(event)) this.endScrollbarDrag();
+  #handlePointerEnd = (event: PointerEvent): void => {
+    if (this.#matchesScrollbarPointer(event)) this.#endScrollbarDrag();
   };
 
-  private endScrollbarDrag(): void {
-    const drag = this.scrollbarDrag;
+  #endScrollbarDrag(): void {
+    const drag = this.#scrollbarDrag;
     if (!drag) return;
-    this.scrollbarDrag = undefined;
-    const canvas = this.canvas;
+    this.#scrollbarDrag = undefined;
+    const canvas = this.#canvas;
     if (canvas) {
       canvas.style.userSelect = drag.userSelect;
       canvas.style.webkitUserSelect = drag.webkitUserSelect;
@@ -1806,76 +1806,76 @@ export class Terminal {
         // Removing a host can already have released its capture.
       }
     }
-    if (this.isOpen && this.getScrollbackLength() > 0) this.showScrollbar();
+    if (this.#isOpen && this.getScrollbackLength() > 0) this.#showScrollbar();
   }
 
   /**
    * Show scrollbar with fade-in and schedule auto-hide
    */
-  private showScrollbar(): void {
+  #showScrollbar(): void {
     if (this.options.testHooks?.scrollbarOpacity !== undefined) return;
     // Clear any existing hide timeout
-    if (this.scrollbarHideTimeout) {
-      window.clearTimeout(this.scrollbarHideTimeout);
-      this.scrollbarHideTimeout = undefined;
+    if (this.#scrollbarHideTimeout) {
+      window.clearTimeout(this.#scrollbarHideTimeout);
+      this.#scrollbarHideTimeout = undefined;
     }
 
-    if (this.scrollbarAnimationFrame !== undefined) {
-      cancelAnimationFrame(this.scrollbarAnimationFrame);
-      this.scrollbarAnimationFrame = undefined;
+    if (this.#scrollbarAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.#scrollbarAnimationFrame);
+      this.#scrollbarAnimationFrame = undefined;
     }
 
     // If not visible, start fade-in
-    if (!this.scrollbarVisible) {
-      this.scrollbarVisible = true;
-      this.scrollbarOpacity = 0;
-      this.fadeInScrollbar();
+    if (!this.#scrollbarVisible) {
+      this.#scrollbarVisible = true;
+      this.#scrollbarOpacity = 0;
+      this.#fadeInScrollbar();
     } else {
       // Already visible, just ensure it's fully opaque
-      this.scrollbarOpacity = 1;
+      this.#scrollbarOpacity = 1;
     }
 
     // Schedule auto-hide (unless dragging)
-    if (!this.scrollbarDrag) {
-      this.scrollbarHideTimeout = window.setTimeout(() => {
-        this.hideScrollbar();
-      }, this.SCROLLBAR_HIDE_DELAY_MS);
+    if (!this.#scrollbarDrag) {
+      this.#scrollbarHideTimeout = window.setTimeout(() => {
+        this.#hideScrollbar();
+      }, this.#SCROLLBAR_HIDE_DELAY_MS);
     }
   }
 
   /**
    * Hide scrollbar with fade-out
    */
-  private hideScrollbar(): void {
-    if (this.scrollbarHideTimeout) {
-      window.clearTimeout(this.scrollbarHideTimeout);
-      this.scrollbarHideTimeout = undefined;
+  #hideScrollbar(): void {
+    if (this.#scrollbarHideTimeout) {
+      window.clearTimeout(this.#scrollbarHideTimeout);
+      this.#scrollbarHideTimeout = undefined;
     }
 
-    if (this.scrollbarVisible) {
-      this.fadeOutScrollbar();
+    if (this.#scrollbarVisible) {
+      this.#fadeOutScrollbar();
     }
   }
 
   /**
    * Fade in scrollbar
    */
-  private fadeInScrollbar(): void {
+  #fadeInScrollbar(): void {
     const startTime = Date.now();
     const animate = () => {
-      this.scrollbarAnimationFrame = undefined;
-      if (!this.isOpen) return;
+      this.#scrollbarAnimationFrame = undefined;
+      if (!this.#isOpen) return;
       const elapsed = Date.now() - startTime;
-      const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
-      this.scrollbarOpacity = progress;
+      const progress = Math.min(elapsed / this.#SCROLLBAR_FADE_DURATION_MS, 1);
+      this.#scrollbarOpacity = progress;
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
       }
 
       if (progress < 1) {
-        this.scrollbarAnimationFrame = requestAnimationFrame(animate);
+        this.#scrollbarAnimationFrame = requestAnimationFrame(animate);
       }
     };
     animate();
@@ -1884,29 +1884,29 @@ export class Terminal {
   /**
    * Fade out scrollbar
    */
-  private fadeOutScrollbar(): void {
+  #fadeOutScrollbar(): void {
     const startTime = Date.now();
-    const startOpacity = this.scrollbarOpacity;
+    const startOpacity = this.#scrollbarOpacity;
     const animate = () => {
-      this.scrollbarAnimationFrame = undefined;
-      if (!this.isOpen) return;
+      this.#scrollbarAnimationFrame = undefined;
+      if (!this.#isOpen) return;
       const elapsed = Date.now() - startTime;
-      const progress = Math.min(elapsed / this.SCROLLBAR_FADE_DURATION_MS, 1);
-      this.scrollbarOpacity = startOpacity * (1 - progress);
+      const progress = Math.min(elapsed / this.#SCROLLBAR_FADE_DURATION_MS, 1);
+      this.#scrollbarOpacity = startOpacity * (1 - progress);
 
       // Trigger render to show updated opacity
       if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+        this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
       }
 
       if (progress < 1) {
-        this.scrollbarAnimationFrame = requestAnimationFrame(animate);
+        this.#scrollbarAnimationFrame = requestAnimationFrame(animate);
       } else {
-        this.scrollbarVisible = false;
-        this.scrollbarOpacity = 0;
+        this.#scrollbarVisible = false;
+        this.#scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
         if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this.paintScrollbarOpacity());
+          this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
         }
       }
     };
@@ -1928,7 +1928,7 @@ export class Terminal {
    * when multiple queries are processed in a single write() call (e.g., when
    * buffered data is written all at once during terminal initialization).
    */
-  private processTerminalResponses(): void {
+  #processTerminalResponses(): void {
     if (!this.wasmTerm) return;
 
     // Read all pending responses from the WASM terminal
@@ -1938,7 +1938,7 @@ export class Terminal {
       if (response === null) break;
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
-      this.dataEmitter.fire(response);
+      this.#dataEmitter.fire(response);
     }
   }
 
@@ -1954,7 +1954,7 @@ export class Terminal {
    * @returns true if mode is enabled
    */
   public getMode(mode: number, isAnsi: boolean = false): boolean {
-    this.assertOpen();
+    this.#assertOpen();
     return this.wasmTerm!.getMode(mode, isAnsi);
   }
 
@@ -1962,7 +1962,7 @@ export class Terminal {
    * Check if bracketed paste mode is enabled
    */
   public hasBracketedPaste(): boolean {
-    this.assertOpen();
+    this.#assertOpen();
     return this.wasmTerm!.hasBracketedPaste();
   }
 
@@ -1970,7 +1970,7 @@ export class Terminal {
    * Check if focus event reporting is enabled
    */
   public hasFocusEvents(): boolean {
-    this.assertOpen();
+    this.#assertOpen();
     return this.wasmTerm!.hasFocusEvents();
   }
 
@@ -1978,7 +1978,7 @@ export class Terminal {
    * Check if mouse tracking is enabled
    */
   public hasMouseTracking(): boolean {
-    this.assertOpen();
+    this.#assertOpen();
     return this.wasmTerm!.hasMouseTracking();
   }
 }
