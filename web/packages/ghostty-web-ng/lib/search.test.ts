@@ -151,6 +151,20 @@ function placementStopsAt(...at: number[]) {
     return { ranges: batch.ranges.slice(0, cut - start), next: cut, total: batch.total };
   });
 }
+// Placement held at list entry `at`, its slice spent at each read that
+// reaches it, as feeds that spend every frame's slice hold it, until the
+// returned release.
+function placementHeldAt(at: number): () => void {
+  let held = true;
+  const read = VtSearch.prototype.readMatches;
+  vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, start: number, budget: number) {
+    const batch = read.call(this, start, budget);
+    if (!held || start > at || batch.next <= at) return batch;
+    now += 5;
+    return { ranges: batch.ranges.slice(0, at - start), next: at, total: batch.total };
+  });
+  return () => { held = false; };
+}
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `needle ${i}`).join('\r\n');
 // Needles on irregular rows and columns, so a wrong row or a wrong entry
@@ -835,6 +849,85 @@ describe('widget search', () => {
     }
     expect(active(term)).toEqual([wrapped]);
     expect(search.state).toEqual({ index: 125, total: 241, partial: false });
+  });
+
+  // The middle page's oldest match, 232:0, with placement held after the
+  // active-area entries of three listed pages, so the placed list lacks
+  // only the match wrapped across the first page boundary. The first listed
+  // page is the page above: its newest entry, 230:0, ends above the screen,
+  // so the rule waits for the entry after them. Reached either way, the
+  // count it reads at the press is this listing's, not one read before the
+  // output.
+  test.each([
+    { name: 'three listed pages throughout', before: 240, newer: 0, older: 123 },
+    { name: 'one page listed in order before the output', before: 100, newer: 18, older: 0 },
+  ])('after output, older from the middle page waits for the match wrapped across the first page boundary, $name', async ({ before, newer, older }) => {
+    const lines = threeStraddled.split('\r\n');
+    const { term } = await create(lines.slice(0, before).join('\r\n'), 200, 20, 10_000_000);
+    const wrapped = range(230, 197, 231, 2);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    if (before < lines.length) {
+      term.write('\r\n' + lines.slice(before).join('\r\n'));
+      settle(search);
+    }
+    for (let i = 0; i < newer; i++) search.step('needle', 'newer');
+    for (let i = 0; i < older; i++) search.step('needle', 'older');
+    expect(active(term)).toEqual([range(232, 0)]);
+    expect(search.state).toEqual({ index: 124, total: 241, partial: false });
+    const raw = term.core!.createSearch();
+    raw.setNeedle('needle');
+    raw.feed();
+    const head = raw.state().total;
+    raw.free();
+    expect(head, 'the active-area entries of the three listed pages').toBe(240);
+    const release = placementHeldAt(head);
+    term.write('\x1b[m');
+    frame();
+    frame();
+    expect(all(term), 'placement holds after the active-area entries').toHaveLength(head);
+    expect(search.state, 'placement reached the active match').toEqual({ index: 124, total: 241, partial: true });
+    search.step('needle', 'older');
+    expect(active(term), 'the press waits for the wrapped match').toEqual([range(232, 0)]);
+    for (let i = 0; i < 5; i++) {
+      frame();
+      expect([range(232, 0), wrapped], `frame ${i}: the press waits on its match or lands on its neighbour`).toContainEqual(active(term)?.[0]);
+    }
+    release();
+    settle(search);
+    expect(active(term)).toEqual([wrapped]);
+    expect(search.state).toEqual({ index: 125, total: 241, partial: false });
+  });
+
+  // A newer press from no active match that lands at its one-second cap
+  // reads no ordering rule, so the count of entries it waits for is still
+  // unread when the next write takes the window. The write has changed the
+  // core's listing by then, and reading it feeds the core inside the
+  // write, which at the largest history costs a frame's work.
+  test.each([
+    { name: 'a listing a page ahead, its scan running', input: () => paged(1, 4000), cols: 200, rows: 5, partial: true },
+    { name: 'one page in order, its scan complete', input: () => numbered(20_000), cols: 40, rows: 6, partial: false },
+  ])('a write that takes the window reads nothing of the core, $name', async ({ input, cols, rows, partial }) => {
+    const { term } = await create(input(), cols, rows, 10_000_000);
+    const feeds = vi.spyOn(VtSearch.prototype, 'feed');
+    const reads = vi.spyOn(VtSearch.prototype, 'matchAt');
+    const search = searchOf(term);
+    search.step('needle', 'newer');
+    for (let i = 0; i < 200 && !active(term); i++) {
+      now += 16;
+      frame();
+    }
+    expect(active(term), 'the press landed at its cap').toBeDefined();
+    expect(search.state.partial).toBe(partial);
+    expect(search.state.index, 'on a placed index, so the write takes a window').not.toBeNull();
+    feeds.mockClear();
+    reads.mockClear();
+    term.write('\r\nneedle new');
+    expect({ feeds: feeds.mock.calls.length, reads: reads.mock.calls.length }, 'inside the write').toEqual({ feeds: 0, reads: 0 });
+    now += 16;
+    frame();
+    expect(feeds, 'the next frame feeds the write').toHaveBeenCalledTimes(1);
   });
 
   test.each([
