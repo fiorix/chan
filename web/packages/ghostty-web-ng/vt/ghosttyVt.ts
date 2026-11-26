@@ -302,8 +302,8 @@ const MODE_GRAPHEME_CLUSTER = 2027;
 
 /// Whether a reply is upstream's answer to an OSC 4, 10, 11 or 12 color
 /// query, or to an OSC 21 query of kitty's color protocol. chan answers
-/// none: a program that exits before reading the reply leaves the PTY to
-/// echo it into the next prompt.
+/// none, as ghostty-web's build never did: a program that exits before
+/// reading the reply leaves the PTY to echo it into the next prompt.
 /// Upstream writes each query's answer as one reply that starts with the
 /// query's own OSC number.
 function isColorReport(reply: Uint8Array): boolean {
@@ -314,8 +314,8 @@ function isColorReport(reply: Uint8Array): boolean {
   return ident === "4" || ident === "10" || ident === "11" || ident === "12" || ident === "21";
 }
 
-/// Whether a reply is upstream's answer to an XTVERSION query, which chan
-/// leaves unanswered.
+/// Upstream answers XTVERSION (`CSI > q`) with its own name, `libghostty`.
+/// chan's terminals give no version reply, as ghostty-web's build gave none.
 function isVersionReport(reply: Uint8Array): boolean {
   return reply[0] === 0x1b && reply[1] === 0x50 && reply[2] === 0x3e && reply[3] === 0x7c;
 }
@@ -438,11 +438,10 @@ class VtWasm {
 
   /// Refuses a core this binding does not drive. The tables and calls in
   /// this module are libghostty-vt's 1.x ABI, which a minor only adds to,
-  /// and the widget's find needs the search feature Ghostty's wasm builds
+  /// and chan's terminals need the search feature Ghostty's wasm builds
   /// carry. Either mismatch would fail inside a user's terminal; failing
-  /// here, as a `GhosttyVtRefusal`, lets the loader tell it from a failure a
-  /// retry can pass: it keeps the refusal for the page's life, and the
-  /// terminal shows it in its own area until a reload.
+  /// here lets the app show the refusal on the failure card in that
+  /// terminal's place before the terminal opens.
   #checkBuild(): void {
     const B = ABI.GhosttyBuildInfo;
     const out = this.alloc(8);

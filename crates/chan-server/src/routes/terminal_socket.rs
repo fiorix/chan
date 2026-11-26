@@ -27,6 +27,9 @@ pub(super) struct TerminalSocket {
     pub(super) stream: SplitStream<WebSocket>,
     pub(super) input: InputState,
     state: Arc<AppState>,
+    /// A wait outside the socket loop ran out its view's stall, so the
+    /// socket ends with the stall close.
+    stalled: bool,
 }
 
 pub(super) struct InputState {
@@ -35,6 +38,14 @@ pub(super) struct InputState {
     pub(super) size_conditional: bool,
     pub(super) focus: Option<u64>,
     pub(super) queue_details: bool,
+    /// Text frames read from the client. Only the page's script sends
+    /// them, so a count that moves shows the page runs; a stopped page's
+    /// network stack can still answer protocol pings.
+    pub(super) frames: u64,
+    /// The wait of a view for its client to report progress: one that
+    /// needs recovery, or one whose window is full after its program
+    /// exited. It is kept where the client's frames are read.
+    pub(super) stall: Option<Stall>,
     replies: VecDeque<(usize, Message)>,
     reply_bytes: usize,
     cwd: Option<CwdFuture>,
@@ -58,11 +69,14 @@ impl TerminalSocket {
                 size_conditional,
                 focus: None,
                 queue_details: false,
+                frames: 0,
+                stall: None,
                 replies: VecDeque::new(),
                 reply_bytes: 0,
                 cwd: None,
             },
             state,
+            stalled: false,
         }
     }
 
@@ -106,7 +120,9 @@ impl TerminalSocket {
     /// How many raw bytes the client's window allows now, waiting for an
     /// acknowledgement when it is full. Input stays live during the wait. An
     /// end of the session ends the wait with an error: the socket drops and
-    /// the client redials into the outcome the server retained.
+    /// the client redials into the outcome the server retained. So does the
+    /// stall of a view released during the wait, which marks the socket for
+    /// the stall close: the wait never returns to the loop that polls it.
     pub(super) async fn output_credit(&mut self, session: &AttachHandle) -> Result<usize, ()> {
         let Some(progress) = session.output_progress() else {
             return Ok(usize::MAX);
@@ -125,10 +141,18 @@ impl TerminalSocket {
             ) {
                 return Err(());
             }
+            let stall_deadline = self.input.stall.as_ref().and_then(|stall| stall.deadline);
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => return Err(()),
                 changed = lifecycle.changed() => changed.map_err(|_| ())?,
+                // Above the client's frames, as in the socket loop.
+                () = tokio::time::sleep_until(
+                    stall_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if stall_deadline.is_some() => {
+                    self.stalled = true;
+                    return Err(());
+                }
                 result = self.input.next_cwd() => self.input.complete_cwd(result)?,
                 message = self.stream.next() => {
                     self.input.receive(&self.state, session, message)?;
@@ -197,6 +221,14 @@ impl TerminalSocket {
             finish_socket(socket, code, reason).await;
         }
     }
+
+    /// End the socket with `finish`, or with the stall close when a wait
+    /// outside the socket loop ran out its view's stall, or else drop it.
+    pub(super) async fn end(self, finish: Option<(u16, &'static str)>) {
+        if let Some((code, reason)) = finish.or(self.stalled.then_some(STALL_CLOSE)) {
+            self.finish(code, reason.into()).await;
+        }
+    }
 }
 
 impl InputState {
@@ -246,8 +278,28 @@ impl InputState {
             Message::Close(_) => return Err(()),
             Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => return Ok(()),
         };
+        let progress = session.output_progress();
+        // The first text frame read after a release starts the stall clock
+        // wherever the socket reads it, also inside a send that was pending
+        // at the release, where the loop does not see the release. The
+        // wait starts before the frame counts, and the update follows the
+        // frame's own ack, so an ack that advances restarts it instead.
+        if self.stall.is_none() {
+            if let Some(progress) = progress.as_ref().filter(|progress| progress.needs_replay()) {
+                self.stall = Some(Stall::new(progress.acked(), self.frames));
+            }
+        }
+        self.frames += 1;
         self.client.observe(Some(session.id()), None);
-        match serde_json::from_str::<ClientFrame>(&text) {
+        let applied = self.apply(state, session, &text);
+        if let (Some(stall), Some(progress)) = (self.stall.as_mut(), progress) {
+            stall.update(progress.acked(), self.frames);
+        }
+        applied
+    }
+
+    fn apply(&mut self, state: &AppState, session: &AttachHandle, text: &str) -> Result<(), ()> {
+        match serde_json::from_str::<ClientFrame>(text) {
             Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {
                 let Some(data) = client_input_bytes(&frame) else {
                     return self.reply(ServerFrame::Error {

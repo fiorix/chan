@@ -251,6 +251,46 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  // The widget's ordering rule (`orderedFrom` in lib/search.ts) waits for
+  // no entry after the active-area entries where the first listed page's
+  // newest match ends on the screen, because the core lists no match
+  // wrapped across a page boundary that is on the screen after those
+  // entries. At this size it lists none at all; at some sizes it lists one
+  // among them, as a range whose end precedes its start. A core that listed
+  // one after them would let a press step over it.
+  test("a needle wrapped across a page boundary on the screen is listed only once the boundary is above it", async () => {
+    // Lines of 300 cells take two rows at 200 columns, and the core's pages
+    // hold 231 rows there; line 200 takes one row, so line 231 lies on rows
+    // 461 and 462, across the boundary of the screen's two pages, and line
+    // 235 on rows 469 and 470, inside the last page. Both wrap a needle
+    // from column 197. The screen is the last 20 of 479 rows.
+    const t = await terminal(200, 20);
+    const wrap = "needle ".padEnd(197, "y") + "needle" + "z".repeat(97);
+    t.write(Array.from({ length: 240 }, (_, i) =>
+      i === 231 || i === 235 ? wrap : i === 200 ? "needle one row" : "needle ".padEnd(300, "x")).join("\r\n"));
+    const across = range(461, 197, 462, 2);
+    const inside = range(469, 197, 470, 2);
+    const listed = () => {
+      const s = t.createSearch();
+      s.setNeedle("needle");
+      scan(s);
+      const all = s.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1_000_000);
+      s.free();
+      const has = (r: MatchRange) => all.some((m) => m.startRow === r.startRow && m.startCol === r.startCol && m.endRow === r.endRow && m.endCol === r.endCol);
+      return { history: t.getScrollbackLength(), across: has(across), inside: has(inside) };
+    };
+    const seen = [listed()];
+    for (let i = 0; i < 2; i++) {
+      t.write("\r\n" + "needle ".padEnd(300, "x"));
+      seen.push(listed());
+    }
+    expect(seen).toEqual([
+      { history: 459, across: false, inside: true },
+      { history: 461, across: false, inside: true },
+      { history: 463, across: true, inside: true },
+    ]);
+  });
+
   test("columns count a wide character as two cells", async () => {
     const t = await terminal(40, 5);
     t.write("中文 target\r\n");
