@@ -320,14 +320,15 @@ describe("writeEditorBuffer's quota retry", () => {
     vi.unstubAllGlobals();
   });
 
-  // The store refuses the first write under `key` with a quota error, and,
-  // given `walkError`, every walk past its first key throws that.
-  function refuseOnce(key: string, walkError: Error | null = null): void {
+  // The store refuses writes under `key` with a quota error: the first one,
+  // or, given `full`, every one while `full()` holds. Given `walkError`,
+  // every walk past its first key throws that.
+  function refuseWrites(key: string, { full, walkError }: { full?: () => boolean; walkError?: Error } = {}): void {
     const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
     const setItem = store.setItem;
     let refused = false;
     vi.spyOn(store, "setItem").mockImplementation(function (this: Storage, k: string, v: string) {
-      if (k === key && !refused) {
+      if (k === key && (full ? full() : !refused)) {
         refused = true;
         throw new DOMException("quota", "QuotaExceededError");
       }
@@ -349,7 +350,9 @@ describe("writeEditorBuffer's quota retry", () => {
 
   test("a write the store refuses is written after a prune", () => {
     writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
-    refuseOnce(bufferKey("a"));
+    // The store stays full until the prune evicts the stale entry, so a
+    // retry ahead of the prune is refused as well.
+    refuseWrites(bufferKey("a"), { full: () => localStorage.getItem(bufferKey("stale")) !== null });
     writeEditorBuffer("a", "body", "a.md");
     expect(localStorage.getItem(bufferKey("stale")), "the prune ran").toBeNull();
     expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
@@ -357,7 +360,7 @@ describe("writeEditorBuffer's quota retry", () => {
 
   test("a prune that meets a bug still lets the write through, and reports the bug", () => {
     twoOthers();
-    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    refuseWrites(bufferKey("a"), { walkError: new TypeError("a bug in the walk") });
     const reported: unknown[] = [];
     vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
     expect(() => writeEditorBuffer("a", "body", "a.md"), "the editor's write throws nothing").not.toThrow();
@@ -367,7 +370,7 @@ describe("writeEditorBuffer's quota retry", () => {
 
   test("without reportError the bug is thrown again in a microtask", () => {
     twoOthers();
-    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    refuseWrites(bufferKey("a"), { walkError: new TypeError("a bug in the walk") });
     const queued: Array<() => void> = [];
     vi.stubGlobal("reportError", undefined);
     vi.stubGlobal("queueMicrotask", (callback: () => void) => void queued.push(callback));
@@ -385,7 +388,7 @@ describe("writeEditorBuffer's quota retry", () => {
     twoOthers();
     queueBufferWrite("a", "first", "a.md");
     queueBufferWrite("b", "second", "b.md");
-    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    refuseWrites(bufferKey("a"), { walkError: new TypeError("a bug in the walk") });
     const reported: unknown[] = [];
     vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
     let flushed = -1;

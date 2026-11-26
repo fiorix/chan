@@ -11,7 +11,7 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { SCROLLBACK_MB_MAX } from "../terminal/scrollback";
+import { SCROLLBACK_MB_MAX, SCROLLBACK_MB_MIN } from "../terminal/scrollback";
 import {
   installTerminalDom,
   resetTerminals,
@@ -57,5 +57,20 @@ describe("the scrollback budget", () => {
     const [tab] = seatTerminals([terminalTab()]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect(term.options.scrollbackBytes).toBe(SCROLLBACK_MB_MAX * MIB);
+  });
+
+  // A zero budget is no budget to the widget, which would keep its line cap.
+  test("takes a zero setting as the 50 MB default, as the server does", async () => {
+    serveScrollbackMb(0);
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    expect(term.options.scrollbackBytes).toBe(50 * MIB);
+  });
+
+  test.each([1, 9])("takes a setting of %i MB, under the slider's range, at its bottom", async (mb) => {
+    serveScrollbackMb(mb);
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    expect(term.options.scrollbackBytes).toBe(SCROLLBACK_MB_MIN * MIB);
   });
 });
