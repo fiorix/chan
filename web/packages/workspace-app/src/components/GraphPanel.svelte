@@ -276,12 +276,14 @@
   /// the spine never read) would be skipped, and while a whole fetch is in
   /// flight asking it would start that fetch again for nothing. The rule
   /// also admits a folder under a parent whose read found it gone: it is
-  /// asked once, which during a whole fetch that does not list it starts
-  /// that fetch again, and then stays asked until a patch reads that
-  /// parent's level. With no spine yet every one is asked, for the fetch
-  /// that brings their nodes. While a whole fetch is in flight, none it
-  /// lists is asked (`spineListing`): that fetch reads its level, and an
-  /// ask would only start it again.
+  /// asked once, which under an answer of the whole tree, during a whole
+  /// fetch that does not list it, starts that fetch again, and then stays
+  /// asked until a patch reads that parent's level. With no spine yet every
+  /// one is asked, for the fetch that brings their nodes. While a whole
+  /// fetch is in flight, none it lists is asked (`spineListing`): that
+  /// fetch reads its level, and an ask would only start it again. Over the
+  /// listing cap none is asked while one is in flight: its landing reads
+  /// every directory opened since its list was taken (`loadSpine`).
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
@@ -290,6 +292,7 @@
   /// opens a level, and the directories it opens above it through this,
   /// leaving a failed one to its retry too.
   function loadOpenedChildren(leaveFailed = false): void {
+    if (spineLoading && (kept ?? taken)?.tree != null) return;
     const withChildren = new Set<string>();
     if ((kept ?? taken)?.tree == null) {
       for (const n of nodes) {
