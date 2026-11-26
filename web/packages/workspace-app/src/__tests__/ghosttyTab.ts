@@ -124,6 +124,7 @@ export function ghosttyMode(term: Terminal, mode: number): boolean {
 }
 
 export function ghosttyAlternateScreen(term: Terminal): boolean {
+  if (!term.core) throw new Error("the widget is not open");
   return term.buffer.active.type === "alternate";
 }
 
