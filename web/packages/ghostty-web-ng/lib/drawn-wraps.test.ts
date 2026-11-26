@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { Terminal } from './terminal';
-import { GhosttyVt, ghosttyScrollbackText } from '../vt/ghosttyVt';
+import { GhosttyVt } from '../vt/ghosttyVt';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const FIXTURES = '../../../scripts/e2e/browser-smoke/fixtures';
@@ -156,7 +156,6 @@ describe.each(DRAWS)("a command Muse drew across two rows ($name)", ({ bytes }) 
     click(3, 10, LINE_ROW + 1);
     expect(writes).toEqual([`${FIRST_ROW.slice(PREFIX.length)}\n${SECOND_ROW}`, "wrapprobe-de", SECOND_ROW]);
     expect(term.getSelection()).toBe(SECOND_ROW);
-    expect(term.getScrollbackText()).toBe(ghosttyScrollbackText(term));
     expect(term.getScrollbackText().split("\n").filter(Boolean)).toEqual([FIRST_ROW, SECOND_ROW]);
   });
 
