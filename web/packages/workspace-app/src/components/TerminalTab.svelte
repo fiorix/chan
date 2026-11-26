@@ -1307,7 +1307,7 @@
       showLoadFailure(err, ghosttyLoadIsFinal(err));
       return;
     }
-    if (attempt !== startAttempt || !host || term) return;
+    if (overtaken()) return;
     try {
       openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes });
     } catch (err) {
@@ -2705,7 +2705,6 @@
 
   /// The load error's Retry: load again, from whatever the loader kept.
   function retryLoad(): void {
-    loadFailure = null;
     void start();
   }
 
@@ -3037,7 +3036,7 @@
   /// state from the first use; null while no terminal is open, since a
   /// search reached before open is inert and reports nothing.
   function terminalSearch(): TerminalSearch | null {
-    if (!term?.core) return null;
+    if (!term) return null;
     findSubscription ??= term.search.onChange((state) => {
       findCount = state;
     });
