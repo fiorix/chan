@@ -1540,6 +1540,62 @@ describe("the workspace tree", () => {
     expect(levelReads("")).toBe(2);
   });
 
+  test("a folder opened under one still being read over the listing cap is read once its parent's level lands", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.fs.nodes.push(fsg.file("a/b/y.md"));
+    graphServer.fs.edges.push(fsg.contains("a/b", "a/b/y.md"));
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      await doubleClick("directory:a");
+      expect(levelReads("a"), "a's level is being read").toBe(1);
+      await doubleClick("directory:a/b");
+      expect({ a: tab.expanded.a, "a/b": tab.expanded["a/b"] }).toEqual({ a: true, "a/b": true });
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }).toEqual({ a: 1, "a/b": 1 });
+    expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+  });
+
+  test("a folder not on disk when its parent's level is read over the listing cap is read once it is there", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view = { nodes: [g.dir(""), g.dir("a")], edges: [g.edge("", "directory:a", "contains")] };
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => n.path !== "a/b");
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "a/b");
+    graphServer.tree = "folders";
+    // `a/b` is open under the closed `a`, and not on disk.
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, "a/b": true } }));
+    await doubleClick("directory:a");
+    expect(tab.expanded.a).toBe(true);
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }, "a's level holds no a/b").toEqual({ a: 1, "a/b": 0 });
+
+    // `a/b` is moved into place with its file, and the change names it
+    // alone: the patch reads `a` again, which brings its node.
+    graphServer.fs.nodes.push(fsg.dir("a/b"), fsg.file("a/b/y.md"));
+    graphServer.fs.edges.push(fsg.contains("a", "a/b"), fsg.contains("a/b", "a/b/y.md"));
+    graphReloadSignal.paths = ["a/b"];
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle();
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }).toEqual({ a: 2, "a/b": 0 });
+
+    // The window's graph comes back over the cap, and taking it reads what
+    // the opened set lacks.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+    };
+    await refreshGraph();
+    await settle(20);
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }).toEqual({ a: 2, "a/b": 1 });
+    expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,

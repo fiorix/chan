@@ -321,6 +321,28 @@ describe("root failures remain fatal", () => {
     expect(canvas.props!.nodes).toHaveLength(0);
     expect(reads(path)).toBe(1);
   });
+
+  test("a double-click on a folder no read covers after a root failure fetches the spine again", async () => {
+    // Over the listing cap: the folders, and none of their files.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("notes")],
+      edges: [g.edge(directoryNodeId(""), directoryNodeId("notes"), "contains")],
+    };
+    graphServer.tree = "folders";
+    failLevel("", 1);
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(target.querySelector(".placeholder.error")?.textContent).toBe(timeout("").message);
+    expect(reads("")).toBe(1);
+
+    canvas.props!.onSelect(directoryNodeId("notes"));
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle(20);
+    expect(tab.expanded.notes).toBe(true);
+    expect({ root: reads(""), notes: reads("notes") }).toEqual({ root: 2, notes: 1 });
+    expect(visibleIds()).toContain("notes/a.md");
+    expect(target.querySelector(".placeholder.error")).toBeNull();
+  });
 });
 
 describe("a failed level belongs to its load", () => {
