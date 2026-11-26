@@ -836,6 +836,25 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         }
       }
 
+      // 6, at a callback: a widget the caller hands to a parameter the
+      // callback declares as a type that names nothing of it. The
+      // callback's contextual type may admit null or undefined, as a
+      // promise's `then` does.
+      if (source.kind === "shipped" && (ts.isArrowFunction(node) || ts.isFunctionExpression(node))) {
+        const context = checker.getContextualType(node);
+        const signature = context && checker.getSignaturesOfType(checker.getNonNullableType(context), ts.SignatureKind.Call)[0];
+        node.parameters.forEach((parameter, i) => {
+          if (!signature || !parameter.type || i >= signature.parameters.length) return;
+          const declared = checker.getTypeFromTypeNode(parameter.type);
+          if (!opaque(declared)) return;
+          const given = checker.getTypeOfSymbolAtLocation(signature.parameters[i], node);
+          const classes = parts(given).filter((t) => widgetClass(t.getSymbol()));
+          if (classes.length > 0 && !classes.every(isError)) {
+            report("escape", parameter, `${nameOf(given)} into a parameter ${checker.typeToString(declared)}`);
+          }
+        });
+      }
+
       // 5. Implementation names.
       if (source.kind === "shipped") {
         const member = memberNamed(node);
@@ -925,6 +944,9 @@ const PLANTS = new Map<string, string>([
       "export const kept = (term: Terminal) => new Set<object>([term]);",
       "const rawT = <T>(o: T): Raw => o as unknown as Raw;",
       "export const viaT = (term: Terminal) => rawT(term).isOpen;",
+      "export const mapped = (term: Terminal) => [term].map((t: any) => t.isOpen as boolean);",
+      "export const mappedUnknown = (term: Terminal) => [term].map((t: unknown) => (t as Raw).isOpen);",
+      "export const promised = (term: Terminal) => Promise.resolve(term).then((t: any) => t.isOpen as boolean);",
     ].join("\n"),
   ],
   [
@@ -951,6 +973,7 @@ const PLANTS = new Map<string, string>([
       "{#each [term] as one}<i>{(one as unknown as { canvas: HTMLCanvasElement }).canvas}</i>{/each}",
       '{#snippet row(t: Terminal)}<b title={t["isOpen"]}></b>{/snippet}',
       "{#snippet gen<T>(t: T)}<b>{(t as unknown as { isOpen: boolean }).isOpen}</b>{/snippet}",
+      "{#each [term] as one}<i>{[one].map((x: any) => x.isOpen)}</i>{/each}",
     ].join("\n"),
   ],
   [
@@ -1054,6 +1077,9 @@ const PLANTED: readonly Finding[] = [
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 65, key: "Terminal into {}" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 66, key: "Terminal into object" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 67, key: "type parameter T to unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 69, key: "Terminal into a parameter any" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 70, key: "Terminal into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 71, key: "Terminal into a parameter any" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
@@ -1068,6 +1094,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "Terminal.canvas" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 10, key: "Terminal.isOpen" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 11, key: "type parameter T to unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryPlant.svelte", line: 12, key: "Terminal into a parameter any" },
   { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "any" },
   { rule: "member", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "Terminal.isOpen" },
   { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 13, key: "unknown" },
