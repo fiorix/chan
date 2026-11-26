@@ -1687,11 +1687,11 @@ export class VtTerminal {
 /// the search reads the current rows again after its next feed.
 export type MatchRange = { startRow: number; startCol: number; endRow: number; endCol: number };
 
-/// The core's count of a search and its own selection. `index` counts from
-/// the newest match, 0 the newest, the order of `VtSearch.matchesBetween`;
-/// it and `active` are null while nothing is selected. `complete` means
-/// the scan has caught up with the terminal as of the last feed, which a
-/// later write undoes until the next one.
+/// The core's count of a search and its own selection. `index` is the
+/// selected match's position in the core's listing (see `VtSearch`), 0 its
+/// first entry; it and `active` are null while nothing is selected.
+/// `complete` means the scan has caught up with the terminal as of the last
+/// feed, which a later write undoes until the next one.
 export type SearchState = { total: number; index: number | null; active: MatchRange | null; complete: boolean };
 
 /// Byte offsets of the scratch area each search keeps for out parameters.
@@ -1852,8 +1852,9 @@ export class VtSearch {
     this.#check("feeding", this.#wasm.fn.ghostty_search_feed(this.#handle));
   }
 
-  /// Selects the next match toward older output: the newest match first,
-  /// then up through the history, wrapping from the oldest to the newest.
+  /// Selects the next entry of the core's listing (see the class): its first
+  /// entry when nothing is selected, wrapping from the last to the first.
+  /// That is toward older output only where the listing is newest first.
   /// Feeds the terminal's changes first and selects among the matches found
   /// so far: right after a needle change those are the newest ones, and the
   /// selection stays on its match while `step` completes the scan. False
@@ -1862,8 +1863,8 @@ export class VtSearch {
     return this.#select(true);
   }
 
-  /// Selects the next match toward newer output, wrapping from the newest
-  /// to the oldest; otherwise as `selectNext`.
+  /// Selects the entry before the selected one in the core's listing,
+  /// wrapping from the first to the last; otherwise as `selectNext`.
   selectPrev(): boolean {
     return this.#select(false);
   }
@@ -1980,11 +1981,13 @@ export class VtSearch {
   }
 
   /// The index of the match that starts at SCREEN row `row` and column
-  /// `col`, counted as `SearchState.index` is (0 the newest) among the
-  /// matches found so far; null when none starts there. Feeds first when the
-  /// terminal changed, as `state` does. It places matches from the newest
-  /// until it reaches the cell, so a match high in a long history costs a
-  /// placement per match below it.
+  /// `col`, its position in the core's listing as `SearchState.index` is,
+  /// among the matches found so far; null when none starts there. Feeds
+  /// first when the terminal changed, as `state` does. It places listed
+  /// matches until one starts above the cell, so a match high in a long
+  /// history costs a placement per match below it. That stop holds only
+  /// where the listing is newest first: where the core lists a page ahead of
+  /// the screen's (see the class), it can return null for a listed match.
   indexOfMatchAt(row: number, col: number): number | null {
     if (!this.#live()) return null;
     const F = LAYOUT.GhosttySelection.fields;
@@ -2029,9 +2032,9 @@ export class VtSearch {
   }
 
   /// Calls `visit` with the address of each match's `GhosttySelection` and
-  /// its index, newest first, until it returns false. The core copies the
-  /// list into a block that lives for the call. Feeds first when the
-  /// terminal changed.
+  /// its index, in the core's listing order (see the class), until it
+  /// returns false. The core copies the list into a block that lives for the
+  /// call. Feeds first when the terminal changed.
   #eachMatch(visit: (sel: number, index: number) => boolean): void {
     this.#catchUp();
     const S = LAYOUT.GhosttySelection;

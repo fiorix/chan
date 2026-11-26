@@ -766,8 +766,8 @@ export class Terminal {
       return; // No change
     }
 
-    // Cancel render loop before resize to prevent accessing detached TypedArray
-    // views while WASM reallocates buffers. We restart it after resize completes.
+    // Cancel the loop's booked frame. The finally below books a new one when
+    // the resize ends, whether or not it completed.
     this.#cancelRenderLoop();
 
     try {
