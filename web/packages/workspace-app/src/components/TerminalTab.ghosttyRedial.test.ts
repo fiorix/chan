@@ -495,6 +495,47 @@ describe("a redial whose answer does not continue the view", () => {
     expect(newRowsShown(term), "every row of the new session once").toEqual(Array(20).fill(1));
   });
 
+  test.each([
+    { name: "drops a mode the program turned off", reasserted: "", mode1000: false },
+    { name: "keeps a mode the program still has on", reasserted: "\x1b[?1000h", mode1000: true },
+  ])("of a fresh view, cut after its alternate-screen reassert, $name before the redial", async ({ reasserted, mode1000 }) => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    first.onopen?.();
+    expect(dialed(first), "fixture: a fresh dial").toMatchObject({ since: "0", generation: null });
+    await receive(first, session(500, 0, 0));
+    await output(first, ALT_SCREEN_ATTACH_PRELUDE + "\x1b[?1000h");
+    expect(ghosttyMode(term, 1000), "fixture: the reassert turned mouse tracking on").toBe(true);
+    // The socket ends after the reassert, before `ready`, and the tab dials
+    // again while the program decides its mouse tracking.
+    const second = await redialedAfterCut(first);
+    expect(dialed(second), "the redial is fresh").toMatchObject({ since: "0", generation: null });
+    await receive(second, session(520, 0, 0));
+    await output(second, ALT_SCREEN_ATTACH_PRELUDE + reasserted);
+    await receive(second, { type: "ready", cols: 80, rows: 24 });
+    expect(screen(term), "the program's alternate screen with its mouse tracking").toEqual({
+      alternate: true, mode1000, tracking: mode1000,
+    });
+  });
+
+  test("across a restart, cut after the new life's alternate-screen reassert, drops a mode it turned off before the redial", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    await output(second, "\x1bc");
+    await receive(second, { ...session(300, 0, 0), generation: GENERATION + 1 });
+    await output(second, ALT_SCREEN_ATTACH_PRELUDE + "\x1b[?1000h");
+    expect(ghosttyMode(term, 1000), "fixture: the new life's mouse tracking").toBe(true);
+    const third = await redialedAfterCut(second);
+    expect(dialed(third), "the redial is fresh").toMatchObject({ since: "0", generation: null });
+    await receive(third, { ...session(320, 0, 0), generation: GENERATION + 1 });
+    await output(third, ALT_SCREEN_ATTACH_PRELUDE);
+    await receive(third, { type: "ready", cols: 80, rows: 24 });
+    expect(screen(term), "the new life's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+  });
+
   test("from cursor 0 is cut before its prelude and dials again for the whole screen", async () => {
     // The view attached before its program wrote anything.
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
