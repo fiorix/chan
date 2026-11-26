@@ -242,6 +242,9 @@
   /// read is still to come, so a parent's level landing ahead of it does not
   /// forget their ask. A whole fetch drops the patches queued before it.
   const spineAskPending = new Set<string>();
+  /// The directories the latest whole fetch reads, taken when it began
+  /// (`loadSpine`).
+  let spineListing: ReadonlySet<string> = new Set();
 
   /// A directory asked for whose level the spine does not hold: one a patch
   /// has still to read, or one whose read found it gone.
@@ -272,9 +275,12 @@
   /// the spine never read) would be skipped, and while a whole fetch is in
   /// flight asking it would start that fetch again for nothing. The rule
   /// also admits a folder under a parent whose read found it gone: it is
-  /// asked once, which during a whole fetch starts that fetch again, and
-  /// then stays asked until a patch reads that parent's level. With no
-  /// spine yet every one is asked, for the fetch that brings their nodes.
+  /// asked once, which during a whole fetch that does not list it starts
+  /// that fetch again, and then stays asked until a patch reads that
+  /// parent's level. With no spine yet every one is asked, for the fetch
+  /// that brings their nodes. While a whole fetch is in flight, none it
+  /// lists is asked (`spineListing`): that fetch reads its level, and an
+  /// ask would only start it again.
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
@@ -293,6 +299,7 @@
     for (const dir of Object.keys(expandedDirs)) {
       if (!dir || !drawsChildren(dir) || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
       if (leaveFailed && spineFailures.has(dir)) continue;
+      if (spineLoading && spineListing.has(dir)) continue;
       missing.push(dir);
     }
     if (missing.length === 0) return;
@@ -1632,6 +1639,7 @@
     const first = spine === NO_GRAPH;
     const read: SpineRead = { nodes: new Map(), edges: [], held: new Set() };
     const dirs = openedSpineDirs();
+    spineListing = new Set(dirs);
     // Up to SPINE_READS_AHEAD levels are asked for at once and laid down in
     // order, parents first.
     const reads: Array<ReturnType<typeof fetchSpineLevel>> = [];
