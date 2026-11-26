@@ -59,7 +59,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | Item | State | Next |
 | --- | --- | --- |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [cap: three walks, no folder layer][capwalks] | built | GA |
+| [cap: three walks, no folder layer][capwalks] | built | review |
 | [AppImage children get its environment][appenv] | built | review |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [ConPTY pulls history into the screen][conpty] | partly built | measure |
@@ -80,7 +80,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [xterm.js as a second backend][noxterm] | built | GA |
 | [the retired key is still accepted][rejectkey] | not started | later |
 | [a held macOS key opens accents][macrepeat] | not started | measure |
-| [a redial keeps dead modes][redialmodes] | partly built | build |
+| [a redial keeps dead modes][redialmodes] | built | owner |
 
 
 ## Completed

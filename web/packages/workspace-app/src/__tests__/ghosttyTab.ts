@@ -124,6 +124,7 @@ export function ghosttyMode(term: Terminal, mode: number): boolean {
 }
 
 export function ghosttyAlternateScreen(term: Terminal): boolean {
+  if (!term.core) throw new Error("the widget is not open");
   return term.buffer.active.type === "alternate";
 }
 
@@ -293,9 +294,9 @@ export function typeInGhostty(term: Terminal, data: string): void {
 /// The widget's input textarea, the hidden field a press on the canvas
 /// focuses, found in the element the widget opened in.
 export function ghosttyTextarea(term: Terminal): HTMLTextAreaElement {
-  const textarea = term.element?.querySelector("textarea");
-  if (!textarea) throw new Error("the widget opened no input textarea");
-  return textarea;
+  const textareas = term.element?.querySelectorAll("textarea") ?? [];
+  expect(textareas, "the widget's one input textarea").toHaveLength(1);
+  return textareas[0]!;
 }
 
 /// Whether keyboard focus is inside the terminal: on its element, which

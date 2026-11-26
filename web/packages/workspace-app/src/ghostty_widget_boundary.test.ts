@@ -8,9 +8,10 @@
 // whatever fallback it has. This check reads every app module, each
 // `.ts`, `.js` and `.svelte` file under `src/` (and the `.mts`, `.cts`,
 // `.mjs` and `.cjs` kin) and the test files beside the app's
-// configuration, through the TypeScript checker, a component as its
-// scripts and the expressions of its markup, and reports, with file and
-// line:
+// configuration, with `src/**/*.d.ts` declaration files in the program's
+// roots, through the TypeScript checker, a component as its `<script
+// module>` followed by its instance `<script>` and the expressions of its
+// markup, and reports, with file and line:
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
 //    module augmentation (`declare module`), `import.meta.glob` pattern or
@@ -18,7 +19,8 @@
 //    other than its export map's entries, by the package's name or by a
 //    relative path with its links resolved (the workspace's
 //    `node_modules/@chan/ghostty-web-ng` is a link to the package, so a
-//    path through it reaches the package's own files);
+//    path through it reaches the package's own files); a template-literal
+//    specifier is read as a glob through the same path check;
 // 2. cast: a cast of a widget value to a type it does not satisfy or to
 //    one that names none of its members (`any`, `unknown`, `object`,
 //    `{}`), and a cast of a value typed by a type parameter to such a
@@ -31,41 +33,47 @@
 //    `Object.hasOwn`, `hasOwnProperty` or `propertyIsEnumerable`, with the
 //    key a literal, one under parentheses or a cast, or a value whose type
 //    is a string literal. A member that only an app module declares on a
-//    widget class, by a module augmentation or a type intersected with the
-//    class, is not public to this rule;
-// 4. patch: a write to a member of a widget object; `Object.assign`,
-//    `defineProperty`, `defineProperties`, `setPrototypeOf`, `freeze`,
-//    `seal` or `preventExtensions`, or `Reflect.set`, `defineProperty`,
-//    `deleteProperty` or `setPrototypeOf`, on one; and any reach of a
-//    widget's prototype: a widget class's `prototype`, or a widget value's
-//    `constructor`, `Object.getPrototypeOf` or `Reflect.getPrototypeOf`
-//    (tests may reach one to read and spy on its public members);
+//    widget class (or a subclass, interface or constrained type parameter
+//    derived from one), by a type-only declaration (an interface or
+//    type-literal member, or a `declare` field) or on an intersection with
+//    the class, is not public to this rule;
+// 4. patch: a write to a member of a widget class instance (skipping
+//    `#private` names and members that only an app subclass's class body
+//    declares); `Object.assign`, `defineProperty`, `defineProperties`,
+//    `setPrototypeOf`, `freeze`, `seal` or `preventExtensions`, or
+//    `Reflect.set`, `defineProperty`, `deleteProperty` or `setPrototypeOf`,
+//    on one; and any reach of a widget class's or subclass's prototype:
+//    its `prototype`, or a widget value's `constructor`,
+//    `Object.getPrototypeOf` or `Reflect.getPrototypeOf` (tests may reach
+//    one to read and spy on its public members);
 // 5. name: the name of one of the widget's implementation members, which
 //    catches what has no widget type to check, such as a duck-typed
 //    parameter;
-// 6. escape: a widget class instance where the program expects a type that
-//    names none of its members (`any`, `unknown`, `object`, `{}`, with or
-//    without `null`): an argument, an initializer, a property value, a
-//    return, a yielded value, an assigned value, an array element, or a
-//    callback's parameter so declared that its caller hands a widget, and
-//    one handed to `Object.getOwnPropertyDescriptors`, which keys each own
-//    property; past it no other rule can follow the value. An Error
-//    subclass is exempt, since errors travel as `unknown` by design and are
-//    read after `instanceof`;
+// 6. escape: a widget class instance (including a subclass, an interface
+//    extending one, an intersection with one, `this`, or a type parameter
+//    constrained to one) where the program expects a type that names none
+//    of its members (`any`, `unknown`, `object`, `{}`, with or without
+//    `null`): an argument, an initializer, a property value, a return, a
+//    yielded value, an assigned value, an array element, or a callback's
+//    parameter so declared that its caller hands a widget, and one handed
+//    to `Object.getOwnPropertyDescriptors`, which keys each own property;
+//    past it no other rule can follow the value. An Error subclass is
+//    exempt, since errors travel as `unknown` by design and are read after
+//    `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
 //    names a member the class keeps private, lacks, or holds as one of its
 //    implementation members, which reads `undefined` once that member is
 //    `#private`; a type with a widget part (a union with another type) is
 //    read through the widget's own declarations, which rules 3 and 5 see.
 //
-// A widget value is one of a type the package declares, of a class that
-// extends one of its classes (`this` in a subclass included), of a type
+// A widget value is one of a type the package declares, of a class or
+// interface that extends one (`this` in a subclass included), of a type
 // parameter constrained to one, or of a type with one as a part. Shipped
 // modules are held to all seven rules, tests to 1, 3 and 4. A dot read of
 // a private member on a widget-typed value is a type error, but
 // `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
 // so rule 3 reads dots as well. Markup is read as the body of a function
-// in the instance script's scope, so a script variable has its declared
+// in the component scripts' scope, so a script variable has its declared
 // type there, as markup sees it after the script assigns it, and a `use:`,
 // `transition:`, `in:`, `out:` or `animate:` directive's value as the
 // argument its function takes.
@@ -90,9 +98,10 @@
 //   function assigned to a function type that takes a widget
 //   (`[term].map((t: { cols: number; isOpen?: boolean }) => t.isOpen)`):
 //   rule 7 reads the values that flow, not the parameters that take them;
-// - a value of a type parameter's type widened into `unknown`, `object` or
-//   `{}` with no cast (`<T>(o: T): unknown => o`), since at the call the
-//   widget meets a parameter of type `T`, not an opaque one;
+// - a value of a type parameter not constrained to a widget class widened
+//   into `unknown`, `object` or `{}` with no cast (`<T>(o: T): unknown =>
+//   o`), since at the call the widget meets a parameter of type `T`, not
+//   an opaque one;
 // - a widget widened with its container (`[term]` held as `readonly
 //   unknown[]`, `{ v: vt }` as `{ readonly v: unknown }`,
 //   `Promise.resolve(term)` as `Promise<unknown>`, or a container cast so),
@@ -123,25 +132,31 @@
 //   by its name or a relative path: an absolute or root-relative path, or
 //   an alias of tsconfig's `paths` or Vite's `resolve.alias` (the app has
 //   none to the package);
-// - in a JavaScript module, a value with no type, which rules 1 and 5
-//   alone can read (`untyped` in `boundaryPlant.js`);
-// - the `.d.ts` files under `src/`, which hold no code: rule 1 does not
-//   read their `declare module` names, though any member they add to a
-//   widget class still reads as lacking under rule 3;
+// - in a JavaScript module, a value with no inferred type (such as an
+//   unannotated parameter), on which rule 5 alone can fire (`untyped` in
+//   `boundaryPlant.js`), and a JSDoc `import()` type inside a comment
+//   (`Internal` in `boundaryPlant.js`);
+// - the `.d.ts` files under `src/`, which are in the program for types
+//   they declare but hold no code: rule 1 does not read their `declare
+//   module` names, though any member they add to a widget class still
+//   reads as lacking under rule 3;
 // - a dynamic import whose specifier is a string literal under
 //   parentheses (`import(("@chan/ghostty-web-ng/lib/internal"))`);
 // - in tests, a `satisfies` inside a cast chain (`(term as unknown)
 //   satisfies unknown as { selectionManager: unknown }`), where rule 3
 //   stops following the casts;
-// - in markup, a name declared in a component's `<script module>` beside
-//   an instance script, or a `$store` read, which has no type there, a
-//   value markup passes to a component's props, which has no contextual
-//   type, and a value typed by a component's `generics` parameters, which
-//   the module this check reads does not declare (`BoundaryGeneric.svelte`).
+// - in markup, a `$store` read, which has no type there, a value markup
+//   passes to a component's props, which has no contextual type, and a
+//   value typed by a component's `generics` parameters, which the module
+//   this check reads does not declare (`BoundaryGeneric.svelte`).
 // Rule 6 also reports a widget kept in a `WeakMap<object>` or a
 // `Set<object>` and never read back as anything else; the app has none.
 // The `scripts/e2e` instruments (the browser checks, the pixel harness)
 // are not app modules: they are read by grep only.
+//
+// This check guards against regressions and does not prove the boundary:
+// a newly found shape that does not defeat a whole rule is named in the
+// list above with a plant rather than adding another special case.
 //
 // Readers that other changes remove are listed as pending, each pinned by
 // the text of the node it reports: a reader more or fewer in a listed
@@ -293,9 +308,9 @@ const PENDING: readonly Pending[] = [];
 type Span = { at: number; from: number; length: number };
 type Range = { start: number; end: number };
 
-/// A module as the program reads it: a `.ts` file whole, or a component's
-/// `<script module>`, or its instance script followed by its markup's
-/// expressions. `spans` lead a module position back to the file's text.
+/// A module as the program reads it: a `.ts` or `.js` file whole, or a
+/// component's scripts followed by its markup's expressions. `spans` lead a
+/// module position back to the file's text.
 type Source = { file: string; rel: string; kind: Kind; text: string; spans: Span[]; original: string };
 
 /// The extensions of the modules TypeScript reads under the app's
@@ -363,15 +378,14 @@ const TEMPLATE_HELPERS = [
   "declare function __boundaryAwait<T>(value: T): Awaited<T>;",
 ].join("\n");
 
-/// A component as modules, from Svelte's own parser: its `<script module>`
-/// when it also has an instance script, then the instance script (or the
-/// module script, or nothing) followed by its markup as the statements of
-/// a function there. Inside a function a script variable has its declared
-/// type, as markup sees it after any assignment, where at the script's top
-/// level the checker would narrow `let term: Terminal | null = null` to
-/// `null`. Each expression is copied as written into the scope the markup
-/// gives it: an each block's item and index, a snippet's parameters, an
-/// await block's value and error, a `{@const}`. A `let:` binding is the
+/// A component as a module, from Svelte's own parser: its `<script module>`
+/// (if any) followed by its instance script (if any) and its markup as the
+/// body of a function there. Inside a function a script variable has its
+/// declared type, as markup sees it after any assignment, where at the
+/// script's top level the checker would narrow `let term: Terminal | null =
+/// null` to `null`. Each expression is copied as written into the scope the
+/// markup gives it: an each block's item and index, a snippet's parameters,
+/// an await block's value and error, a `{@const}`. A `let:` binding is the
 /// slot's and left out, so a name it binds has no type.
 function componentSources(file: string, rel: string, kind: Kind, text: string): Source[] {
   const root = parse(text, { modern: true }) as unknown as {
@@ -483,10 +497,9 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
     for (const child of Object.values(node)) walk(child);
   };
 
-  const sources: Source[] = [];
   if (root.module && root.instance) {
     copy(root.module.content);
-    sources.push(take("module"));
+    put("\n");
   }
   const host = root.instance ?? root.module;
   if (host) copy(host.content);
@@ -494,8 +507,7 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
   walk(root.fragment);
   put("}\n");
   put(TEMPLATE_HELPERS);
-  sources.push(take(root.instance || !root.module ? "instance" : "module"));
-  return sources;
+  return [take(root.instance || !root.module ? "instance" : "module")];
 }
 
 function sourcesOf(rel: string, text: string): Source[] {
@@ -535,6 +547,17 @@ function loadSources(plants: ReadonlyMap<string, string>): Source[] {
 function scan(plants: ReadonlyMap<string, string>): Finding[] {
   const sources = loadSources(plants);
   const virtual = new Map(sources.filter((s) => s.rel.endsWith(".svelte") || plants.has(s.rel)).map((s) => [s.file, s.text]));
+  const declarations = ts.sys
+    .readDirectory(`${APP}/src`, [".d.ts", ".d.mts", ".d.cts"], undefined, ["**/*"])
+    .map(normalize)
+    .filter((path) => !plants.has(path.slice(APP.length + 1)));
+  for (const [rel, text] of plants) {
+    if (/^src\/.*\.d\.[mc]?ts$/.test(rel)) {
+      const file = `${APP}/${rel}`;
+      virtual.set(file, text);
+      declarations.push(file);
+    }
+  }
   const config = ts.readConfigFile(`${APP}/tsconfig.json`, ts.sys.readFile);
   const options = { ...ts.parseJsonConfigFileContent(config.config, ts.sys, APP).options, noEmit: true };
   const host = ts.createCompilerHost(options, true);
@@ -547,7 +570,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const text = virtual.get(f);
     return text === undefined ? getSourceFile(f, language, onError, create) : ts.createSourceFile(f, text, language, true);
   };
-  const program = ts.createProgram({ rootNames: sources.map((s) => s.file), options, host });
+  const program = ts.createProgram({ rootNames: [...sources.map((s) => s.file), ...declarations], options, host });
   const checker = program.getTypeChecker();
   const findings = new Map<string, Finding>();
 
@@ -571,21 +594,41 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const fileName = d.getSourceFile().fileName;
     return fileName.startsWith(`${APP}/`) && !fileName.includes("/node_modules/");
   };
-  /// Whether a type is a widget class's instance or an intersection with one.
-  const classPart = (type: ts.Type) => (type.isIntersection() ? type.types : [type]).some((t) => widgetClass(t.getSymbol()));
+  /// Whether a type is a widget class's instance or derives from one: an
+  /// intersection or union part, a class or interface that extends one, or
+  /// `this` or a type parameter constrained to one.
+  function classPart(type: ts.Type, depth = 0): boolean {
+    if (depth > 4) return false;
+    if (widgetClass(type.getSymbol())) return true;
+    if (type.isUnionOrIntersection()) return type.types.some((t) => classPart(t, depth + 1));
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      return !!constraint && constraint !== type && classPart(constraint, depth + 1);
+    }
+    const declared = (type as ts.TypeReference).target ?? type;
+    return declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => classPart(base, depth + 1));
+  }
+  /// Whether a declaration adds a member to the type alone, with nothing at
+  /// run time: a member of an interface or type literal, or an ambient
+  /// (`declare`) class member.
+  const typeOnly = (d: ts.Declaration) =>
+    ts.isInterfaceDeclaration(d.parent) ||
+    ts.isTypeLiteralNode(d.parent) ||
+    (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) !== 0;
 
   function isWidget(type: ts.Type, depth = 0): boolean {
     if (depth > 4) return false;
     if (type.isUnionOrIntersection()) return type.types.some((t) => isWidget(t, depth + 1));
+    if (classPart(type, depth)) return true;
     if (declaredInWidget(type.aliasSymbol) || declaredInWidget(type.getSymbol())) return true;
-    // A type parameter constrained to a widget, `this` in a subclass
-    // included, and a class that extends one.
+    // A type parameter constrained to a widget interface, or an interface
+    // that extends one.
     if (type.flags & ts.TypeFlags.TypeParameter) {
       const constraint = checker.getBaseConstraintOfType(type);
       if (constraint && constraint !== type && isWidget(constraint, depth + 1)) return true;
     }
     const declared = (type as ts.TypeReference).target ?? type;
-    if (declared.isClass() && (checker.getBaseTypes(declared) ?? []).some((base) => isWidget(base, depth + 1))) return true;
+    if (declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => isWidget(base, depth + 1))) return true;
     const reference = (type as ts.TypeReference).target ? checker.getTypeArguments(type as ts.TypeReference) : [];
     return [...(type.aliasTypeArguments ?? []), ...reference].some((t) => isWidget(t, depth + 1));
   }
@@ -593,7 +636,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const t = checker.getNonNullableType(type);
     return t.isUnion() ? t.types : [t];
   };
-  const isClassInstance = (type: ts.Type) => parts(type).some((t) => widgetClass(t.getSymbol()));
+  const isClassInstance = (type: ts.Type) => parts(type).some((t) => classPart(t));
   const nameOf = (type: ts.Type) =>
     parts(type)
       .map((t) => t.getSymbol()?.getName())
@@ -665,9 +708,20 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   };
   /// Whether a class instance type is an Error's, which travels as
   /// `unknown` through every catch.
-  const isError = (type: ts.Type): boolean =>
-    type.isClassOrInterface() &&
-    (checker.getBaseTypes(type) ?? []).some((base) => base.getSymbol()?.getName() === "Error" || isError(base));
+  const isError = (type: ts.Type, depth = 0): boolean => {
+    if (depth > 4) return false;
+    if (type.isUnion()) return type.types.every((t) => isError(t, depth + 1));
+    if (type.isIntersection()) return type.types.some((t) => isError(t, depth + 1));
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      return !!constraint && constraint !== type && isError(constraint, depth + 1);
+    }
+    const declared = (type as ts.TypeReference).target ?? type;
+    return (
+      declared.isClassOrInterface() &&
+      (checker.getBaseTypes(declared) ?? []).some((base) => base.getSymbol()?.getName() === "Error" || isError(base, depth + 1))
+    );
+  };
   /// Whether a type says nothing of the members of what it holds, so a
   /// widget that flows into it is out of sight of the member, cast and duck
   /// rules: `any`, `unknown`, `object`, or an object type with no member,
@@ -697,7 +751,12 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       const member = checker.getApparentType(part).getProperty(name);
       if (!member) return true;
       const declarations = member.declarations ?? [];
-      if (classPart(part) && declarations.some(appDeclared) && !declarations.some((d) => inWidget(d.getSourceFile().fileName))) {
+      if (
+        classPart(part) &&
+        declarations.some(appDeclared) &&
+        !declarations.some((d) => inWidget(d.getSourceFile().fileName)) &&
+        declarations.every((d) => !appDeclared(d) || typeOnly(d) || part.isIntersection())
+      ) {
         return true;
       }
       return declarations.some((d) => {
@@ -730,6 +789,10 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       [WIDGET, ...WIDGET_LINKS].some((p) => d === p || d.startsWith(`${p}/`) || p.startsWith(`${d}/`)),
     );
   };
+
+  /// A template specifier as the glob Vite builds from it: head plus a
+  /// wildcard for each substitution.
+  const templateGlob = (t: ts.TemplateExpression) => t.head.text + t.templateSpans.map((s) => `*${s.literal.text}`).join("");
 
   const MOCKS = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
   const DEFINERS: Record<string, ReadonlySet<string>> = {
@@ -824,6 +887,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) return;
       const widget = widgetOf(access.expression);
       if (!widget || !isClassInstance(widget)) return;
+      if (ts.isPropertyAccessExpression(access) && ts.isPrivateIdentifier(access.name)) return;
+      const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
+      const member = key === undefined ? undefined : checker.getApparentType(widget).getProperty(key);
+      if (
+        !parts(widget).some((p) => p.isIntersection()) &&
+        member?.declarations?.length &&
+        member.declarations.every((d) => appDeclared(d) && !typeOnly(d))
+      ) {
+        return;
+      }
       const name = ts.isPropertyAccessExpression(access) ? access.name.getText(sf) : access.argumentExpression.getText(sf);
       report("patch", access, `write ${nameOf(widget)}.${name}`);
     };
@@ -850,6 +923,9 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (specifier && ts.isStringLiteralLike(specifier) && isDeep(specifier.text, source.file)) {
         report("deep", specifier, specifier.text);
       }
+      if (specifier && ts.isTemplateExpression(specifier) && globReaches(templateGlob(specifier), source.file)) {
+        report("deep", specifier, specifier.getText(sf));
+      }
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
@@ -871,6 +947,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       ) {
         const [path] = node.arguments;
         if (ts.isStringLiteralLike(path) && isDeep(path.text, source.file)) report("deep", path, path.text);
+        if (ts.isTemplateExpression(path) && globReaches(templateGlob(path), source.file)) report("deep", path, path.getText(sf));
       }
 
       // 2. Casts of a widget value to a type it does not satisfy, and casts
@@ -940,7 +1017,9 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (source.kind === "shipped" && reached?.name === "prototype") {
         let symbol = checker.getSymbolAtLocation(reached.receiver);
         if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
-        if (symbol && widgetClass(symbol)) report("patch", node, `prototype ${symbol.getName()}`);
+        if (symbol && (symbol.flags & ts.SymbolFlags.Class) !== 0 && classPart(checker.getDeclaredTypeOfSymbol(symbol))) {
+          report("patch", node, `prototype ${symbol.getName()}`);
+        }
       }
       if (source.kind === "shipped" && reached?.name === "constructor") {
         const widget = widgetOf(reached.receiver);
@@ -961,7 +1040,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       // nothing of its members, or flows into a duck type of the app's.
       if (source.kind === "shipped" && ts.isExpression(node) && flows(node)) {
         const type = checker.getTypeAtLocation(node);
-        const classes = parts(type).filter((t) => widgetClass(t.getSymbol()));
+        const classes = parts(type).filter((t) => classPart(t));
         const target = classes.length > 0 ? targetOf(node) : undefined;
         if (target && opaque(target)) {
           if (!classes.every(isError)) report("escape", node, `${nameOf(type)} into ${checker.typeToString(target)}`);
@@ -1000,7 +1079,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
           const declared = checker.getTypeFromTypeNode(parameter.type);
           if (!opaque(declared)) return;
           const given = checker.getTypeOfSymbolAtLocation(signature.parameters[i], node);
-          const classes = parts(given).filter((t) => widgetClass(t.getSymbol()));
+          const classes = parts(given).filter((t) => classPart(t));
           if (classes.length > 0 && !classes.every(isError)) {
             report("escape", parameter, `${nameOf(given)} into a parameter ${checker.typeToString(declared)}`);
           }
@@ -1162,6 +1241,46 @@ const PLANTS = new Map<string, string>([
       "export const bufferEscape = (term: Terminal) => [peekBuffer(term.buffer), peekBuffer(term.buffer.active)];",
       "export const bufferDuck = (term: Terminal) => ((b: { type: string; terminal?: Terminal }) => b.terminal)(term.buffer.active);",
       "export const nested = (nest: { renderer: { renderer: number } }) => nest.renderer.renderer;",
+      'declare module "@chan/ghostty-web-ng" {',
+      "  interface Terminal {",
+      "    isSealed: boolean;",
+      "  }",
+      "}",
+      "export const rootAugmented = (term: Terminal) => term.isSealed;",
+      "export class Shadow extends Terminal {",
+      "  declare isOpen: boolean;",
+      "}",
+      "export const shadowed = (s: Shadow) => s.isOpen;",
+      "export interface RawTerminal extends Terminal {",
+      "  isOpen: boolean;",
+      "}",
+      "const isRawSub = (t: Terminal): t is RawTerminal => t !== null;",
+      "export const viaInterface = (term: Terminal) => (isRawSub(term) ? term.isOpen : false);",
+      "export class SelfKin extends Terminal {",
+      "  leakSelf() {",
+      "    return [raw(this), this.isSealed];",
+      "  }",
+      "}",
+      "export const kinEscape = (k: Kin) => [raw(k), [k].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(k).isOpen?.value];",
+      "export const kinDuck = (k: Kin) => ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(k);",
+      "export const kinPatch = (k: Kin) => {",
+      "  k.cols = 1;",
+      "  return [Object.assign(k, { cols: 1 }), Object.freeze(k), Kin.prototype, k.isSealed];",
+      "};",
+      "export const kinIntersect = (k: Kin & { isOpen?: boolean }) => k.isOpen;",
+      "export const constrainedAll = <T extends Terminal>(t: T) => {",
+      "  t.cols = 1;",
+      "  return [raw(t), [t].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(t).isOpen?.value, ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t), Object.assign(t, { cols: 1 }), Object.freeze(t), t.isSealed];",
+      "};",
+      "export const constrainedIntersect = <T extends Terminal>(t: T & { isOpen?: boolean }) => t.isOpen;",
+      "export const interAll = (t: Terminal & { tag?: string }) => {",
+      "  t.cols = 1;",
+      "  return [raw(t), [t].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(t).isOpen?.value, ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t), Object.assign(t, { cols: 1 }), Object.freeze(t)];",
+      "};",
+      "export const dynImport = (name: string) => import(`../../../ghostty-web-ng/lib/${name}.ts`);",
+      "export const dynUrl = (name: string) => new URL(`../../../ghostty-web-ng/lib/${name}.ts`, import.meta.url);",
+      "export const dynSafeUrl = (name: string) => new URL(`./local/${name}.ts`, import.meta.url);",
+      "export const fromGlobalDts = () => (window.boundaryTerminal as unknown as Raw).isOpen;",
     ].join("\n"),
   ],
   [
@@ -1261,6 +1380,48 @@ const PLANTS = new Map<string, string>([
       "    (this as unknown as Raw).isOpen = true;",
       "  }",
       "}",
+      "export const kinFixtureChecks = (s: KinFixture) => {",
+      "  s.cols = 1;",
+      "  return [Object.assign(s, { cols: 1 }), Object.freeze(s), s.isSealed];",
+      "};",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/boundaryLegit.ts",
+    [
+      'import { Terminal } from "@chan/ghostty-web-ng";',
+      'import { GhosttyVtRefusal } from "@chan/ghostty-web-ng/vt";',
+      "export class AppTerminal extends Terminal {",
+      '  private label = "";',
+      "  protected tagged = false;",
+      "  #count = 0;",
+      "  rename(next: string): void {",
+      "    this.label = next;",
+      "    this.tagged = true;",
+      "    this.#count++;",
+      "  }",
+      "  get title(): string {",
+      "    return `${this.label} ${this.#count} ${this.tagged}`;",
+      "  }",
+      "}",
+      "export const titled = (t: AppTerminal) => t.title;",
+      "export class Pool<T extends Terminal> {",
+      "  readonly items: T[] = [];",
+      "  add(t: T): void {",
+      "    this.items.push(t);",
+      "  }",
+      "  get size(): number {",
+      "    return this.items.length;",
+      "  }",
+      "}",
+      "export const sizeOf = <T extends Terminal>(t: T) => `${t.cols}x${t.rows}`;",
+      "type Mounted = Terminal & { element: HTMLElement };",
+      "export const isMounted = (t: Terminal): t is Mounted => t.element !== undefined;",
+      "export const focusMounted = (t: Terminal) => {",
+      "  if (isMounted(t)) t.element.focus();",
+      "};",
+      "export class CustomRefusal extends GhosttyVtRefusal {}",
+      'export const reportCustomRefusal = (report: (error: unknown) => void) => report(new CustomRefusal("refused"));',
     ].join("\n"),
   ],
   [
@@ -1276,6 +1437,28 @@ const PLANTS = new Map<string, string>([
       "",
       "<div use:peek={term} transition:swap={term}></div>",
       "{#each [term] as one (one)}<i animate:shift={term}></i>{/each}",
+      "<div in:swap={term} out:swap={term}></div>",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/BoundaryModuleAction.svelte",
+    [
+      '<script module lang="ts">',
+      '  import type { Terminal as ModTerminal } from "@chan/ghostty-web-ng";',
+      "  export function fit(node: HTMLElement, size: { cols: number; rows: number }) {",
+      "    node.dataset.size = `${size.cols}x${size.rows}`;",
+      "  }",
+      "  export const leak = (node: HTMLElement, t: unknown) => void node.append(String(t));",
+      "  export const shared: ModTerminal | null = null;",
+      "</script>",
+      "",
+      '<script lang="ts">',
+      '  import type { Terminal } from "@chan/ghostty-web-ng";',
+      "  let { term }: { term: Terminal } = $props();",
+      "</script>",
+      "",
+      "<div use:fit={term} use:leak={term}></div>",
+      "<p>{(shared as any)?.isOpen}</p>",
     ].join("\n"),
   ],
   [
@@ -1284,6 +1467,20 @@ const PLANTS = new Map<string, string>([
       "export const untyped = (term) => term.isOpen;",
       "export const named = (term) => term.wasmTerm;",
       'import "../../../ghostty-web-ng/lib/internal";',
+      '/** @param {import("@chan/ghostty-web-ng").Terminal} term */',
+      "export const typed = (term) => term.isOpen;",
+      '/** @typedef {import("../../../ghostty-web-ng/lib/internal")} Internal */',
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/boundaryGlobal.d.ts",
+    [
+      'import type { Terminal } from "@chan/ghostty-web-ng";',
+      "declare global {",
+      "  interface Window {",
+      "    boundaryTerminal?: Terminal;",
+      "  }",
+      "}",
     ].join("\n"),
   ],
   [
@@ -1370,6 +1567,7 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 101, key: "Terminal & { isOpen?: boolean | undefined; }.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 105, key: "Kin.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 109, key: "Kin.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 109, key: "write Kin.isOpen" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 112, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 112, key: "Kin.isOpen" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 113, key: "unknown" },
@@ -1385,11 +1583,52 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 140, key: "Terminal.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 144, key: "Shadow.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 149, key: "RawTerminal.isOpen" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 152, key: "SelfKin into unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 152, key: "SelfKin.isSealed" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 156, key: "Kin.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 158, key: "write Kin.cols" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Object.assign Kin" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Object.freeze Kin" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "prototype Kin" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Kin.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 161, key: "Kin & { isOpen?: boolean | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 163, key: "write T.cols" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 164, key: "Object.assign T" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 164, key: "Object.freeze T" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 166, key: "T & { isOpen?: boolean | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 168, key: "write Terminal & { tag?: string | undefined; }.cols" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.assign Terminal & { tag?: string | undefined; }" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.freeze Terminal & { tag?: string | undefined; }" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 171, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 172, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 174, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 174, key: "Terminal.isOpen" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 11, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 11, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryModuleAction.svelte", line: 15, key: "Terminal into unknown" },
+  { rule: "cast", file: "src/terminal/BoundaryModuleAction.svelte", line: 16, key: "any" },
+  { rule: "member", file: "src/terminal/BoundaryModuleAction.svelte", line: 16, key: "Terminal.isOpen" },
   { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
   { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
+  { rule: "member", file: "src/terminal/boundaryPlant.js", line: 5, key: "Terminal.isOpen" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
@@ -1427,6 +1666,11 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 37, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 40, key: "KinFixture.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 43, key: "KinFixture.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 43, key: "write KinFixture.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 47, key: "write KinFixture.cols" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.assign KinFixture" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.freeze KinFixture" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "KinFixture.isSealed" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too
