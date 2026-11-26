@@ -15,7 +15,7 @@
 // the terminal's area and the console report.
 
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, test, vi, type MockInstance } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi, type MockInstance } from "vitest";
 import { ABI } from "@chan/ghostty-web-ng/vt";
 import { takeShownLoadFailures } from "../../vitest.setup";
 
@@ -239,6 +239,19 @@ let warn: MockInstance<typeof console.warn>;
 function loadReports(): unknown[][] {
   return warn.mock.calls.filter(([first]) => typeof first === "string" && first.startsWith("[chan] ghostty-web failed to load"));
 }
+
+// The first page a file opens pays the cold transform of the terminal's
+// module graph and the widget's, which under host load comes near the 30 s
+// case timeout. The warm-up pays it once, under a budget of its own, so each
+// case's timeout bounds only that case; every case still opens a fresh page.
+const WARM_UP_MS = 180_000;
+
+beforeAll(async () => {
+  const warm = await openPage();
+  await import("@chan/ghostty-web-ng");
+  warm.harness.resetTerminals();
+  warm.store.__testSetStandalonePreferences(null);
+}, WARM_UP_MS);
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
