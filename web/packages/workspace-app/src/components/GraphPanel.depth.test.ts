@@ -2084,6 +2084,132 @@ describe("the workspace tree", () => {
     expect({ first, change: change - first, next: levelReads("") - change }).toEqual({ first: 2, change: 1, next: 0 });
   });
 
+  /// `p/c` is open under the closed `p`, which leaves the disk; a
+  /// double-click on `p` finds it gone, so `p/c` stays asked. `p` comes
+  /// back, then `p/c` with its file, and the patch of `p` brings `p/c`'s
+  /// node and forgets its ask. A whole fetch then begins, which lists `p/c`.
+  test("an opening during a whole spine fetch after a parent's level forgot a folder's ask starts no other fetch, over the listing cap", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("p"), g.dir("p/c"), g.dir("a")],
+      edges: [g.edge("", "directory:p", "contains"), g.edge("directory:p", "directory:p/c", "contains"), g.edge("", "directory:a", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "p"), fsg.contains("", "a"), fsg.contains("a", "a/x.md")],
+    };
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, "p/c": true, a: true } }));
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => n.path !== "p");
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "p");
+    await doubleClick("directory:p");
+    await settle(20);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c"), a: levelReads("a") }, "p's read finds it gone").toEqual({ p: 1, "p/c": 0, a: 1 });
+    graphServer.fs.nodes.push(fsg.dir("p"));
+    graphServer.fs.edges.push(fsg.contains("", "p"));
+    await changeNames(["p"]);
+    graphServer.fs.nodes.push(fsg.dir("p/c"), fsg.file("p/c/y.md"));
+    graphServer.fs.edges.push(fsg.contains("p", "p/c"), fsg.contains("p/c", "p/c/y.md"));
+    await changeNames(["p/c"]);
+    await settle(20);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c") }).toEqual({ p: 2, "p/c": 0 });
+    const release = await holdWholeFetch();
+    let during = -1;
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(3);
+      await doubleClick("directory:a");
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      during = levelReads("");
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect({ during, root: levelReads(""), drawsY: visibleIds().includes("p/c/y.md") }).toEqual({ during: 3, root: 3, drawsY: true });
+  });
+
+  /// Under an answer of the whole tree, `s` holds only `s/l.md`, which only
+  /// the spine carries, so its opening reads it. `s` is closed, and opens
+  /// again during a whole fetch F1 that did not list it, whose landing
+  /// forgets its ask. A second whole fetch F2 then begins, which lists `s`.
+  test("an opening during a whole spine fetch after a landing forgot a reopened folder's ask starts no other fetch, under an answer of the whole tree", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("s"), g.dir("a"), g.file("a/x.md")],
+      edges: [g.edge("", "directory:s", "contains"), g.edge("", "directory:a", "contains"), g.edge("directory:a", "a/x.md", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("s"), fsg.file("s/l.md"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "s"), fsg.contains("s", "s/l.md"), fsg.contains("", "a"), fsg.contains("a", "a/x.md")],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true } }));
+    await doubleClick("directory:s");
+    await settle(20);
+    expect({ s: levelReads("s"), drawsL: visibleIds().includes("s/l.md") }, "the opening reads s").toEqual({ s: 1, drawsL: true });
+    await doubleClick("directory:s");
+    expect(tab.expanded.s).toBeUndefined();
+    const releaseF1 = await holdWholeFetch();
+    let duringF1 = -1;
+    try {
+      expect(levelReads(""), "F1 is in flight").toBe(2);
+      await doubleClick("directory:s");
+      expect(tab.expanded.s).toBe(true);
+      duringF1 = levelReads("");
+    } finally {
+      releaseF1();
+    }
+    await settle(20);
+    const releaseF2 = await holdWholeFetch();
+    let startF2 = -1;
+    let duringF2 = -1;
+    try {
+      startF2 = levelReads("");
+      await doubleClick("directory:a");
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      duringF2 = levelReads("");
+    } finally {
+      releaseF2();
+    }
+    await settle(20);
+    expect({ duringF1, startF2, duringF2, root: levelReads(""), drawsL: visibleIds().includes("s/l.md") }).toEqual({
+      duringF1: 2,
+      startF2: 3,
+      duringF2: 3,
+      root: 3,
+      drawsL: true,
+    });
+  });
+
+  /// `b`'s read always fails, so the spine never holds its level, and the
+  /// whole fetch that the test holds lists it.
+  test("an opening during a whole spine fetch with a folder drawn whose read failed starts no other fetch, over the listing cap", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("", "directory:b", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.file("a/x.md"), fsg.dir("b"), fsg.file("b/y.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/x.md"), fsg.contains("", "b"), fsg.contains("b", "b/y.md")],
+    };
+    graphServer.tree = "folders";
+    graphServer.fsFail = (path) => (path === "b" ? new Error("request timed out after 10000 ms") : null);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true, b: true } }));
+    await settle(20);
+    const release = await holdWholeFetch();
+    let start = -1;
+    let during = -1;
+    try {
+      start = levelReads("");
+      await doubleClick("directory:a");
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      during = levelReads("");
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect({ start, during }).toEqual({ start: 2, during: 2 });
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
