@@ -1708,6 +1708,57 @@ describe("the workspace tree", () => {
     expect({ "p/c": levelReads("p/c"), drawsY: visibleIds().includes("p/c/y.md") }).toEqual({ "p/c": 1, drawsY: true });
   });
 
+  test("an opened folder asked again while its first read waits behind a patch of its parent is read once, over the listing cap", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("p"), g.dir("p/c"), g.dir("a")],
+      edges: [g.edge("", "directory:p", "contains"), g.edge("directory:p", "directory:p/c", "contains"), g.edge("", "directory:a", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("p/c"), fsg.file("p/f.md"), fsg.file("p/c/y.md"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [
+        fsg.contains("", "p"), fsg.contains("p", "p/c"), fsg.contains("p", "p/f.md"), fsg.contains("p/c", "p/c/y.md"),
+        fsg.contains("", "a"), fsg.contains("a", "a/x.md"),
+      ],
+    };
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, p: true } }));
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c") }, "the first fetch reads p, which brings p/c's node").toEqual({ p: 1, "p/c": 0 });
+
+    // A save in `p` patches it; its read is held while `p/c` opens, so the
+    // opening's ask waits behind the patch.
+    let releaseParent!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (releaseParent = resolve));
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => (releaseChild = resolve));
+    try {
+      await changeNames(["p/f.md"]);
+      expect(levelReads("p"), "the patch reads p").toBe(2);
+      await doubleClick("directory:p/c");
+      expect(tab.expanded["p/c"]).toBe(true);
+      // The patch lands; the ask's read of `p/c` is then held, and an
+      // opening asks for what the opened set lacks meanwhile.
+      graphServer.onFsGraph = (request) => {
+        if (request.path === "p/c") graphServer.fsGate = childGate;
+      };
+      releaseParent();
+      await settle(20);
+      expect(levelReads("p/c"), "the ask reads p/c").toBe(1);
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+    } finally {
+      graphServer.onFsGraph = null;
+      graphServer.fsGate = null;
+      releaseParent();
+      releaseChild();
+    }
+    await settle(20);
+    expect({ "p/c": levelReads("p/c"), a: levelReads("a"), drawsY: visibleIds().includes("p/c/y.md") }).toEqual({
+      "p/c": 1,
+      a: 1,
+      drawsY: true,
+    });
+  });
+
   test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
     serveWholeTree();
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
