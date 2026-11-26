@@ -66,13 +66,13 @@ export class SearchOwner {
   // How many listed entries placement must read before the list placed so
   // far is the head of the whole one, read from those entries
   // (`orderedFrom`); null until read.
-  private orderedAt: number | null = null;
+  #orderedAt: number | null = null;
   // While a list is placed: its first entry, the newest match of the first
   // page the core listed; the first entry of the page it is listing; the
   // first of the page it listed before that, which is that page's newest
   // match; and the last entry read. An entry newer than the one listed
   // before it starts a page.
-  private firstListed: MatchRange | null = null;
+  #firstListed: MatchRange | null = null;
   #listedPage: MatchRange | null = null;
   #pageAbove: MatchRange | null = null;
   #lastListed: MatchRange | null = null;
@@ -215,14 +215,14 @@ export class SearchOwner {
     // A resize resets the core's scan; after a write its listing has the
     // history it holds behind a new active area of unknown length.
     if (kind === 'resize') this.#fresh = true;
-    this.#head = this.orderedAt = null;
+    this.#head = this.#orderedAt = null;
     // The other screen's total says nothing about this one.
     this.#lastTotal = switched ? 0 : Math.max(this.#lastTotal, this.#total);
     this.#chunks = [];
     this.#starts = [];
     this.#total = 0;
     this.#readCursor = 0;
-    this.firstListed = this.#listedPage = this.#pageAbove = this.#lastListed = null;
+    this.#firstListed = this.#listedPage = this.#pageAbove = this.#lastListed = null;
     this.#index = null;
     this.#complete = false;
     this.#highlights.clear('search-all');
@@ -275,8 +275,8 @@ export class SearchOwner {
     this.#total = 0;
     this.#lastTotal = 0;
     this.#readCursor = 0;
-    this.#head = this.orderedAt = null;
-    this.firstListed = this.#listedPage = this.#pageAbove = this.#lastListed = null;
+    this.#head = this.#orderedAt = null;
+    this.#firstListed = this.#listedPage = this.#pageAbove = this.#lastListed = null;
     this.#waiting = [];
     this.#askedOver = null;
     this.#complete = true;
@@ -326,7 +326,7 @@ export class SearchOwner {
     search.feed();
     this.#markBacklog();
     this.#head = search.state().total;
-    this.orderedAt = null;
+    this.#orderedAt = null;
   }
 
   /**
@@ -340,16 +340,16 @@ export class SearchOwner {
   #ordered(measure: boolean): boolean {
     if (this.#complete) return true;
     if (this.#head === null && !measure) return true;
-    const head = this.activeEntries();
+    const head = this.#activeEntries();
     if (head === 0) return true;
-    this.orderedAt ??= this.orderedFrom(head);
-    return this.#readCursor >= this.orderedAt;
+    this.#orderedAt ??= this.#orderedFrom(head);
+    return this.#readCursor >= this.#orderedAt;
   }
 
   // The count of the core's active-area entries, read where output made it
   // unknown. The core lists its active area first, so a search that lists
   // nothing has none and needs no scratch search.
-  private activeEntries(): number {
+  #activeEntries(): number {
     this.#head ??= this.#search!.state().total === 0 ? 0 : this.#activeCount();
     return this.#head;
   }
@@ -380,7 +380,7 @@ export class SearchOwner {
   // screen, which puts that page on it, its entries suffice. An entry the
   // core cannot place reads as a page ahead of the page above, which only
   // makes a press wait.
-  private orderedFrom(head: number): number {
+  #orderedFrom(head: number): number {
     const first = this.#search!.matchAt(0);
     const last = this.#search!.matchAt(head - 1);
     if (!first || !last) return head + 1;
@@ -401,7 +401,7 @@ export class SearchOwner {
    */
   #listedNewest(): MatchRange | null {
     if (this.#complete) return null;
-    const head = this.activeEntries();
+    const head = this.#activeEntries();
     if (head === 0 || this.#readCursor > head) return null;
     const search = this.#search!;
     const last = search.matchAt(head - 1);
@@ -483,7 +483,7 @@ export class SearchOwner {
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
-        this.firstListed ??= range;
+        this.#firstListed ??= range;
         if (!this.#lastListed || compare(range, this.#lastListed) > 0) {
           this.#pageAbove = this.#listedPage;
           this.#listedPage = range;
@@ -683,8 +683,8 @@ export class SearchOwner {
     // changed the core's listing, and reading that would feed the core
     // inside the write.
     const known = this.#complete ||
-      (this.#head !== null && (this.#head === 0 || (this.orderedAt !== null && this.#readCursor >= this.orderedAt)));
-    const edges = known ? [] : [this.#pageAbove, this.firstListed];
+      (this.#head !== null && (this.#head === 0 || (this.#orderedAt !== null && this.#readCursor >= this.#orderedAt)));
+    const edges = known ? [] : [this.#pageAbove, this.#firstListed];
     for (const edge of edges) {
       const split = edge ? this.#indexOf(edge) : undefined;
       if (split === undefined || split <= 0) continue;
