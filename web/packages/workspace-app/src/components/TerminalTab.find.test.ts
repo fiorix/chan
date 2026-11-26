@@ -264,6 +264,25 @@ describe("Copy with a find match showing", () => {
     expect(await copied(writeText, command), "no bar, no match: the scrollback").toEqual([SCROLLBACK]);
   });
 
+  // Find matches ASCII case-insensitively, so these three matches read
+  // differently, and the active one, stepped off the newest, is neither end
+  // of the matches every match's layer lists.
+  test("copies the active match in its own case, not another highlighted match", async () => {
+    const term = await renderGhostty("\x1b[2J\x1b[3J\x1b[H" + ["a", "NEEDLE b", "c", "Needle d", "e", "needle f"].join("\r\n"));
+    const writeText = clipboardWrites();
+    const frames = await holdFrames(term);
+    const input = await openFindWithQuery("needle");
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term), "the newest match").toEqual(match(5));
+    pressEnter(input);
+    frames.settle();
+    await tick();
+    expect(activeHighlight(term), "one step older").toEqual(match(3));
+    expect(term.highlights.get("search-all")?.ranges, "every match highlighted").toHaveLength(3);
+    expect(await copied(writeText, command), "the active match's text").toEqual(["Needle"]);
+  });
+
   test("copies the scrollback while the bar's query matches nothing", async () => {
     const term = await renderGhostty();
     const writeText = clipboardWrites();
