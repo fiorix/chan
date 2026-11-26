@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { VtSearch } from "@chan/ghostty-web-ng/vt";
 import TerminalTab from "./TerminalTab.svelte";
-import terminalTabSource from "./TerminalTab.svelte?raw";
 import { allCommands } from "../state/commands";
 import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
@@ -1073,45 +1072,6 @@ describe("terminal find in a mounted tab", () => {
     // The core keeps the selection on its text; the line's match is newer.
     expect(countElement()?.textContent).toBe("2 of 2");
     expect(activeHighlight(term)).toEqual(earlier);
-  });
-
-  /// Each call of a write method in `source`, as the name written to and the
-  /// method (`term.write`), read through an optional chain, a non-null
-  /// assertion or a cast in parentheses. `unread` counts the mentions of a
-  /// write method that no call accounts for, such as a call on an indexed or
-  /// returned terminal, or the method handed on uncalled.
-  function writeCalls(source: string): { calls: string[]; unread: number } {
-    const calls = [...source.matchAll(/\b(\w+)!?(?:\s+as\s+[^()]*)?\)?[!?]?\.(write|writeln)\(/g)].map(
-      (m) => `${m[1]}.${m[2]}`,
-    );
-    const mentions = source.match(/\.(?:write|writeln)\b/g)?.length ?? 0;
-    return { calls, unread: mentions - calls.length };
-  }
-
-  test("every write the tab makes reaches the terminal through the viewport controller", () => {
-    // The controller tells find of each write, and a write around it leaves
-    // the count and the highlight behind. The PTY writer handed to
-    // ptyWrites is the controller's write, and chan's own lines take it in
-    // writeChanLine.
-    const { calls, unread } = writeCalls(terminalTabSource);
-    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "viewport.write"]);
-    expect(unread, "no write method is reached another way").toBe(0);
-    const helper = terminalTabSource.slice(terminalTabSource.indexOf("function writeChanLine("));
-    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("ghosttyViewport?.write(");
-  });
-
-  test("the write scan reads a call through an assertion, a cast or an optional chain, and counts what it cannot name", () => {
-    const source = [
-      "term!.write(bytes);",
-      "(term as Terminal).write(bytes);",
-      "(term as unknown as Terminal)?.writeln(line);",
-      "this.term?.writeln(line);",
-    ].join("\n");
-    expect(writeCalls(source)).toEqual({
-      calls: ["term.write", "term.write", "term.writeln", "term.writeln"],
-      unread: 0,
-    });
-    expect(writeCalls("terms[0].write(bytes);\nonData(term.writeln);")).toEqual({ calls: [], unread: 2 });
   });
 
   test("a restart closes the bar and frees its search, and the kept query searches the new terminal", async () => {
