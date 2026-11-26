@@ -584,15 +584,18 @@
   // disposed terminal clears it.
   let sawSessionControl = false;
   // Set when a socket is closed between a session frame and its `ready`
-  // (closeSocket, which every redial's connect runs first, marks it): the
+  // (closeSocket, which every redial's connect runs first, sets it): the
   // screen holds part of a replay and `receivedSeq` names the end of it, so
-  // the live cursor is no place to resume from. A replay that continued the
-  // view leaves `cutResume`, and the redial resumes from there as a redial
-  // after a clean close resumes from the live cursor. After any other cut
-  // the redial asks for the whole ring: a nonempty replay with a byte count
-  // starts on a reset screen; an empty or unmarked replay keeps it. The
-  // next `ready`, or a session frame that continues the view, clears the cut.
-  let replayCut = false;
+  // the live cursor is no place to resume from. A cut of a replay that
+  // continued the view keeps where it left the view in `resume`, and the
+  // redial echoes `parsed`, or `lossFrom` while a loss is owed its suffix,
+  // since only a cursor before the lost bytes gets that suffix sent again;
+  // it resumes from there as a redial after a clean close resumes from the
+  // live cursor. After any other cut (`resume` null) the redial asks for
+  // the whole ring: a nonempty replay with a byte count starts on a reset
+  // screen; an empty or unmarked replay keeps it. The next `ready`, or a
+  // session frame that continues the view, clears the cut.
+  let cut: { resume: { parsed: number; lossFrom: number | null } | null } | null = null;
   // The replay in progress when it continues the view's own screen (the
   // server resumed the cursor this dial echoed in its live generation, or
   // recovers this socket's stream), in raw stream positions: its first
@@ -601,7 +604,10 @@
   // earlier repeats and the tab does not write again. `lossFrom` is the
   // cursor the bytes it missed start at, while their recovery suffix,
   // which ends the replay, has not been parsed. Read only while
-  // `attachReplayActive`, and set by the session frame that starts it.
+  // `attachReplayActive`, and set by the session frame that starts it. It
+  // counts its own position rather than reading StreamAck's: on a re-ask
+  // the view stands at the larger of `parsed` and the stream position,
+  // while the acknowledgement follows the stream.
   let continuingReplay: {
     start: number;
     length: number;
@@ -609,11 +615,6 @@
     parsed: number;
     lossFrom: number | null;
   } | null = null;
-  // Where a cut replay that continued the view left it: the redial echoes
-  // `parsed`, or `lossFrom` while a loss is owed its suffix, since only a
-  // cursor before the lost bytes gets that suffix sent again. Read only
-  // while `replayCut`, and set with it.
-  let cutResume: { parsed: number; lossFrom: number | null } | null = null;
   // The keyboard protocol as it stood when the current replay began, which
   // the reset write's callback restores once the protocol observer has read
   // the reset and before the first ring byte is parsed.
@@ -1655,10 +1656,10 @@
     const resume: { since: number; parsed: number } | undefined =
       !reattaching || !sawSessionControl || serverGeneration === null
         ? undefined
-        : !replayCut
+        : cut === null
           ? { since: receivedSeq, parsed: receivedSeq }
-          : cutResume
-            ? { since: cutResume.lossFrom ?? cutResume.parsed, parsed: cutResume.parsed }
+          : cut.resume
+            ? { since: cut.resume.lossFrom ?? cut.resume.parsed, parsed: cut.resume.parsed }
             : undefined;
     const liveResumeSince = resume?.since;
     const liveResumeGeneration =
@@ -1799,7 +1800,7 @@
       if (frame.type === "ready") {
         resetBeforeReplay = false;
         attachReplayActive = false;
-        replayCut = false;
+        cut = null;
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
@@ -1857,12 +1858,12 @@
               }
             : null;
         // The replay goes on from where the cut left the view.
-        if (continuingReplay) replayCut = false;
+        if (continuingReplay) cut = null;
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
-        resetBeforeReplay = replayCut && typeof frame.replay_bytes === "number" && frame.replay_bytes > 0;
-        if (replayCut) {
+        resetBeforeReplay = cut !== null && typeof frame.replay_bytes === "number" && frame.replay_bytes > 0;
+        if (cut) {
           // These observers can hold a partial sequence even when the server
           // sends only its alternate-screen prelude and mode reassert.
           mouseFilter?.reset();
@@ -1881,7 +1882,7 @@
         // as it is now.
         if (
           tab.keyboardProtocol &&
-          (!replayCut || (liveResumeGeneration !== undefined && frame.generation !== liveResumeGeneration))
+          (cut === null || (liveResumeGeneration !== undefined && frame.generation !== liveResumeGeneration))
         ) {
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
         }
@@ -2652,10 +2653,11 @@
 
   function closeSocket(): void {
     if (attachReplayActive) {
-      replayCut = true;
-      cutResume = continuingReplay && {
-        parsed: Math.max(continuingReplay.parsed, continuingReplay.start + continuingReplay.taken),
-        lossFrom: continuingReplay.lossFrom,
+      cut = {
+        resume: continuingReplay && {
+          parsed: Math.max(continuingReplay.parsed, continuingReplay.start + continuingReplay.taken),
+          lossFrom: continuingReplay.lossFrom,
+        },
       };
     }
     attachReplayActive = false;
