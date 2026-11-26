@@ -166,6 +166,16 @@ function ghosttyWidgetUrl(): Plugin {
       };
       const importers = chunks.filter((chunk) => chunk.dynamicImports.includes(widget.fileName));
       if (importers.length === 0) return;
+      // A retry imports the chunk outside the preload helper, which is what
+      // loads the stylesheets a chunk carries, so a retried widget would paint
+      // without them.
+      const css = [...(widget.viteMetadata?.importedCss ?? [])];
+      if (css.length > 0) {
+        this.error(
+          `the terminal widget's chunk ${widget.fileName} carries ${css.join(", ")}, which the loader's retry at a new URL ` +
+            "would not load (src/terminal/backend.ts)",
+        );
+      }
       for (const importer of importers) {
         const loaded = loadedWith(importer.fileName);
         const late = widget.imports.filter((file) => !loaded.has(file));

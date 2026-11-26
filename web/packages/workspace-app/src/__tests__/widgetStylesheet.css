@@ -1,0 +1,5 @@
+/* A stylesheet vite.bundle.test.ts makes the terminal widget import in a
+   test build; the widget itself carries none. */
+.widget-stylesheet-fixture {
+  color: inherit;
+}

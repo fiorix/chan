@@ -51,7 +51,7 @@ describe("the widget's chunk imports only chunks loaded with the chunk that asks
   const glyphs = fileURLToPath(new URL("../ghostty-web-ng/lib/box-glyphs.ts", import.meta.url));
   const late = /the terminal widget's chunk assets\/ghostty-web-[\w-]+\.js imports assets\/box-glyphs-[\w-]+\.js,/;
 
-  function buildLayout(input: string | Record<string, string>, modules: Record<string, string>) {
+  function buildLayout(input: string | Record<string, string>, modules: Record<string, string>, extra: Plugin[] = []) {
     const prefix = "\0layout:";
     const layout: Plugin = {
       name: "layout-modules",
@@ -61,14 +61,14 @@ describe("the widget's chunk imports only chunks loaded with the chunk that asks
     return build({
       configFile: fileURLToPath(new URL("./vite.config.ts", import.meta.url)),
       logLevel: "silent",
-      plugins: [layout],
+      plugins: [layout, ...extra],
       build: { write: false, rollupOptions: { input, preserveEntrySignatures: "strict" } },
     });
   }
 
   /// What a build of the layout came to: its error's message, or "built".
-  function outcome(input: string | Record<string, string>, modules: Record<string, string>): Promise<string> {
-    return buildLayout(input, modules).then(
+  function outcome(input: string | Record<string, string>, modules: Record<string, string>, extra: Plugin[] = []): Promise<string> {
+    return buildLayout(input, modules, extra).then(
       () => "built",
       (error: Error) => error.message,
     );
@@ -103,6 +103,18 @@ describe("the widget's chunk imports only chunks loaded with the chunk that asks
     });
     expect(built).toMatch(late);
     expect(built, "the chunk that does not load it").toMatch(/which the app chunk assets\/app-[\w-]+\.js that asks for it/);
+  });
+
+  // A retry imports the widget's chunk outside the preload helper, which
+  // loads the stylesheets a chunk carries.
+  test("a build fails when the widget's chunk carries a stylesheet", async () => {
+    const styles = fileURLToPath(new URL("./src/__tests__/widgetStylesheet.css", import.meta.url));
+    const styled: Plugin = {
+      name: "widget-imports-a-stylesheet",
+      transform: (code, id) => (id.endsWith("/ghostty-web-ng/lib/terminal.ts") ? `import ${JSON.stringify(styles)};\n${code}` : undefined),
+    };
+    const built = await outcome(backend, {}, [styled]);
+    expect(built).toMatch(/the terminal widget's chunk assets\/ghostty-web-[\w-]+\.js carries assets\/[\w-]+\.css, which the loader's retry/);
   });
 
   // The chunk the widget's imports come from is the loader's own, which is
