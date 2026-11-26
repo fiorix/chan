@@ -45,6 +45,7 @@
         <tr><td><code>xdg-open</code> opens Markdown files or folders in another app</td><td>Another default holds the type.</td><td><a href="#default-apps">Default apps</a></td></tr>
         <tr><td><code>chan-desktop is not running; start it and run chan-files again</code>, or <code>chan-edit</code> or <code>chan-term</code></td><td>The names of the <code>chan</code> command-line packages cannot start Chan Desktop.</td><td><a href="#default-apps">Default apps</a></td></tr>
         <tr><td><code>this session has no display</code></td><td>The command ran over SSH or with no display.</td><td><a href="#default-apps">Default apps</a></td></tr>
+        <tr><td>A card in a terminal's place: <strong>The terminal view could not load.</strong></td><td>The window failed to fetch, start or open the terminal's view.</td><td><a href="#terminal">Terminal</a></td></tr>
         <tr><td>The terminal's find bar reads <code>? of N+</code></td><td>The search is finding the selected match's place again after output or a resize. The match stays highlighted, and the next step lands next to it. With no match highlighted, the search is still running with none selected, as while <kbd>Shift+Enter</kbd> waits for the oldest match.</td><td><a href="/manual/terminal/#find">Find</a></td></tr>
         <tr><td>The terminal's find bar reads <code>? of N</code></td><td>No match is selected: output pushed it out of the scrollback or rewrote it, a resize removed it, or a full-screen program shows its own screen until it exits.</td><td><a href="/manual/terminal/#find">Find</a></td></tr>
         <tr><td>Files dragged from another app onto the file browser do nothing</td><td>The file browser takes no files from outside.</td><td><a href="/manual/files/#transfers">Use Upload</a></td></tr>
@@ -157,6 +158,21 @@
       <li>xdg-utils 1.1 reads only <code>~/.config/mimeapps.list</code>.</li>
       <li>With <code>CHAN_NO_DESKTOP_HANDOFF</code> set, these commands open nothing and say so; unset it.</li>
       <li>The full setup is in <a href="/manual/standalone/#default-terminal">Default terminal</a> and <a href="/manual/standalone/#default-file-browser">File browser and Markdown editor</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="terminal">
+  <h2><a class="heading-anchor" href="#terminal">A terminal that does not load</a></h2>
+  <ul>
+    <li><strong>Retry</strong> loads the view again. The failure does not end the tab's shell: Retry attaches to it, and a tab that had none starts one once the view opens.</li>
+    <li>With no Retry, the window will not load a terminal again until it is reloaded: press <strong>Reload window</strong>. The tab then attaches to its shell, or starts one.</li>
+    <li><strong>Close</strong> closes the tab.</li>
+  </ul>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>When another terminal in the window loads its view, every terminal with a Retry tries again, so a fetch that failed for all of them takes one Retry.</li>
     </ul>
   </details>
 </section>

@@ -169,7 +169,6 @@
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
-  import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type {
     Terminal as GhosttyTerminal,
     TerminalLinkActivation,
@@ -448,15 +447,6 @@
     const masking = effectiveSecretMasking;
     untrack(() => secretMasker?.setEnabled(masking));
   });
-  // Last cols value the masker scanned at; the resize handler rescans only
-  // when cols actually changed.
-  let resizeScanCols = 0;
-  // A drag of a pane's edge changes the width on every frame, and a
-  // whole-buffer mask rescan of a long scrollback costs a large part of one,
-  // so each change rescans the rows on screen and the whole buffer waits for
-  // the width to stay put this long.
-  const RESIZE_SCAN_QUIET_MS = 150;
-  let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
   let ws: WebSocket | null = null;
   const terminalConnection = createTerminalConnectionHealth(() => sendPing());
   $effect(() => {
@@ -639,7 +629,6 @@
   const seeThrough = $derived(
     effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
-  const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites: a SYNCHRONOUS wrapper. ghostty-web
   // parses inside write() synchronously and only defers the optional
   // callback to requestAnimationFrame, which STALLS in a backgrounded or
@@ -1318,7 +1307,7 @@
       showLoadFailure(err, ghosttyLoadIsFinal(err));
       return;
     }
-    if (attempt !== startAttempt || !host || term) return;
+    if (overtaken()) return;
     try {
       openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes });
     } catch (err) {
@@ -1521,23 +1510,7 @@
     // that acts on a key cancels it itself.
     term.attachCustomKeyEventHandler((e) => !handleTerminalKeyEvent(e));
     term.onData(handleGhosttyData);
-    resizeScanCols = term.cols;
-    term.onResize(({ cols, rows }) => {
-      publishLocalSize(cols, rows);
-      // The PTY notification goes first: a whole-buffer rescan must not
-      // delay the resize reaching the shell. Only a cols change reflows
-      // wrapped groups; a rows-only resize leaves every decoration correct
-      // by marker tracking.
-      if (cols !== resizeScanCols) {
-        resizeScanCols = cols;
-        secretMasker?.scanViewport();
-        if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
-        resizeScanTimer = setTimeout(() => {
-          resizeScanTimer = null;
-          secretMasker?.scanAll();
-        }, RESIZE_SCAN_QUIET_MS);
-      }
-    });
+    term.onResize(({ cols, rows }) => publishLocalSize(cols, rows));
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
     stopPixelRatioWatch?.();
@@ -1762,16 +1735,12 @@
         }
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
-          const terminal = term;
-          const sessionId = tab.terminalSessionId;
           const protocol = tab.keyboardProtocol;
           const beforeReplay = keyboardProtocolBeforeReplay;
           // RIS resets the observed keyboard state too. Its write callback
           // runs once the observer has read it, before the replay is written.
           writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
-            if (term === terminal && tab.terminalSessionId === sessionId && protocol && beforeReplay) {
-              copyTerminalKeyboardProtocolState(beforeReplay, protocol);
-            }
+            if (protocol && beforeReplay) copyTerminalKeyboardProtocolState(beforeReplay, protocol);
           });
           if (missedBytes > 0) {
             writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
@@ -1801,7 +1770,6 @@
         resetBeforeReplay = false;
         attachReplayActive = false;
         cut = null;
-        replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
         if (tmuxSized) {
@@ -1866,7 +1834,6 @@
         // The replay goes on from where the cut left the view.
         if (continuingReplay) cut = null;
         attachReplayActive = true;
-        replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
         resetBeforeReplay = cut !== null && typeof frame.replay_bytes === "number" && frame.replay_bytes > 0;
         if (cut) {
@@ -2376,12 +2343,7 @@
       onComplete?.();
       return;
     }
-    const completeMaskScan = replayMaskScans.track(attachReplayActive);
-    // Restore the reset's keyboard state before draining the mask batch.
-    ptyWrites.write(termWriter, bytes, origin, () => {
-      onComplete?.();
-      completeMaskScan();
-    });
+    ptyWrites.write(termWriter, bytes, origin, onComplete);
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
@@ -2710,7 +2672,6 @@
     }
     closeSocket();
     inputHold.abandon();
-    replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
     stopPixelRatioWatch?.();
@@ -2723,8 +2684,6 @@
     host?.removeEventListener("keydown", noteInterruptKey, true);
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
-    if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
-    resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
     // The terminal's disposal frees its search and removes its layers.
@@ -2746,7 +2705,6 @@
 
   /// The load error's Retry: load again, from whatever the loader kept.
   function retryLoad(): void {
-    loadFailure = null;
     void start();
   }
 
@@ -3078,7 +3036,7 @@
   /// state from the first use; null while no terminal is open, since a
   /// search reached before open is inert and reports nothing.
   function terminalSearch(): TerminalSearch | null {
-    if (!term?.core) return null;
+    if (!term) return null;
     findSubscription ??= term.search.onChange((state) => {
       findCount = state;
     });

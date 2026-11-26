@@ -235,6 +235,25 @@ describe("a masker built after its tab's masking was already on", () => {
   });
 });
 
+describe("a secret in an attach replay", () => {
+  test("is masked in the frame that draws it, and stays masked once the replay ends", async () => {
+    __testSetStandalonePreferences(terminalPreferences({ secret_masking: true }));
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: "sess-1" })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket, { id: "sess-1" });
+    // A frame paints the empty screen first, so the replay's rows are read
+    // again for their own bytes, not at the masker's first frame.
+    expect(painted(term)).toEqual([]);
+
+    await output(socket, SECRET_LINE);
+    expect(painted(term), "while the replay is parsed").toEqual(MASKED);
+
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    expect(painted(term), "once it ends").toEqual(MASKED);
+  });
+});
+
 // A masker that fails leaves its mark on the tab, and masking stays off for
 // that masker whatever asks for it. The mark is that masker's: a terminal
 // built again over the same tab has a new one, which starts from the rule.

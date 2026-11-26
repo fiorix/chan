@@ -17,10 +17,12 @@ export type TerminalWsPathOpts = {
   side?: "a" | "b" | null;
   tabId?: string | null;
   sessionId?: string | null;
-  /// Byte cursor to resume a reattach from, when the terminal still shows the
-  /// screen up to it (a redial after a dropped socket). Omitted -> a full
-  /// replay from the ring head (the server reports any overflow loss via
-  /// `missed_bytes`).
+  /// Byte cursor a reattach's replay starts from. Omitted, it is sent as 0:
+  /// a full replay, the server reporting any ring-overflow loss via
+  /// `missed_bytes`. A redial after a dropped socket passes a cursor its
+  /// screen holds the output up to: where the view parsed to, or, after a
+  /// cut replay that still owes a loss its suffix, where that loss starts,
+  /// which is earlier; the caller skips the bytes the view already parsed.
   since?: number | null;
   /// The session generation `since` was read in. The server honors `since`
   /// only when this still matches the live session (a restart bumps it).
