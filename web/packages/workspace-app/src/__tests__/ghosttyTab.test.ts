@@ -13,6 +13,7 @@ import TerminalTab from "../components/TerminalTab.svelte";
 import {
   ghosttyFixture,
   ghosttyHasFocus,
+  ghosttyTextarea,
   holdGhosttyLoads,
   mountGhosttyTerminal,
   pressInGhostty,
@@ -147,4 +148,19 @@ test("focus inside the terminal follows focus() and blur()", async () => {
   expect(ghosttyHasFocus(term)).toBe(true);
   term.blur();
   expect(ghosttyHasFocus(term)).toBe(false);
+});
+
+test("ghosttyTextarea returns the single input textarea and refuses a host with another or none", async () => {
+  const { term } = await opened();
+  const textarea = ghosttyTextarea(term);
+  expect(textarea.tagName).toBe("TEXTAREA");
+  const extra = document.createElement("textarea");
+  term.element!.append(extra);
+  try {
+    expect(() => ghosttyTextarea(term)).toThrow();
+  } finally {
+    extra.remove();
+  }
+  textarea.remove();
+  expect(() => ghosttyTextarea(term)).toThrow();
 });
