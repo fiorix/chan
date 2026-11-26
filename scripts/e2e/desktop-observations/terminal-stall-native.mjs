@@ -171,8 +171,8 @@ async function stallArm({ label, windowId, env, stallMs, probed }) {
   await run(chan, ["shell", "terminal", "new", "--window", windowId, "--tab-name", name, "--command", command, "--env", `STALL_GO=${go}`],
     { env, timeout: 30_000 });
   await until(`${label}: the terminal attached and began`, readTrace, (seen) => seen.begun && seen.sockets.at(-1)?.ready, 60_000);
-  const ghostty = await inPage(windowId, `document.querySelectorAll(".terminal-tab.active .terminal-host > canvas").length`);
-  if (!ghostty) throw new Inconclusive(`${label}: the active terminal is not on the ghostty backend`);
+  const canvases = await inPage(windowId, `document.querySelectorAll(".terminal-tab.active .terminal-host > canvas").length`);
+  if (!canvases) throw new Inconclusive(`${label}: the active terminal has no canvas`);
 
   await inPage(windowId, `window.__stallNative.startStall(${stallMs})`);
   await sleep(400);

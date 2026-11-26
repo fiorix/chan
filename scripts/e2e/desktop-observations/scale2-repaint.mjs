@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The check-296 reset on the real WebKitGTK desktop at GDK_SCALE=2: open
-// one ghostty terminal, paint pages, read painted pixels per quarter plus
+// one terminal, paint pages, read painted pixels per quarter plus
 // the transform, drop the canvas drawing state by a same-size reset, and
 // refocus the window (the app's forced passes run on focus). At the tip
 // the repaint lands at full scale; at the base it stays in the top-left
@@ -52,13 +52,10 @@ const evaluate = (expression) =>
   JSON.parse(run(process.execPath, [new URL("inspect.mjs", import.meta.url).pathname,
     args.inspector, "eval", "/workspace-", expression], "inspect", 15000));
 
-// The ghostty surface only: an xterm screen under the host means the wrong
-// backend, and more than one canvas means the tab lookup is ambiguous.
+// One terminal canvas: more than one means the tab lookup is ambiguous.
 const FIND = `(() => {
-  const ghostty = [...document.querySelectorAll(".terminal-host > canvas")];
-  const xterm = document.querySelector(".terminal.xterm .xterm-screen");
-  if (xterm) return { backend: "xterm" };
-  if (ghostty.length !== 1) return { canvases: ghostty.length };
+  const canvases = document.querySelectorAll(".terminal-host > canvas").length;
+  if (canvases !== 1) return { canvases };
   return { ok: true };
 })()`;
 const COUNT = `(() => {
@@ -139,7 +136,7 @@ async function main() {
   cs(["terminal", "new", "--window", WID, "--pane", pane, "--side", "a", "--tab-name", tab]);
   // Hang guard: the new terminal takes a moment to mount its canvas.
   await poll(async () => evaluate(FIND),
-    (f) => f.ok === true, "no ghostty canvas mounted", 15000, "incomplete").catch((error) => {
+    (f) => f.ok === true, "no terminal canvas mounted", 15000, "incomplete").catch((error) => {
     throw new Incomplete(error.message);
   });
   // Hang guard: the shell takes a moment to answer on the fresh pty.

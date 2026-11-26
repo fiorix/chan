@@ -14,7 +14,7 @@ export function unobservedViews({ name, tabId, surface }) {
     };
     return [{ name, tab: id, pane: pane?.getAttribute("data-pane-id"), connected: !!screen,
       visible: !!host && tab.classList.contains("active") && getComputedStyle(host).visibility === "visible",
-      backend: screen ? "ghostty" : null, grid: null,
+      canvas: Boolean(screen), grid: null,
       paneBox: box(pane), hostBox: box(host), screenBox: box(screen) }];
   });
 }
@@ -49,7 +49,7 @@ export function installSizeObserver(surface) {
       pane: pane?.getAttribute("data-pane-id") ?? null,
       connected: entry.peer.readyState === NativeSocket.OPEN,
       visible: !!host && tab.classList.contains("active") && style.visibility === "visible" && host.clientWidth > 0 && host.clientHeight > 0,
-      backend: screen ? "ghostty" : null,
+      canvas: Boolean(screen),
       grid: entry.grid, sizeIfUnset: entry.sizeIfUnset, paneBox: box(pane), hostBox: box(host), screenBox: box(screen),
       hostWidth: host?.clientWidth ?? 0, hostHeight: host?.clientHeight ?? 0, padding,
       // Ghostty's scrollbar overlays the cells without reserving width.
