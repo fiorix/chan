@@ -61,10 +61,10 @@
 //    exempt, since errors travel as `unknown` by design and are read after
 //    `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
-//    names a member the class keeps private, lacks, or holds as one of its
-//    implementation members, which reads `undefined` once that member is
-//    `#private`; a type with a widget part (a union with another type) is
-//    read through the widget's own declarations, which rules 3 and 5 see.
+//    names a member the class keeps private or lacks, which reads
+//    `undefined` once that member is `#private`; a type with a widget part
+//    (a union with another type) is read through the widget's own
+//    declarations, which rules 3 and 5 see.
 //
 // A widget value is one of a type the package declares, of a class or
 // interface that extends one (`this` in a subclass included), of a type
@@ -119,11 +119,6 @@
 //   state `#private` (`term.buffer.active`), into `unknown` or an app duck
 //   type: rules 6 and 7 take widget class instances only (`bufferEscape`,
 //   `bufferDuck`);
-// - Terminal's `renderer`, `textarea` and `viewportY` outside its modules,
-//   on a receiver not named like a terminal (`offView`, `offText` and
-//   `offOffset` in `src/state/`): TypeScript lists them as public, so only
-//   rule 5 reads them, by that name heuristic, until the package seals
-//   them;
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
 //   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
 //   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
@@ -247,9 +242,9 @@ const ENTRIES = new Set(
   ),
 );
 
-/// Implementation members of the widget an app module has no reason to name:
-/// Terminal's core, which TypeScript still lists as public, and the parts
-/// the widget holds privately.
+/// Implementation members of the widget (all `#private`) an app module has
+/// no reason to name: catches what has no widget type to check, such as a
+/// duck-typed parameter or an untyped JavaScript reader.
 const IMPLEMENTATION = new Set([
   "wasmTerm",
   "selectionManager",
@@ -259,9 +254,10 @@ const IMPLEMENTATION = new Set([
   "buildWasmConfig",
   "hoveredHyperlinkId",
 ]);
-/// Terminal's renderer, textarea and scroll offset, also listed as public:
-/// other modules name objects of their own the same, so these count in the
-/// terminal's own modules and elsewhere only on a receiver named like one.
+/// Terminal's `#private` renderer, textarea and scroll offset: other modules
+/// name objects of their own the same, so rule 5 counts these in the
+/// terminal's own modules and elsewhere only on a receiver named like one;
+/// rule 3 catches any typed read on a Terminal everywhere.
 const GENERIC = new Set(["renderer", "textarea", "viewportY"]);
 const TERMINAL_MODULE = /^src\/(terminal\/|components\/TerminalTab\.svelte$)/;
 const TERMINAL_RECEIVER = /term|ghostty|widget/i;
@@ -1049,7 +1045,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
             if (shape.flags & ts.TypeFlags.TypeParameter) continue;
             for (const property of checker.getPropertiesOfType(checker.getApparentType(shape))) {
               const name = property.getName();
-              if (IMPLEMENTATION.has(name) || GENERIC.has(name) || hidden(type, name)) report("duck", node, `${nameOf(type)}.${name}`);
+              if (hidden(type, name)) report("duck", node, `${nameOf(type)}.${name}`);
             }
           }
         }
@@ -1384,6 +1380,16 @@ const PLANTS = new Map<string, string>([
       "  s.cols = 1;",
       "  return [Object.assign(s, { cols: 1 }), Object.freeze(s), s.isSealed];",
       "};",
+      "export const sealed = (term: Terminal) => [",
+      "  // @ts-expect-error sealed fields",
+      "  term.wasmTerm,",
+      "  // @ts-expect-error sealed fields",
+      "  term.renderer,",
+      "  // @ts-expect-error sealed fields",
+      "  term.textarea,",
+      "  // @ts-expect-error sealed fields",
+      "  term.viewportY,",
+      "];",
     ].join("\n"),
   ],
   [
@@ -1635,10 +1641,14 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 4, key: "wasmTerm" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 7, key: "Terminal.renderer" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 8, key: "Terminal.textarea" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 9, key: "Terminal.viewportY" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
+  { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "Terminal.renderer" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "renderer" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "any" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "Terminal.isOpen" },
@@ -1671,6 +1681,10 @@ const PLANTED: readonly Site[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.assign KinFixture" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.freeze KinFixture" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "KinFixture.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 52, key: "Terminal.wasmTerm" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 54, key: "Terminal.renderer" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 56, key: "Terminal.textarea" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 58, key: "Terminal.viewportY" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too

@@ -69,12 +69,12 @@ export class Terminal {
   // The package's white-box tests set up and read these through ./internal.
   static {
     registerWidgetInternals((term) => ({
-      get wasmTerm() { return term.wasmTerm; },
-      set wasmTerm(wasmTerm) { term.wasmTerm = wasmTerm; },
-      get renderer() { return term.renderer; },
-      set renderer(renderer) { term.renderer = renderer; },
-      get viewportY() { return term.viewportY; },
-      set viewportY(viewportY) { term.viewportY = viewportY; },
+      get wasmTerm() { return term.#wasmTerm; },
+      set wasmTerm(wasmTerm) { term.#wasmTerm = wasmTerm; },
+      get renderer() { return term.#renderer; },
+      set renderer(renderer) { term.#renderer = renderer; },
+      get viewportY() { return term.#viewportY; },
+      set viewportY(viewportY) { term.#viewportY = viewportY; },
       get canvas() { return term.#canvas; },
       set canvas(canvas) { term.#canvas = canvas; },
       get isOpen() { return term.#isOpen; },
@@ -96,7 +96,6 @@ export class Terminal {
   public cols: number;
   public rows: number;
   public element?: HTMLElement;
-  public textarea?: HTMLTextAreaElement;
 
   // Buffer API (xterm.js compatibility)
   public readonly buffer: IBufferNamespace;
@@ -107,11 +106,11 @@ export class Terminal {
 
   // Components (created on open())
   #ghostty?: GhosttyVt;
-  public wasmTerm: VtTerminal | undefined; // Made public for link providers
+  #wasmTerm: VtTerminal | undefined;
   #coreAccess?: ReturnType<typeof createTerminalCore>;
   /** Available from open to dispose; the widget retains ownership of the raw core. */
   get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
-  public renderer?: CanvasRenderer;
+  #renderer?: CanvasRenderer;
   #inputHandler?: InputHandler;
   #selectionManager?: SelectionManager;
   #highlightsManager?: HighlightsManager;
@@ -124,6 +123,7 @@ export class Terminal {
     clear: (name) => this.#highlightsManager?.clear(name) ?? false,
   };
   #canvas?: HTMLCanvasElement;
+  #textarea?: HTMLTextAreaElement;
 
   // Link detection system
   #linkDetector?: LinkDetector;
@@ -164,7 +164,7 @@ export class Terminal {
   #customKeyEventHandler?: (event: KeyboardEvent) => boolean;
 
   // Phase 2: Viewport and scrolling state
-  public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
+  #viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   #targetViewportY: number = 0; // Target viewport position for smooth scrolling
   #scrollAnimationStartTime?: number;
   #scrollAnimationFrame?: number;
@@ -230,7 +230,7 @@ export class Terminal {
     this.rows = this.options.rows;
 
     // Initialize buffer API
-    this.buffer = new BufferNamespace(() => this.wasmTerm);
+    this.buffer = new BufferNamespace(() => this.#wasmTerm);
     const terminal = this;
     const emptySearch = Object.freeze({ index: 0, total: 0, partial: false });
     this.search = Object.freeze({
@@ -241,10 +241,10 @@ export class Terminal {
       onChange: (listener: Parameters<TerminalSearch['onChange']>[0]) => this.#searchOwner?.onChange(listener) ?? { dispose() {} },
     });
     this.viewport = {
-      get offset() { return terminal.viewportY; },
+      get offset() { return terminal.#viewportY; },
       followOutput: 'at-bottom',
       scrollTo: (offset) => this.#scrollViewportTo(offset),
-      scrollBy: (rows) => this.#scrollViewportTo(this.viewportY + rows),
+      scrollBy: (rows) => this.#scrollViewportTo(this.#viewportY + rows),
       scrollToBottom: () => this.scrollToBottom(),
       reveal: (row, align = 'center') => this.#revealRow(row, align),
     };
@@ -269,29 +269,29 @@ export class Terminal {
 
       case 'cursorBlink':
       case 'cursorStyle':
-        if (this.renderer) {
-          this.renderer.setCursorStyle(this.options.cursorStyle);
-          this.renderer.setCursorBlink(this.options.cursorBlink);
+        if (this.#renderer) {
+          this.#renderer.setCursorStyle(this.options.cursorStyle);
+          this.#renderer.setCursorBlink(this.options.cursorBlink);
         }
         break;
 
       case 'theme':
-        this.wasmTerm!.setColors(this.#buildWasmConfig());
-        this.renderer!.setTheme(this.options.theme);
+        this.#wasmTerm!.setColors(this.#buildWasmConfig());
+        this.#renderer!.setTheme(this.options.theme);
         this.#searchOwner?.restyle();
         this.refresh();
         break;
 
       case 'fontSize':
-        if (this.renderer) {
-          this.renderer.setFontSize(this.options.fontSize);
+        if (this.#renderer) {
+          this.#renderer.setFontSize(this.options.fontSize);
           this.#handleFontChange();
         }
         break;
 
       case 'fontFamily':
-        if (this.renderer) {
-          this.renderer.setFontFamily(this.options.fontFamily);
+        if (this.#renderer) {
+          this.#renderer.setFontFamily(this.options.fontFamily);
           this.#handleFontChange();
         }
         break;
@@ -309,7 +309,7 @@ export class Terminal {
    * Updates canvas size to match new font metrics and forces a full re-render
    */
   #handleFontChange(): void {
-    if (!this.renderer || !this.wasmTerm || !this.#canvas) return;
+    if (!this.#renderer || !this.#wasmTerm || !this.#canvas) return;
 
     // Clear any active selection since pixel positions have changed
     if (this.#selectionManager) {
@@ -317,10 +317,10 @@ export class Terminal {
     }
 
     // Resize canvas to match new font metrics
-    this.renderer.resize(this.cols, this.rows);
+    this.#renderer.resize(this.cols, this.rows);
 
     // Force full re-render with new font
-    this.renderer.render(this.wasmTerm, true, this.viewportY, this.#paintScrollbarOpacity());
+    this.#renderer.render(this.#wasmTerm, true, this.#viewportY, this.#paintScrollbarOpacity());
   }
 
   #parseColorToHex(color?: string): number | undefined {
@@ -417,8 +417,8 @@ export class Terminal {
 
       // Create WASM terminal with current dimensions and config
       const config = this.#buildWasmConfig();
-      this.wasmTerm = this.#ghostty!.createTerminal(this.cols, this.rows, config);
-      this.#coreAccess = createTerminalCore(this.wasmTerm);
+      this.#wasmTerm = this.#ghostty!.createTerminal(this.cols, this.rows, config);
+      this.#coreAccess = createTerminalCore(this.#wasmTerm);
 
       // Create canvas element
       this.#canvas = document.createElement('canvas');
@@ -428,34 +428,34 @@ export class Terminal {
       parent.appendChild(this.#canvas);
 
       // Create hidden textarea for keyboard input (must be inside parent for event bubbling)
-      this.textarea = document.createElement('textarea');
-      this.textarea.setAttribute('autocorrect', 'off');
-      this.textarea.setAttribute('autocapitalize', 'off');
-      this.textarea.setAttribute('spellcheck', 'false');
-      this.textarea.setAttribute('tabindex', '0'); // Allow focus for mobile keyboard
-      this.textarea.setAttribute('aria-label', 'Terminal input');
+      this.#textarea = document.createElement('textarea');
+      this.#textarea.setAttribute('autocorrect', 'off');
+      this.#textarea.setAttribute('autocapitalize', 'off');
+      this.#textarea.setAttribute('spellcheck', 'false');
+      this.#textarea.setAttribute('tabindex', '0'); // Allow focus for mobile keyboard
+      this.#textarea.setAttribute('aria-label', 'Terminal input');
       // Use clip-path to completely hide the textarea and its caret
-      this.textarea.style.position = 'absolute';
-      this.textarea.style.left = '0';
-      this.textarea.style.top = '0';
-      this.textarea.style.width = '1px';
-      this.textarea.style.height = '1px';
-      this.textarea.style.padding = '0';
-      this.textarea.style.border = 'none';
-      this.textarea.style.margin = '0';
-      this.textarea.style.opacity = '0';
-      this.textarea.style.clipPath = 'inset(50%)'; // Clip everything including caret
-      this.textarea.style.overflow = 'hidden';
-      this.textarea.style.whiteSpace = 'nowrap';
-      this.textarea.style.resize = 'none';
-      parent.appendChild(this.textarea);
+      this.#textarea.style.position = 'absolute';
+      this.#textarea.style.left = '0';
+      this.#textarea.style.top = '0';
+      this.#textarea.style.width = '1px';
+      this.#textarea.style.height = '1px';
+      this.#textarea.style.padding = '0';
+      this.#textarea.style.border = 'none';
+      this.#textarea.style.margin = '0';
+      this.#textarea.style.opacity = '0';
+      this.#textarea.style.clipPath = 'inset(50%)'; // Clip everything including caret
+      this.#textarea.style.overflow = 'hidden';
+      this.#textarea.style.whiteSpace = 'nowrap';
+      this.#textarea.style.resize = 'none';
+      parent.appendChild(this.#textarea);
 
       // Focus textarea on interaction - preventDefault before focus
       this.#canvas.addEventListener('mousedown', this.#handleCanvasFocus);
       this.#canvas.addEventListener('touchend', this.#handleCanvasFocus);
 
       // Create renderer
-      this.renderer = new CanvasRenderer(this.#canvas, {
+      this.#renderer = new CanvasRenderer(this.#canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
         cursorStyle: this.options.cursorStyle,
@@ -467,12 +467,12 @@ export class Terminal {
       });
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
-      this.renderer.resize(this.cols, this.rows);
+      this.#renderer.resize(this.cols, this.rows);
 
       // Create mouse tracking configuration
       const canvas = this.#canvas;
-      const renderer = this.renderer;
-      const wasmTerm = this.wasmTerm;
+      const renderer = this.#renderer;
+      const wasmTerm = this.#wasmTerm;
       const mouseConfig: MouseTrackingConfig = {
         hasMouseTracking: () => wasmTerm?.hasMouseTracking() ?? false,
         hasSgrMouseMode: () => wasmTerm?.getMode(1006, false) ?? true, // SGR extended mode
@@ -514,22 +514,22 @@ export class Terminal {
         this.#customKeyEventHandler,
         (mode: number) => {
           // Query terminal mode state (e.g., mode 1 for application cursor mode)
-          return this.wasmTerm?.getMode(mode, false) ?? false;
+          return this.#wasmTerm?.getMode(mode, false) ?? false;
         },
         () => {
           // Handle Cmd+C copy - returns true if there was a selection to copy
           return this.copySelection();
         },
-        this.textarea,
+        this.#textarea,
         mouseConfig
       );
 
       // Create selection manager (pass textarea for context menu positioning)
       this.#selectionManager = new SelectionManager(
         this,
-        this.renderer,
-        this.wasmTerm,
-        this.textarea,
+        this.#renderer,
+        this.#wasmTerm,
+        this.#textarea,
         {
           claimScrollbarPress: (event) => this.#claimScrollbarPress(event),
           press: (event, reported) => {
@@ -550,11 +550,11 @@ export class Terminal {
       );
 
       // Connect selection manager to renderer
-      this.renderer.setSelectionManager(this.#selectionManager);
-      this.#highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
-      this.renderer.setHighlights(this.#highlightsManager);
+      this.#renderer.setSelectionManager(this.#selectionManager);
+      this.#highlightsManager = new HighlightsManager(this.#wasmTerm.isAlternateScreen());
+      this.#renderer.setHighlights(this.#highlightsManager);
       this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.#highlightsManager, this.viewport,
-        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch(),
+        this.#wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.#wasmTerm!.createSearch(),
         () => this.options.theme);
 
       // Initialize link detection system
@@ -562,7 +562,7 @@ export class Terminal {
 
       // Register link providers
       // OSC8 first (explicit hyperlinks take precedence)
-      this.#linkDetector.registerProvider(new OSC8LinkProvider(this, () => this.wasmTerm));
+      this.#linkDetector.registerProvider(new OSC8LinkProvider(this, () => this.#wasmTerm));
       // URL regex second (fallback for plain text URLs)
       this.#linkDetector.registerProvider(new UrlRegexProvider(this));
 
@@ -581,7 +581,7 @@ export class Terminal {
       parent.addEventListener('wheel', this.#handleWheel, { passive: false, capture: true });
 
       // Render initial blank screen (force full redraw)
-      this.renderer.render(this.wasmTerm, true, this.viewportY, this.#paintScrollbarOpacity());
+      this.#renderer.render(this.#wasmTerm, true, this.#viewportY, this.#paintScrollbarOpacity());
 
       // Start render loop
       this.#startRenderLoop();
@@ -615,8 +615,8 @@ export class Terminal {
       if (callback) requestAnimationFrame(callback);
       return;
     }
-    const core = this.wasmTerm!;
-    const viewportBefore = this.viewportY;
+    const core = this.#wasmTerm!;
+    const viewportBefore = this.#viewportY;
     const targetBefore = this.#targetViewportY;
     const scrolling = this.#scrollAnimationStartTime !== undefined;
     const scrollbackBefore = this.getScrollbackLength();
@@ -637,7 +637,7 @@ export class Terminal {
       const position = anchor?.point();
       const offset = viewportBefore < 1 ? viewportBefore
         : position ? scrollbackAfter - position.row + viewportBefore % 1 : scrollbackAfter;
-      this.viewportY = Math.max(0, Math.min(scrollbackAfter, offset));
+      this.#viewportY = Math.max(0, Math.min(scrollbackAfter, offset));
       if (scrolling) {
         // The visible row can be pruned while a newer gesture target survives.
         const targetPosition = targetAnchor?.point();
@@ -645,7 +645,7 @@ export class Terminal {
           : targetPosition ? scrollbackAfter - targetPosition.row + targetBefore % 1 : scrollbackAfter;
         this.#targetViewportY = Math.max(0, Math.min(scrollbackAfter, target));
       } else {
-        this.#targetViewportY = this.viewportY;
+        this.#targetViewportY = this.#viewportY;
       }
     } finally {
       anchor?.free();
@@ -677,12 +677,12 @@ export class Terminal {
 
     if (this.#awaitingEcho) {
       this.#awaitingEcho = false;
-      if (this.renderer && this.wasmTerm) {
+      if (this.#renderer && this.#wasmTerm) {
         // The core has taken the bytes and the observers have run, so a
         // failed paint is reported rather than thrown at the writer.
         try {
           this.#searchOwner?.runDue();
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
+          this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
         } catch (error) {
           reportPaintError(error);
         }
@@ -723,7 +723,7 @@ export class Terminal {
     // paste encoder frames the text under bracketed paste (DEC mode 2004)
     // and turns the bytes that could end the bracket or act as keys into
     // spaces. An empty text without bracketed paste sends nothing.
-    const encoded = this.wasmTerm!.encodePaste(pasteLineEnds(data));
+    const encoded = this.#wasmTerm!.encodePaste(pasteLineEnds(data));
     if (!encoded) return;
     this.#awaitingEcho = true;
     this.scrollToBottom();
@@ -779,23 +779,23 @@ export class Terminal {
       this.rows = rows;
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
-      this.wasmTerm!.resize(cols, rows);
-      this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
+      this.#wasmTerm!.resize(cols, rows);
+      this.#viewportY = Math.min(this.#viewportY, this.getScrollbackLength());
       this.#targetViewportY = Math.min(this.#targetViewportY, this.getScrollbackLength());
       this.#selectionManager?.syncSelection();
-      this.#highlightsManager?.observeScreen(this.wasmTerm!.isAlternateScreen());
+      this.#highlightsManager?.observeScreen(this.#wasmTerm!.isAlternateScreen());
 
       // Resize renderer
-      this.renderer!.resize(cols, rows);
+      this.#renderer!.resize(cols, rows);
 
-      this.#searchOwner?.changed('resize', this.wasmTerm!.isAlternateScreen());
+      this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen());
       this.#changeEmitter.fire({ kind: 'resize' });
 
       // The dimension event also serves PTY size publication.
       this.#resizeEmitter.fire({ cols, rows });
 
       // Force full render
-      this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.#paintScrollbarOpacity());
+      this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
     } catch (e) {
       console.error('Terminal resize failed:', e);
     }
@@ -919,8 +919,8 @@ export class Terminal {
    * cursor moves synchronously; undefined before open and after disposal.
    */
   public getCursor(): Readonly<{ x: number; y: number }> | undefined {
-    if (!this.#isOpen || !this.wasmTerm) return undefined;
-    const { x, y } = this.wasmTerm.getCursor();
+    if (!this.#isOpen || !this.#wasmTerm) return undefined;
+    const { x, y } = this.#wasmTerm.getCursor();
     return { x, y };
   }
 
@@ -931,13 +931,13 @@ export class Terminal {
    * scrollback buffer. It may be fractional during smooth scrolling.
    */
   public getViewportY(): number {
-    return this.viewportY;
+    return this.#viewportY;
   }
 
   /** Add a layer above the widget; an unopened terminal retains no registration. */
   public addPaintLayer(layer: PaintLayer): () => void {
     if (!this.#isOpen) return () => {};
-    return this.renderer!.addPaintLayer(layer);
+    return this.#renderer!.addPaintLayer(layer);
   }
 
   /**
@@ -946,7 +946,7 @@ export class Terminal {
    */
   public refresh(): void {
     if (!this.#isOpen) return;
-    this.renderer!.render(this.wasmTerm!, true, this.viewportY, this.#paintScrollbarOpacity());
+    this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
   }
 
   /**
@@ -961,7 +961,7 @@ export class Terminal {
 
   /** Cell dimensions in CSS pixels, or undefined while the widget is not open. */
   public getMetrics(): Readonly<FontMetrics> | undefined {
-    return this.#isOpen ? this.renderer!.getMetrics() : undefined;
+    return this.#isOpen ? this.#renderer!.getMetrics() : undefined;
   }
 
   #paintScrollbarOpacity(): number {
@@ -1008,7 +1008,7 @@ export class Terminal {
    * @param amount Number of lines to scroll (positive = down, negative = up)
    */
   public scrollLines(amount: number): void {
-    if (!this.wasmTerm) {
+    if (!this.#wasmTerm) {
       throw new Error('Terminal not open');
     }
 
@@ -1021,10 +1021,10 @@ export class Terminal {
     // amount < 0 (scroll up) should INCREASE viewportY
     // amount > 0 (scroll down) should DECREASE viewportY
     // So we SUBTRACT amount (negative amount becomes positive change)
-    const newViewportY = Math.max(0, Math.min(maxScroll, this.viewportY - amount));
+    const newViewportY = Math.max(0, Math.min(maxScroll, this.#viewportY - amount));
 
-    if (newViewportY !== this.viewportY) {
-      this.viewportY = newViewportY;
+    if (newViewportY !== this.#viewportY) {
+      this.#viewportY = newViewportY;
 
       // Show scrollbar when scrolling (with auto-hide)
       if (scrollbackLength > 0) {
@@ -1043,8 +1043,8 @@ export class Terminal {
       this.#scrollAnimationFrame = undefined;
     }
     this.#scrollAnimationStartTime = undefined;
-    if (this.viewportY !== 0) {
-      this.viewportY = 0;
+    if (this.#viewportY !== 0) {
+      this.#viewportY = 0;
       // Show scrollbar briefly when scrolling to bottom
       if (this.getScrollbackLength() > 0) {
         this.#showScrollbar();
@@ -1062,8 +1062,8 @@ export class Terminal {
     }
     this.#scrollAnimationStartTime = undefined;
 
-    if (newViewportY !== this.viewportY) {
-      this.viewportY = newViewportY;
+    if (newViewportY !== this.#viewportY) {
+      this.#viewportY = newViewportY;
 
       if (scrollbackLength > 0) {
         this.#showScrollbar();
@@ -1073,7 +1073,7 @@ export class Terminal {
 
   #revealRow(row: number, align: 'start' | 'center' | 'end'): void {
     const history = this.getScrollbackLength();
-    const onScreen = row - history + Math.max(0, Math.floor(this.viewportY));
+    const onScreen = row - history + Math.max(0, Math.floor(this.#viewportY));
     if (onScreen >= 0 && onScreen < this.rows) return;
     const at = align === 'start' ? 0 : align === 'end' ? this.rows - 1 : Math.floor(this.rows / 2);
     this.#scrollViewportTo(history - row + at);
@@ -1084,7 +1084,7 @@ export class Terminal {
    * @param targetY Target viewport Y position (in lines, can be fractional)
    */
   #smoothScrollTo(targetY: number): void {
-    if (!this.wasmTerm) return;
+    if (!this.#wasmTerm) return;
 
     const scrollbackLength = this.getScrollbackLength();
     const maxScroll = scrollbackLength;
@@ -1095,7 +1095,7 @@ export class Terminal {
     // If smooth scrolling is disabled (duration = 0), jump immediately
     const duration = this.options.smoothScrollDuration ?? 100;
     if (duration === 0) {
-      this.viewportY = newTarget;
+      this.#viewportY = newTarget;
       this.#targetViewportY = newTarget;
 
       if (scrollbackLength > 0) {
@@ -1124,19 +1124,19 @@ export class Terminal {
    * Uses asymptotic approach - moves a fraction of remaining distance each frame
    */
   #animateScroll = (): void => {
-    if (!this.wasmTerm || this.#scrollAnimationStartTime === undefined) {
+    if (!this.#wasmTerm || this.#scrollAnimationStartTime === undefined) {
       return;
     }
 
     const duration = this.options.smoothScrollDuration ?? 100;
 
     // Calculate distance to target
-    const distance = this.#targetViewportY - this.viewportY;
+    const distance = this.#targetViewportY - this.#viewportY;
     const absDistance = Math.abs(distance);
 
     // If very close, snap to target
     if (absDistance < 0.01) {
-      this.viewportY = this.#targetViewportY;
+      this.#viewportY = this.#targetViewportY;
 
       const scrollbackLength = this.getScrollbackLength();
       if (scrollbackLength > 0) {
@@ -1154,7 +1154,7 @@ export class Terminal {
     // This creates smooth deceleration toward target
     const framesForDuration = (duration / 1000) * 60; // Convert ms to frame count
     const moveRatio = 1 - (1 / framesForDuration) ** 2; // Ease-out
-    this.viewportY += distance * moveRatio;
+    this.#viewportY += distance * moveRatio;
 
     // Show scrollbar during animation
     const scrollbackLength = this.getScrollbackLength();
@@ -1228,7 +1228,7 @@ export class Terminal {
   #flushWriteQueue(): void {
     while (this.#writeQueue.length > 0) {
       const data = this.#writeQueue.shift()!;
-      this.wasmTerm!.write(data);
+      this.#wasmTerm!.write(data);
     }
   }
 
@@ -1252,7 +1252,7 @@ export class Terminal {
           // Search runs first, so this paint shows its results.
           if (inFrame) this.#searchOwner?.runDue();
           inFrame = true;
-          this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.#paintScrollbarOpacity());
+          this.#renderer!.render(this.#wasmTerm!, false, this.#viewportY, this.#paintScrollbarOpacity());
         } finally {
           if (!this.#isDisposed && this.#isOpen) this.#animationFrameId = requestAnimationFrame(loop);
         }
@@ -1265,8 +1265,8 @@ export class Terminal {
    * Get scrollback length from native WASM
    */
   public getScrollbackLength(): number {
-    if (!this.wasmTerm) return 0;
-    return this.wasmTerm.getScrollbackLength();
+    if (!this.#wasmTerm) return 0;
+    return this.#wasmTerm.getScrollbackLength();
   }
 
   /**
@@ -1301,9 +1301,9 @@ export class Terminal {
     }
 
     // Dispose renderer
-    if (this.renderer) {
-      this.renderer.dispose();
-      this.renderer = undefined;
+    if (this.#renderer) {
+      this.#renderer.dispose();
+      this.#renderer = undefined;
     }
 
     if (this.#canvas) {
@@ -1314,9 +1314,9 @@ export class Terminal {
     }
 
     // Remove textarea from DOM
-    if (this.textarea && this.textarea.parentNode) {
-      this.textarea.parentNode.removeChild(this.textarea);
-      this.textarea = undefined;
+    if (this.#textarea && this.#textarea.parentNode) {
+      this.#textarea.parentNode.removeChild(this.#textarea);
+      this.#textarea = undefined;
     }
 
     // Remove event listeners
@@ -1352,15 +1352,15 @@ export class Terminal {
     }
 
     // Free WASM terminal
-    if (this.wasmTerm) {
-      this.wasmTerm.free();
-      this.wasmTerm = undefined;
+    if (this.#wasmTerm) {
+      this.#wasmTerm.free();
+      this.#wasmTerm = undefined;
     }
 
     // Clear references
     this.#ghostty = undefined;
     this.element = undefined;
-    this.textarea = undefined;
+    this.#textarea = undefined;
   }
 
   /**
@@ -1379,7 +1379,7 @@ export class Terminal {
    * Throttle link hover detection while leaving captured moves synchronous.
    */
   #handleMouseMove = (e: MouseEvent): void => {
-    if (!this.#canvas || !this.renderer || !this.wasmTerm) return;
+    if (!this.#canvas || !this.#renderer || !this.#wasmTerm) return;
 
     if (this.#scrollbarDrag) return;
 
@@ -1407,12 +1407,12 @@ export class Terminal {
    * Process mouse move for link detection (internal, called by throttled handler)
    */
   #processMouseMove(e: MouseEvent): void {
-    if (!this.#canvas || !this.renderer || !this.#linkDetector || !this.wasmTerm) return;
+    if (!this.#canvas || !this.#renderer || !this.#linkDetector || !this.#wasmTerm) return;
 
     // Convert mouse coordinates to terminal cell position
     const rect = this.#canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const x = Math.floor((e.clientX - rect.left) / this.#renderer.charWidth);
+    const y = Math.floor((e.clientY - rect.top) / this.#renderer.charHeight);
 
     // Get the link the cell at this position carries
     // Must account for viewportY (scrollback position)
@@ -1428,19 +1428,19 @@ export class Terminal {
     const rawViewportY = this.getViewportY();
     const viewportY = Math.max(0, Math.floor(rawViewportY));
     if (viewportY > 0) {
-      const scrollbackLength = this.wasmTerm.getScrollbackLength();
+      const scrollbackLength = this.#wasmTerm.getScrollbackLength();
       if (viewportRow < viewportY) {
         // Mouse is over scrollback content
         const scrollbackOffset = scrollbackLength - viewportY + viewportRow;
-        read = this.wasmTerm.readHistoryRow(scrollbackOffset, this.#hoverCells);
+        read = this.#wasmTerm.readHistoryRow(scrollbackOffset, this.#hoverCells);
       } else {
         // Mouse is over screen content (bottom part of viewport)
         const screenRow = viewportRow - viewportY;
-        read = this.wasmTerm.readRow(screenRow, this.#hoverCells);
+        read = this.#wasmTerm.readRow(screenRow, this.#hoverCells);
       }
     } else {
       // At bottom - just use screen buffer
-      read = this.wasmTerm.readRow(viewportRow, this.#hoverCells);
+      read = this.#wasmTerm.readRow(viewportRow, this.#hoverCells);
     }
 
     const cell = read ? this.#hoverCells.at(x) : undefined;
@@ -1450,12 +1450,12 @@ export class Terminal {
 
     // The renderer repaints the link's rows only when the id changes, and
     // the render loop picks that up, so setting it on every move is free.
-    this.renderer.setHoveredHyperlinkId(hyperlinkId);
+    this.#renderer.setHoveredHyperlinkId(hyperlinkId);
 
     // Check if there's a link at this position (for click handling and cursor)
     // Buffer API expects absolute buffer coordinates (including scrollback)
     // When scrolled, we need to adjust the buffer row based on viewportY
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const scrollbackLength = this.#wasmTerm.getScrollbackLength();
     let bufferRow: number;
 
     // Use floored viewportY for buffer mapping (must match renderer & selection)
@@ -1496,10 +1496,10 @@ export class Terminal {
           }
 
           // Update renderer for underline (for regex URLs without hyperlink_id)
-          if (this.renderer) {
+          if (this.#renderer) {
             if (link) {
               // Convert buffer coordinates to viewport coordinates
-              const scrollbackLength = this.wasmTerm?.getScrollbackLength() || 0;
+              const scrollbackLength = this.#wasmTerm?.getScrollbackLength() || 0;
 
               // Calculate viewport Y for start and end positions
               // Use floored viewportY so overlay rows match renderer & selection
@@ -1510,17 +1510,17 @@ export class Terminal {
 
               // Only show underline if link is visible in viewport
               if (startViewportY < this.rows && endViewportY >= 0) {
-                this.renderer.setHoveredLinkRange({
+                this.#renderer.setHoveredLinkRange({
                   startX: link.range.start.x,
                   startY: Math.max(0, startViewportY),
                   endX: link.range.end.x,
                   endY: Math.min(this.rows - 1, endViewportY),
                 });
               } else {
-                this.renderer.setHoveredLinkRange(null);
+                this.#renderer.setHoveredLinkRange(null);
               }
             } else {
-              this.renderer.setHoveredLinkRange(null);
+              this.#renderer.setHoveredLinkRange(null);
             }
           }
         }
@@ -1535,9 +1535,9 @@ export class Terminal {
    */
   #handleMouseLeave = (): void => {
     // Clear both underlines: the OSC 8 link's and the matched URL's.
-    if (this.renderer && this.wasmTerm) {
-      this.renderer.setHoveredHyperlinkId(0);
-      this.renderer.setHoveredLinkRange(null);
+    if (this.#renderer && this.#wasmTerm) {
+      this.#renderer.setHoveredHyperlinkId(0);
+      this.#renderer.setHoveredLinkRange(null);
     }
 
     if (this.#currentHoveredLink) {
@@ -1560,7 +1560,7 @@ export class Terminal {
 
   #handleCanvasFocus = (event: Event): void => {
     event.preventDefault();
-    this.textarea?.focus({ preventScroll: true });
+    this.#textarea?.focus({ preventScroll: true });
   };
 
   #handlePointerDown = (event: PointerEvent): void => {
@@ -1573,8 +1573,8 @@ export class Terminal {
 
   #checkLinkDrag(event: MouseEvent): void {
     const press = this.#linkPress;
-    if (!press || !this.renderer) return;
-    const threshold = this.renderer.charWidth * DRAG_THRESHOLD_CELLS;
+    if (!press || !this.#renderer) return;
+    const threshold = this.#renderer.charWidth * DRAG_THRESHOLD_CELLS;
     const dx = event.clientX - press.x;
     const dy = event.clientY - press.y;
     if (dx * dx + dy * dy >= threshold * threshold) this.#linkPress = undefined;
@@ -1616,7 +1616,7 @@ export class Terminal {
   #handleClick = async (e: MouseEvent): Promise<void> => {
     // For more reliable clicking, detect the link at click time
     // rather than relying on cached hover state (avoids async races)
-    if (!this.#canvas || !this.renderer || !this.#linkDetector || !this.wasmTerm) return;
+    if (!this.#canvas || !this.#renderer || !this.#linkDetector || !this.#wasmTerm) return;
 
     const press = this.#linkPress;
     this.#linkPress = undefined;
@@ -1626,12 +1626,12 @@ export class Terminal {
 
     // Get click position
     const rect = this.#canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
-    const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
+    const x = Math.floor((e.clientX - rect.left) / this.#renderer.charWidth);
+    const y = Math.floor((e.clientY - rect.top) / this.#renderer.charHeight);
 
     // Calculate buffer row (same logic as processMouseMove)
     const viewportRow = y;
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
+    const scrollbackLength = this.#wasmTerm.getScrollbackLength();
     let bufferRow: number;
 
     // Use floored viewportY for buffer mapping (must match renderer & selection)
@@ -1674,7 +1674,7 @@ export class Terminal {
     }
 
     // Check if in alternate screen mode (vim, less, htop, etc.)
-    const isAltScreen = this.wasmTerm?.isAlternateScreen() ?? false;
+    const isAltScreen = this.#wasmTerm?.isAlternateScreen() ?? false;
 
     if (isAltScreen) {
       // Alternate screen: send arrow keys to the application
@@ -1698,7 +1698,7 @@ export class Terminal {
       if (e.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
         // Pixel mode (trackpads): convert pixels to lines
         // Use actual line height from renderer for accurate conversion
-        const lineHeight = this.renderer?.getMetrics()?.height ?? 20;
+        const lineHeight = this.#renderer?.getMetrics()?.height ?? 20;
         deltaLines = e.deltaY / lineHeight;
       } else if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) {
         // Line mode (some mice): use directly
@@ -1716,7 +1716,7 @@ export class Terminal {
         // Calculate target position
         // deltaY > 0 = scroll down (decrease viewportY)
         // deltaY < 0 = scroll up (increase viewportY)
-        const targetY = this.viewportY - deltaLines;
+        const targetY = this.#viewportY - deltaLines;
         this.#smoothScrollTo(targetY);
       }
     }
@@ -1730,7 +1730,7 @@ export class Terminal {
     const track = Math.max(0, rect.height - 8);
     const thumb = Math.min(track, Math.max(20, this.rows / (history + this.rows) * track));
     const travel = track - thumb;
-    return { rect, track, thumb, travel, history, top: 4 + travel * (1 - this.viewportY / history) };
+    return { rect, track, thumb, travel, history, top: 4 + travel * (1 - this.#viewportY / history) };
   }
 
   #matchesScrollbarPointer(event: PointerEvent): boolean {
@@ -1771,7 +1771,7 @@ export class Terminal {
       canvas.style.userSelect = 'none';
       canvas.style.webkitUserSelect = 'none';
       // Cancel smooth motion before it can change the position under the held thumb.
-      this.viewport.scrollTo(this.viewportY);
+      this.viewport.scrollTo(this.#viewportY);
       this.#showScrollbar();
     } else if (track > 0) {
       this.viewport.scrollTo(Math.round((1 - (y - 4) / track) * history));
@@ -1792,7 +1792,7 @@ export class Terminal {
     // that viewport between moves, so neither output nor overshoot is replayed.
     drag.lastY = event.clientY;
     if (!geometry || geometry.travel <= 0) return;
-    this.viewport.scrollTo(this.viewportY - delta * geometry.history / geometry.travel);
+    this.viewport.scrollTo(this.#viewportY - delta * geometry.history / geometry.travel);
   };
 
   #handlePointerEnd = (event: PointerEvent): void => {
@@ -1877,8 +1877,8 @@ export class Terminal {
       this.#scrollbarOpacity = progress;
 
       // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
+      if (this.#renderer && this.#wasmTerm) {
+        this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1902,8 +1902,8 @@ export class Terminal {
       this.#scrollbarOpacity = startOpacity * (1 - progress);
 
       // Trigger render to show updated opacity
-      if (this.renderer && this.wasmTerm) {
-        this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
+      if (this.#renderer && this.#wasmTerm) {
+        this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
       }
 
       if (progress < 1) {
@@ -1912,8 +1912,8 @@ export class Terminal {
         this.#scrollbarVisible = false;
         this.#scrollbarOpacity = 0;
         // Final render to clear scrollbar completely
-        if (this.renderer && this.wasmTerm) {
-          this.renderer.render(this.wasmTerm, false, this.viewportY, this.#paintScrollbarOpacity());
+        if (this.#renderer && this.#wasmTerm) {
+          this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
         }
       }
     };
@@ -1936,12 +1936,12 @@ export class Terminal {
    * buffered data is written all at once during terminal initialization).
    */
   #processTerminalResponses(): void {
-    if (!this.wasmTerm) return;
+    if (!this.#wasmTerm) return;
 
     // Read all pending responses from the WASM terminal
     // Multiple responses can be queued if a single write() contained multiple queries
     while (true) {
-      const response = this.wasmTerm.readResponse();
+      const response = this.#wasmTerm.readResponse();
       if (response === null) break;
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
@@ -1962,7 +1962,7 @@ export class Terminal {
    */
   public getMode(mode: number, isAnsi: boolean = false): boolean {
     this.#assertOpen();
-    return this.wasmTerm!.getMode(mode, isAnsi);
+    return this.#wasmTerm!.getMode(mode, isAnsi);
   }
 
   /**
@@ -1970,7 +1970,7 @@ export class Terminal {
    */
   public hasBracketedPaste(): boolean {
     this.#assertOpen();
-    return this.wasmTerm!.hasBracketedPaste();
+    return this.#wasmTerm!.hasBracketedPaste();
   }
 
   /**
@@ -1978,7 +1978,7 @@ export class Terminal {
    */
   public hasFocusEvents(): boolean {
     this.#assertOpen();
-    return this.wasmTerm!.hasFocusEvents();
+    return this.#wasmTerm!.hasFocusEvents();
   }
 
   /**
@@ -1986,6 +1986,6 @@ export class Terminal {
    */
   public hasMouseTracking(): boolean {
     this.#assertOpen();
-    return this.wasmTerm!.hasMouseTracking();
+    return this.#wasmTerm!.hasMouseTracking();
   }
 }
