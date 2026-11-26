@@ -211,10 +211,13 @@ export async function mountRealTerminal(component: Component<any>) {
     } catch (error) { await unmount(instance); target.remove(); throw error; }
   }
   const mounted = { tab, ...(await opened()),
-    /// The page reloads: the tab's component goes and a new one opens on the
-    /// same tab, which keeps its session and negotiated keyboard protocol, so
-    /// its widget is new and its first dial asks for the whole ring. Returns
-    /// once that dial is made; `term` and `socket` are the new widget's.
+    /// The tab's component goes and a new one opens on the same tab, as the
+    /// tab's Retry after a drawing failure does. The tab keeps its session
+    /// and its keyboard protocol object, so its widget is new and its first
+    /// dial asks for the whole ring. A page reload dials the same way but is
+    /// not this: it restores the protocol from the session's saved snapshot
+    /// into a new object, without its push stacks. Returns once that dial is
+    /// made; `term` and `socket` are the new widget's.
     async remount() {
       await unmount(instance);
       Object.assign(mounted, await opened());
