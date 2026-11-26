@@ -172,8 +172,8 @@ const PENDING: readonly Pending[] = [
 /// A module as the program reads it: a `.ts` file whole, or one script
 /// block of a component (`line` is its first line in the component), or a
 /// component's markup with its scripts, styles and comments blanked so
-/// lines keep their numbers (`markup`). `names` is whether rule 5 applies.
-type Source = { file: string; rel: string; kind: Kind; text: string; line: number; markup: boolean; names: boolean };
+/// lines keep their numbers (`markup`).
+type Source = { file: string; rel: string; kind: Kind; text: string; line: number; markup: boolean };
 
 function kindOf(rel: string): Kind | null {
   if (rel.endsWith(".d.ts") || !/\.(ts|svelte)$/.test(rel)) return null;
@@ -189,16 +189,15 @@ function sourcesOf(rel: string, text: string): Source[] {
   const kind = kindOf(rel);
   if (!kind) return [];
   const file = `${APP}/${rel}`;
-  const names = kind === "shipped" && (TERMINAL_MODULE.test(rel) || text.includes(PACKAGE_NAME));
-  if (!rel.endsWith(".svelte")) return [{ file, rel, kind, text, line: 1, markup: false, names }];
+  if (!rel.endsWith(".svelte")) return [{ file, rel, kind, text, line: 1, markup: false }];
   const sources: Source[] = [];
   const script = /(<script\b[^>]*>)([\s\S]*?)<\/script>/g;
   for (let match: RegExpExecArray | null, i = 0; (match = script.exec(text)) !== null; i++) {
     const line = text.slice(0, match.index + match[1].length).split("\n").length;
-    sources.push({ file: `${file}.${i}.ts`, rel, kind, text: match[2], line, markup: false, names });
+    sources.push({ file: `${file}.${i}.ts`, rel, kind, text: match[2], line, markup: false });
   }
   const markup = text.replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>|<!--[\s\S]*?-->/g, blank);
-  sources.push({ file, rel, kind, text: markup, line: 1, markup: true, names });
+  sources.push({ file, rel, kind, text: markup, line: 1, markup: true });
   return sources;
 }
 
@@ -358,7 +357,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       findings.set(show(finding), finding);
     };
     if (source.markup) {
-      if (!source.names) continue;
+      if (source.kind !== "shipped") continue;
       // The receiver is read back from the dot: a pattern that may start in
       // whitespace backtracks over the blanked scripts quadratically.
       const member = /\??\.\s*([\w$]+)/g;
@@ -464,7 +463,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       }
 
       // 5. Implementation names.
-      if (source.names) {
+      if (source.kind === "shipped") {
         const member = memberNamed(node);
         if (member && isImplementationName(source.rel, member.name, member.receiver?.getText(sf))) {
           report("name", lineOf(node), member.name);
@@ -496,6 +495,13 @@ const PLANTS = new Map<string, string>([
       "  // @ts-expect-error a private member",
       "  return term.isOpen;",
       "};",
+    ].join("\n"),
+  ],
+  [
+    "src/state/boundaryPlant.ts",
+    [
+      "export const duck = (t: { wasmTerm?: unknown; selectionManager?: unknown }) => [t.wasmTerm, t.selectionManager];",
+      "export const own = { renderer: 1, textarea: 2 };",
     ].join("\n"),
   ],
   [
@@ -536,6 +542,8 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 6, key: "prototype Terminal" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 7, key: "wasmTerm" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 11, key: "Terminal.isOpen" },
+  { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
+  { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
