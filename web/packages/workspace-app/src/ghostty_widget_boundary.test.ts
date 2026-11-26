@@ -203,51 +203,7 @@ const pending = (
   readers: Record<string, readonly string[]>,
 ): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
 
-const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
-
-const PENDING: readonly Pending[] = [
-  ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
-    "Terminal.buildWasmConfig": [
-      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
-      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
-      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
-    ],
-    "Terminal.selectionManager": ["(term as unknown as { selectionManager: SelectionManager }).selectionManager"],
-  }),
-  ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.test.ts", {
-    "write Terminal.element": ["(term as unknown as { element: HTMLElement }).element"],
-    "write Terminal.renderer": ["term.renderer", "term.renderer", "term.renderer", "term.renderer"],
-    "write Terminal.selectionManager": ["(term as unknown as { selectionManager: SelectionManager }).selectionManager"],
-    "write Terminal.wasmTerm": ["term.wasmTerm", "term.wasmTerm", "term.wasmTerm", "term.wasmTerm"],
-  }),
-  ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.redraw.test.ts", {
-    "CanvasRenderer.cursorVisible": [
-      "(whole.renderer as unknown as { cursorVisible: boolean }).cursorVisible",
-      "hover.cursorVisible",
-    ],
-    "CanvasRenderer.hoveredHyperlinkId": ["hover.hoveredHyperlinkId"],
-    "CanvasRenderer.hoveredLinkRange": ["hover.hoveredLinkRange"],
-    "CanvasRenderer.selectionManager": [
-      "(painter.renderer as unknown as { selectionManager: { getSelectionCoords(): Coords | null } }).selectionManager",
-    ],
-    "Terminal.selectionManager": [
-      "(r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager",
-    ],
-  }),
-  ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.redraw.test.ts", {
-    "write CanvasRenderer.cursorVisible": ["(whole.renderer as unknown as { cursorVisible: boolean }).cursorVisible"],
-    "write Terminal.renderer": ["term.renderer"],
-    "write Terminal.selectionManager": [
-      "(r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager",
-    ],
-    "write Terminal.viewportY": [
-      "(fresh.term as unknown as { viewportY: number }).viewportY",
-      "(r.painter.term as unknown as { viewportY: number }).viewportY",
-      "(whole.term as unknown as { viewportY: number }).viewportY",
-    ],
-    "write Terminal.wasmTerm": ["term.wasmTerm"],
-  }),
-];
+const PENDING: readonly Pending[] = [];
 
 /// A run of a module's text copied from its file: `at` in the module,
 /// `from` in the file.
