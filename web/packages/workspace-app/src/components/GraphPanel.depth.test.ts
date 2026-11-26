@@ -1255,6 +1255,26 @@ describe("the workspace tree", () => {
     expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ a: 1, drawsX: true });
   });
 
+  test("a raise a new selection ends during a whole spine fetch leaves the folder above to that fetch's landing, over an answer over the listing cap", async () => {
+    serveLinkBelowClosedFolder("folders");
+    const { tab, slider } = await selectBelowClosedParent({});
+    expect(slider.value, "a/b is closed").toBe("0");
+    const release = await holdWholeFetch();
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await slideTo(slider, 1);
+      expect(tab.expanded.a, "the raise's first pass opens the folder above").toBe(true);
+      canvas.props!.onSelect("notes/n.md");
+      await settle();
+      expect(levelReads(""), "ending the raise starts no other fetch").toBe(2);
+    } finally {
+      release();
+    }
+    await settle(30);
+    expect(tab.expanded.a, "the folder above stays open").toBe(true);
+    expect({ root: levelReads(""), a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ root: 2, a: 1, drawsX: true });
+  });
+
   test("a raise a new selection ends leaves a folder whose read failed to its retry", async () => {
     serveLinkBelowClosedFolder("folders");
     graphServer.view.nodes.push(g.dir("bad"));
