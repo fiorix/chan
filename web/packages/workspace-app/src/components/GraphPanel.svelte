@@ -235,7 +235,7 @@
   /// stays asked. A patch that reads a directory's level forgets the asks
   /// of its children that the spine holds no level of and the patch does
   /// not read (`patchSpine`), so each is asked again once it is opened and
-  /// drawn.
+  /// drawn, and a whole fetch forgets those it did not read (`loadSpine`).
   const spineAsked = new Set<string>();
 
   /// A directory asked for whose level the spine does not hold: one a patch
@@ -1665,6 +1665,13 @@
       }
       if (undrawn) publishSpine(read);
       spineRead = read;
+      // An ask answered against the spine this replaces stands only for a
+      // directory this fetch read: it holds that one's level, found it gone
+      // or failed it. Any other was not drawn when the list was taken; it is
+      // asked again at its next opening or, opened since, by the landing's
+      // read below over the listing cap.
+      const listed = new Set(dirs);
+      for (const dir of spineAsked) if (!listed.has(dir)) spineAsked.delete(dir);
       rootGone = false;
       landed = true;
     } catch (e) {
