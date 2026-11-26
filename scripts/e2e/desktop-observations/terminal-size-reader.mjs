@@ -304,10 +304,14 @@ export function preflight() {
   assert.equal(readSizeRun(uncaptured).steps[0].frameSurfaces[0].readable, false,
     "a tab no captured terminal owns is unreadable");
   const [, probeTerminal] = captured[FRAME_CAPTURE_KEY].terminals;
+  // The short buffer's last row is a full border, so only its row count can
+  // make it unreadable.
   probeTerminal.rows = 23;
+  screenRows[22] = border;
   const shortRows = structuredClone(corners);
   shortRows.steps[0].frameSurfaces[0] = frame();
   probeTerminal.rows = 24;
+  screenRows[22] = "";
   assert.equal(readSizeRun(shortRows).steps[0].frameSurfaces[0].readable, false,
     "the buffer needs every grid row");
   screenRows[0] = border.slice(0, -1);
