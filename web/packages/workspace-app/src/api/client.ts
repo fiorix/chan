@@ -636,6 +636,13 @@ export type BacklinksStreamEvent =
   | { type: "done" }
   | { type: "error"; error: string };
 
+/// What a workspace-scope graph answer over the listing cap holds of the
+/// tree. `folders`: every folder in scope, joined to its parent, but of the
+/// files only those the graph holds otherwise (indexed, linked, or within
+/// the request's depth). `depth`: the folders and files down to the
+/// request's depth alone. An answer that holds the whole tree carries none.
+export type GraphTreeCoverage = "folders" | "depth";
+
 export type GraphStreamEvent =
   | {
       type: "meta";
@@ -643,6 +650,9 @@ export type GraphStreamEvent =
       path: string;
       depth: number;
       gated?: true;
+      /// Never on the opening `meta`: a second one carries it, ahead of the
+      /// first node, though a keep-alive's empty `nodes` can precede it.
+      tree?: GraphTreeCoverage;
     }
   | { type: "nodes"; nodes: GraphViewNode[] }
   | { type: "edges"; edges: GraphViewEdge[] }

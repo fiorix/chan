@@ -137,6 +137,38 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  test("matchAt reads one entry of the snapshot readMatches reads, feeding first after a write", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    expect([0, 1, 2, 3].map((i) => s.matchAt(i))).toEqual(ERRORS);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS);
+    expect(s.matchAt(4), "past the end").toBeNull();
+    expect(() => s.matchAt(-1)).toThrow(RangeError);
+    expect(() => s.matchAt(0.5)).toThrow(RangeError);
+    t.write("line 12 ERROR here");
+    expect(s.matchAt(0), "the write's match, read after a feed").toEqual(range(12, 8, 12, 12));
+    expect(s.readMatches(0, 1000).ranges[0]).toEqual(range(12, 8, 12, 12));
+    s.free();
+  });
+
+  test("matchAt reads nothing past a snapshot that shrank", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS);
+    // Line 9 is the screen's second row: erasing its ERROR leaves three
+    // matches, while the copied buffer still holds the fourth entry.
+    t.write("\x1b[2;1H\x1b[2Kline 9 fine");
+    scan(s);
+    expect(s.readMatches(0, 1000).ranges).toEqual(ERRORS.slice(1));
+    expect(s.matchAt(2)).toEqual(ERRORS[3]);
+    expect(s.matchAt(3), "past the shrunk end").toBeNull();
+    s.free();
+  });
+
   test("the same needle keeps the results and another one restarts the scan", async () => {
     const t = await errorTerminal();
     const s = t.createSearch();
@@ -431,6 +463,7 @@ describe("a search over the binding's terminal", () => {
     t.free();
     expect(s.state()).toEqual({ total: 0, index: null, active: null, complete: true });
     expect(s.matchesBetween(0, 9, 10)).toEqual([]);
+    expect(s.matchAt(0)).toBeNull();
     expect(s.selectNext()).toBe(false);
     expect(s.selectPrev()).toBe(false);
     expect(s.step(1, () => 0)).toBe("complete");

@@ -36,9 +36,9 @@ const DEFAULT_ROWS: u16 = 24;
 const MAX_COLS: u16 = 500;
 const MAX_ROWS: u16 = 200;
 
-/// RIS (ESC c) -- full terminal reset, sent to an attached xterm when its
-/// session is restarted in place so the relaunched shell starts on a clean
-/// screen. A fresh SPA reattach gets a brand-new empty xterm; a server-side
+/// RIS (ESC c) -- full terminal reset, sent to an attached terminal view when
+/// its session is restarted in place so the relaunched shell starts on a clean
+/// screen. A fresh SPA reattach gets a brand-new empty terminal; a server-side
 /// re-attach reuses the live one, so reset it here to match.
 const RESET_TERMINAL: &[u8] = b"\x1bc";
 
@@ -65,9 +65,10 @@ pub struct TerminalQuery {
     pane_id: Option<String>,
     side: Option<PaneSide>,
     tab_id: Option<String>,
-    /// The session incarnation epoch the client cached its scrollback snapshot
-    /// under. The server honors `since` only when it still matches the live
-    /// session's generation (a restart bumps it); absent or stale -> full replay.
+    /// The session incarnation epoch the client counted its `since` cursor
+    /// in. Absent, `since` is honored as sent; present, `since` is honored
+    /// only while this matches the live session's generation (a restart
+    /// bumps it), and a stale generation replays the ring.
     generation: Option<u64>,
     mcp_env: Option<TerminalMcpEnv>,
     cwd: Option<String>,
@@ -338,8 +339,8 @@ enum ServerFrame {
         spawn_group: Option<String>,
         seq: u64,
         /// This session incarnation's epoch. A restart reuses the id but bumps
-        /// this and resets `seq`, so the SPA invalidates a cached scrollback
-        /// snapshot whose generation no longer matches.
+        /// this and resets `seq`, so a client that redials echoes it with its
+        /// `since` cursor, and a stale generation's cursor replays the ring.
         generation: u64,
         missed_bytes: u64,
         /// Ring bytes sent immediately after this frame, excluding the

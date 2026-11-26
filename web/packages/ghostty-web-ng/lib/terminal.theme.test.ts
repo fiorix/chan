@@ -6,7 +6,11 @@ import type { PaintFrame } from './renderer';
 import { Terminal } from './terminal';
 
 // Structural typing lets this file run unchanged against the pre-API widget.
-type Theme = ITheme & { minimumContrastRatio?: number };
+type Theme = ITheme & {
+  minimumContrastRatio?: number;
+  searchMatchBackground?: string; searchMatchForeground?: string;
+  searchActiveMatchBackground?: string; searchActiveMatchForeground?: string;
+};
 function setTheme(term: Terminal, theme: Theme): void {
   (term as Terminal & { setTheme(theme: Theme): void }).setTheme(theme);
 }
@@ -339,6 +343,61 @@ describe('widget themes', () => {
     term.refresh();
     expect(cellPixel(ctx, 0)).toEqual([153, 153, 153, 1]);
     expect(cellPixel(ctx, 2)).toEqual([170, 170, 170, 1]);
+  });
+
+  test('search colours are theme keys with defaults, and inherited ink on them meets the floor on dark and light themes', async () => {
+    // Ink close to both themes' match backgrounds, so the floor must move it.
+    const { term, ctx } = await open(DARK, '\x1b[?25l\x1b[38;2;150;130;80mneedle\x1b[0m needle');
+    term.search.find('needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
+    expect(term.search.state).toEqual({ index: 1, total: 2, partial: false });
+    // The last glyph painted at a column of row 0, whose baseline is y 14.
+    const ink = (col: number) => {
+      const color = ctx.texts.filter(t => t.x === col * 8 && t.y === 14).at(-1)?.color ?? '';
+      return color.startsWith('#') ? color.slice(1).match(/../g)!.map(c => Number.parseInt(c, 16)) : color.match(/\d+/g)!.map(Number);
+    };
+    const hex = (color: string) => color.slice(1).match(/../g)!.map(c => Number.parseInt(c, 16));
+    expect(term.highlights.get('search-all')?.style, 'default match colour').toEqual({ background: '#806d36' });
+    expect(term.highlights.get('search-active')?.style, 'default active colours').toEqual({ background: '#ffb454', foreground: '#000000' });
+    const themes: Theme[] = [
+      { ...DARK, minimumContrastRatio: 4.5, searchMatchBackground: '#6a5a30', searchActiveMatchBackground: '#e0a040', searchActiveMatchForeground: '#101010' },
+      { ...LIGHT, minimumContrastRatio: 4.5, searchMatchBackground: '#c8b070', searchActiveMatchBackground: '#ffd080', searchActiveMatchForeground: '#202020' },
+    ];
+    for (const theme of themes) {
+      ctx.texts.length = 0;
+      setTheme(term, theme);
+      const match = hex(theme.searchMatchBackground!);
+      expect(cellPixel(ctx, 0).slice(0, 3), 'the match background is the theme key').toEqual(match);
+      expect(contrast(ink(0), match), 'inherited ink on a match meets the floor').toBeGreaterThanOrEqual(4.5);
+      expect(contrast([150, 130, 80], match), 'the ink itself does not').toBeLessThan(4.5);
+      expect(cellPixel(ctx, 7).slice(0, 3), 'the active background is the theme key').toEqual(hex(theme.searchActiveMatchBackground!));
+      expect(ink(7), 'an explicit active foreground stays exact').toEqual(hex(theme.searchActiveMatchForeground!));
+      expect(term.highlights.get('search-all')?.style).toEqual({ background: theme.searchMatchBackground });
+    }
+    setTheme(term, { ...LIGHT, searchMatchForeground: '#333333' });
+    expect(term.highlights.get('search-all')?.style, 'omitted keys return to their defaults').toEqual({ background: '#806d36', foreground: '#333333' });
+    expect(ink(0)).toEqual([51, 51, 51]);
+  });
+
+  test('search colours in the theme a terminal opens with apply to its first search', async () => {
+    const { term, ctx } = await open({ ...DARK, searchMatchBackground: '#6a5a30', searchMatchForeground: '#fefefe', searchActiveMatchBackground: '#e0a040', searchActiveMatchForeground: '#101010' }, '\x1b[?25lneedle needle');
+    term.search.find('needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
+    expect(term.highlights.get('search-all')?.style).toEqual({ background: '#6a5a30', foreground: '#fefefe' });
+    expect(term.highlights.get('search-active')?.style).toEqual({ background: '#e0a040', foreground: '#101010' });
+    expect(cellPixel(ctx, 0).slice(0, 3), 'the first match paints in the theme colour').toEqual([0x6a, 0x5a, 0x30]);
+  });
+
+  test('search colours set by a theme change hold through the next write', async () => {
+    const { term } = await open(DARK, '\x1b[?25lneedle needle');
+    term.search.find('needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || !term.highlights.get('search-active')); i++) tick();
+    setTheme(term, { ...DARK, searchMatchBackground: '#6a5a30', searchActiveMatchBackground: '#e0a040', searchActiveMatchForeground: '#101010' });
+    term.write(' more needle');
+    for (let i = 0; i < 100 && (term.search.state.partial || term.search.state.total !== 3); i++) tick();
+    expect(term.search.state.total).toBe(3);
+    expect(term.highlights.get('search-all')?.style, 'the republished match layer').toEqual({ background: '#6a5a30' });
+    expect(term.highlights.get('search-active')?.style, 'the republished active layer').toEqual({ background: '#e0a040', foreground: '#101010' });
   });
 
   test('wide clusters, boxes and decorations share adjusted ink; explicit underline and faint keep their rules', async () => {

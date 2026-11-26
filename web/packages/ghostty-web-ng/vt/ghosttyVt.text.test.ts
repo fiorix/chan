@@ -162,6 +162,38 @@ describe("a copy joins the rows a program soft-wrapped", () => {
     expect(t.plainText()).toBe("a".repeat(10) + "b".repeat(10) + "c".repeat(5) + "\nz");
     expect(t.plainText({ startCol: 5, startRow: 1, endCol: 0, endRow: 3 })).toBe("b".repeat(5) + "c".repeat(5) + "\nz");
   });
+
+  // A full-screen program (a pager, an editor, tmux) moves the rows of a
+  // line it did not draw with these, and copy and find read the line by
+  // its wrap flags afterwards.
+  const HEAD = "a".repeat(15) + "b".repeat(5);
+  const TAIL = "b".repeat(10);
+  // Rows: 0 "top", 1 blank, 2 and 3 the wrapped line, 4 "end".
+  const SCREEN = `top\r\n\r\n${HEAD}${TAIL}\r\nend`;
+
+  test.each([
+    ["inserting a line above it", "\x1b[1;1H\x1b[L", 4, `\ntop\n\n${HEAD}${TAIL}\nend`],
+    ["deleting a line above it", "\x1b[1;1H\x1b[M", 2, `\n${HEAD}${TAIL}\nend`],
+    ["scrolling the screen down", "\x1b[T", 4, `\ntop\n\n${HEAD}${TAIL}\nend`],
+    ["a reverse index at the top", "\x1b[1;1H\x1bM", 4, `\ntop\n\n${HEAD}${TAIL}\nend`],
+    ["scrolling a region up", "\x1b[2;6r\x1b[S", 2, `top\n${HEAD}${TAIL}\nend`],
+  ])("a soft-wrapped line moved by %s stays one line", async (_name, move, continuation, text) => {
+    const t = await terminal(20, 6);
+    write(t, SCREEN);
+    expect(t.isRowWrapped(3), "the line wraps onto row 3").toBe(true);
+    write(t, move);
+    expect(t.isRowWrapped(continuation), `row ${continuation} still continues the line`).toBe(true);
+    expect(t.plainText()).toBe(text);
+  });
+
+  test.each([
+    ["inserting a line inside it", "\x1b[4;1H\x1b[L", `top\n\n${HEAD}\n\n${TAIL}\nend`],
+    ["deleting its last row", "\x1b[4;1H\x1b[M", `top\n\n${HEAD}\nend`],
+  ])("a soft-wrapped line cut by %s ends at the cut and joins no other row", async (_name, cut, text) => {
+    const t = await terminal(20, 6);
+    write(t, SCREEN + cut);
+    expect(t.plainText()).toBe(text);
+  });
 });
 
 describe("a range of rows in one core call", () => {

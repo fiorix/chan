@@ -251,6 +251,7 @@ export class Terminal {
       case 'theme':
         this.wasmTerm!.setColors(this.buildWasmConfig());
         this.renderer!.setTheme(this.options.theme);
+        this.#searchOwner?.restyle();
         this.refresh();
         break;
 
@@ -526,7 +527,8 @@ export class Terminal {
       this.highlightsManager = new HighlightsManager(this.wasmTerm.isAlternateScreen());
       this.renderer.setHighlights(this.highlightsManager);
       this.#searchOwner = new SearchOwner(this.#coreAccess.core, this.highlightsManager, this.viewport,
-        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch());
+        this.wasmTerm.isAlternateScreen(), () => this.getSelectionRange(), () => this.wasmTerm!.createSearch(),
+        () => this.options.theme);
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);

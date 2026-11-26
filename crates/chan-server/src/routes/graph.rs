@@ -13,6 +13,21 @@
 //! and `/api/backlinks/{*path}` also expose `?stream=1` NDJSON forms
 //! so the UI can render partial relationship data while the full
 //! graph is still being composed.
+//!
+//! A graph load walks the workspace's tree once. The listing is bounded
+//! at `fs_ops::LIST_TREE_LIMIT` entries; over that cap its partial result
+//! is dropped and the directories alone are walked, bounded at the same
+//! number of directories, so the workspace scope's folder layer still
+//! holds every folder, joined only to the files the graph holds
+//! otherwise. Over both bounds the tree layer is the depth-bounded
+//! filesystem layer alone, as when nothing walked the folders. The
+//! answer says which in its `tree` (`TreeCoverage`).
+//!
+//! Memory: a load holds one cap's worth of walked paths at a time, the
+//! listing or the directories, never both. The over-cap answer itself can
+//! hold up to one cap of folders beside the files the graph holds
+//! otherwise, up to one cap of them indexed, so about two caps' worth of
+//! nodes and edges, where under the cap files and folders share one.
 
 use std::sync::Arc;
 
@@ -247,6 +262,35 @@ struct GraphViewResponse {
     /// from the graph of a workspace that has none.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     gated: bool,
+    /// What the tree layer holds, set only when it is less than every
+    /// folder and file in scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree: Option<TreeCoverage>,
+}
+
+/// What the tree layer of a workspace-scope answer holds when it is not
+/// every folder and file in scope, because the whole-tree listing is over
+/// its cap or failed. A workspace-scope answer without it holds the whole
+/// listing; a directory or file scope answer and the gated empty answer
+/// never carry it.
+///
+/// With either value a file the answer holds no node for may be on disk,
+/// so a client that needs a folder's files reads them from the filesystem
+/// graph instead of from the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TreeCoverage {
+    /// Every folder in scope, each joined to its parent, and of the files
+    /// only those the graph holds otherwise: the indexed ones, the link
+    /// targets on disk and those the filesystem layer reaches down to the
+    /// request's depth. The listing is over its cap and the folders alone
+    /// are not.
+    Folders,
+    /// The folders and files the filesystem layer reaches down to the
+    /// request's depth, and the files the graph holds otherwise, with no
+    /// folder below that depth. The folders alone are over the cap too, or
+    /// the listing failed.
+    Depth,
 }
 
 #[derive(Debug)]
@@ -294,6 +338,12 @@ impl From<super::fs_graph::FsGraphError> for GraphBuildError {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum GraphStreamEvent {
+    /// A stream opens with one, before the build reads anything. When the
+    /// build's tree walk finds the answer's tree layer less than the whole
+    /// tree, a second one follows the walk with `tree` set, ahead of the
+    /// first node. It is not always ahead of the first `nodes` event: the
+    /// keep-alive's empty `nodes` events can come before it while the build
+    /// reads and walks. A client keeps the last it reads.
     Meta {
         scope: GraphScope,
         path: String,
@@ -302,6 +352,9 @@ enum GraphStreamEvent {
         /// whose only other event is `done`; absent otherwise.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         gated: bool,
+        /// The answer's [`TreeCoverage`], on the second `meta` only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tree: Option<TreeCoverage>,
     },
     Nodes {
         nodes: Vec<GraphNodeView>,
@@ -568,96 +621,242 @@ fn is_image_path(rel: &str) -> bool {
     )
 }
 
-/// Collect every regular file under the workspace root, workspace-relative
-/// POSIX paths. Used as the link-resolution oracle: a markdown link
-/// pointing at any on-disk file (LICENSE, .rs source, .sh, ...)
-/// resolves to that real file instead of synthesizing a ghost.
-///
-/// Returns `None` when the walk is over the listing cap, where the graph
-/// looks link targets up one by one instead (`link_targets_on_disk`),
-/// and an empty set when the walk fails otherwise, so callers still
-/// answer the request with the indexed graph files alone as the
-/// resolver's universe instead of failing it.
-fn workspace_disk_files(
-    workspace: &chan_workspace::Workspace,
-) -> Option<std::collections::BTreeSet<String>> {
-    match workspace.list_tree_filtered_unified() {
-        Ok(entries) => Some(
-            entries
-                .into_iter()
-                .filter(|e| !e.is_dir)
-                .map(|e| e.path)
-                .collect(),
-        ),
-        Err(chan_workspace::ChanError::ListingTooLarge { .. }) => None,
-        Err(_) => Some(std::collections::BTreeSet::new()),
+/// The whole-tree walk of one graph load, which the link resolver's file
+/// and directory sets and the folder layer share.
+enum TreeWalk {
+    /// Every regular file and every directory in the workspace's scope,
+    /// workspace-relative POSIX paths. The files are the link resolver's
+    /// universe beside the indexed ones, so a link to any file on disk
+    /// (LICENSE, a `.rs` source, a script) lands on that file instead of a
+    /// ghost. The directories let the graph tell a link to a folder
+    /// (`[notes](../alex/)`) from a ghost and drop its edge, since a folder
+    /// link carries no between-file meaning.
+    Listed {
+        files: std::collections::BTreeSet<String>,
+        dirs: std::collections::BTreeSet<String>,
+    },
+    /// The listing is over the cap. The graph looks each link target that
+    /// is a file up on disk instead (`link_targets_on_disk`). `dirs` holds
+    /// every directory in scope, from `walk_directories`, or is `None` when
+    /// the directories are over the cap too.
+    OverCap {
+        dirs: Option<std::collections::BTreeSet<String>>,
+    },
+    /// The listing failed otherwise. The graph answers with the indexed
+    /// files alone as the resolver's universe and, in workspace scope, no
+    /// tree layer, rather than failing the request.
+    Failed,
+}
+
+impl TreeWalk {
+    /// Walk the workspace's tree once. Over the listing cap the listing's
+    /// partial result is gone before the directories are walked, so the
+    /// load holds at most one cap's worth of walked paths at a time.
+    fn of(workspace: &chan_workspace::Workspace) -> Self {
+        #[cfg(test)]
+        tree_walks::record(workspace.root(), tree_walks::Walk::Listing);
+        match workspace.list_tree_filtered_unified() {
+            Ok(entries) => {
+                let mut files = std::collections::BTreeSet::new();
+                let mut dirs = std::collections::BTreeSet::new();
+                for entry in entries {
+                    if entry.is_dir {
+                        dirs.insert(entry.path);
+                    } else {
+                        files.insert(entry.path);
+                    }
+                }
+                TreeWalk::Listed { files, dirs }
+            }
+            Err(chan_workspace::ChanError::ListingTooLarge { .. }) => TreeWalk::OverCap {
+                dirs: walk_directories(workspace, directory_walk_limit(workspace.root())),
+            },
+            Err(_) => TreeWalk::Failed,
+        }
+    }
+
+    /// What the workspace scope's tree layer holds from this walk, when it
+    /// is less than the whole listing.
+    fn coverage(&self) -> Option<TreeCoverage> {
+        match self {
+            TreeWalk::Listed { .. } => None,
+            TreeWalk::OverCap { dirs: Some(_) } => Some(TreeCoverage::Folders),
+            TreeWalk::OverCap { dirs: None } | TreeWalk::Failed => Some(TreeCoverage::Depth),
+        }
     }
 }
 
-/// Workspace-relative directory paths from the same walk
-/// `workspace_disk_files` uses. Used to recognise markdown links whose
-/// target is a directory (doc-navigation links like
-/// `[notes](../alex/)`); those don't carry between-file graph semantics,
-/// so `build_graph_view` drops their edges.
+/// The bound a graph load gives the directories-only walk of the workspace
+/// at `root`: the listing cap, so that walk holds at most as many paths as
+/// the listing it stands in for.
+#[cfg_attr(
+    not(test),
+    expect(unused_variables, reason = "only a test lowers the bound per root")
+)]
+fn directory_walk_limit(root: &std::path::Path) -> usize {
+    #[cfg(test)]
+    if let Some(limit) = tree_walks::directory_limit(root) {
+        return limit;
+    }
+    chan_workspace::fs_ops::LIST_TREE_LIMIT
+}
+
+/// Every directory in the workspace's scope, workspace-relative POSIX
+/// paths, or `None` once more than `limit` of them arrive.
 ///
-/// Returns `None` over the listing cap, as `workspace_disk_files` does,
-/// and an empty set on any other `list_tree` failure rather than failing
-/// the request. A directory link then counts as an unresolved link
-/// target, and its edge is dropped the same way.
-fn workspace_disk_dirs(
+/// It takes the walk the whole-tree listing collects
+/// (`walk_workspace_scoped` under the workspace's scope policy) and keeps
+/// its directories, so it reaches exactly the directories the listing
+/// lists: real directories inside the policy (excluded directories,
+/// `.gitignore`), entered only through such directories, on the root's
+/// file system (a mount point is listed and not entered). Each directory's
+/// files are read past in its listing, neither held nor read for metadata,
+/// so the walk holds at most `limit` paths; a graph load passes the
+/// listing cap, which bounds the directories as it bounds the listing.
+fn walk_directories(
     workspace: &chan_workspace::Workspace,
+    limit: usize,
 ) -> Option<std::collections::BTreeSet<String>> {
-    match workspace.list_tree_filtered_unified() {
-        Ok(entries) => Some(
-            entries
-                .into_iter()
-                .filter(|e| e.is_dir)
-                .map(|e| e.path)
-                .collect(),
-        ),
-        Err(chan_workspace::ChanError::ListingTooLarge { .. }) => None,
-        Err(_) => Some(std::collections::BTreeSet::new()),
+    #[cfg(test)]
+    tree_walks::record(workspace.root(), tree_walks::Walk::Directories);
+    let root = workspace.root();
+    let policy = workspace.scope_policy();
+    let mut dirs = std::collections::BTreeSet::new();
+    for entry in chan_workspace::fs_ops::walk_workspace_scoped(root, &policy) {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        if dirs.len() >= limit {
+            return None;
+        }
+        if let Ok(rel) = entry.path().strip_prefix(root) {
+            dirs.insert(chan_workspace::fs_ops::rel_path_text(rel));
+        }
+    }
+    Some(dirs)
+}
+
+/// How many whole-tree walks graph loads have taken, as calls of
+/// `TreeWalk::of` and `walk_directories`, per workspace root and kind of
+/// walk, so a test can read the walks of one load, and a lowered bound on
+/// the directories-only walk.
+#[cfg(test)]
+pub(crate) mod tree_walks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    /// A kind of whole-tree walk.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) enum Walk {
+        /// The listing of every file and directory in scope.
+        Listing,
+        /// The walk of the directories in scope alone, over the listing cap.
+        Directories,
+    }
+
+    static TAKEN: LazyLock<Mutex<HashMap<(PathBuf, Walk), usize>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) fn record(root: &Path, walk: Walk) {
+        *TAKEN
+            .lock()
+            .unwrap()
+            .entry((root.to_path_buf(), walk))
+            .or_default() += 1;
+    }
+
+    /// The walks of kind `walk` the graph loads of the workspace at `root`
+    /// have taken.
+    pub(crate) fn taken(root: &Path, walk: Walk) -> usize {
+        TAKEN
+            .lock()
+            .unwrap()
+            .get(&(root.to_path_buf(), walk))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    static DIRECTORY_LIMITS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(Default::default);
+
+    /// A lowered bound on one workspace's directories-only walk, held until
+    /// it is dropped.
+    pub(crate) struct LoweredDirectoryWalk(PathBuf);
+
+    impl Drop for LoweredDirectoryWalk {
+        fn drop(&mut self) {
+            DIRECTORY_LIMITS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    /// Bound the directories-only walk of the workspace at `root` at `limit`
+    /// directories, in place of the listing cap.
+    pub(crate) fn lower_directory_walk(root: &Path, limit: usize) -> LoweredDirectoryWalk {
+        let previous = DIRECTORY_LIMITS
+            .lock()
+            .unwrap()
+            .insert(root.to_path_buf(), limit);
+        assert!(previous.is_none(), "the directory walk is lowered already");
+        LoweredDirectoryWalk(root.to_path_buf())
+    }
+
+    pub(super) fn directory_limit(root: &Path) -> Option<usize> {
+        DIRECTORY_LIMITS.lock().unwrap().get(root).copied()
     }
 }
 
 /// The link targets in `edges` that are on disk, as `(files,
-/// directories)`, for a graph whose whole-tree walk is over the listing
-/// cap and lists nothing. A target is looked up as the resolver's first
+/// directories)`, for a graph whose whole-tree listing is over the cap
+/// and lists no file. A target is looked up as the resolver's first
 /// candidate spells it (percent-decoded, workspace-rooted), and only when
-/// that is the walk's own spelling. It is kept as the walk's
-/// `filter_entry` keeps an entry: every directory above it is a real
-/// directory (an lstat, so a symlinked one stops it, as the walk follows
-/// no symlink) inside the scope policy (excluded directories,
-/// `.gitignore`), and the target itself is a regular file or a directory
-/// inside that policy. Every lookup goes through the workspace's
-/// capability sandbox, so no `..` or symlink leaves the root.
+/// that is the walk's own spelling. It is kept as the walk keeps an entry:
+/// every directory above it is one the walk enters, and the target is a
+/// regular file inside the scope policy (excluded directories,
+/// `.gitignore`) or a directory the walk lists.
+///
+/// `walked_dirs` is every directory the walk lists, from the
+/// directories-only walk, and answers for the directories above a target
+/// and for a folder target, so only a file target is statted. Without it
+/// (the directories are over the cap too) each of those directories is
+/// an lstat instead, kept when it is a real directory (a symlinked one
+/// stops it, as the walk follows no symlink) inside the scope policy.
+/// Every lookup goes through the workspace's capability sandbox, so no
+/// `..` or symlink leaves the root.
 ///
 /// It finds what the walk would list, with two differences: on a
 /// case-folding volume a wrong-case spelling finds a file the walk lists
-/// under its stored spelling only, and an entry below a mount point
-/// inside the root is found where the walk does not descend. The
+/// under its stored spelling only, and a file inside a mount point inside
+/// the root is found where the walk does not descend. With `walked_dirs`
+/// both hold for the last component only, since the set spells each
+/// directory as the walk does and holds none below a mount point. The
 /// resolver's other candidates match indexed Markdown files only, so an
 /// extensionless link to a text file (`[[todo]]` for `todo.txt`) and a
 /// source-relative spelling of a non-Markdown file stay dropped over the
 /// cap.
 ///
-/// Cost: one lstat per distinct link target that is not an indexed file,
-/// and one per distinct directory above those targets, on every graph
-/// load over the cap. Under the cap the walk's sets answer and nothing is
-/// statted.
+/// Cost: one lstat per distinct link target that is not an indexed file
+/// or a walked directory, on every graph load over the cap, and without
+/// `walked_dirs` one per distinct directory above those targets too.
+/// Under the cap the walk's sets answer and nothing is statted.
 fn link_targets_on_disk(
     workspace: &chan_workspace::Workspace,
     edges: &[chan_workspace::Edge],
     indexed: &std::collections::BTreeSet<&str>,
+    walked_dirs: Option<&std::collections::BTreeSet<String>>,
 ) -> (
     std::collections::BTreeSet<String>,
     std::collections::BTreeSet<String>,
 ) {
     let policy = workspace.scope_policy();
-    // Each directory above a target is read once per call. The walk
-    // reaches an entry only through real directories its scope keeps.
+    // Without the walked directories, each directory above a target is
+    // read once per call. The walk reaches an entry only through real
+    // directories its scope keeps.
     let mut ancestors = std::collections::HashMap::new();
     let mut walk_descends = |dir: &str| -> bool {
+        if let Some(walked) = walked_dirs {
+            return walked.contains(dir);
+        }
         if let Some(&descends) = ancestors.get(dir) {
             return descends;
         }
@@ -695,11 +894,17 @@ fn link_targets_on_disk(
         {
             continue;
         }
+        if walked_dirs.is_some_and(|walked| walked.contains(target)) {
+            dirs.insert(target.to_string());
+            continue;
+        }
         match workspace.classify_workspace_path(target) {
             Ok(WorkspacePath::Regular(_)) if policy.includes(target, false) => {
                 files.insert(target.to_string());
             }
-            Ok(WorkspacePath::Directory(_)) if policy.includes(target, true) => {
+            Ok(WorkspacePath::Directory(_))
+                if walked_dirs.is_none() && policy.includes(target, true) =>
+            {
                 dirs.insert(target.to_string());
             }
             _ => {}
@@ -708,7 +913,7 @@ fn link_targets_on_disk(
     (files, dirs)
 }
 
-/// Image subset of `workspace_disk_files`. Kept as its own predicate so
+/// Image subset of the load's disk files. Kept as its own predicate so
 /// images stay distinguishable from other non-graph files (they get
 /// the Media node kind; other on-disk files become regular File
 /// nodes).
@@ -1094,123 +1299,277 @@ impl<'a> TreeMergeCtx<'a> {
         }
     }
 
+    /// Merge the folder at `path` and every folder above it, each joined to
+    /// its parent by a `contains` edge.
+    ///
+    /// It stops at a folder already merged: one with a classified node and
+    /// its edge from its parent, since the folders above such a folder have
+    /// their nodes and edges already. That edge is pushed either by this
+    /// pass, after the folders above it, or by the filesystem layer, which
+    /// joins each folder it walks to its parent from the workspace root
+    /// down: its `emit_ancestor_chain` joins every folder above a scoped
+    /// path before its walk joins the folders below. A folder that layer
+    /// draws only as a symlink's target has no edge from its parent, so the
+    /// pass goes on above it. A folder is classified only when its node is
+    /// new or has no class yet, since merging keeps a class it has.
     fn ensure_directory_path(&mut self, path: &str) {
         let clean = path.trim_matches('/');
         let id = directory_node_id(clean);
+        let classified = matches!(
+            self.nodes.get(&id),
+            Some(GraphNodeView::Directory {
+                path_class: Some(_),
+                ..
+            })
+        );
+        let parent = (!clean.is_empty()).then(|| parent_directory(clean));
+        if classified {
+            let joined = match &parent {
+                None => true,
+                Some(parent) => self
+                    .edge_set
+                    .contains(&contains_edge_key(&directory_node_id(parent), &id)),
+            };
+            if joined {
+                return;
+            }
+        }
+        let path_class = if classified {
+            None
+        } else {
+            path_class_for_graph(self.workspace, clean)
+        };
         merge_directory_node(
             self.nodes,
             id.clone(),
             directory_label(clean),
             clean.to_string(),
-            path_class_for_graph(self.workspace, clean),
+            path_class,
             0,
             0,
         );
-        if clean.is_empty() {
+        let Some(parent) = parent else {
             return;
-        }
-        let parent = parent_directory(clean);
+        };
         self.ensure_directory_path(&parent);
         self.push_contains_edge(directory_node_id(&parent), id);
     }
 
+    /// Merge a node for the file at `path`. A node the graph holds already
+    /// keeps its kind and class and gains only the report bucket it lacks,
+    /// so nothing is classified for it.
     fn merge_tree_file_node(&mut self, path: &str) {
+        let media = is_media_graph_path(path);
+        match self.nodes.get_mut(path) {
+            Some(GraphNodeView::File { bucket, .. }) if !media => {
+                if bucket.is_none() {
+                    *bucket = self.report_buckets.get(path).cloned();
+                }
+                return;
+            }
+            Some(_) => return,
+            None => {}
+        }
+
         let id = path.to_string();
         let label = file_label(path);
         let path_class = path_class_for_graph(self.workspace, path);
-        if is_media_graph_path(path) {
-            self.nodes
-                .entry(id.clone())
-                .or_insert(GraphNodeView::Media {
-                    id,
-                    label,
-                    path: path.to_string(),
-                    path_class,
-                    missing: false,
-                });
-            return;
-        }
-
-        if let Some(GraphNodeView::File { bucket, .. }) = self.nodes.get_mut(&id) {
-            if bucket.is_none() {
-                *bucket = self.report_buckets.get(path).cloned();
+        let node = if media {
+            GraphNodeView::Media {
+                id: id.clone(),
+                label,
+                path: path.to_string(),
+                path_class,
+                missing: false,
             }
-            return;
-        }
-
-        self.nodes.entry(id.clone()).or_insert(GraphNodeView::File {
-            id,
-            label,
-            path: path.to_string(),
-            path_class,
-            node_kind: None,
-            bucket: self.report_buckets.get(path).cloned(),
-            missing: false,
-        });
+        } else {
+            GraphNodeView::File {
+                id: id.clone(),
+                label,
+                path: path.to_string(),
+                path_class,
+                node_kind: None,
+                bucket: self.report_buckets.get(path).cloned(),
+                missing: false,
+            }
+        };
+        self.nodes.insert(id, node);
     }
 
-    fn merge_tree_entry(&mut self, entry: &chan_workspace::TreeEntry) {
-        let path = entry.path.trim_matches('/');
+    fn merge_tree_entry(&mut self, path: &str, is_dir: bool) {
+        let path = path.trim_matches('/');
         if path.is_empty() {
             self.ensure_directory_path("");
             return;
         }
         let parent = parent_directory(path);
         self.ensure_directory_path(&parent);
-        if entry.is_dir {
+        if is_dir {
             self.ensure_directory_path(path);
         } else {
             self.merge_tree_file_node(path);
             self.push_contains_edge(directory_node_id(&parent), path.to_string());
         }
     }
+
+    /// Merge the root and then `entries`, each a path and whether it is a
+    /// directory, in path order. A directory the workspace holds read-only
+    /// is merged as a dead end, and nothing below it is. Returns those
+    /// directories.
+    ///
+    /// Whether a directory is read-only is read from the class its merged
+    /// node carries, which is the class of that path on disk as the graph
+    /// reports it, so a dead end is never classified twice.
+    fn merge_tree_entries<'e>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'e str, bool)>,
+    ) -> Vec<String> {
+        self.ensure_directory_path("");
+        let mut blocked_dirs: Vec<String> = Vec::new();
+        for (entry_path, is_dir) in entries {
+            let entry_path = entry_path.trim_matches('/');
+            if is_below_any(&blocked_dirs, entry_path) {
+                continue;
+            }
+            self.merge_tree_entry(entry_path, is_dir);
+            if is_dir
+                && matches!(
+                    self.nodes.get(&directory_node_id(entry_path)),
+                    Some(GraphNodeView::Directory {
+                        path_class: Some(class),
+                        ..
+                    }) if class.permission == PathPermission::ReadOnly
+                )
+            {
+                blocked_dirs.push(entry_path.to_string());
+            }
+        }
+        blocked_dirs
+    }
+
+    /// Over the listing cap, where the walk lists directories alone: join
+    /// each file the graph already holds to its folder, as the listing
+    /// would, when the walk lists that folder and no read-only directory
+    /// at or above it makes it a dead end. A file the graph holds for no
+    /// other reason gets no node, so the layer holds one node per walked
+    /// folder and per file the graph has, not one per file on disk. A file
+    /// joined already, as the filesystem layer joins each file down to the
+    /// request's depth, costs lookups only: its folder is merged, its node
+    /// is kept and its edge is held.
+    fn spine_held_files(
+        &mut self,
+        dirs: &std::collections::BTreeSet<String>,
+        blocked_dirs: &[String],
+    ) {
+        let held: Vec<String> = self
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                GraphNodeView::File { path, missing, .. }
+                | GraphNodeView::Media { path, missing, .. }
+                    if !missing =>
+                {
+                    Some(path.trim_matches('/').to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        for path in held {
+            if path.is_empty() || is_below_any(blocked_dirs, &path) {
+                continue;
+            }
+            let parent = parent_directory(&path);
+            if parent.is_empty() || dirs.contains(&parent) {
+                self.merge_tree_entry(&path, false);
+            }
+        }
+    }
+}
+
+/// Whether `path` lies below one of `dirs`.
+fn is_below_any(dirs: &[String], path: &str) -> bool {
+    dirs.iter()
+        .any(|dir| path != dir && path.starts_with(&format!("{dir}/")))
+}
+
+/// The paths of `dirs` and `files` as one sequence in path order, the order
+/// of the sorted listing they were split from, each with whether it is a
+/// directory.
+fn in_path_order<'a>(
+    dirs: &'a std::collections::BTreeSet<String>,
+    files: &'a std::collections::BTreeSet<String>,
+) -> impl Iterator<Item = (&'a str, bool)> + 'a {
+    let mut dirs = dirs.iter().peekable();
+    let mut files = files.iter().peekable();
+    std::iter::from_fn(move || {
+        let next_is_dir = match (dirs.peek(), files.peek()) {
+            (Some(dir), Some(file)) => dir < file,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        if next_is_dir {
+            dirs.next().map(|dir| (dir.as_str(), true))
+        } else {
+            files.next().map(|file| (file.as_str(), false))
+        }
+    })
 }
 
 fn merge_unified_tree_layer(
+    workspace: &chan_workspace::Workspace,
+    p: &GraphParams,
+    walk: &TreeWalk,
+    nodes: &mut std::collections::BTreeMap<String, GraphNodeView>,
+    edges: &mut Vec<GraphEdgeView>,
+    report_buckets: &std::collections::HashMap<String, ReportFileBucket>,
+) {
+    // Filtered walks, the load's whole-tree walk or a subtree's, so the
+    // semantic graph's tree layer excludes the same blocklist dirs
+    // (`node_modules/`, `target/`, ...) the index, the File Browser spine,
+    // and the fs-graph walker exclude. The comment below ("same file
+    // coverage as the File Browser") holds because the File Browser spine
+    // is itself filtered (bootstrap).
+    match p.scope {
+        GraphScope::Workspace => match walk {
+            TreeWalk::Listed { files, dirs } => {
+                let mut ctx = TreeMergeCtx::new(workspace, report_buckets, nodes, edges);
+                ctx.merge_tree_entries(in_path_order(dirs, files));
+            }
+            TreeWalk::OverCap { dirs: Some(dirs) } => {
+                let mut ctx = TreeMergeCtx::new(workspace, report_buckets, nodes, edges);
+                let blocked_dirs =
+                    ctx.merge_tree_entries(dirs.iter().map(|dir| (dir.as_str(), true)));
+                ctx.spine_held_files(dirs, &blocked_dirs);
+            }
+            TreeWalk::OverCap { dirs: None } | TreeWalk::Failed => {}
+        },
+        GraphScope::Directory | GraphScope::File => {
+            merge_subtree_layer(workspace, p, nodes, edges, report_buckets)
+        }
+    }
+}
+
+/// The tree layer of a directory or file scope: the scoped subtree's own
+/// walk, then every file node anchored to its folders.
+fn merge_subtree_layer(
     workspace: &chan_workspace::Workspace,
     p: &GraphParams,
     nodes: &mut std::collections::BTreeMap<String, GraphNodeView>,
     edges: &mut Vec<GraphEdgeView>,
     report_buckets: &std::collections::HashMap<String, ReportFileBucket>,
 ) {
-    let path = graph_scope_path(p);
-    // Filtered listing so the semantic graph's tree layer excludes the
-    // same blocklist dirs (`node_modules/`, `target/`, ...) the index,
-    // the File Browser spine, and the fs-graph walker exclude. The
-    // comment below ("same file coverage as the File Browser") holds
-    // because the File Browser spine is itself filtered (bootstrap).
-    let entries = match p.scope {
-        GraphScope::Workspace => workspace.list_tree_filtered_unified(),
-        GraphScope::Directory | GraphScope::File => {
-            workspace.list_tree_prefix_filtered_unified(path)
-        }
-    };
-    let Ok(mut entries) = entries else {
+    let Ok(mut entries) = workspace.list_tree_prefix_filtered_unified(graph_scope_path(p)) else {
         return;
     };
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut ctx = TreeMergeCtx::new(workspace, report_buckets, nodes, edges);
-    ctx.ensure_directory_path("");
-    let mut blocked_dirs: Vec<String> = Vec::new();
-    for entry in &entries {
-        let entry_path = entry.path.trim_matches('/');
-        if blocked_dirs
+    ctx.merge_tree_entries(
+        entries
             .iter()
-            .any(|dir| entry_path != dir && entry_path.starts_with(&format!("{dir}/")))
-        {
-            continue;
-        }
-        ctx.merge_tree_entry(entry);
-        if entry.is_dir
-            && matches!(
-                path_class_for_graph(workspace, entry_path),
-                Some(class) if class.permission == PathPermission::ReadOnly
-            )
-        {
-            blocked_dirs.push(entry_path.to_string());
-        }
-    }
+            .map(|entry| (entry.path.as_str(), entry.is_dir)),
+    );
 
     // Anchor every included file to its folder ancestors. In directory/file
     // scope the file NODES are seeded workspace-wide (a node per indexed file,
@@ -1225,30 +1584,28 @@ fn merge_unified_tree_layer(
     // is anchored like any other live directory. The spine ops are idempotent
     // (`edge_set`/`merge_directory_node`
     // dedup), so an in-scope file already spined by the prefix walk is a no-op.
-    // Workspace scope already walks the full tree, so it needs no backfill.
-    if !matches!(p.scope, GraphScope::Workspace) {
-        let unspined: Vec<String> = ctx
-            .nodes
-            .values()
-            .filter_map(|node| match node {
-                GraphNodeView::File { path, missing, .. }
-                | GraphNodeView::Media { path, missing, .. }
-                    if !missing =>
-                {
-                    Some(path.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for path in unspined {
-            let clean = path.trim_matches('/');
-            if clean.is_empty() {
-                continue;
+    // Workspace scope walks the full tree, so it needs no backfill.
+    let unspined: Vec<String> = ctx
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            GraphNodeView::File { path, missing, .. }
+            | GraphNodeView::Media { path, missing, .. }
+                if !missing =>
+            {
+                Some(path.clone())
             }
-            let parent = parent_directory(clean);
-            ctx.ensure_directory_path(&parent);
-            ctx.push_contains_edge(directory_node_id(&parent), clean.to_string());
+            _ => None,
+        })
+        .collect();
+    for path in unspined {
+        let clean = path.trim_matches('/');
+        if clean.is_empty() {
+            continue;
         }
+        let parent = parent_directory(clean);
+        ctx.ensure_directory_path(&parent);
+        ctx.push_contains_edge(directory_node_id(&parent), clean.to_string());
     }
 }
 
@@ -1260,12 +1617,14 @@ fn merge_filesystem_layer(
     edges: &mut Vec<GraphEdgeView>,
 ) -> Result<(), super::fs_graph::FsGraphError> {
     let report_buckets = report_buckets_for_graph(workspace);
-    merge_filesystem_layer_with_buckets(workspace, p, nodes, edges, &report_buckets)
+    let walk = TreeWalk::of(workspace);
+    merge_filesystem_layer_with_buckets(workspace, p, &walk, nodes, edges, &report_buckets)
 }
 
 fn merge_filesystem_layer_with_buckets(
     workspace: &chan_workspace::Workspace,
     p: &GraphParams,
+    walk: &TreeWalk,
     nodes: &mut std::collections::BTreeMap<String, GraphNodeView>,
     edges: &mut Vec<GraphEdgeView>,
     report_buckets: &std::collections::HashMap<String, ReportFileBucket>,
@@ -1344,7 +1703,7 @@ fn merge_filesystem_layer_with_buckets(
     // then fills in the full public namespace so the semantic graph
     // keeps the same file coverage as the File Browser, regardless
     // of the current visual depth.
-    merge_unified_tree_layer(workspace, p, nodes, edges, report_buckets);
+    merge_unified_tree_layer(workspace, p, walk, nodes, edges, report_buckets);
 
     Ok(())
 }
@@ -1552,6 +1911,7 @@ pub async fn api_graph(
             nodes: Vec::new(),
             edges: Vec::new(),
             gated: true,
+            tree: None,
         })
         .into_response();
     }
@@ -1702,6 +2062,7 @@ async fn empty_graph_stream_response(p: GraphParams) -> Response {
         path: p.path.clone(),
         depth: p.depth,
         gated: true,
+        tree: None,
     }))
 }
 
@@ -1760,6 +2121,7 @@ where
         path: p.path.clone(),
         depth: p.depth,
         gated: false,
+        tree: None,
     }) {
         return Err(GraphBuildError::Cancelled);
     }
@@ -1894,25 +2256,48 @@ fn build_graph_view(
     // there on disk. We walk the workspace once and use the result as the
     // link resolver's universe; images are the image subset of that
     // walk (Media node kind) while everything else gets the regular
-    // File treatment further down.
+    // File treatment further down. The folder layer reads the same walk.
     //
     // Directory entries come from the same walk. Markdown links whose
     // target is a directory (e.g. `[notes](../notes/)`) stay out of
     // `ghost_set`, and the edge filter below drops their edges.
     //
-    // Over the listing cap the walk lists nothing, so each link target
-    // is looked up on disk instead; `link_targets_on_disk` states the
-    // cost.
+    // Over the listing cap the walk lists directories alone, so each link
+    // target that is a file is looked up on disk instead;
+    // `link_targets_on_disk` states the cost.
     let graph_file_set: std::collections::BTreeSet<&str> =
         files.iter().map(String::as_str).collect();
-    let (disk_files, disk_dirs) = match (
-        workspace_disk_files(&workspace),
-        workspace_disk_dirs(&workspace),
-    ) {
-        (Some(disk_files), Some(disk_dirs)) => (disk_files, disk_dirs),
-        _ => link_targets_on_disk(&workspace, &all_edges, &graph_file_set),
+    let walk = TreeWalk::of(&workspace);
+    let tree = match p.scope {
+        GraphScope::Workspace => walk.coverage(),
+        GraphScope::Directory | GraphScope::File => None,
     };
-    let image_files = image_subset(&disk_files);
+    if tree.is_some() {
+        emit_graph_event(
+            emit,
+            GraphStreamEvent::Meta {
+                scope: p.scope,
+                path: p.path.clone(),
+                depth: p.depth,
+                gated: false,
+                tree,
+            },
+        )?;
+    }
+    let looked_up;
+    let (disk_files, disk_dirs) = match &walk {
+        TreeWalk::Listed { files, dirs } => (files, dirs),
+        TreeWalk::OverCap { dirs } => {
+            looked_up =
+                link_targets_on_disk(&workspace, &all_edges, &graph_file_set, dirs.as_ref());
+            (&looked_up.0, dirs.as_ref().unwrap_or(&looked_up.1))
+        }
+        TreeWalk::Failed => {
+            looked_up = Default::default();
+            (&looked_up.0, &looked_up.1)
+        }
+    };
+    let image_files = image_subset(disk_files);
     let present_files: std::collections::BTreeSet<&str> = files
         .iter()
         .filter(|path| indexed_file_exists(&workspace, path))
@@ -1941,11 +2326,11 @@ fn build_graph_view(
     // file_set is what resolve_link_dst and ghost classification
     // consult.
     let mut file_set = graph_file_set.clone();
-    for f in &disk_files {
+    for f in disk_files {
         file_set.insert(f.as_str());
     }
     let mut present_file_set = present_files.clone();
-    for f in &disk_files {
+    for f in disk_files {
         present_file_set.insert(f.as_str());
     }
 
@@ -2187,7 +2572,14 @@ fn build_graph_view(
 
     let report_buckets = report_buckets_for_graph(&workspace);
     apply_report_buckets(&mut nodes, &report_buckets);
-    merge_filesystem_layer_with_buckets(&workspace, &p, &mut nodes, &mut edges, &report_buckets)?;
+    merge_filesystem_layer_with_buckets(
+        &workspace,
+        &p,
+        &walk,
+        &mut nodes,
+        &mut edges,
+        &report_buckets,
+    )?;
     merge_language_layer(&workspace, &p, &mut nodes, &mut edges)?;
     // The filesystem tree layer adds contact files as plain File nodes;
     // re-stamp the contact discriminator so cross-linked (not
@@ -2201,6 +2593,7 @@ fn build_graph_view(
         nodes: nodes.into_values().collect(),
         edges,
         gated: false,
+        tree,
     })
 }
 
@@ -2422,8 +2815,17 @@ where
     // Same resolver universe as `api_graph`: graph files + every
     // regular on-disk file. Without this, `[link](LICENSE)` from a
     // README would not show up in LICENSE's backlinks because the
-    // resolver couldn't tell that "LICENSE" was a real file.
-    let disk_files = workspace_disk_files(workspace).unwrap_or_default();
+    // resolver couldn't tell that "LICENSE" was a real file. Over the
+    // listing cap, or when the walk fails, the graph files stand alone.
+    let disk_files: std::collections::BTreeSet<String> =
+        match workspace.list_tree_filtered_unified() {
+            Ok(entries) => entries
+                .into_iter()
+                .filter(|e| !e.is_dir)
+                .map(|e| e.path)
+                .collect(),
+            Err(_) => std::collections::BTreeSet::new(),
+        };
     let mut file_set: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
     for f in &disk_files {
         file_set.insert(f.as_str());
@@ -2909,6 +3311,21 @@ mod tests {
         (cfg, root, workspace)
     }
 
+    /// The file and directory sets of the whole-tree walk of `workspace`,
+    /// which must be under the listing cap.
+    fn listed(
+        workspace: &chan_workspace::Workspace,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        match TreeWalk::of(workspace) {
+            TreeWalk::Listed { files, dirs } => (files, dirs),
+            TreeWalk::OverCap { .. } => panic!("fixture: the walk is over the cap"),
+            TreeWalk::Failed => panic!("fixture: the walk failed"),
+        }
+    }
+
     fn put(root: &std::path::Path, rel: &str, body: &[u8]) {
         let path = root.join(rel);
         if let Some(parent) = path.parent() {
@@ -3075,9 +3492,9 @@ mod tests {
     }
 
     #[test]
-    fn workspace_disk_files_includes_non_markdown_targets() {
-        // The link resolver in `api_graph` walks the workspace once via
-        // `workspace_disk_files` and uses the result as the universe of
+    fn the_tree_walk_lists_every_file_a_link_may_target() {
+        // The link resolver in `api_graph` walks the workspace once
+        // (`TreeWalk::of`) and uses its files as the universe of
         // valid link targets. Without this, a `[mit](LICENSE)` or
         // `[code](src/lib.rs)` link from a markdown file would fall
         // through to the ghost path, even though both files are
@@ -3089,7 +3506,7 @@ mod tests {
         put(root.path(), "scripts/build.sh", b"#!/bin/sh\n");
         put(root.path(), "notes/a.md", b"# A\n");
 
-        let disk = workspace_disk_files(&workspace).expect("under the cap");
+        let (disk, _) = listed(&workspace);
         assert!(disk.contains("LICENSE"), "got {disk:?}");
         assert!(disk.contains("src/lib.rs"));
         assert!(disk.contains("scripts/build.sh"));
@@ -3119,7 +3536,7 @@ mod tests {
         // chan-workspace stores the verbatim authored target on the edge.
         assert_eq!(link.dst, "LICENSE");
 
-        let disk = workspace_disk_files(&workspace).expect("under the cap");
+        let (disk, _) = listed(&workspace);
         assert!(disk.contains("LICENSE"), "got {disk:?}");
 
         let graph_files = graph.files().unwrap();
@@ -3146,18 +3563,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_disk_dirs_includes_directory_entries() {
+    fn the_tree_walk_lists_every_directory_a_link_may_target() {
         // Pin the helper contract: every regular directory
         // the user might link to has to show up here so api_graph can
         // recognise `[label](some/dir/)` targets and keep them out of
-        // `ghost_set`. The companion `workspace_disk_files` set is
-        // unaffected (it filters `is_dir` out the other way).
+        // `ghost_set`. The walk's file set is unaffected (it takes the
+        // entries that are not directories).
         let (_cfg, root, workspace) = open_workspace();
         put(root.path(), "docs/intro.md", b"# Intro\n");
         put(root.path(), "docs/agents/alice.md", b"# alice\n");
         put(root.path(), "notes/inner/deep.md", b"# deep\n");
 
-        let dirs = workspace_disk_dirs(&workspace).expect("under the cap");
+        let (files, dirs) = listed(&workspace);
         assert!(dirs.contains("docs"), "got {dirs:?}");
         assert!(dirs.contains("docs/agents"));
         assert!(dirs.contains("notes"));
@@ -3166,9 +3583,8 @@ mod tests {
         assert!(!dirs.contains("docs/intro.md"));
         assert!(!dirs.contains("docs/agents/alice.md"));
 
-        // Files set stays clean of directories. The two helpers split
-        // the same walk; pin that the split is exclusive.
-        let files = workspace_disk_files(&workspace).expect("under the cap");
+        // Files set stays clean of directories. The walk splits one
+        // listing into the two sets; pin that the split is exclusive.
         assert!(files.contains("docs/intro.md"));
         assert!(!files.contains("docs"));
         assert!(!files.contains("docs/agents"));
@@ -3201,8 +3617,7 @@ mod tests {
             .expect("indexed markdown link edge");
         assert_eq!(link.dst, "some-dir");
 
-        let disk_files = workspace_disk_files(&workspace).expect("under the cap");
-        let disk_dirs = workspace_disk_dirs(&workspace).expect("under the cap");
+        let (disk_files, disk_dirs) = listed(&workspace);
         assert!(disk_dirs.contains("some-dir"), "got {disk_dirs:?}");
         // The link target is NOT a file on disk (it's the directory).
         // Pinning this rules out the referenced-disk-file path
@@ -3305,8 +3720,10 @@ mod tests {
     // directory, to an ignored file, to a file a negation re-includes under
     // an ignored directory, or through a symlinked directory stays a ghost,
     // whose edge the graph drops; a link to a folder draws no ghost node.
-    // The stored links are read first, so a dropped edge is a ghost and not
-    // a link the index never kept.
+    // That holds whether the directories come from the walk of directories
+    // alone or, when they are over the cap too, from a stat of each. The
+    // stored links are read first, so a dropped edge is a ghost and not a
+    // link the index never kept.
     #[tokio::test]
     async fn links_resolve_by_their_targets_on_disk_over_the_listing_cap() {
         let app = evidence_route_app();
@@ -3353,9 +3770,21 @@ mod tests {
             "fixture: the walk is not over the lowered cap"
         );
         let over = graph_route_body(&app, "/api/graph?depth=1").await;
+        let directories = super::tree_walks::lower_directory_walk(workspace.root(), 1);
+        assert_eq!(
+            walk_directories(&workspace, 1),
+            None,
+            "fixture: the directories are not over the lowered bound"
+        );
+        let over_both = graph_route_body(&app, "/api/graph?depth=1").await;
+        drop(directories);
         drop(limit);
 
-        for (when, body) in [("under the cap", under), ("over the cap", over)] {
+        for (when, body) in [
+            ("under the cap", under),
+            ("over the cap", over),
+            ("with the directories over the cap too", over_both),
+        ] {
             let json: serde_json::Value = serde_json::from_str(&body).unwrap();
             let links: std::collections::BTreeMap<&str, Option<bool>> = json["edges"]
                 .as_array()
@@ -3404,9 +3833,10 @@ mod tests {
         }
     }
 
-    // The lookup the graph makes over the listing cap, read directly: the
-    // route drops the edge of a link to a folder whether it counts as a
-    // folder or as a ghost, so only here does a folder show. Of the note's
+    // The lookup the graph makes over the listing cap, read directly, with
+    // no walked directories, so each directory is statted: the route drops
+    // the edge of a link to a folder whether it counts as a folder or as a
+    // ghost, so only here does a folder show. Of the note's
     // targets it finds the file, the image and the folder on disk, and
     // neither the missing file nor one out of the root or out of scope, an
     // excluded folder, a symlink, or a path through a symlinked directory.
@@ -3423,6 +3853,7 @@ mod tests {
             &workspace,
             &edges,
             &indexed.iter().map(String::as_str).collect(),
+            None,
         );
 
         assert_eq!(
@@ -3432,6 +3863,1032 @@ mod tests {
                 .into()
         );
         assert_eq!(dirs, ["evidence/run1".to_string()].into());
+    }
+
+    /// The deepest folder of `folder_layer_app`. It and its parent sit
+    /// below the depth the shared graph asks of its depth-bounded
+    /// filesystem layer (6), so only the tree layer draws them.
+    const DEEP: &str = "deep/l2/l3/l4/l5/l6/l7/l8";
+
+    /// A workspace app whose folders run below the depth the shared graph
+    /// asks of its depth-bounded filesystem layer. Its indexed note links a
+    /// second indexed note and an image in the deepest folder, beside a file
+    /// nothing indexes or links, an empty folder, a folder the `.gitignore`
+    /// names and an excluded one.
+    fn folder_layer_app() -> GraphRouteApp {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let deep = root.path().join(DEEP);
+        put(
+            root.path(),
+            ".gitignore",
+            format!("{DEEP}/hidden/\n").as_bytes(),
+        );
+        put(
+            root.path(),
+            "notes/index.md",
+            format!("# Index\n\n[[{DEEP}/leaf.md]]\n![pic](../{DEEP}/pic.png)\n").as_bytes(),
+        );
+        put(&deep, "leaf.md", b"# Leaf\n");
+        put(&deep, "pic.png", b"png");
+        put(&deep, "raw.bin", &[1, 2, 3]);
+        put(&deep, "hidden/secret.md", b"# Hidden\n");
+        put(&deep, "node_modules/pkg/index.js", b"dep\n");
+        std::fs::create_dir(deep.join("empty")).unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.index_file("notes/index.md").unwrap();
+        workspace.index_file(&format!("{DEEP}/leaf.md")).unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace,
+            )
+        });
+        GraphRouteApp {
+            _cfg: cfg,
+            _root: root,
+            state,
+        }
+    }
+
+    /// Lower the whole-tree walk's cap of `workspace` below its entries, and
+    /// show the walk is over it.
+    fn over_the_listing_cap(
+        workspace: &chan_workspace::Workspace,
+    ) -> chan_workspace::workspace::listing_limit_test_hooks::LimitGuard {
+        let limit =
+            chan_workspace::workspace::listing_limit_test_hooks::lower_tree_walk(workspace, 3);
+        assert!(
+            matches!(
+                workspace.list_tree_filtered_unified(),
+                Err(chan_workspace::ChanError::ListingTooLarge { .. })
+            ),
+            "fixture: the walk is not over the lowered cap"
+        );
+        limit
+    }
+
+    /// The shared graph's load of `folder_layer_app`, the JSON form, under
+    /// the listing cap and then over it.
+    async fn folder_layer_answers() -> [(&'static str, serde_json::Value); 2] {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let under = graph_route_body(&app, "/api/graph").await;
+        let limit = over_the_listing_cap(&workspace);
+        let over = graph_route_body(&app, "/api/graph").await;
+        drop(limit);
+        [("under the cap", under), ("over the cap", over)]
+            .map(|(when, body)| (when, serde_json::from_str(&body).unwrap()))
+    }
+
+    /// The folder ids of `folder_layer_app`, written from its tree: the
+    /// root, `notes`, each folder down to `DEEP` and `DEEP/empty`. The
+    /// ignored and excluded folders are not among them.
+    fn folder_layer_folder_ids() -> std::collections::BTreeSet<String> {
+        let mut ids = std::collections::BTreeSet::from([
+            String::new(),
+            "directory:notes".to_string(),
+            format!("directory:{DEEP}/empty"),
+        ]);
+        let mut path = String::new();
+        for part in DEEP.split('/') {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            ids.insert(format!("directory:{path}"));
+        }
+        ids
+    }
+
+    /// The `(source, target)` of each `contains` edge in `answer`.
+    fn contains_edges(answer: &serde_json::Value) -> std::collections::BTreeSet<(String, String)> {
+        answer["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["kind"] == "contains")
+            .map(|edge| {
+                (
+                    edge["source"].as_str().unwrap().to_string(),
+                    edge["target"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The nodes of `answer` by id.
+    fn nodes_by_id(
+        answer: &serde_json::Value,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        answer["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| (node["id"].as_str().unwrap().to_string(), node.clone()))
+            .collect()
+    }
+
+    // One graph load walks the whole tree once, in each of its forms and
+    // scopes: the link resolver's file and directory sets and the folder
+    // layer share that walk. Over the listing cap the load also walks the
+    // directories alone, once; under it, never. What it counts is the calls
+    // of `TreeWalk::of` and of `walk_directories`, not the listings the
+    // workspace makes, so a listing taken outside them goes uncounted.
+    #[tokio::test]
+    async fn a_graph_load_walks_the_whole_tree_once() {
+        use super::tree_walks::{taken, Walk};
+
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let root = workspace.root().to_path_buf();
+        let walks = || (taken(&root, Walk::Listing), taken(&root, Walk::Directories));
+        assert!(
+            workspace.list_tree_filtered_unified().is_ok(),
+            "fixture: the walk is over the cap before it is lowered"
+        );
+        for (when, over_cap) in [("under the cap", false), ("over the cap", true)] {
+            let limit = over_cap.then(|| over_the_listing_cap(&workspace));
+            for uri in [
+                "/api/graph",
+                "/api/graph?stream=1",
+                "/api/graph?scope=directory&path=notes",
+            ] {
+                let (listings, directory_walks) = walks();
+                graph_route_body(&app, uri).await;
+                let (listings_after, directory_walks_after) = walks();
+                assert_eq!(
+                    listings_after - listings,
+                    1,
+                    "GET {uri} {when}: the whole-tree listings of one load"
+                );
+                assert_eq!(
+                    directory_walks_after - directory_walks,
+                    usize::from(over_cap),
+                    "GET {uri} {when}: the directories-only walks of one load"
+                );
+            }
+            drop(limit);
+        }
+    }
+
+    // Over the listing cap the shared graph holds the root and every folder
+    // in scope, and only those, as under it: the folders below the
+    // depth-bounded filesystem layer's reach included, the ignored and
+    // excluded ones left out. Each folder node is the one the graph holds
+    // under the cap, its counts included.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_every_folder_in_scope() {
+        let [(_, under), (_, over)] = folder_layer_answers().await;
+        let expected = folder_layer_folder_ids();
+        assert_eq!(expected.len(), 11, "fixture: the folders in scope");
+        let folders =
+            |answer: &serde_json::Value| -> std::collections::BTreeMap<String, serde_json::Value> {
+                nodes_by_id(answer)
+                    .into_iter()
+                    .filter(|(_, node)| node["kind"] == "directory")
+                    .collect()
+            };
+        let (under_folders, over_folders) = (folders(&under), folders(&over));
+        assert_eq!(
+            under_folders
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "under the cap, the folder nodes"
+        );
+        assert_eq!(
+            over_folders
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "over the cap, the folder nodes"
+        );
+        assert_eq!(
+            over_folders, under_folders,
+            "over the cap, a folder node differs from the one under the cap"
+        );
+    }
+
+    // Over the listing cap each folder but the root is joined to its parent
+    // by one `contains` edge, as under the cap, and no other `contains` edge
+    // runs between two folders.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_the_contains_edges_between_folders() {
+        let [under, over] = folder_layer_answers().await;
+        let folders = folder_layer_folder_ids();
+        let expected: std::collections::BTreeSet<(String, String)> = folders
+            .iter()
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                let path = id.strip_prefix("directory:").unwrap();
+                let parent = match path.rsplit_once('/') {
+                    Some((parent, _)) => format!("directory:{parent}"),
+                    None => String::new(),
+                };
+                (parent, id.clone())
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            10,
+            "fixture: one edge per folder but the root"
+        );
+        for (when, answer) in [under, over] {
+            let between_folders: std::collections::BTreeSet<(String, String)> =
+                contains_edges(&answer)
+                    .into_iter()
+                    .filter(|(source, target)| folders.contains(source) && folders.contains(target))
+                    .collect();
+            assert_eq!(
+                between_folders, expected,
+                "{when}, the contains edges between folders"
+            );
+        }
+    }
+
+    // Over the listing cap each file the shared graph holds (the two
+    // indexed notes and the linked image) stays in its folder by its
+    // `contains` edge, as under the cap. The walk over the cap lists no
+    // file, so a file the graph holds for no other reason (`raw.bin`, which
+    // nothing indexes or links) has a node only under the cap. Every other
+    // `contains` edge is the one under the cap: none is lost, none added.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_graph_keeps_each_file_it_holds_in_its_folder() {
+        let [(_, under), (_, over)] = folder_layer_answers().await;
+        let held = [
+            ("directory:notes".to_string(), "notes/index.md".to_string()),
+            (format!("directory:{DEEP}"), format!("{DEEP}/leaf.md")),
+            (format!("directory:{DEEP}"), format!("{DEEP}/pic.png")),
+        ];
+        let raw = (format!("directory:{DEEP}"), format!("{DEEP}/raw.bin"));
+        let (under_edges, over_edges) = (contains_edges(&under), contains_edges(&over));
+        for edge in held.iter().chain([&raw]) {
+            assert!(
+                under_edges.contains(edge),
+                "fixture: under the cap, no contains edge {edge:?}"
+            );
+        }
+        for edge in &held {
+            assert!(
+                over_edges.contains(edge),
+                "over the cap, no contains edge {edge:?}"
+            );
+        }
+        let over_nodes = nodes_by_id(&over);
+        assert!(
+            !over_nodes.contains_key(&raw.1) && !over_edges.contains(&raw),
+            "over the cap, the graph holds a file the walk listed: {:?}",
+            over_nodes.get(&raw.1)
+        );
+        let expected_over: std::collections::BTreeSet<(String, String)> = under_edges
+            .iter()
+            .filter(|(_, target)| over_nodes.contains_key(target))
+            .cloned()
+            .collect();
+        assert_eq!(
+            over_edges, expected_over,
+            "over the cap, the contains edges are not those under the cap into the nodes it holds"
+        );
+    }
+
+    // The directories-only walk lists the directories the whole-tree
+    // listing lists, the empty one included and the ignored and excluded
+    // ones left out, and holds no more than its bound: at its bound it
+    // answers them all, and one below it refuses instead of holding more.
+    #[tokio::test]
+    async fn the_directory_walk_lists_the_listings_directories_within_its_bound() {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        let (_, listed_dirs) = listed(&workspace);
+        assert_eq!(
+            listed_dirs.len(),
+            10,
+            "fixture: the listing's directories, {listed_dirs:?}"
+        );
+        assert_eq!(
+            walk_directories(&workspace, listed_dirs.len()),
+            Some(listed_dirs.clone()),
+            "at its bound, the walk's directories"
+        );
+        assert_eq!(
+            walk_directories(&workspace, listed_dirs.len() - 1),
+            None,
+            "one below its bound, the walk answers"
+        );
+    }
+
+    // Given the walked directories, the lookup over the cap reads them for
+    // the directories above a target and for a folder target, and stats
+    // only a file target: it answers what the stat path answers, and
+    // without `evidence/run1` in the set it finds neither that folder nor
+    // the two files in it, though all three are on disk.
+    #[tokio::test]
+    async fn link_targets_on_disk_reads_folders_from_the_walked_directories() {
+        let app = evidence_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let graph = workspace.graph().unwrap();
+        let indexed = graph.files().unwrap();
+        let indexed: std::collections::BTreeSet<&str> =
+            indexed.iter().map(String::as_str).collect();
+        let edges = graph.neighbors("notes/evidence.md").unwrap();
+        let mut walked = walk_directories(&workspace, chan_workspace::fs_ops::LIST_TREE_LIMIT)
+            .expect("fixture: the directories are over the cap");
+
+        assert_eq!(
+            link_targets_on_disk(&workspace, &edges, &indexed, Some(&walked)),
+            link_targets_on_disk(&workspace, &edges, &indexed, None),
+            "the walked directories answer otherwise than the stat path"
+        );
+        assert!(walked.remove("evidence/run1"), "fixture: {walked:?}");
+        assert_eq!(
+            link_targets_on_disk(&workspace, &edges, &indexed, Some(&walked)),
+            Default::default(),
+            "a target found below or at a directory the walk did not list"
+        );
+    }
+
+    // A read-only folder is a dead end over the listing cap as under it: the
+    // folder is drawn, and an indexed note inside it, which the graph holds,
+    // is joined to it by no `contains` edge.
+    #[cfg(unix)]
+    #[test]
+    fn over_the_listing_cap_a_read_only_folder_stays_a_dead_end() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "notes/a.md", b"# A\n");
+        put(root.path(), "locked/hidden.md", b"# Hidden\n");
+        workspace.index_file("locked/hidden.md").unwrap();
+        let locked = root.path().join("locked");
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 6,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            assert!(
+                view.nodes.iter().any(|node| matches!(
+                    node,
+                    GraphNodeView::Directory { id, .. } if id == "directory:locked"
+                )),
+                "{when}, no folder node for the read-only folder"
+            );
+            assert!(
+                view.nodes.iter().any(|node| matches!(
+                    node,
+                    GraphNodeView::File { id, .. } if id == "locked/hidden.md"
+                )),
+                "fixture: {when}, the indexed note has no node"
+            );
+            assert!(
+                !view
+                    .edges
+                    .iter()
+                    .any(|edge| edge.kind == "contains" && edge.target == "locked/hidden.md"),
+                "{when}, the note inside the read-only folder is joined to it"
+            );
+        }
+    }
+
+    // A read-only folder below the filesystem layer's depth, whose node only
+    // the tree layer makes, carries its class and is a dead end, under the
+    // listing cap and over it: an indexed note inside it is joined to it by
+    // no `contains` edge, while one in an open folder beside it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_folder_below_the_filesystem_layers_depth_is_classified_and_a_dead_end() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Puts the directory's mode back when the test ends, pass or fail, so
+        // that a user who is not root can remove the temp directory.
+        struct ModeRestore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "a/b/locked/hidden.md", b"# Hidden\n");
+        put(root.path(), "a/b/open/seen.md", b"# Seen\n");
+        workspace.index_file("a/b/locked/hidden.md").unwrap();
+        workspace.index_file("a/b/open/seen.md").unwrap();
+        let locked = root.path().join("a/b/locked");
+        let _restore = ModeRestore(
+            locked.clone(),
+            std::fs::metadata(&locked).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+
+        let class_of = |view: &GraphViewResponse, folder: &str| {
+            view.nodes.iter().find_map(|node| match node {
+                GraphNodeView::Directory { id, path_class, .. } if id == folder => {
+                    Some(path_class.clone())
+                }
+                _ => None,
+            })
+        };
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            let locked_class = class_of(&view, "directory:a/b/locked");
+            assert!(
+                matches!(
+                    &locked_class,
+                    Some(Some(class)) if class.permission == PathPermission::ReadOnly
+                ),
+                "{when}, the deep read-only folder's class: {locked_class:?}"
+            );
+            let open_class = class_of(&view, "directory:a/b/open");
+            assert!(
+                matches!(open_class, Some(Some(_))),
+                "{when}, the deep open folder's class: {open_class:?}"
+            );
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "contains"
+                    && edge.source == "directory:a/b/open"
+                    && edge.target == "a/b/open/seen.md"),
+                "fixture: {when}, the note in the open folder is not joined to it"
+            );
+            assert!(
+                !view
+                    .edges
+                    .iter()
+                    .any(|edge| edge.kind == "contains" && edge.target == "a/b/locked/hidden.md"),
+                "{when}, the note inside the deep read-only folder is joined to it"
+            );
+        }
+    }
+
+    // A file the index holds below a folder the scope has left since (a
+    // stale index, until the reconcile it requested runs) has a node and no
+    // folder under the cap, since the listing lists neither. Over the cap the
+    // walk lists neither either, so it reads the same: the folder nodes and
+    // the `contains` edges are those under the cap.
+    #[test]
+    fn over_the_listing_cap_a_file_below_a_folder_the_walk_does_not_list_gets_no_folder() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "notes/a.md", b"# A\n");
+        put(root.path(), "stalearea/sub/held.md", b"# Held\n");
+        put(root.path(), "keep/sub/held2.md", b"# Held2\n");
+        workspace.index_file("stalearea/sub/held.md").unwrap();
+        workspace.index_file("keep/sub/held2.md").unwrap();
+        workspace
+            .set_excluded_dirs(vec!["stalearea".to_string()])
+            .unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let summary = |view: &GraphViewResponse| {
+            let folders: std::collections::BTreeSet<String> = view
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    GraphNodeView::Directory { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            let files: std::collections::BTreeSet<(String, bool)> = view
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    GraphNodeView::File { id, missing, .. } => Some((id.clone(), *missing)),
+                    _ => None,
+                })
+                .collect();
+            let contains: std::collections::BTreeSet<(String, String)> = view
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == "contains")
+                .map(|edge| (edge.source.clone(), edge.target.clone()))
+                .collect();
+            (folders, files, contains)
+        };
+        let under = summary(&load());
+        let limit = over_the_listing_cap(&workspace);
+        let over = summary(&load());
+        drop(limit);
+        assert!(
+            under
+                .1
+                .contains(&("stalearea/sub/held.md".to_string(), false)),
+            "fixture: the stale file has no live node under the cap"
+        );
+        assert!(
+            !under.0.contains("directory:stalearea/sub"),
+            "fixture: under the cap the excluded folder is drawn"
+        );
+        assert_eq!(over.0, under.0, "over the cap, the folder nodes");
+        let held: std::collections::BTreeSet<&String> = over.1.iter().map(|(id, _)| id).collect();
+        let expected: std::collections::BTreeSet<(String, String)> = under
+            .2
+            .iter()
+            .filter(|(_, target)| target.starts_with("directory:") || held.contains(target))
+            .cloned()
+            .collect();
+        assert_eq!(over.2, expected, "over the cap, the contains edges");
+    }
+
+    // An indexed file that has left the disk keeps a muted node. Under the
+    // cap the listing does not hold it, so no folder contains it; over the
+    // cap it reads the same, though its folders are on disk and walked.
+    #[test]
+    fn over_the_listing_cap_a_vanished_note_stays_out_of_its_folder() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "notes/a.md", b"# A\n");
+        put(root.path(), "gone/deep/sub/held.md", b"# Held\n");
+        put(root.path(), "gone/deep/sub/stays.md", b"# Stays\n");
+        workspace.index_file("gone/deep/sub/held.md").unwrap();
+        std::fs::remove_file(root.path().join("gone/deep/sub/held.md")).unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            assert!(
+                view.nodes.iter().any(|node| matches!(
+                    node,
+                    GraphNodeView::File { id, missing: true, .. } if id == "gone/deep/sub/held.md"
+                )),
+                "fixture: {when}, the vanished note has no muted node"
+            );
+            assert!(
+                !view
+                    .edges
+                    .iter()
+                    .any(|edge| edge.kind == "contains" && edge.target == "gone/deep/sub/held.md"),
+                "{when}, a folder contains the vanished note"
+            );
+        }
+    }
+
+    // The filesystem layer draws a symlink's target folder as a node of its
+    // own, with no edge from its parent when the target lies below the
+    // layer's depth. The tree layer still joins that folder to its parent,
+    // under the listing cap and over it, so a walked folder never floats
+    // apart from the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_below_the_filesystem_layers_depth_is_joined_to_its_parent() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(root.path(), "a/b/c/note.md", b"# Note\n");
+        std::os::unix::fs::symlink("a/b/c", root.path().join("alias")).unwrap();
+        let load = || {
+            let mut emit = None;
+            build_graph_view(
+                Arc::clone(&workspace),
+                GraphParams {
+                    scope: GraphScope::Workspace,
+                    path: String::new(),
+                    depth: 1,
+                },
+                &mut emit,
+            )
+            .unwrap()
+        };
+        let under = load();
+        let limit = over_the_listing_cap(&workspace);
+        let over = load();
+        drop(limit);
+        for (when, view) in [("under the cap", under), ("over the cap", over)] {
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "symlink"
+                    && edge.source == "alias"
+                    && edge.target == "directory:a/b/c"),
+                "fixture: {when}, the filesystem layer draws no symlink to the folder"
+            );
+            assert!(
+                view.edges.iter().any(|edge| edge.kind == "contains"
+                    && edge.source == "directory:a/b"
+                    && edge.target == "directory:a/b/c"),
+                "{when}, the symlinked folder is not joined to its parent"
+            );
+        }
+    }
+
+    // A source file only the filesystem layer holds (nothing indexes or
+    // links it) carries its report bucket in the answer: that layer draws
+    // it with none, and the tree layer's merge fills it on the held node.
+    #[test]
+    fn a_file_only_the_filesystem_layer_holds_carries_its_report_bucket() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "top.md", b"# Top\n");
+        put(
+            root.path(),
+            "src/lib.rs",
+            b"pub fn f() -> u32 {\n    1\n}\n",
+        );
+        workspace.index_file("top.md").unwrap();
+        let mut emit = None;
+        let view = build_graph_view(
+            Arc::clone(&workspace),
+            GraphParams {
+                scope: GraphScope::Workspace,
+                path: String::new(),
+                depth: 6,
+            },
+            &mut emit,
+        )
+        .unwrap();
+        let bucket = view.nodes.iter().find_map(|node| match node {
+            GraphNodeView::File { id, bucket, .. } if id == "src/lib.rs" => Some(bucket.clone()),
+            _ => None,
+        });
+        assert!(
+            matches!(bucket, Some(Some(_))),
+            "the source file the filesystem layer holds has no report bucket: {bucket:?}"
+        );
+    }
+
+    /// The shared graph's load of `app` in its JSON form, the `tree` of each
+    /// `meta` of its stream form in order (`null` where it is absent), and
+    /// whether every `meta` comes before the stream's first `nodes` event.
+    async fn tree_marks(app: &GraphRouteApp) -> (serde_json::Value, Vec<serde_json::Value>, bool) {
+        let json: serde_json::Value =
+            serde_json::from_str(&graph_route_body(app, "/api/graph").await).unwrap();
+        let stream = graph_route_body(app, "/api/graph?stream=1").await;
+        let events: Vec<serde_json::Value> = stream
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let first_nodes = events
+            .iter()
+            .position(|event| event["type"] == "nodes")
+            .unwrap_or(events.len());
+        let metas: Vec<(usize, serde_json::Value)> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["type"] == "meta")
+            .map(|(at, event)| (at, event["tree"].clone()))
+            .collect();
+        let ahead = metas.iter().all(|(at, _)| *at < first_nodes);
+        (
+            json,
+            metas.into_iter().map(|(_, tree)| tree).collect(),
+            ahead,
+        )
+    }
+
+    // Over the listing cap the shared graph's answer says that its tree
+    // layer holds every folder and not every file: the JSON form in its
+    // `tree`, and the stream form in a `meta` ahead of its first node, the
+    // last `meta` it sends. Under the cap neither says anything, and the
+    // stream sends its one `meta`. A directory-scope answer, whose tree
+    // layer is its own subtree's listing, says nothing over the cap either.
+    #[tokio::test]
+    async fn over_the_listing_cap_the_answer_says_it_holds_every_folder_and_not_every_file() {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let (under, under_metas, under_ahead) = tree_marks(&app).await;
+        let limit = over_the_listing_cap(&workspace);
+        let (over, metas, ahead) = tree_marks(&app).await;
+        let directory: serde_json::Value = serde_json::from_str(
+            &graph_route_body(&app, "/api/graph?scope=directory&path=notes").await,
+        )
+        .unwrap();
+        drop(limit);
+
+        assert_eq!(
+            (&under["tree"], under_metas, under_ahead),
+            (
+                &serde_json::Value::Null,
+                vec![serde_json::Value::Null],
+                true
+            ),
+            "under the cap, the JSON form's tree, the stream's metas and their order"
+        );
+        assert_eq!(
+            over["tree"], "folders",
+            "over the cap, the JSON form's tree"
+        );
+        assert_eq!(
+            metas.last(),
+            Some(&serde_json::json!("folders")),
+            "over the cap, the stream's last meta: {metas:?}"
+        );
+        assert!(ahead, "over the cap, a meta follows the first node batch");
+        assert_eq!(
+            directory["tree"],
+            serde_json::Value::Null,
+            "over the cap, the directory-scope answer's tree"
+        );
+    }
+
+    // With the folders over the cap too, the directories-only walk stops at
+    // its bound, and the shared graph holds the folders of its depth-bounded
+    // filesystem layer and no other, as when no walk listed the folders. Its
+    // answer says so: its tree layer holds what lies down to the request's
+    // depth.
+    #[tokio::test]
+    async fn over_the_cap_for_the_folders_too_the_graph_keeps_the_depth_bounded_folders_and_says_so(
+    ) {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let directories = super::tree_walks::lower_directory_walk(workspace.root(), 1);
+        assert_eq!(
+            walk_directories(&workspace, 1),
+            None,
+            "fixture: the directories are not over the lowered bound"
+        );
+        let (answer, metas, ahead) = tree_marks(&app).await;
+        drop(directories);
+        drop(limit);
+
+        let layer = build_fs_graph(
+            &workspace,
+            FsGraphScope::Directory,
+            "",
+            default_graph_depth(),
+        )
+        .unwrap();
+        let expected: std::collections::BTreeSet<String> = layer
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "directory")
+            .map(|node| directory_node_id(&node.path))
+            .collect();
+        assert!(
+            expected.contains("directory:notes")
+                && !expected.contains(&format!("directory:{DEEP}")),
+            "fixture: the depth-bounded layer's folders, {expected:?}"
+        );
+        let folders: std::collections::BTreeSet<String> = nodes_by_id(&answer)
+            .into_iter()
+            .filter(|(_, node)| node["kind"] == "directory")
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            folders, expected,
+            "with the folders over the cap too, the folder nodes"
+        );
+        assert_eq!(
+            answer["tree"], "depth",
+            "with the folders over the cap too, the JSON form's tree"
+        );
+        assert_eq!(
+            metas.last(),
+            Some(&serde_json::json!("depth")),
+            "with the folders over the cap too, the stream's last meta: {metas:?}"
+        );
+        assert!(
+            ahead,
+            "with the folders over the cap too, a meta follows the first node batch"
+        );
+    }
+
+    // Over the listing cap, while the build reads and walks for longer than
+    // the keep-alive (held here after the opening `meta`, as a long walk
+    // holds it), the client reads empty `nodes` events and no node ahead of
+    // the `meta` that carries the mark: on the wire, `meta`, empty batches,
+    // the `meta` with `tree`, then the nodes.
+    #[tokio::test]
+    async fn over_the_listing_cap_no_node_reaches_a_client_ahead_of_the_streams_tree_mark() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let held = stream_hold::hold(workspace.root());
+        stream_hold::KEEPALIVE
+            .with(|period| period.set(Some(std::time::Duration::from_millis(100))));
+
+        let request = axum::http::Request::builder()
+            .uri("/api/graph?stream=1")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        let held_lines = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while text.lines().count() < 3 {
+                let chunk = body
+                    .next()
+                    .await
+                    .expect("the stream ended while the server was held")
+                    .expect("a body chunk");
+                text.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        })
+        .await;
+        stream_hold::KEEPALIVE.with(|period| period.set(None));
+        assert!(held_lines.is_ok(), "the held stream went silent: {text:?}");
+        drop(held);
+        while let Some(chunk) = body.next().await {
+            text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+        drop(limit);
+
+        let events = graph_stream_events(&text);
+        let batch = |event: &serde_json::Value| {
+            (event["type"] == "nodes").then(|| event["nodes"].as_array().unwrap().len())
+        };
+        let order: Vec<String> = events
+            .iter()
+            .map(|event| match event["type"].as_str().unwrap() {
+                "meta" => format!("meta(tree={})", event["tree"]),
+                "nodes" => format!("nodes({})", batch(event).unwrap()),
+                "edges" => format!("edges({})", event["edges"].as_array().unwrap().len()),
+                other => other.to_string(),
+            })
+            .collect();
+        let metas: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["type"] == "meta")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(metas.len(), 2, "the stream's metas: {order:?}");
+        let mark = metas[1];
+        assert_eq!(
+            (metas[0], &events[0]["tree"]),
+            (0, &serde_json::Value::Null),
+            "the stream opens with its meta, with no tree: {order:?}"
+        );
+        assert_eq!(
+            events[mark]["tree"], "folders",
+            "the second meta's tree: {order:?}"
+        );
+        assert!(
+            mark > 1,
+            "fixture: the keep-alive sent no empty batch ahead of the mark: {order:?}"
+        );
+        assert!(
+            events[1..mark].iter().all(|event| batch(event) == Some(0)),
+            "ahead of the mark the client reads something other than empty batches: {order:?}"
+        );
+        assert!(
+            events[mark + 1..]
+                .iter()
+                .any(|event| batch(event).is_some_and(|len| len > 0)),
+            "fixture: no node follows the mark: {order:?}"
+        );
+        assert_eq!(
+            events.last().map(|event| &event["type"]),
+            Some(&serde_json::json!("done")),
+            "{order:?}"
+        );
+    }
+
+    // The mark is the workspace scope's alone: over the listing cap a
+    // file-scope answer carries no `tree`, and a directory-scope or
+    // file-scope stream sends its one `meta`, with none.
+    #[tokio::test]
+    async fn over_the_listing_cap_a_file_scope_answer_and_a_scoped_stream_say_nothing_of_the_tree()
+    {
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let limit = over_the_listing_cap(&workspace);
+        let file: serde_json::Value = serde_json::from_str(
+            &graph_route_body(&app, "/api/graph?scope=file&path=notes/index.md").await,
+        )
+        .unwrap();
+        let directory_stream =
+            graph_route_body(&app, "/api/graph?scope=directory&path=notes&stream=1").await;
+        let file_stream =
+            graph_route_body(&app, "/api/graph?scope=file&path=notes/index.md&stream=1").await;
+        drop(limit);
+
+        assert!(
+            file["nodes"]
+                .as_array()
+                .is_some_and(|nodes| nodes.iter().any(|node| node["id"] == "notes/index.md")),
+            "fixture: the file-scope answer does not hold its file: {file}"
+        );
+        assert_eq!(
+            file["tree"],
+            serde_json::Value::Null,
+            "over the cap, the file-scope answer's tree"
+        );
+        for (scope, stream) in [("directory", directory_stream), ("file", file_stream)] {
+            let metas: Vec<serde_json::Value> = graph_stream_events(&stream)
+                .into_iter()
+                .filter(|event| event["type"] == "meta")
+                .map(|event| event["tree"].clone())
+                .collect();
+            assert_eq!(
+                metas,
+                vec![serde_json::Value::Null],
+                "over the cap, the {scope}-scope stream's metas"
+            );
+        }
+    }
+
+    // A graph load bounds its directories-only walk at the listing cap
+    // itself, unlowered; only a test lowers it, for one workspace root.
+    #[test]
+    fn the_directories_only_walk_is_bounded_at_the_listing_cap() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            chan_workspace::fs_ops::LIST_TREE_LIMIT,
+            "the production bound"
+        );
+        let lowered = super::tree_walks::lower_directory_walk(root.path(), 1);
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            1,
+            "fixture: the lowered bound"
+        );
+        drop(lowered);
+        assert_eq!(
+            directory_walk_limit(root.path()),
+            chan_workspace::fs_ops::LIST_TREE_LIMIT,
+            "the bound once the lowered one is dropped"
+        );
     }
 
     #[test]

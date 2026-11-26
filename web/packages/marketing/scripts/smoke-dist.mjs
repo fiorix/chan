@@ -103,6 +103,16 @@ const checks = [
     includes: '$DefaultMetadataBase = "https://chan.app/dl/cli"',
   },
   { path: "/assets/home/videos/terminal-commands.mp4", status: 200 },
+  { path: "/manual/tmux/", status: 200, includes: 'src="/assets/manual/videos/tmux-connect.mp4"' },
+  { path: "/manual/tmux/", status: 200, includes: 'src="/assets/manual/tmux-card.webp"' },
+  { path: "/manual/computers/", status: 200, includes: 'src="/assets/manual/videos/computers-carousel.mp4"' },
+  { path: "/manual/computers/", status: 200, includes: 'src="/assets/manual/computers-this-machine.webp"' },
+  { path: "/assets/manual/videos/tmux-connect.mp4", status: 200 },
+  { path: "/assets/manual/video-posters/tmux-connect.jpg", status: 200 },
+  { path: "/assets/manual/tmux-card.webp", status: 200 },
+  { path: "/assets/manual/videos/computers-carousel.mp4", status: 200 },
+  { path: "/assets/manual/video-posters/computers-carousel.jpg", status: 200 },
+  { path: "/assets/manual/computers-this-machine.webp", status: 200 },
 ];
 
 async function main() {
@@ -228,6 +238,7 @@ function contentType(file) {
   if (file.endsWith(".sh")) return "text/x-shellscript; charset=utf-8";
   if (file.endsWith(".ps1")) return "text/plain; charset=utf-8";
   if (file.endsWith(".png")) return "image/png";
+  if (file.endsWith(".jpg") || file.endsWith(".jpeg")) return "image/jpeg";
   if (file.endsWith(".webp")) return "image/webp";
   if (file.endsWith(".ico")) return "image/x-icon";
   return "application/octet-stream";
