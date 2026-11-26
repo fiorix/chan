@@ -104,7 +104,10 @@
 // the text of the node it reports: a reader more or fewer in a listed
 // file fails, and so does one replaced by a reader of another text, while
 // a reader moved with its text unchanged does not, nor one replaced by
-// another of that text in the same file.
+// another of that text in the same file. Nothing is pending, and a test
+// pins the list empty: an entry added later is named in that test as
+// well, with the change that removes it, so the commit that lets a reader
+// through says why in the code.
 //
 // The package keeps four members TypeScript private on purpose, as its
 // search measurement's seam: `SearchOwner`'s `pump` and `readResults` and
@@ -1195,6 +1198,10 @@ describe("the terminal widget's boundary", () => {
 
   test("each pending entry covers exactly the readers it pins", () => {
     expect(mispinned(PENDING, real)).toEqual([]);
+  });
+
+  test("no reader is pending", () => {
+    expect(PENDING.map((p) => `${p.rule} ${p.file} ${p.key}, until ${p.until}`)).toEqual([]);
   });
 
   test("a pending entry fails on a reader more, fewer or of another text than it pins", () => {
