@@ -1123,7 +1123,9 @@ describe("terminal find in a mounted tab", () => {
       data: JSON.stringify({ type: "session", id: "sess-2", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
     });
     await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
-    const bytes = new TextEncoder().encode(NEEDLES);
+    // A scan of many frames, so only a settle that reads the new terminal
+    // waits for its count.
+    const bytes = new TextEncoder().encode(DEEP_NEEDLES);
     const buffer = new ArrayBuffer(bytes.length);
     new Uint8Array(buffer).set(bytes);
     await socket.onmessage?.({ data: buffer });
@@ -1135,11 +1137,13 @@ describe("terminal find in a mounted tab", () => {
     await tick();
     expect(findInput()?.value).toBe("needle");
     expect(countElement()?.textContent).toBe("");
+    slowClock(0.5);
     pressEnter(findInput()!);
     frames.settle(next);
     await tick();
-    expect(activeHighlight(next)).toEqual(match(5));
-    expect(countElement()?.textContent).toBe("1 of 3");
+    // 300 needles above NEEDLES' three, whose last is the newest.
+    expect(activeHighlight(next)).toEqual(match(3005));
+    expect(countElement()?.textContent).toBe("1 of 303");
   });
 
   test("the tab's teardown disposes its terminal, which ends the open bar's search", async () => {
