@@ -9,6 +9,7 @@ import {
   type FixtureKeyEvent,
   type OracleFixture,
 } from "./__tests__/oracleFixture";
+import { terminalInternals } from "./internal";
 import {
   ABI,
   CELL_BITS,
@@ -465,39 +466,31 @@ describe("upstream's terminal through the binding", () => {
   });
 
   test("a failed write-buffer growth preserves the allocation for later writes", async () => {
-    type Wasm = {
-      fn: { ghostty_wasm_alloc(len: number): number };
-      free(ptr: number, len: number): void;
-    };
-    const t = (await upstream()).createTerminal(80, 24) as unknown as Pick<VtTerminal, "write" | "free" | "readRow" | "readHistoryRow"> & {
-      wasm: Wasm;
-      writeBuf: number;
-      writeCap: number;
-    };
+    const t = (await upstream()).createTerminal(80, 24);
+    const internals = () => terminalInternals(t);
     t.write("first");
-    const oldBuf = t.writeBuf;
-    const oldCap = t.writeCap;
-    const { ghostty_wasm_alloc: alloc } = t.wasm.fn;
-    const { free } = t.wasm;
+    const { writeBuf: oldBuf, writeCap: oldCap, wasm } = internals();
+    const { ghostty_wasm_alloc: alloc } = wasm.fn;
+    const { free } = wasm;
     const frees: [number, number][] = [];
-    t.wasm.free = (ptr, len) => {
+    wasm.free = (ptr, len) => {
       frees.push([ptr, len]);
-      free.call(t.wasm, ptr, len);
+      free.call(wasm, ptr, len);
     };
-    t.wasm.fn.ghostty_wasm_alloc = (len) => len > oldCap ? 0 : alloc(len);
+    wasm.fn.ghostty_wasm_alloc = (len: number) => len > oldCap ? 0 : alloc(len);
     try {
       expect(() => t.write(new Uint8Array(oldCap + 1))).toThrow(/out of memory/);
     } finally {
-      t.wasm.fn.ghostty_wasm_alloc = alloc;
+      wasm.fn.ghostty_wasm_alloc = alloc;
     }
     expect(frees, "the live buffer must not be freed on allocation failure").not.toContainEqual([oldBuf, oldCap]);
-    expect(t.writeBuf).toBe(oldBuf);
-    expect(t.writeCap).toBe(oldCap);
+    expect(internals().writeBuf).toBe(oldBuf);
+    expect(internals().writeCap).toBe(oldCap);
     t.write(" second");
-    expect(t.writeBuf, "a smaller write reuses the intact buffer").toBe(oldBuf);
+    expect(internals().writeBuf, "a smaller write reuses the intact buffer").toBe(oldBuf);
     expect(text(t, 0)).toBe("first second");
     t.write("x".repeat(oldCap + 1));
-    expect(t.writeBuf).not.toBe(oldBuf);
+    expect(internals().writeBuf).not.toBe(oldBuf);
     t.free();
     expect(frees.filter(([ptr]) => ptr === oldBuf), "the old buffer is freed exactly once").toEqual([[oldBuf, oldCap]]);
   });
@@ -596,39 +589,41 @@ describe("upstream's terminal through the binding", () => {
   });
 
   test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
-    type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
-    type Probe = Pick<VtTerminal, "write" | "beginFrame" | "readRow"> & { scratch: number; wasm: Wasm };
-    const clusterAt = (term: Probe) => {
+    const clusterAt = (term: VtTerminal) => {
       const cells = new VtCells();
       term.readRow(0, cells);
       return cells.at(0)?.cluster ?? "";
     };
-    const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
+    const pastScratch = (term: VtTerminal) => {
+      const { wasm, scratch } = terminalInternals(term);
+      return wasm.bytes().slice(scratch + SCRATCH.size, scratch + SCRATCH.size + 512);
+    };
     const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
     // The core keeps its own state (the cursor and the read position among
     // it) right past the scratch, so a two-codepoint cluster, which fits
     // the scratch, written and read on an identical terminal names the
     // bytes a write and a read move on their own.
-    const control = (await upstream()).createTerminal(20, 3) as unknown as Probe;
+    const control = (await upstream()).createTerminal(20, 3);
     const controlBefore = pastScratch(control);
     control.write("e\u0301");
     control.beginFrame();
     clusterAt(control);
     const ownState = moved(controlBefore, pastScratch(control));
-    const t = (await upstream()).createTerminal(20, 3) as unknown as Probe;
-    expect(t.scratch, "the control's layout is this terminal's").toBe(control.scratch);
+    const t = (await upstream()).createTerminal(20, 3);
+    expect(terminalInternals(t).scratch, "the control's layout is this terminal's").toBe(terminalInternals(control).scratch);
     const before = pastScratch(t);
     const allocs: [number, number][] = [];
     const frees: [number, number][] = [];
-    const { alloc, free } = t.wasm;
-    t.wasm.alloc = (len) => {
-      const ptr = alloc.call(t.wasm, len);
+    const { wasm } = terminalInternals(t);
+    const { alloc, free } = wasm;
+    wasm.alloc = (len) => {
+      const ptr = alloc.call(wasm, len);
       allocs.push([ptr, len]);
       return ptr;
     };
-    t.wasm.free = (ptr, len) => {
+    wasm.free = (ptr, len) => {
       frees.push([ptr, len]);
-      free.call(t.wasm, ptr, len);
+      free.call(wasm, ptr, len);
     };
     // One cluster: "e" and n - 1 combining acute accents.
     t.write("e" + "\u0301".repeat(n - 1));

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells, VtTerminal } from '../vt/ghosttyVt';
+import { terminalInternals } from '../vt/internal';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -84,7 +85,7 @@ async function open(input: string, cols = 20, rows = 4, copy?: (text: string) =>
 const range = (a: number, b: number, c: number, d: number): Range => ({ start: { col: a, absoluteRow: b }, end: { col: c, absoluteRow: d } });
 
 function trackedCells(term: Terminal) {
-  return (term.wasmTerm! as unknown as { trackedCells: Set<{ point(): unknown }> }).trackedCells;
+  return terminalInternals(term.wasmTerm!).trackedCells;
 }
 
 // The core prunes whole pages. Detect the real boundary instead of assuming

@@ -18,6 +18,8 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
+import { registerSearchInternals, registerTerminalInternals } from "./internal";
+
 /// Enum values of the pinned build, by upstream C type.
 export const ABI = {
   GhosttyResult: { SUCCESS: 0, OUT_OF_SPACE: -3, NO_VALUE: -4 },
@@ -699,6 +701,18 @@ const ROW_STYLES = 64;
 /// `readRow` and `readHistoryRow` read any row's cells into a `VtCells` view;
 /// `endFrame` marks it all painted.
 export class VtTerminal {
+  // The package's white-box tests read these through ./internal.
+  static {
+    registerTerminalInternals((t) => ({
+      wasm: t.wasm,
+      handle: t.handle,
+      scratch: t.scratch,
+      writeBuf: t.writeBuf,
+      writeCap: t.writeCap,
+      trackedCells: t.trackedCells,
+    }));
+  }
+
   private readonly wasm: VtWasm;
   private readonly owner: GhosttyVt;
   private handle: number;
@@ -1680,6 +1694,11 @@ type SearchTerminal = { handle(): number; changes(): number };
 /// `VtTerminal.createSearch()` and `free` it when the find bar closes; the
 /// terminal may be freed first, after which the search reports nothing.
 export class VtSearch {
+  // The package's white-box tests read these through ./internal.
+  static {
+    registerSearchInternals((s) => ({ wasm: s.wasm, handle: s.handle }));
+  }
+
   private readonly wasm: VtWasm;
   private readonly terminal: SearchTerminal;
   private handle: number;

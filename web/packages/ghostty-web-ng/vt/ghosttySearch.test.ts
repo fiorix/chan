@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ABI, GhosttyVt, LAYOUT, type MatchRange, type VtSearch, VtCells, VtTerminal } from "./ghosttyVt";
+import { searchInternals, terminalInternals } from "./internal";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -62,16 +63,7 @@ const ERRORS = [range(9, 7, 9, 11), range(6, 7, 6, 11), range(3, 7, 3, 11), rang
 
 /// The binding's privates a test reaches for: the wasm instance and the
 /// core handle of a terminal or a search.
-type Raw = {
-  wasm: {
-    fn: Record<string, (...args: number[]) => number>;
-    view(): DataView;
-    alloc(len: number): number;
-    free(ptr: number, len: number): void;
-  };
-  handle: number;
-};
-const raw = (o: unknown): Raw => o as Raw;
+const raw = (o: VtTerminal | VtSearch) => (o instanceof VtTerminal ? terminalInternals(o) : searchInternals(o));
 
 /// The blocks and opaque slots taken from `t`'s allocator from here on and
 /// not given back yet, each described by its size.

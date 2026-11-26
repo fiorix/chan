@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
+import { terminalInternals } from '../vt/internal';
 import type { ITerminalOptions } from './interfaces';
 import { Terminal } from './terminal';
 
@@ -70,7 +71,7 @@ async function open(options: Options = {}) {
   const host = document.createElement('div');
   document.body.append(host);
   term.open(host);
-  const handle = (term.wasmTerm as unknown as { handle: number }).handle;
+  const handle = terminalInternals(term.wasmTerm!).handle;
   function read<T>(size: number, fn: (ptr: number) => T): T {
     const ptr = raw.ghostty_wasm_alloc(size);
     try { return fn(ptr); } finally { raw.ghostty_wasm_free(ptr, size); }

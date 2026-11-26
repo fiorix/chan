@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ABI, CELL_BITS, GhosttyVt, LAYOUT, STYLE_FLAG_BITS, VtCells, VtFlag, type VtCell, type VtTerminal } from "./ghosttyVt";
+import { terminalInternals } from "./internal";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 const D = ABI.GhosttyRenderStateDirty;
@@ -21,11 +22,9 @@ async function core() {
   return { vt: new GhosttyVt(instance), exports: instance.exports as unknown as Exports };
 }
 
-type Internals = { handle: number; wasm: { fn: Record<string, (...args: unknown[]) => unknown> } };
-
 /// Counts the binding's calls into the core, by export.
 function counting(t: VtTerminal) {
-  const fn = (t as unknown as Internals).wasm.fn;
+  const fn = terminalInternals(t).wasm.fn;
   const counts: Record<string, number> = {};
   for (const [name, f] of Object.entries(fn)) {
     fn[name] = (...args: unknown[]) => {
@@ -180,7 +179,7 @@ describe("the frame reader's rows", () => {
     const view = new VtCells();
     for (let y = 0; y < t.rows; y++) {
       expect(t.readRow(y, view), `row ${y}`).toBe(true);
-      expect(cellsOf(view), `row ${y}`).toEqual(coreRow(exports, (t as unknown as Internals).handle, y));
+      expect(cellsOf(view), `row ${y}`).toEqual(coreRow(exports, terminalInternals(t).handle, y));
     }
   });
 
@@ -194,7 +193,7 @@ describe("the frame reader's rows", () => {
     t.setColors({ fgColor: 0x202020, bgColor: 0xfafafa, palette: [0, 0x0000aa] });
     for (let y = 0; y < t.rows; y++) {
       expect(t.readRow(y, view)).toBe(true);
-      expect(cellsOf(view), `row ${y}`).toEqual(coreRow(exports, (t as unknown as Internals).handle, y));
+      expect(cellsOf(view), `row ${y}`).toEqual(coreRow(exports, terminalInternals(t).handle, y));
     }
   });
 
@@ -206,7 +205,7 @@ describe("the frame reader's rows", () => {
     // ids name the other styles than in the rows above it on the screen.
     const { vt, exports } = await core();
     const t = vt.createTerminal(80, 24, { scrollbackLimit: 100_000 });
-    const handle = (t as unknown as Internals).handle;
+    const handle = terminalInternals(t).handle;
     const buf = exports.ghostty_wasm_alloc(64);
     const P = LAYOUT.GhosttyPoint.fields;
     const C = LAYOUT.GhosttyPointCoordinate.fields;

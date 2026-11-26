@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
+import { terminalInternals } from '../vt/internal';
 import type { EventEmitter } from './event-emitter';
 import type { TerminalChange } from './interfaces';
 import { LinkDetector } from './link-detector';
@@ -439,7 +440,7 @@ describe('retained history at the scrollback cap', () => {
   test('write anchors are released after a write, a screen change and a parser failure', async () => {
     const { term } = await history();
     const core = term.wasmTerm!;
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     expect(tracked.size).toBe(0);
     term.viewport.scrollTo(7.5);
     term.write('more\r\n');
@@ -469,7 +470,7 @@ describe('retained history at the scrollback cap', () => {
     scrolling.scrollAnimationStartTime = Date.now();
     const core = term.wasmTerm!;
     const track = core.trackCell.bind(core);
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     vi.spyOn(core, 'trackCell')
       .mockImplementationOnce(track)
       .mockImplementationOnce(() => { throw new Error('tracking failed'); });
@@ -563,7 +564,7 @@ describe('history-cap boundary guards', () => {
     term.viewport.scrollTo(7.5);
     gestureTarget(term, 12.25);
     const core = term.wasmTerm!;
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     const write = core.write.bind(core);
     const observed: number[] = [];
     vi.spyOn(core, 'write').mockImplementationOnce((data) => {
