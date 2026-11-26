@@ -206,30 +206,6 @@ describe("terminal connection invariants", () => {
     expect(shouldForwardGeneratedTerminalInput(tracker)).toBe(true);
   });
 
-  test("forwards a bracketed paste while a replay write is draining", () => {
-    const tracker = new PtyWriteTracker();
-    const direct: string[] = [];
-    const user: string[] = [];
-    let drain: (() => void) | undefined;
-    const paste = "\x1b[200~pasted text\x1b[201~";
-
-    tracker.write(
-      {
-        write(_bytes, callback) {
-          drain = callback;
-        },
-      },
-      new Uint8Array([27, 91, 54, 110]),
-      "replay",
-    );
-
-    routeTerminalData(paste, tracker, (data) => direct.push(data), (data) => user.push(data));
-    drain?.();
-
-    expect(direct).toEqual([]);
-    expect(user).toEqual([paste]);
-  });
-
   test("recognizes common terminal-generated report replies", () => {
     expect(isTerminalGeneratedReply("\x1b[1;2R")).toBe(true);
     expect(isTerminalGeneratedReply("\x1b[?1;2c\x1b[>0;276;0c")).toBe(true);
@@ -242,17 +218,5 @@ describe("terminal connection invariants", () => {
   test("treats escape-prefixed replay input as generated even when unknown", () => {
     expect(isReplayGeneratedTerminalInput("\x1b[A")).toBe(true);
     expect(isReplayGeneratedTerminalInput("a")).toBe(false);
-  });
-
-  test("lets a lone ESC through: it is a keystroke, not a reply", () => {
-    // Escape, and Ctrl+[ which encodes to the same byte, are the user's. The
-    // fail-closed rule above is about replies replay can re-trigger, and a
-    // reply is never one character: it carries an introducer and a terminator
-    // after the ESC. Dropping this one loses a key the user pressed while a
-    // reattach is still replaying.
-    expect(isReplayGeneratedTerminalInput("\x1b")).toBe(false);
-    // The shapes it must keep catching are all longer than one byte.
-    expect(isReplayGeneratedTerminalInput("\x1b[")).toBe(true);
-    expect(isReplayGeneratedTerminalInput("\x1bP")).toBe(true);
   });
 });

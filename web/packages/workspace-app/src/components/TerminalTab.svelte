@@ -1735,16 +1735,12 @@
         }
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
-          const terminal = term;
-          const sessionId = tab.terminalSessionId;
           const protocol = tab.keyboardProtocol;
           const beforeReplay = keyboardProtocolBeforeReplay;
           // RIS resets the observed keyboard state too. Its write callback
           // runs once the observer has read it, before the replay is written.
           writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
-            if (term === terminal && tab.terminalSessionId === sessionId && protocol && beforeReplay) {
-              copyTerminalKeyboardProtocolState(beforeReplay, protocol);
-            }
+            if (protocol && beforeReplay) copyTerminalKeyboardProtocolState(beforeReplay, protocol);
           });
           if (missedBytes > 0) {
             writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
