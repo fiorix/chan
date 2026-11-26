@@ -226,12 +226,16 @@
   /// children the drawn graph does not hold and there is no spine to patch.
   let spineReload = $state(0);
   /// Directories asked for their level, so one that is empty or gone on
-  /// disk is asked once. Only a directory a patch can read is asked
-  /// (`loadOpenedChildren`). One the patch then finds no node of is
-  /// forgotten, so the first ask after a level brings its node reads it,
-  /// except under a parent asked whose level the spine does not hold, as
-  /// one found gone (`askedUnread`): asked again, it would only be skipped
-  /// again, so it stays asked.
+  /// disk is asked once while its parent's level stands. Only a directory a
+  /// patch can read is asked (`loadOpenedChildren`). One the patch then
+  /// finds no node of is forgotten, so the first ask after a level brings
+  /// its node reads it, except under a parent asked whose level the spine
+  /// does not hold, as one found gone (`askedUnread`): asked again before
+  /// that parent's level is read, it would only be skipped again, so it
+  /// stays asked. A patch that reads a directory's level forgets the asks
+  /// of its children that the spine holds no level of and the patch does
+  /// not read (`patchSpine`), so each is asked again once it is opened and
+  /// drawn.
   const spineAsked = new Set<string>();
 
   /// A directory asked for whose level the spine does not hold: one a patch
@@ -1949,8 +1953,10 @@
         for (const dir of [...reading].sort(byDepth)) {
           // A directory is read only when the spine holds it: what the walk
           // never drew, a patch never draws either. Not on disk as its
-          // parent was last read, it is asked again once a level brings it,
-          // unless that parent was found gone (`spineAsked`).
+          // parent was last read, it is asked again once a level brings it.
+          // Under a parent asked whose level the spine does not hold, as one
+          // found gone, it stays asked until a patch reads that parent's
+          // level (below).
           if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) {
             if (!askedUnread(parentDir(dir))) spineAsked.delete(dir);
             continue;
@@ -1959,6 +1965,14 @@
           if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
           applySpineLevel(read, dir, level);
           landed = true;
+          // The asks of its children were answered against the level the
+          // spine held before: one it holds no level of now, and that this
+          // patch does not read, is asked again once it is opened and drawn.
+          if (level !== null) {
+            for (const asked of spineAsked) {
+              if (parentDir(asked) === dir && !reading.has(asked) && !read.held.has(asked)) spineAsked.delete(asked);
+            }
+          }
         }
       } catch {
         if (seq === spineSeq) void loadSpine();
