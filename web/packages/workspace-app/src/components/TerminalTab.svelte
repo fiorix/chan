@@ -586,11 +586,32 @@
   // Set when a socket is closed between a session frame and its `ready`
   // (closeSocket, which every redial's connect runs first, marks it): the
   // screen holds part of a replay and `receivedSeq` names the end of it, so
-  // the live cursor is no place to resume from. The redial asks for the
-  // whole ring. A nonempty replay with a byte count starts on a reset
-  // screen; an empty or unmarked replay keeps it. The next `ready` clears
-  // the cut.
+  // the live cursor is no place to resume from. A replay that continued the
+  // view leaves `cutResume`, and the redial resumes from there as a redial
+  // after a clean close resumes from the live cursor. After any other cut
+  // the redial asks for the whole ring: a nonempty replay with a byte count
+  // starts on a reset screen; an empty or unmarked replay keeps it. The
+  // next `ready`, or a session frame that continues the view, clears the cut.
   let replayCut = false;
+  // The replay in progress when it continues the view's own screen (the
+  // server resumed the cursor this dial echoed in its live generation, or
+  // recovers this socket's stream), in raw stream positions: its first
+  // byte is at `start`, `taken` of its `length` bytes have arrived, and the
+  // view had parsed up to `parsed` before it, which a replay that starts
+  // earlier repeats and the tab does not write again. `lossFrom` is the
+  // cursor the bytes it missed start at, while their recovery suffix,
+  // which ends the replay, has not been parsed.
+  let continuingReplay: {
+    start: number;
+    length: number;
+    taken: number;
+    parsed: number;
+    lossFrom: number | null;
+  } | null = null;
+  // Where a cut replay that continued the view left it: the redial echoes
+  // `parsed`, or `lossFrom` while a loss is owed its suffix, since only a
+  // cursor before the lost bytes gets that suffix sent again.
+  let cutResume: { parsed: number; lossFrom: number | null } | null = null;
   // The keyboard protocol as it stood when the current replay began, which
   // the reset write's callback restores once the protocol observer has read
   // the reset and before the first ring byte is parsed.
@@ -1627,10 +1648,17 @@
     statusDetail = "";
     missedBytes = 0;
     const reattaching = Boolean(tab.terminalSessionId);
-    const liveResumeSince =
-      reattaching && sawSessionControl && !replayCut && serverGeneration !== null
-        ? receivedSeq
-        : undefined;
+    // The cursor this dial echoes and the stream position the view has
+    // parsed, which differ only while a cut replay owes a loss its suffix.
+    const resume: { since: number; parsed: number } | undefined =
+      !reattaching || !sawSessionControl || serverGeneration === null
+        ? undefined
+        : !replayCut
+          ? { since: receivedSeq, parsed: receivedSeq }
+          : cutResume
+            ? { since: cutResume.lossFrom ?? cutResume.parsed, parsed: cutResume.parsed }
+            : undefined;
+    const liveResumeSince = resume?.since;
     const liveResumeGeneration =
       liveResumeSince !== undefined ? (serverGeneration ?? undefined) : undefined;
     // Whether this dial's socket has delivered a session frame yet: its first
@@ -1640,9 +1668,10 @@
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
     // On a live socket reconnect the terminal still shows the screen it had
-    // before the drop, so the dial resumes from the in-memory cursor. On a
-    // remount or reload the terminal is new and empty, so it asks for the
-    // whole ring.
+    // before the drop, so the dial resumes from the in-memory cursor, or
+    // from where a cut replay that continued the view left it. On a remount
+    // or reload the terminal is new and empty, so it asks for the whole
+    // ring, as it does after any other cut replay.
     if (liveResumeSince === undefined) {
       receivedSeq = 0;
       serverGeneration = null;
@@ -1715,6 +1744,19 @@
         // (between the `session` and `ready` frames) reconstruct history up to
         // the prelude `seq` we already adopted, so counting them would double.
         if (!attachReplayActive) receivedSeq += bytes.length;
+        let written = bytes;
+        const replay = attachReplayActive ? continuingReplay : null;
+        if (replay) {
+          const at = replay.start + replay.taken;
+          const raw = Math.min(bytes.length, replay.length - replay.taken);
+          replay.taken += raw;
+          // What follows the replay's own bytes is the recovery suffix of
+          // what it missed, which the view now parses.
+          if (raw < bytes.length) replay.lossFrom = null;
+          const repeated = Math.min(raw, Math.max(0, replay.parsed - at));
+          if (repeated > 0) written = bytes.subarray(repeated);
+          if (written.length === 0) return;
+        }
         if (resetBeforeReplay && bytes.length > 0) {
           resetBeforeReplay = false;
           const terminal = term;
@@ -1732,7 +1774,7 @@
             writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
           }
         }
-        writePtyOutput(bytes, attachPtyWriteOrigin());
+        writePtyOutput(written, attachPtyWriteOrigin());
         recordOutputActivity();
         maybeSeedPrompt();
         return;
@@ -1756,6 +1798,8 @@
         resetBeforeReplay = false;
         attachReplayActive = false;
         replayCut = false;
+        continuingReplay = null;
+        cutResume = null;
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
@@ -1788,6 +1832,32 @@
         const duplicateReplay =
           (reattaching && !dialSawSession) ||
           (dialSawSession && frame.id === priorId && frame.generation === serverGeneration);
+        // This frame continues the view's screen when the server resumed the
+        // non-zero cursor this dial echoed in the live generation, or
+        // recovers this socket's own stream after its `ready`.
+        const continued =
+          frame.id !== priorId
+            ? undefined
+            : firstOnDial
+              ? resume && resume.since > 0 && frame.generation === liveResumeGeneration
+                ? resume
+                : undefined
+              : !attachReplayActive && frame.generation === serverGeneration
+                ? { since: receivedSeq, parsed: receivedSeq }
+                : undefined;
+        const replayLength = frame.replay_bytes;
+        continuingReplay =
+          continued && typeof replayLength === "number"
+            ? {
+                start: frame.seq - replayLength,
+                length: replayLength,
+                taken: 0,
+                parsed: continued.parsed,
+                lossFrom: (frame.missed_bytes ?? 0) > 0 ? continued.since : null,
+              }
+            : null;
+        // The replay goes on from where the cut left the view.
+        if (continuingReplay) replayCut = false;
         attachReplayActive = true;
         replayMaskScans.begin(() => secretMasker?.scanAll());
         suppressAttachReplayGeneratedReplies = duplicateReplay;
@@ -1858,7 +1928,15 @@
         missedBytes = Math.max(0, Math.floor(frame.missed_bytes ?? 0));
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
-        if (missedBytes > 0 && !resetBeforeReplay) {
+        // A dial that asked again for a loss the view already shows, and
+        // whose replay starts at or before what the view parsed, continues
+        // the view's parser at its own byte.
+        const reaskedLoss =
+          continued !== undefined &&
+          continuingReplay !== null &&
+          continued.since < continued.parsed &&
+          continuingReplay.start <= continued.parsed;
+        if (missedBytes > 0 && !resetBeforeReplay && !reaskedLoss) {
           // The lost bytes can end inside a sequence whose rest never comes.
           // CAN on the output path ends it in the core and in every stream
           // observer, as the server's own recovery suffix does after the
@@ -2558,7 +2636,14 @@
   }
 
   function closeSocket(): void {
-    if (attachReplayActive) replayCut = true;
+    if (attachReplayActive) {
+      replayCut = true;
+      cutResume = continuingReplay && {
+        parsed: Math.max(continuingReplay.parsed, continuingReplay.start + continuingReplay.taken),
+        lossFrom: continuingReplay.lossFrom,
+      };
+    }
+    continuingReplay = null;
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
     streamAck.stop();
@@ -2623,6 +2708,7 @@
     term?.dispose();
     term = null;
     sawSessionControl = false;
+    cutResume = null;
     termWriter = null;
     ptyWrites.reset();
     mouseFilter = null;
