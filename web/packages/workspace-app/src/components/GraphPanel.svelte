@@ -1671,6 +1671,12 @@
     // Its list of directories was taken when it began, and an answer over
     // the listing cap taken since read none: one opened since is read now,
     // or, since a hidden tab fetches nothing, once the tab is shown again.
+    // When taking its changes above began another whole fetch, that one
+    // reads them. Under an answer of the whole tree nothing is read, which
+    // spares each landing a pass over the shared graph's nodes: that answer
+    // holds an opened folder's level unless it shows the folder empty, and
+    // an empty one is asked at its opening, or, when only this fetch brought
+    // its node, at the next opening or depth change.
     if (landed && seq === spineSeq && (kept ?? taken)?.tree != null) {
       if (visible) loadOpenedChildren(true);
       else readOpenedOnShow = true;
