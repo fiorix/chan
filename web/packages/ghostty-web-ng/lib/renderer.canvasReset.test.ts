@@ -6,12 +6,14 @@
 // scale again, filling the last cell's background in that cell's device
 // rectangle.
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
-import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
+import { GhosttyVt } from "../vt/ghosttyVt";
+import { SoftwareCanvasContext } from "./__tests__/softwareCanvas";
+import { widgetInternals } from "./internal";
+import type { CanvasRenderer } from "./renderer";
+import { Terminal } from "./terminal";
 
-const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 20;
 const ROWS = 8;
 
@@ -51,7 +53,7 @@ async function openAt(ratio: number, cols = COLS, rows = ROWS) {
   term.open(host);
   const canvas = host.querySelector("canvas")!;
   const context = contexts.get(canvas)!;
-  const renderer = term.renderer!;
+  const renderer = widgetInternals(term).renderer!;
   return { term, canvas, context, renderer };
 }
 
@@ -68,16 +70,16 @@ describe("a ghostty canvas reset at an unchanged size", () => {
   test("a full pass paints at full scale again", async () => {
     const { term, canvas, context, renderer } = await openAt(2);
     term.write(`${"x".repeat(COLS)}\r\n`.repeat(ROWS));
-    renderer.render(term.wasmTerm!, true, 0, 0);
+    renderer.render(widgetInternals(term).wasmTerm!, true, 0, 0);
     const target = deviceRectOfLastCell(renderer, 2);
-    expect(term.renderer, "a renderer").toBeDefined();
+    expect(widgetInternals(term).renderer, "a renderer").toBeDefined();
     expect(covers(context.fills, target), "the baseline paints the last cell").toBe(true);
     // The host reset: a same-size assignment, which resets the state and
     // blanks the pixels, the page not told.
     canvas.width = canvas.width;
     expect(context.getTransform().a, "the reset dropped the scale").toBe(1);
     context.fills.length = 0;
-    renderer.render(term.wasmTerm!, true, 0, 0);
+    renderer.render(widgetInternals(term).wasmTerm!, true, 0, 0);
     expect(context.getTransform().a, "a full pass restores the scale").toBe(2);
     expect(covers(context.fills, target), "a full pass fills the last cell at full scale").toBe(true);
     term.dispose();
@@ -86,13 +88,13 @@ describe("a ghostty canvas reset at an unchanged size", () => {
   test("a forced pass after a grid change fills the new last cell at full scale", async () => {
     const { term, context, renderer } = await openAt(2, 20, 8);
     term.write(`${"x".repeat(20)}\r\n`.repeat(8));
-    renderer.render(term.wasmTerm!, true, 0, 0);
+    renderer.render(widgetInternals(term).wasmTerm!, true, 0, 0);
     // Grow the grid behind the widget: the next render resizes mid-frame,
     // and the resize must re-establish the scale the size assignment reset.
-    term.wasmTerm!.resize(30, 8);
+    widgetInternals(term).wasmTerm!.resize(30, 8);
     const target = deviceRectOfLastCell(renderer, 2, 30, 8);
     context.fills.length = 0;
-    renderer.render(term.wasmTerm!, true, 0, 0);
+    renderer.render(widgetInternals(term).wasmTerm!, true, 0, 0);
     expect(context.getTransform().a, "the post-resize pass restores the scale").toBe(2);
     expect(covers(context.fills, target), "the post-resize pass fills the new last cell at full scale").toBe(true);
     term.dispose();

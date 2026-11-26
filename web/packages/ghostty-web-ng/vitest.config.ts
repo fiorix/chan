@@ -22,6 +22,7 @@ export default defineConfig({
       "lib/terminal.viewport.test.ts",
       "lib/renderer.test.ts",
       "lib/renderer.redraw.test.ts",
+      "lib/renderer.canvasReset.test.ts",
     ],
     environment: "jsdom",
     testTimeout: 30_000,
