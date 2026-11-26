@@ -2,7 +2,6 @@ import { describe, expect, test, vi } from "vitest";
 import {
   GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR,
   GhosttyViewportController,
-  ghosttyHistoryRows,
   type GhosttyViewportContext,
 } from "./ghosttyViewport";
 
@@ -10,13 +9,12 @@ const DOM_DELTA_PIXEL = 0;
 const DOM_DELTA_LINE = 1;
 const DOM_DELTA_PAGE = 2;
 
-/// A widget double with the public viewport and parsed-change contract.
-/// Scripted history growth covers the adapter's wheel/reveal decisions;
-/// ghosttyViewport.change.test.ts checks the ownership against the real widget.
+/// A widget double with the public viewport. Scripted history growth
+/// covers the adapter's wheel decisions; ghosttyViewport.change.test.ts
+/// checks the ownership against the real widget.
 function fakeGhostty(viewportY: number, scrollback: number) {
   const state = { viewportY, scrollback };
   const clamp = (v: number) => Math.max(0, Math.min(state.scrollback, v));
-  const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
   const term = {
     appendedByWrite: [] as number[],
     cols: 80,
@@ -27,22 +25,6 @@ function fakeGhostty(viewportY: number, scrollback: number) {
       scrollTo: vi.fn((offset: number) => { state.viewportY = clamp(offset); }),
       scrollBy: vi.fn((rows: number) => { state.viewportY = clamp(state.viewportY + rows); }),
       scrollToBottom: vi.fn(() => { state.viewportY = 0; }),
-      reveal: vi.fn((row: number, align = "center") => {
-        const onScreen = row - state.scrollback + ghosttyHistoryRows(state.viewportY);
-        if (onScreen >= 0 && onScreen < term.rows) return;
-        const at = align === "start" ? 0 : align === "end" ? term.rows - 1 : Math.floor(term.rows / 2);
-        term.viewport.scrollTo(state.scrollback - row + at);
-      }),
-    },
-    onChange: vi.fn((listener: (change: { kind: "write" | "resize" }) => void) => {
-      changeListeners.add(listener);
-      return { dispose: () => changeListeners.delete(listener) };
-    }),
-    resize(cols: number, rows: number) {
-      if (cols === term.cols && rows === term.rows) return;
-      term.cols = cols;
-      term.rows = rows;
-      for (const listener of changeListeners) listener({ kind: "resize" });
     },
     getScrollbackLength: vi.fn(() => state.scrollback),
     write: vi.fn((_data: string | Uint8Array) => {
@@ -50,7 +32,6 @@ function fakeGhostty(viewportY: number, scrollback: number) {
       state.scrollback = Math.max(0, before + (term.appendedByWrite.shift() ?? 0));
       const growth = state.viewportY >= 1 ? Math.max(0, state.scrollback - before) : 0;
       state.viewportY = clamp(state.viewportY + growth);
-      for (const listener of changeListeners) listener({ kind: "write" });
     }),
   };
   return { state, term };
@@ -124,7 +105,7 @@ describe("GhosttyViewportController writes", () => {
     // appended rows: the view still shows no history row.
     expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(offset);
-    expect(ghosttyHistoryRows(state.viewportY)).toBe(0);
+    expect(Math.floor(state.viewportY)).toBe(0);
     expect(state.scrollback).toBe(24);
   });
 
@@ -138,7 +119,7 @@ describe("GhosttyViewportController writes", () => {
       controller.handleWheel(gentle);
       term.appendedByWrite.push(1);
       controller.write(`line ${i}\r\n`);
-      if (i < 5) expect(ghosttyHistoryRows(state.viewportY), `after delta ${i}`).toBe(0);
+      if (i < 5) expect(Math.floor(state.viewportY), `after delta ${i}`).toBe(0);
     }
     // Five deltas reach a whole row: that write already anchored the view,
     // and the next one keeps it on its rows as output grows the history.
@@ -236,63 +217,6 @@ describe("GhosttyViewportController writes", () => {
     controller.write("output");
 
     expect(term.viewport.scrollBy).not.toHaveBeenCalled();
-  });
-
-  test("change observers hear every write, after the widget anchors its view, until stopped", () => {
-    const { state, term } = fakeGhostty(7, 20);
-    term.appendedByWrite.push(3, 0, 0);
-    const controller = new GhosttyViewportController(term, context());
-    const seen: Array<[string, number]> = [];
-    const stop = controller.observeChanges((change) => seen.push([change, state.viewportY]));
-
-    controller.write("anchored");
-    state.viewportY = 0;
-    controller.write("at the bottom");
-    stop();
-    controller.write("unobserved");
-
-    // Observers read the widget's completed viewport adjustment.
-    expect(seen).toEqual([
-      ["write", 10],
-      ["write", 0],
-    ]);
-  });
-
-  test("change observers hear every resize the terminal reports, whoever resized it", () => {
-    const { term } = fakeGhostty(0, 20);
-    const controller = new GhosttyViewportController(term, context());
-    const seen: string[] = [];
-    const stop = controller.observeChanges((change) => seen.push(change));
-
-    // Through ghostty-web's own resize, not a method of the controller: the
-    // fit, a broadcast grid and ghostty-web's option setter all end there.
-    term.resize(60, 24);
-    term.resize(60, 24);
-    term.resize(60, 30);
-    stop();
-    term.resize(80, 24);
-
-    // An unchanged grid fires no event.
-    expect(seen).toEqual(["resize", "resize"]);
-    expect(term.onChange).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("GhosttyViewportController reveal", () => {
-  // 100 rows of history on a ten-row screen.
-  test.each([
-    ["on the screen at the bottom", 0, 105, null],
-    ["on the screen scrolled back", 30, 75, null],
-    ["above the screen, centred", 0, 50, 55],
-    ["below the screen, centred", 100, 60, 45],
-    ["near the oldest row, clamped to the top", 0, 2, 100],
-    ["near the newest row, clamped to the bottom", 100, 108, 0],
-  ])("a row %s", (_name, from, row, to) => {
-    const { state, term } = fakeGhostty(from, 100);
-    term.rows = 10;
-    new GhosttyViewportController(term, context()).reveal(row);
-    expect(term.viewport.reveal).toHaveBeenCalledWith(row, "center");
-    expect(state.viewportY).toBe(to ?? from);
   });
 });
 
