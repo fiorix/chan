@@ -571,21 +571,41 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const fileName = d.getSourceFile().fileName;
     return fileName.startsWith(`${APP}/`) && !fileName.includes("/node_modules/");
   };
-  /// Whether a type is a widget class's instance or an intersection with one.
-  const classPart = (type: ts.Type) => (type.isIntersection() ? type.types : [type]).some((t) => widgetClass(t.getSymbol()));
+  /// Whether a type is a widget class's instance or derives from one: an
+  /// intersection or union part, a class or interface that extends one, or
+  /// `this` or a type parameter constrained to one.
+  function classPart(type: ts.Type, depth = 0): boolean {
+    if (depth > 4) return false;
+    if (widgetClass(type.getSymbol())) return true;
+    if (type.isUnionOrIntersection()) return type.types.some((t) => classPart(t, depth + 1));
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      return !!constraint && constraint !== type && classPart(constraint, depth + 1);
+    }
+    const declared = (type as ts.TypeReference).target ?? type;
+    return declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => classPart(base, depth + 1));
+  }
+  /// Whether a declaration adds a member to the type alone, with nothing at
+  /// run time: a member of an interface or type literal, or an ambient
+  /// (`declare`) class member.
+  const typeOnly = (d: ts.Declaration) =>
+    ts.isInterfaceDeclaration(d.parent) ||
+    ts.isTypeLiteralNode(d.parent) ||
+    (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) !== 0;
 
   function isWidget(type: ts.Type, depth = 0): boolean {
     if (depth > 4) return false;
     if (type.isUnionOrIntersection()) return type.types.some((t) => isWidget(t, depth + 1));
+    if (classPart(type, depth)) return true;
     if (declaredInWidget(type.aliasSymbol) || declaredInWidget(type.getSymbol())) return true;
-    // A type parameter constrained to a widget, `this` in a subclass
-    // included, and a class that extends one.
+    // A type parameter constrained to a widget interface, or an interface
+    // that extends one.
     if (type.flags & ts.TypeFlags.TypeParameter) {
       const constraint = checker.getBaseConstraintOfType(type);
       if (constraint && constraint !== type && isWidget(constraint, depth + 1)) return true;
     }
     const declared = (type as ts.TypeReference).target ?? type;
-    if (declared.isClass() && (checker.getBaseTypes(declared) ?? []).some((base) => isWidget(base, depth + 1))) return true;
+    if (declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => isWidget(base, depth + 1))) return true;
     const reference = (type as ts.TypeReference).target ? checker.getTypeArguments(type as ts.TypeReference) : [];
     return [...(type.aliasTypeArguments ?? []), ...reference].some((t) => isWidget(t, depth + 1));
   }
@@ -593,7 +613,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const t = checker.getNonNullableType(type);
     return t.isUnion() ? t.types : [t];
   };
-  const isClassInstance = (type: ts.Type) => parts(type).some((t) => widgetClass(t.getSymbol()));
+  const isClassInstance = (type: ts.Type) => parts(type).some((t) => classPart(t));
   const nameOf = (type: ts.Type) =>
     parts(type)
       .map((t) => t.getSymbol()?.getName())
@@ -665,9 +685,20 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   };
   /// Whether a class instance type is an Error's, which travels as
   /// `unknown` through every catch.
-  const isError = (type: ts.Type): boolean =>
-    type.isClassOrInterface() &&
-    (checker.getBaseTypes(type) ?? []).some((base) => base.getSymbol()?.getName() === "Error" || isError(base));
+  const isError = (type: ts.Type, depth = 0): boolean => {
+    if (depth > 4) return false;
+    if (type.isUnion()) return type.types.every((t) => isError(t, depth + 1));
+    if (type.isIntersection()) return type.types.some((t) => isError(t, depth + 1));
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      return !!constraint && constraint !== type && isError(constraint, depth + 1);
+    }
+    const declared = (type as ts.TypeReference).target ?? type;
+    return (
+      declared.isClassOrInterface() &&
+      (checker.getBaseTypes(declared) ?? []).some((base) => base.getSymbol()?.getName() === "Error" || isError(base, depth + 1))
+    );
+  };
   /// Whether a type says nothing of the members of what it holds, so a
   /// widget that flows into it is out of sight of the member, cast and duck
   /// rules: `any`, `unknown`, `object`, or an object type with no member,
@@ -697,7 +728,12 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       const member = checker.getApparentType(part).getProperty(name);
       if (!member) return true;
       const declarations = member.declarations ?? [];
-      if (classPart(part) && declarations.some(appDeclared) && !declarations.some((d) => inWidget(d.getSourceFile().fileName))) {
+      if (
+        classPart(part) &&
+        declarations.some(appDeclared) &&
+        !declarations.some((d) => inWidget(d.getSourceFile().fileName)) &&
+        declarations.every((d) => !appDeclared(d) || typeOnly(d) || part.isIntersection())
+      ) {
         return true;
       }
       return declarations.some((d) => {
@@ -824,6 +860,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) return;
       const widget = widgetOf(access.expression);
       if (!widget || !isClassInstance(widget)) return;
+      if (ts.isPropertyAccessExpression(access) && ts.isPrivateIdentifier(access.name)) return;
+      const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
+      const member = key === undefined ? undefined : checker.getApparentType(widget).getProperty(key);
+      if (
+        !parts(widget).some((p) => p.isIntersection()) &&
+        member?.declarations?.length &&
+        member.declarations.every((d) => appDeclared(d) && !typeOnly(d))
+      ) {
+        return;
+      }
       const name = ts.isPropertyAccessExpression(access) ? access.name.getText(sf) : access.argumentExpression.getText(sf);
       report("patch", access, `write ${nameOf(widget)}.${name}`);
     };
@@ -940,7 +986,9 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (source.kind === "shipped" && reached?.name === "prototype") {
         let symbol = checker.getSymbolAtLocation(reached.receiver);
         if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
-        if (symbol && widgetClass(symbol)) report("patch", node, `prototype ${symbol.getName()}`);
+        if (symbol && (symbol.flags & ts.SymbolFlags.Class) !== 0 && classPart(checker.getDeclaredTypeOfSymbol(symbol))) {
+          report("patch", node, `prototype ${symbol.getName()}`);
+        }
       }
       if (source.kind === "shipped" && reached?.name === "constructor") {
         const widget = widgetOf(reached.receiver);
@@ -961,7 +1009,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       // nothing of its members, or flows into a duck type of the app's.
       if (source.kind === "shipped" && ts.isExpression(node) && flows(node)) {
         const type = checker.getTypeAtLocation(node);
-        const classes = parts(type).filter((t) => widgetClass(t.getSymbol()));
+        const classes = parts(type).filter((t) => classPart(t));
         const target = classes.length > 0 ? targetOf(node) : undefined;
         if (target && opaque(target)) {
           if (!classes.every(isError)) report("escape", node, `${nameOf(type)} into ${checker.typeToString(target)}`);
@@ -1000,7 +1048,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
           const declared = checker.getTypeFromTypeNode(parameter.type);
           if (!opaque(declared)) return;
           const given = checker.getTypeOfSymbolAtLocation(signature.parameters[i], node);
-          const classes = parts(given).filter((t) => widgetClass(t.getSymbol()));
+          const classes = parts(given).filter((t) => classPart(t));
           if (classes.length > 0 && !classes.every(isError)) {
             report("escape", parameter, `${nameOf(given)} into a parameter ${checker.typeToString(declared)}`);
           }
@@ -1162,6 +1210,42 @@ const PLANTS = new Map<string, string>([
       "export const bufferEscape = (term: Terminal) => [peekBuffer(term.buffer), peekBuffer(term.buffer.active)];",
       "export const bufferDuck = (term: Terminal) => ((b: { type: string; terminal?: Terminal }) => b.terminal)(term.buffer.active);",
       "export const nested = (nest: { renderer: { renderer: number } }) => nest.renderer.renderer;",
+      'declare module "@chan/ghostty-web-ng" {',
+      "  interface Terminal {",
+      "    isSealed: boolean;",
+      "  }",
+      "}",
+      "export const rootAugmented = (term: Terminal) => term.isSealed;",
+      "export class Shadow extends Terminal {",
+      "  declare isOpen: boolean;",
+      "}",
+      "export const shadowed = (s: Shadow) => s.isOpen;",
+      "export interface RawTerminal extends Terminal {",
+      "  isOpen: boolean;",
+      "}",
+      "const isRawSub = (t: Terminal): t is RawTerminal => t !== null;",
+      "export const viaInterface = (term: Terminal) => (isRawSub(term) ? term.isOpen : false);",
+      "export class SelfKin extends Terminal {",
+      "  leakSelf() {",
+      "    return [raw(this), this.isSealed];",
+      "  }",
+      "}",
+      "export const kinEscape = (k: Kin) => [raw(k), [k].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(k).isOpen?.value];",
+      "export const kinDuck = (k: Kin) => ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(k);",
+      "export const kinPatch = (k: Kin) => {",
+      "  k.cols = 1;",
+      "  return [Object.assign(k, { cols: 1 }), Object.freeze(k), Kin.prototype, k.isSealed];",
+      "};",
+      "export const kinIntersect = (k: Kin & { isOpen?: boolean }) => k.isOpen;",
+      "export const constrainedAll = <T extends Terminal>(t: T) => {",
+      "  t.cols = 1;",
+      "  return [raw(t), [t].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(t).isOpen?.value, ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t), Object.assign(t, { cols: 1 }), Object.freeze(t), t.isSealed];",
+      "};",
+      "export const constrainedIntersect = <T extends Terminal>(t: T & { isOpen?: boolean }) => t.isOpen;",
+      "export const interAll = (t: Terminal & { tag?: string }) => {",
+      "  t.cols = 1;",
+      "  return [raw(t), [t].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(t).isOpen?.value, ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t), Object.assign(t, { cols: 1 }), Object.freeze(t)];",
+      "};",
     ].join("\n"),
   ],
   [
@@ -1261,6 +1345,48 @@ const PLANTS = new Map<string, string>([
       "    (this as unknown as Raw).isOpen = true;",
       "  }",
       "}",
+      "export const kinFixtureChecks = (s: KinFixture) => {",
+      "  s.cols = 1;",
+      "  return [Object.assign(s, { cols: 1 }), Object.freeze(s), s.isSealed];",
+      "};",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/boundaryLegit.ts",
+    [
+      'import { Terminal } from "@chan/ghostty-web-ng";',
+      'import { GhosttyVtRefusal } from "@chan/ghostty-web-ng/vt";',
+      "export class AppTerminal extends Terminal {",
+      '  private label = "";',
+      "  protected tagged = false;",
+      "  #count = 0;",
+      "  rename(next: string): void {",
+      "    this.label = next;",
+      "    this.tagged = true;",
+      "    this.#count++;",
+      "  }",
+      "  get title(): string {",
+      "    return `${this.label} ${this.#count} ${this.tagged}`;",
+      "  }",
+      "}",
+      "export const titled = (t: AppTerminal) => t.title;",
+      "export class Pool<T extends Terminal> {",
+      "  readonly items: T[] = [];",
+      "  add(t: T): void {",
+      "    this.items.push(t);",
+      "  }",
+      "  get size(): number {",
+      "    return this.items.length;",
+      "  }",
+      "}",
+      "export const sizeOf = <T extends Terminal>(t: T) => `${t.cols}x${t.rows}`;",
+      "type Mounted = Terminal & { element: HTMLElement };",
+      "export const isMounted = (t: Terminal): t is Mounted => t.element !== undefined;",
+      "export const focusMounted = (t: Terminal) => {",
+      "  if (isMounted(t)) t.element.focus();",
+      "};",
+      "export class CustomRefusal extends GhosttyVtRefusal {}",
+      'export const reportCustomRefusal = (report: (error: unknown) => void) => report(new CustomRefusal("refused"));',
     ].join("\n"),
   ],
   [
@@ -1370,6 +1496,7 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 101, key: "Terminal & { isOpen?: boolean | undefined; }.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 105, key: "Kin.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 109, key: "Kin.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 109, key: "write Kin.isOpen" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 112, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 112, key: "Kin.isOpen" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 113, key: "unknown" },
@@ -1385,6 +1512,37 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 140, key: "Terminal.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 144, key: "Shadow.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 149, key: "RawTerminal.isOpen" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 152, key: "SelfKin into unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 152, key: "SelfKin.isSealed" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 155, key: "Kin into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 156, key: "Kin.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 158, key: "write Kin.cols" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Object.assign Kin" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Object.freeze Kin" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 159, key: "prototype Kin" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 159, key: "Kin.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 161, key: "Kin & { isOpen?: boolean | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 163, key: "write T.cols" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 164, key: "Object.assign T" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 164, key: "Object.freeze T" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 164, key: "T.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 166, key: "T & { isOpen?: boolean | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 168, key: "write Terminal & { tag?: string | undefined; }.cols" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into a parameter unknown" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; } into Object.getOwnPropertyDescriptors" },
+  { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; }.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.assign Terminal & { tag?: string | undefined; }" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.freeze Terminal & { tag?: string | undefined; }" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
@@ -1427,6 +1585,11 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 37, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 40, key: "KinFixture.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 43, key: "KinFixture.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 43, key: "write KinFixture.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 47, key: "write KinFixture.cols" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.assign KinFixture" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.freeze KinFixture" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "KinFixture.isSealed" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too
