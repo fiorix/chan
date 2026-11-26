@@ -1538,6 +1538,34 @@ describe("the workspace tree", () => {
     graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
   }
 
+  // Over the listing cap the shared graph's children of `a` do not show its
+  // level is drawn, so the double-click reads it: the whole fetch's landing
+  // does, as it reads every folder opened since its list was taken.
+  test.each([
+    ["an answer of the whole tree", null, { root: 2, a: 0 }],
+    ["an answer over the listing cap", "folders", { root: 2, a: 1 }],
+  ] as const)("a double-click during a whole spine fetch on a folder the spine has not read starts no other fetch, over %s", async (_label, tree, after) => {
+    if (tree === null) serveWholeTree();
+    else serveFoldersWithoutFiles();
+    graphServer.tree = tree;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(graphData.tree).toBe(tree);
+    expect({ root: levelReads(""), a: levelReads("a") }, "the first fetch reads the root alone").toEqual({ root: 1, a: 0 });
+
+    const release = await holdWholeFetch();
+    let during = -1;
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      during = levelReads("");
+    } finally {
+      release();
+    }
+    await settle(30);
+    expect({ during, root: levelReads(""), a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ during: 2, ...after, drawsX: true });
+  });
+
   test("an opened folder gone from disk costs a double-click during a whole spine fetch no other fetch", async () => {
     serveWholeTree();
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, gone: true } }));
