@@ -317,7 +317,6 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
     expect(entered.active).toBe("normal");
     expect(entered.normal, "entering the alternate screen preserves the normal history and cursor").toEqual(splitBaseline.normal);
     let expectedKeys = "";
-    const alternatePrelude = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?1h\x1b[?2004h";
     async function alternateKeys(label: string) {
       for (const modifier of [{ ctrlKey: true }, { shiftKey: true }]) {
         expect(pressInGhostty(term, { key: "Enter", code: "Enter", ...modifier }).defaultPrevented).toBe(true);
@@ -326,78 +325,115 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       expect(Buffer.from(await rpc("keys", { length: Buffer.from(expectedKeys).length }), "base64").toString(), label).toBe(expectedKeys);
     }
     await alternateKeys("alternate keys before cuts");
-    const alternateVariants = [
-      { name: "alternate-before-session", boundary: "before-session", failures: 0 },
-      { name: "alternate-after-prelude", boundary: "after-replay-frame", frames: 1, failures: 0 },
-      { name: "alternate-after-modes", boundary: "after-replay-frame", frames: 2, failures: 0 },
-      { name: "alternate-before-ready", boundary: "before-ready", failures: 0 },
-      { name: "alternate-after-ready", boundary: "after-ready", failures: 0 },
-      { name: "alternate-second-cut", boundary: "after-session", failures: 1 },
-      { name: "alternate-repeated-failed-dial", boundary: "after-session", failures: 2 },
+    // Each arm names the dials it cuts, in order, and the dial that recovers.
+    // A redial echoes the page's cursor and the live generation; a fresh dial
+    // is `since=0` with no generation. The page dials fresh after a socket
+    // that closed between its session and its ready, until a dial reaches
+    // ready; a cut before the session leaves the next dial as it was. On the
+    // alternate screen the server continues a redial's view: the raw delta
+    // from its cursor, empty here since the page parsed every byte, and no
+    // prelude or mode reassert, so the view keeps its screen. A fresh dial
+    // replays no ring bytes and gets the prelude, which clears the alternate
+    // screen, then the reassert of the modes the program enabled.
+    type Dial = "redial" | "fresh";
+    const sentTo = (dial: Dial) => dial === "fresh" ? ["\x1b[?1049h\x1b[2J\x1b[H", "\x1b[?1h\x1b[?2004h"] : [];
+    const sentLabel = (dial: Dial) => dial === "fresh"
+      ? "a fresh dial on the alternate screen gets the prelude, then the mode reassert"
+      : "a redial on the alternate screen continues its view: no prelude and no mode reassert";
+    const alternateVariants: Array<{ name: string; cuts: Array<{ dial: Dial; boundary: string; frames?: number }>; recovery: Dial }> = [
+      { name: "alternate-before-session", cuts: [{ dial: "redial", boundary: "before-session" }], recovery: "redial" },
+      // Only a fresh dial gets the prelude and the reassert, so the counted
+      // cuts follow a redial cut before its ready: the one boundary that
+      // reads everything the redial gets between its session and its ready
+      // and still leaves the page to dial fresh.
+      { name: "alternate-after-prelude", cuts: [{ dial: "redial", boundary: "before-ready" },
+        { dial: "fresh", boundary: "after-replay-frame", frames: 1 }], recovery: "fresh" },
+      { name: "alternate-after-modes", cuts: [{ dial: "redial", boundary: "before-ready" },
+        { dial: "fresh", boundary: "after-replay-frame", frames: 2 }], recovery: "fresh" },
+      { name: "alternate-before-ready", cuts: [{ dial: "redial", boundary: "before-ready" }], recovery: "fresh" },
+      { name: "alternate-after-ready", cuts: [{ dial: "redial", boundary: "after-ready" }], recovery: "redial" },
+      { name: "alternate-second-cut", cuts: [{ dial: "redial", boundary: "after-session" },
+        { dial: "fresh", boundary: "before-session" }], recovery: "fresh" },
+      { name: "alternate-repeated-failed-dial", cuts: [{ dial: "redial", boundary: "after-session" },
+        { dial: "fresh", boundary: "before-session" }, { dial: "fresh", boundary: "before-session" }], recovery: "fresh" },
     ];
     for (const variant of alternateVariants) {
       const first = current.connection + 1;
-      const recoveryOrdinal = first + variant.failures + 1;
+      const recoveryOrdinal = first + variant.cuts.length;
       const source = await rpc("fixture-log");
       const seq = Buffer.from(source.bytes, "base64").length;
+      const before = await snapshot(`${variant.name} before its cuts`);
+      expect(before.active).toBe("alternate");
       let ackTail = Promise.resolve();
       ReplaySocket.acknowledge = (message) => {
-        if (message.connection !== first) return Promise.resolve();
+        const plan = variant.cuts[message.connection - first];
+        if (!plan) return Promise.resolve();
         ackTail = ackTail.then(async () => {
-          const atBoundary = variant.boundary === "before-ready"
-            || (variant.boundary === "after-replay-frame" && message.frame === 1 + variant.frames!)
-            || (variant.boundary === "after-ready" && message.type === "ready")
-            || (variant.boundary === "after-session" && message.type === "session");
+          const atBoundary = plan.boundary === "before-ready"
+            || (plan.boundary === "after-replay-frame" && message.frame === 1 + plan.frames!)
+            || (plan.boundary === "after-ready" && message.type === "ready")
+            || (plan.boundary === "after-session" && message.type === "session");
           if (atBoundary) {
-            await rpc("ack", { connection: first, frame: message.frame, drained: true });
+            await rpc("ack", { connection: message.connection, frame: message.frame, drained: true });
           }
         });
         return ackTail;
       };
-      await rpc("arm-sequence", { arms: [{ boundary: variant.boundary, ordinal: first, frames: variant.frames },
-        ...Array.from({ length: variant.failures }, (_, index) => ({ boundary: "before-session", ordinal: first + index + 1 }))] });
+      await rpc("arm-sequence", { arms: variant.cuts.map((plan, index) => ({ boundary: plan.boundary, ordinal: first + index, frames: plan.frames })) });
       current.disconnect();
       const cuts = await rpc("cuts");
-      expect(cuts).toHaveLength(variant.failures + 1);
-      for (const cut of cuts) {
-        expect(cut.replayBytes, "alternate prelude and modes are excluded from ring replay").toBe(0);
+      expect(cuts.map((cut: any) => [cut.connection, cut.boundary])).toEqual(variant.cuts.map((plan, index) => [first + index, plan.boundary]));
+      for (const [index, plan] of variant.cuts.entries()) {
+        const cut = cuts[index];
+        const interrupted = await ReplaySocket.dial(first + index);
+        const sent = sentTo(plan.dial);
+        expect(cut.replayBytes, plan.dial === "fresh" ? "a fresh dial on the alternate screen replays no ring bytes"
+          : "a redial's delta is empty once the page parsed every byte").toBe(0);
         expect(cut.replayForwarded).toBe(0);
         expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
-        if (cut.boundary === "before-session") expect((await ReplaySocket.dial(cut.connection)).deliveries).toEqual([]);
-      }
-      const interrupted = await ReplaySocket.dial(first);
-      if (variant.boundary === "after-replay-frame") {
-        const expected = variant.frames === 1 ? "\x1b[?1049h\x1b[2J\x1b[H" : alternatePrelude;
-        expect(binaryOf(interrupted).toString(), "the counted cut delivers exactly the selected prelude or mode prefix").toBe(expected);
-        expect(interrupted.deliveries.map((frame) => frame.type)).toEqual(["session", ...Array(variant.frames).fill(null)]);
-        expect(cuts[0].upstreamFrame, "the cut is at the counted frame, before ready").toBe(1 + variant.frames!);
-        expect(cuts[0].lastAcknowledged).toEqual({ frame: 1 + variant.frames!, drained: true });
-      }
-      if (variant.boundary === "before-ready" || variant.boundary === "after-ready") {
-        expect(binaryOf(interrupted).toString(), "alternate prelude precedes the negotiated private-mode reassert").toBe(alternatePrelude);
-        expect(cuts[0].lastAcknowledged.drained).toBe(true);
-        expect(interrupted.deliveries.some((frame) => frame.type === "ready")).toBe(variant.boundary === "after-ready");
+        if (plan.boundary === "before-session") {
+          expect(interrupted.deliveries).toEqual([]);
+        } else if (plan.boundary === "after-session") {
+          expect(interrupted.deliveries.map((frame) => frame.type)).toEqual(["session"]);
+        } else if (plan.boundary === "after-replay-frame") {
+          expect(binaryOf(interrupted).toString(), "the counted cut delivers exactly the selected prelude or mode prefix")
+            .toBe(sent.slice(0, plan.frames).join(""));
+          expect(interrupted.deliveries.map((frame) => frame.type)).toEqual(["session", ...Array(plan.frames).fill(null)]);
+          expect(cut.upstreamFrame, "the cut is at the counted frame, before ready").toBe(1 + plan.frames!);
+          expect(cut.lastAcknowledged).toEqual({ frame: 1 + plan.frames!, drained: true });
+        } else {
+          expect(binaryOf(interrupted).toString(), sentLabel(plan.dial)).toBe(sent.join(""));
+          expect(cut.upstreamFrame, "ready follows the session and what the server sends this dial").toBe(2 + sent.length);
+          expect(cut.lastAcknowledged.drained).toBe(true);
+          expect(interrupted.deliveries.some((frame) => frame.type === "ready")).toBe(plan.boundary === "after-ready");
+        }
       }
       current = await ReplaySocket.dial(recoveryOrdinal);
       await current.ready();
       const session = sessionOf(current);
       expect({ seq: session.seq, replay: session.replay_bytes, missed: session.missed_bytes, generation: session.generation })
         .toEqual({ seq, replay: 0, missed: 0, generation });
-      expect(binaryOf(current).toString()).toBe(alternatePrelude);
+      expect(binaryOf(current).toString(), sentLabel(variant.recovery)).toBe(sentTo(variant.recovery).join(""));
       const parsed = await snapshot(`${variant.name} recovery`);
       expect(parsed.active).toBe("alternate");
+      if (variant.recovery === "fresh") {
+        expect(parsed.alternate.rows.filter(Boolean), "the prelude clears the alternate screen").toEqual([]);
+        expect({ x: parsed.alternate.cursorX, y: parsed.alternate.cursorY }, "the prelude homes the cursor").toEqual({ x: 0, y: 0 });
+      } else {
+        expect(parsed.alternate, "a continued view keeps its alternate screen and cursor").toEqual(before.alternate);
+      }
       expect(mounted.tab.keyboardProtocol).toBe(protocol);
       expect(JSON.parse(JSON.stringify(mounted.tab.keyboardProtocol))).toEqual(protocolValue);
       expect(ghosttyMode(term, 1)).toBe(true);
       expect(ghosttyMode(term, 2004)).toBe(true);
       await alternateKeys(`${variant.name} keys`);
       records = await assertWireProvenance();
+      const made = [...variant.cuts.map((plan) => plan.dial), variant.recovery];
       const dials = records.filter((entry: any) => entry.event === "connection" && entry.connection >= first && entry.connection <= recoveryOrdinal);
-      expect(dials).toHaveLength(variant.failures + 2);
-      for (const dial of dials) {
-        const cutReplay = dial.connection !== first && ["before-ready", "after-session", "after-replay-frame"].includes(variant.boundary);
-        expect(dial.query.since).toBe(cutReplay ? "0" : String(seq));
-        expect(dial.query.generation).toBe(cutReplay ? undefined : String(generation));
+      expect(dials.map((dial: any) => dial.connection)).toEqual(made.map((_, index) => first + index));
+      for (const [index, dial] of dials.entries()) {
+        expect(dial.query.since, `dial ${dial.connection} is a ${made[index]} dial`).toBe(made[index] === "fresh" ? "0" : String(seq));
+        expect(dial.query.generation).toBe(made[index] === "fresh" ? undefined : String(generation));
       }
       await emit("redraw", { name: variant.name });
       await current.bytesInclude(`SCREEN:${variant.name}\r\n`);
@@ -405,8 +441,8 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
       expect(redrawn.alternate.rows.filter(Boolean)).toEqual([`SCREEN:${variant.name}`]);
       const left = await normalAfterExit(variant.name);
       expect(left.active).toBe("normal");
-      expect(left.normal, "empty replay, prelude and redraw preserve the normal history and cursor").toEqual(splitBaseline.normal);
-      passed(variant.name, { cuts, session, protocol: protocolValue });
+      expect(left.normal, "the cuts, the recovery and the redraw preserve the normal history and cursor").toEqual(splitBaseline.normal);
+      passed(variant.name, { cuts, session, dials: made, protocol: protocolValue });
     }
     await emit("alternate", { enabled: false });
     await emit("bytes", { base64: Buffer.from("\x1b[?1l\x1b[?2004l").toString("base64") });
