@@ -234,6 +234,22 @@ describe('content changes', () => {
     expect(renderer.render, 'the next real echo still paints synchronously').toHaveBeenCalledOnce();
   });
 
+  test("a paste scrolls to the bottom and its echo paints inside the write", async () => {
+    const { term, renderer } = await history();
+    renderer.render.mockClear();
+    term.write('quiet');
+    expect(renderer.render, 'output with no paste before it waits for a frame').not.toHaveBeenCalled();
+    term.viewport.scrollTo(7);
+    const sent: string[] = [];
+    term.onData((data) => sent.push(data));
+    term.paste('x');
+    expect(sent).toEqual(['x']);
+    expect(term.viewport.offset, 'the paste brought the prompt into view').toBe(0);
+    renderer.render.mockClear();
+    term.write('x');
+    expect(renderer.render, "the paste's echo painted inside its write").toHaveBeenCalledOnce();
+  });
+
   test('a throwing change listener cannot leave parsed terminal replies unsent', async () => {
     const { term } = await terminal();
     const replies: string[] = [];
