@@ -14,9 +14,9 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { createReadStream } from "node:fs";
 import { cp } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join, normalize, sep } from "node:path";
+import { dirname, join, normalize, posix, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Plugin } from "vite";
+import { normalizePath, type Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
 // Resolve svelte's client entry through node resolution so it works whether
@@ -104,9 +104,50 @@ function sourceCodeProLicense(): Plugin {
   };
 }
 
+// Serve the URL of the terminal widget's lazily loaded chunk as the default
+// export of `virtual:ghostty-widget-url`. An engine may keep a failed module
+// import for the page's life (WebKit does), so the terminal loader asks for
+// the chunk under this URL with a query after an import of it failed
+// (src/terminal/backend.ts). The build writes the chunk's file name, relative
+// to the chunk that asks, once chunks are named: emitting the widget as a
+// chunk of its own would make it an entry and move the modules it shares with
+// the app out of the app's entry into a chunk every window loads. The dev
+// server and vitest serve the module itself at its /@fs/ path.
+const GHOSTTY_WIDGET_URL = "virtual:ghostty-widget-url";
+// Stands in for the file name in the chunk that asks until chunks are named;
+// the minifier may change the quotes around it, never its text.
+const GHOSTTY_WIDGET_CHUNK = "__chan_ghostty_widget_chunk__";
+function ghosttyWidgetUrl(): Plugin {
+  const resolved = `\0${GHOSTTY_WIDGET_URL}`;
+  let build = false;
+  return {
+    name: "ghostty-widget-url",
+    configResolved(config) {
+      build = config.command === "build";
+    },
+    resolveId: (id) => (id === GHOSTTY_WIDGET_URL ? resolved : undefined),
+    load(id) {
+      if (id !== resolved) return undefined;
+      if (build) {
+        return `const chunk = ${JSON.stringify(GHOSTTY_WIDGET_CHUNK)};\nexport default new URL(chunk, import.meta.url).href;`;
+      }
+      const path = normalizePath(ghosttyWidgetEntry);
+      return `export default ${JSON.stringify(`/@fs${path.startsWith("/") ? "" : "/"}${path}`)};`;
+    },
+    renderChunk(code, chunk, _options, { chunks }) {
+      if (!code.includes(GHOSTTY_WIDGET_CHUNK)) return null;
+      const widget = Object.values(chunks).find(
+        (rendered) => rendered.facadeModuleId !== null && normalize(rendered.facadeModuleId) === ghosttyWidgetEntry,
+      );
+      if (!widget) this.error(`${chunk.fileName} asks for the terminal widget's chunk, which this build does not make`);
+      return code.replaceAll(GHOSTTY_WIDGET_CHUNK, posix.relative(posix.dirname(chunk.fileName), widget.fileName));
+    },
+  };
+}
+
 export default defineConfig({
   base: "./",
-  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense()],
+  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense(), ghosttyWidgetUrl()],
   resolve: {
     alias: {
       "@chan/web-shared/command-deck": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/command-deck/model.ts"),
