@@ -1642,6 +1642,36 @@ describe("the workspace tree", () => {
     expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
   });
 
+  test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
+    serveWholeTree();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const release = await holdWholeFetch();
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+      serveFoldersWithoutFiles();
+      graphServer.tree = "folders";
+      await refreshGraph();
+      await settle();
+      expect(graphData.tree).toBe("folders");
+      // A second change that names no path, which the fetch in flight
+      // leaves to a whole fetch of its own once it lands.
+      graphReloadSignal.paths = [];
+      graphReloadSignal.nonce += 1;
+      await new Promise((r) => setTimeout(r, 400));
+      await settle();
+      expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 2, a: 0 });
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect({ root: levelReads(""), a: levelReads("a") }, "the next fetch reads `a`, and no third one").toEqual({ root: 3, a: 1 });
+    expect(filesOfA()).toEqual(["a/x.md"]);
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
