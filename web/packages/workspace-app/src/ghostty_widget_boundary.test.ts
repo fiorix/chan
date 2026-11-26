@@ -120,10 +120,16 @@
 //   state `#private` (`term.buffer.active`), into `unknown` or an app duck
 //   type: rules 6 and 7 take widget class instances only (`bufferEscape`,
 //   `bufferDuck`);
+// - a mapped utility type over a widget class (`Readonly<Terminal>`,
+//   `Partial<Terminal>`, `Pick<Terminal, ...>`): `isWidget` sees its type
+//   argument at the call while `classPart` is false on the mapped type, so
+//   rules 4, 6 and 7 miss writes, escapes and ducks through it
+//   (`readonlyEscape`, `partialPatch`);
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
-//   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
-//   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
-//   does not read as a write;
+//   `({ rows: term.rows } = rows)`), a Svelte `bind:` directive
+//   (`bind:this={live.element}`, `bind:value={live.cols}`), or a nested
+//   widget member reached through an app-declared structural type
+//   (`nestedPatch`), which rule 4 does not read as a widget write;
 // - an import, mock or URL specifier that reaches the package other than
 //   by its name or a relative path: an absolute or root-relative path, or
 //   an alias of tsconfig's `paths` or Vite's `resolve.alias` (the app has
@@ -1309,6 +1315,15 @@ const PLANTS = new Map<string, string>([
       "}",
       "const isFakeClass = (t: Terminal): t is Terminal & FakeClass => t !== null;",
       "export const viaFakeClass = (term: Terminal) => (isFakeClass(term) ? term.isOpen : false);",
+      "type MaskBuf = { getLine(y: number): unknown };",
+      "type MaskTerm = { readonly buffer: { readonly active: MaskBuf } };",
+      "const patchNested = (t: MaskTerm) => {",
+      "  const a = t.buffer.active;",
+      "  a.getLine = () => undefined;",
+      "};",
+      "export const nestedPatch = (term: Terminal) => patchNested(term);",
+      "export const readonlyEscape = (term: Terminal) => ((t: Readonly<Terminal>) => raw(t))(term);",
+      "export const partialPatch = (term: Terminal) => ((t: Partial<Terminal>) => { t.cols = 1; })(term);",
     ].join("\n"),
   ],
   [
