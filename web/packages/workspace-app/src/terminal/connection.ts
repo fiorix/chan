@@ -61,9 +61,8 @@ export function terminalMouseReport(data: string): "x10" | "sgr" | null {
 /// Route one chunk of the data the terminal hands the program, which carries
 /// no mark of who made it. While a live write is being parsed it may be the
 /// terminal's reply to that output, so it reaches only this PTY; during a
-/// replay write a chunk that may be a reply is dropped
-/// (`isReplayGeneratedTerminalInput`); a focus report reaches only this PTY;
-/// anything else reaches the whole broadcast group.
+/// replay write an escape-prefixed chunk is dropped; a focus report reaches
+/// only this PTY; anything else reaches the whole broadcast group.
 export function routeTerminalData(
   data: string,
   writes: PtyWriteTracker,
@@ -76,7 +75,12 @@ export function routeTerminalData(
     sendInput(data);
     return;
   }
-  if (origin === "replay" && isReplayGeneratedTerminalInput(data)) return;
+  // Replay re-triggers the terminal's answers to old queries, which have no
+  // reader any more: forwarded, raw CPR, DA or DCS bytes land in the shell's
+  // prompt after a refresh or reattach. The write is synchronous, so what is
+  // handed over inside it is the terminal's own output, never a key or a
+  // paste, and an escape-prefixed chunk of an unknown shape goes too.
+  if (origin === "replay" && data.startsWith("\x1b")) return;
   // A focus report is this terminal's answer to its own program.
   if (data === "\x1b[I" || data === "\x1b[O") {
     sendInput(data);
@@ -87,64 +91,4 @@ export function routeTerminalData(
 
 export function shouldForwardGeneratedTerminalInput(writes: PtyWriteTracker): boolean {
   return writes.currentOrigin !== "replay";
-}
-
-export function isReplayGeneratedTerminalInput(data: string): boolean {
-  if (!data) return false;
-  // Historical replay can re-trigger the terminal's answers to old PTY
-  // queries. Those replies have no live reader anymore; forwarding them leaks
-  // raw CPR/DA/DCS bytes into the shell prompt after refresh or reattach.
-  if (isTerminalGeneratedReply(data)) return true;
-  // The terminal's write is synchronous, so what it hands the program inside
-  // a replay write is its own output, never a key or a paste: an unknown
-  // escape-prefixed chunk is dropped too.
-  return data.startsWith("\x1b");
-}
-
-export function isTerminalGeneratedReply(data: string): boolean {
-  let i = 0;
-  while (i < data.length) {
-    const next = scanTerminalReply(data, i);
-    if (next === i) return false;
-    i = next;
-  }
-  return i === data.length;
-}
-
-function scanTerminalReply(data: string, start: number): number {
-  if (data[start] !== "\x1b") return start;
-  const introducer = data[start + 1];
-  if (introducer === "[") return scanCsiReply(data, start + 2);
-  if (introducer === "P") return scanStringTerminatedReply(data, start + 2);
-  if (introducer === "]") return scanOscReply(data, start + 2);
-  return start;
-}
-
-function scanCsiReply(data: string, start: number): number {
-  let i = start;
-  while (i < data.length) {
-    const code = data.charCodeAt(i);
-    if (code >= 0x40 && code <= 0x7e) {
-      return isGeneratedCsiFinal(data[i] ?? "") ? i + 1 : start - 2;
-    }
-    i += 1;
-  }
-  return start - 2;
-}
-
-function isGeneratedCsiFinal(final: string): boolean {
-  return final === "R" || final === "c" || final === "n" || final === "u" || final === "m" || final === "y";
-}
-
-function scanStringTerminatedReply(data: string, start: number): number {
-  const end = data.indexOf("\x1b\\", start);
-  return end < 0 ? start - 2 : end + 2;
-}
-
-function scanOscReply(data: string, start: number): number {
-  const bel = data.indexOf("\x07", start);
-  const st = data.indexOf("\x1b\\", start);
-  if (bel < 0) return st < 0 ? start - 2 : st + 2;
-  if (st < 0) return bel + 1;
-  return Math.min(bel + 1, st + 2);
 }

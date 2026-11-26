@@ -1,8 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
   PtyWriteTracker,
-  isReplayGeneratedTerminalInput,
-  isTerminalGeneratedReply,
   routeTerminalData,
   shouldForwardGeneratedTerminalInput,
   terminalMessageBytes,
@@ -180,7 +178,7 @@ describe("terminal connection invariants", () => {
     expect(tracker.currentOrigin).toBeNull();
   });
 
-  test("suppresses terminal-generated replies from duplicate replay writes", () => {
+  test("drops escape-prefixed chunks handed over inside a replay write, replies and unknown shapes alike", () => {
     const tracker = new PtyWriteTracker();
     const direct: string[] = [];
     const user: string[] = [];
@@ -197,6 +195,7 @@ describe("terminal connection invariants", () => {
     );
 
     routeTerminalData("\x1b[1;1R", tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData("\x1b[A", tracker, (data) => direct.push(data), (data) => user.push(data));
     routeTerminalData("typed", tracker, (data) => direct.push(data), (data) => user.push(data));
     expect(shouldForwardGeneratedTerminalInput(tracker)).toBe(false);
     drain?.();
@@ -204,19 +203,5 @@ describe("terminal connection invariants", () => {
     expect(direct).toEqual([]);
     expect(user).toEqual(["typed"]);
     expect(shouldForwardGeneratedTerminalInput(tracker)).toBe(true);
-  });
-
-  test("recognizes common terminal-generated report replies", () => {
-    expect(isTerminalGeneratedReply("\x1b[1;2R")).toBe(true);
-    expect(isTerminalGeneratedReply("\x1b[?1;2c\x1b[>0;276;0c")).toBe(true);
-    expect(isTerminalGeneratedReply("\x1bP1$r0;4;2m\x1b\\")).toBe(true);
-    expect(isTerminalGeneratedReply("\x1b]10;rgb:ffff/ffff/ffff\x1b\\")).toBe(true);
-    expect(isTerminalGeneratedReply("a")).toBe(false);
-    expect(isTerminalGeneratedReply("\x1b[A")).toBe(false);
-  });
-
-  test("treats escape-prefixed replay input as generated even when unknown", () => {
-    expect(isReplayGeneratedTerminalInput("\x1b[A")).toBe(true);
-    expect(isReplayGeneratedTerminalInput("a")).toBe(false);
   });
 });
