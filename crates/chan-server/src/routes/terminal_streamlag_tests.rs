@@ -1962,6 +1962,176 @@ async fn a_normal_screen_lossless_redial_gets_its_delta_and_nothing_else() {
     );
 }
 
+/// Count the resizes `watcher` hears within `window`. A redraw request is
+/// heard as one: it wobbles the PTY's size and broadcasts the size it
+/// restores to every view.
+async fn count_resizes(watcher: &mut AttachHandle, window: std::time::Duration) -> usize {
+    let mut resizes = 0;
+    let until = tokio::time::Instant::now() + window;
+    loop {
+        match tokio::time::timeout_at(until, watcher.rx.recv()).await {
+            Err(_) => return resizes,
+            Ok(Ok(SessionEvent::Resize(_))) => resizes += 1,
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("the watcher may have lost a resize: {error}"),
+        }
+    }
+}
+
+/// The grids `view` is told in resize frames within `window`.
+async fn resizes_heard(view: &mut Client, window: std::time::Duration) -> Vec<(u64, u64)> {
+    let mut heard = Vec::new();
+    let until = tokio::time::Instant::now() + window;
+    while let Ok(frame) = tokio::time::timeout_at(until, next(view)).await {
+        if let ClientMessage::Text(text) = frame {
+            let frame: Value = serde_json::from_str(&text).expect("control JSON");
+            if frame["type"] == "resize" {
+                heard.push((number(&frame, "cols"), number(&frame, "rows")));
+            }
+        }
+    }
+    heard
+}
+
+/// Redial a view of the live generation from its cursor with the grid the
+/// PTY has, past bytes the ring dropped when `lost`, and count the redraws
+/// the dial asks of its program.
+async fn live_redial_redraws(lost: bool) -> usize {
+    const RING: usize = 4096;
+    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
+    let (generation, cursor) = view_modes_then_drop(&rig, b"\x1b[?1h").await;
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    // The first view's own dial asked for a redraw; let its resize land first.
+    count_resizes(&mut watcher, std::time::Duration::from_secs(1)).await;
+    if lost {
+        let shell = vec![b's'; RING / 4];
+        for _ in 0..5 {
+            rig.output(&shell);
+        }
+    } else {
+        rig.output(b"$ back at the prompt\r\n");
+    }
+    let (_redial, session, before, _after) = redial(&rig, cursor, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_eq!(
+        number(&session, "missed_bytes") > 0,
+        lost,
+        "fixture: the redial misses bytes only past a ring overflow"
+    );
+    count_resizes(&mut watcher, std::time::Duration::from_millis(1500)).await
+}
+
+/// A redial that continues its view and missed nothing shows the screen its
+/// program drew, as a lossless live recovery does, so it asks for no
+/// redraw: one wobbles the PTY's size, sends every view a resize and has
+/// the program repaint a screen the delta already made exact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossless_live_redial_asks_its_program_for_no_redraw() {
+    let _gate = pty_test_lock();
+    assert_eq!(
+        live_redial_redraws(false).await,
+        0,
+        "a lossless redial that continues its view asks for no redraw"
+    );
+}
+
+/// A redial that continues its view past missed bytes asks its program to
+/// repaint what the lost span drew, after the suffix that reconciles its
+/// modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_live_redial_asks_its_program_to_redraw() {
+    let _gate = pty_test_lock();
+    assert_eq!(
+        live_redial_redraws(true).await,
+        1,
+        "a redial that continues its view past missed bytes asks for one redraw"
+    );
+}
+
+/// A hidden view's dial sizes only a PTY no view has sized, so the resize a
+/// redraw broadcasts is what tells it the PTY's grid. A hidden view that
+/// redials its live generation losslessly with the grid the PTY has asks
+/// for no redraw; one whose PTY another view resized while its socket was
+/// down asks for the redraw whose resize reports the new grid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hidden_live_redial_asks_for_a_redraw_only_for_a_grid_it_missed() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let (mut shown, _) = rig.attach().await;
+    let (hidden, initial) = rig.attach_with("&size_if_unset=true").await;
+    let generation = number(&initial, "generation");
+    drop(hidden);
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None, None)
+        .expect("watch the session");
+    // Both dials asked for a redraw; let their resizes land first.
+    count_resizes(&mut watcher, std::time::Duration::from_secs(1)).await;
+    let dial = |cursor: u64| {
+        format!(
+            "session={}&cols=80&rows=24&size_if_unset=true&since={cursor}&generation={generation}",
+            rig.handle.id()
+        )
+    };
+    let (redial, session, before, _after) =
+        dial_until_ready(rig.address, &dial(number(&initial, "seq"))).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert_eq!(
+        count_resizes(&mut watcher, std::time::Duration::from_millis(1500)).await,
+        0,
+        "a hidden view that redials with the PTY's grid asks for no redraw"
+    );
+    let cursor = number(&session, "seq");
+    drop(redial);
+    send(
+        &mut shown,
+        json!({"type": "resize", "cols": 100, "rows": 30}),
+    )
+    .await;
+    bounded("the PTY takes the shown view's grid", async {
+        loop {
+            match watcher.rx.recv().await {
+                Ok(SessionEvent::Resize(size)) if (size.cols, size.rows) == (100, 30) => break,
+                Ok(_) => {}
+                Err(error) => panic!("the watcher may have lost the resize: {error}"),
+            }
+        }
+    })
+    .await;
+    let (mut redial, session, _before, _after) = dial_until_ready(rig.address, &dial(cursor)).await;
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert_eq!(
+        resizes_heard(&mut redial, std::time::Duration::from_millis(1500)).await,
+        [(100, 30)],
+        "a hidden view whose PTY another view resized while its socket was down is told \
+         the PTY's grid"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_reads() {
     use std::fmt::Write as _;
