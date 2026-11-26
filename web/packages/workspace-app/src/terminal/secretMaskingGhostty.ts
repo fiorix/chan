@@ -58,8 +58,8 @@ type FrameKey = {
 /// has the widget repaint every row at its next frame, which is how a
 /// toggle draws or clears the masks.
 ///
-/// Writes reach the painter through the widget's change event; scanAll and
-/// scanViewport force a rescan at the next frame that repaints rows.
+/// Writes and resizes reach the painter through the widget's change event,
+/// so a reflow rescans with no request from the tab.
 export class GhosttySecretMasker {
   readonly #term: GhosttyMaskTerminal;
   readonly #matcher: SecretAssignmentMatcher;
@@ -110,15 +110,6 @@ export class GhosttySecretMasker {
     if (this.#disposed || color === this.#color) return;
     this.#color = color;
     if (this.#removeLayer && this.#spans.length > 0) this.#term.refresh();
-  }
-
-  scanAll(): void {
-    if (this.#disposed || !this.#enabled) return;
-    this.#rescan = true;
-  }
-
-  scanViewport(): void {
-    this.scanAll();
   }
 
   dispose(): void {

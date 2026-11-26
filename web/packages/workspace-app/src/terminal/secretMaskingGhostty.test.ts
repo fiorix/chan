@@ -389,18 +389,6 @@ describe("ghostty secret masking over a fake buffer", () => {
     expect(screen.refreshCalls).toBe(2);
   });
 
-  test("scanAll and scanViewport force the next frame to read again", () => {
-    const screen = ghosttyTerminal({ cols: 20, rows: 3, lines: [new FakeLine("TOKEN=abc", 20), new FakeLine("", 20), new FakeLine("", 20)] });
-    const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
-    screen.frame();
-    screen.lines[0].text = "TOKEN=abcd";
-    masker.scanViewport();
-    expect(screen.frame([0]).fills).toEqual([cells(6, 0, 4)]);
-    screen.lines[0].text = "TOKEN=abcde";
-    masker.scanAll();
-    expect(screen.frame([0]).fills).toEqual([cells(6, 0, 5)]);
-  });
-
   test("masking toggled off redraws the rows it covered and paints nothing", () => {
     const screen = ghosttyTerminal({ cols: 20, rows: 3, lines: [new FakeLine("TOKEN=abc", 20), new FakeLine("", 20), new FakeLine("", 20)] });
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);

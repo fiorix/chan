@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 //
 // With secret masking on, a change of the terminal's width reflows every
-// wrapped line, so the masks must follow. A drag of a pane's edge changes the
-// width on every frame. The app requests a visible-row scan at each change
-// and a final rescan once the width stops changing. Ghostty bounds both
-// requests to visible wrapped groups and scans them at the next frame.
+// wrapped line, so the masks must follow. The masker rescans the rows on
+// screen at the next frame after the widget reports a resize, with no
+// request from the tab; the software canvas reads the masks it paints.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -15,7 +14,6 @@ import type { Terminal } from "@chan/ghostty-web-ng";
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
 import {
   attach,
   installTerminalDom,
@@ -23,7 +21,6 @@ import {
   receive,
   resetTerminals,
   seatTerminals,
-  sentFrames,
   terminalTab,
   TerminalSocket,
 } from "../__tests__/terminalTab";
@@ -32,8 +29,6 @@ import { ghosttyCellMetrics, installSoftwareCanvas, mountGhosttyTerminal } from 
 import type { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
 installTerminalDom();
-
-const ownViewportScan = GhosttySecretMasker.prototype.scanViewport;
 
 afterEach(() => {
   resetTerminals();
@@ -99,66 +94,5 @@ describe("a width change with secret masking on", () => {
 
     term.resize(80, 24);
     expect(rows(), "on two rows again at 80 columns").toEqual(wrapped);
-  });
-
-  test("sends the new grid to the PTY before scanning its visible masks", async () => {
-    const { term } = await maskedTerminal();
-    const socket = TerminalSocket.all.at(-1)!;
-    socket.sent = [];
-    const gridsAtScan: Array<Array<Record<string, unknown>>> = [];
-    vi.spyOn(GhosttySecretMasker.prototype, "scanViewport").mockImplementation(function (this: GhosttySecretMasker) {
-      gridsAtScan.push(sentFrames(socket).filter((frame) => frame.type === "resize"));
-      return ownViewportScan.call(this);
-    });
-
-    term.resize(91, 24);
-
-    expect(gridsAtScan).toEqual([[{ type: "resize", cols: 91, rows: 24 }]]);
-    expect(sentFrames(socket).filter((frame) => frame.type === "resize")).toEqual([
-      { type: "resize", cols: 91, rows: 24 },
-    ]);
-  });
-
-  test("requests a final rescan once the width stops changing, not at each change", async () => {
-    // The masker's scanViewport delegates to scanAll; count the app's final
-    // request separately from that delegation.
-    let inViewport = false;
-    const finalScan = vi.fn();
-    const ownAll = GhosttySecretMasker.prototype.scanAll;
-    vi.spyOn(GhosttySecretMasker.prototype, "scanAll").mockImplementation(function (this: GhosttySecretMasker) {
-      if (!inViewport) finalScan();
-      return ownAll.call(this);
-    });
-    const ownViewport = GhosttySecretMasker.prototype.scanViewport;
-    vi.spyOn(GhosttySecretMasker.prototype, "scanViewport").mockImplementation(function (this: GhosttySecretMasker) {
-      inViewport = true;
-      try {
-        return ownViewport.call(this);
-      } finally {
-        inViewport = false;
-      }
-    });
-    const { term } = await maskedTerminal();
-    finalScan.mockClear();
-
-    for (const cols of [81, 82, 83, 84, 85]) term.resize(cols, 24);
-
-    expect(finalScan, "no final rescan while the width is changing").not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(finalScan).toHaveBeenCalled(), { timeout: 2000 });
-    await new Promise((r) => setTimeout(r, 200));
-    expect(finalScan).toHaveBeenCalledTimes(1);
-  });
-
-  test("rescans the rows on screen at each change", async () => {
-    const onScreen: number[] = [];
-    vi.spyOn(GhosttySecretMasker.prototype, "scanViewport").mockImplementation(function (this: GhosttySecretMasker) {
-      onScreen.push(1);
-      return ownViewportScan.call(this);
-    });
-    const { term } = await maskedTerminal();
-
-    for (const cols of [81, 82, 83]) term.resize(cols, 24);
-
-    expect(onScreen).toHaveLength(3);
   });
 });
