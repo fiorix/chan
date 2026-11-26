@@ -689,7 +689,8 @@ function ghostty(init: Init, platform: KeyPlatform, applicationCursorMode = fals
 }
 
 /// The reference encoding for the same keydown: chan's key
-/// handler, then xterm.js, with the browser typing the key it passes on.
+/// handler, then keyEncoding.ts, the port of xterm.js's encoder, with
+/// the browser typing the key it passes on.
 function referenceEncoding(init: Init, platform: KeyPlatform, applicationCursorMode = false): Omit<Outcome, "prevented"> {
   const ev = keydown(init);
   const chan = terminalMetaKeyBytes(ev, createTerminalKeyboardProtocolState());

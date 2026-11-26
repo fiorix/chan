@@ -68,7 +68,7 @@ export type OpacityRoot = {
 
 /// Mark the document root for the CSS that paints terminal backgrounds.
 ///
-/// `data-transparent-window` is fixed for the page: the renderers paint a
+/// `data-transparent-window` is fixed for the page: the terminal paints a
 /// transparent default background and `.terminal-tab` paints the tint at
 /// `--terminal-opacity`, which also covers 100%, so a change to or from 100
 /// applies live. `data-terminal-see-through` is set only below 100 and is
