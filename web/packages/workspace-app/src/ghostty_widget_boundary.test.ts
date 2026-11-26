@@ -730,13 +730,17 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         if (ts.isStringLiteralLike(path) && isDeep(path.text, source.file)) report("deep", path, path.text);
       }
 
-      // 2. Casts of a widget value to a type it does not satisfy.
+      // 2. Casts of a widget value to a type it does not satisfy, and casts
+      // of a type parameter's value to a type that names nothing of it,
+      // which launder whatever a caller passes, a widget included.
       if (isCast(node) && source.kind === "shipped") {
         const from = checker.getTypeAtLocation(node.expression);
         const to = checker.getTypeFromTypeNode(node.type);
         const wide = (to.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
         if (isWidget(from) && (wide || !checker.isTypeAssignableTo(checker.getNonNullableType(from), to))) {
           report("cast", node, node.type.getText(sf));
+        } else if ((from.isUnion() ? from.types : [from]).some((t) => t.flags & ts.TypeFlags.TypeParameter) && opaque(to)) {
+          report("cast", node, `type parameter ${checker.typeToString(from)} to ${node.type.getText(sf)}`);
         }
       }
 
@@ -919,6 +923,8 @@ const PLANTS = new Map<string, string>([
       "export const viaEmpty = (term: Terminal) => rawEmpty(term).isOpen;",
       "export const walked = (term: Terminal) => Object.entries(term).length;",
       "export const kept = (term: Terminal) => new Set<object>([term]);",
+      "const rawT = <T>(o: T): Raw => o as unknown as Raw;",
+      "export const viaT = (term: Terminal) => rawT(term).isOpen;",
     ].join("\n"),
   ],
   [
@@ -944,6 +950,7 @@ const PLANTS = new Map<string, string>([
       "<p>{(term as any)?.isOpen}</p>",
       "{#each [term] as one}<i>{(one as unknown as { canvas: HTMLCanvasElement }).canvas}</i>{/each}",
       '{#snippet row(t: Terminal)}<b title={t["isOpen"]}></b>{/snippet}',
+      "{#snippet gen<T>(t: T)}<b>{(t as unknown as { isOpen: boolean }).isOpen}</b>{/snippet}",
     ].join("\n"),
   ],
   [
@@ -1046,6 +1053,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 64, key: "Terminal into {}" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 65, key: "Terminal into {}" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 66, key: "Terminal into object" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 67, key: "type parameter T to unknown" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
@@ -1059,6 +1067,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "Terminal.canvas" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 10, key: "Terminal.isOpen" },
+  { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 11, key: "type parameter T to unknown" },
   { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "any" },
   { rule: "member", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "Terminal.isOpen" },
   { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 13, key: "unknown" },
