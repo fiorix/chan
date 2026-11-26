@@ -8,13 +8,16 @@
 // whatever fallback it has. This check reads every app module through the
 // TypeScript checker and reports, with file and line:
 //
-// 1. deep: an import, export, dynamic import, `import()` type or module
-//    mock of a path inside the package other than its export map's entries;
+// 1. deep: an import, export, dynamic import, `import()` type, module mock
+//    or `import.meta.glob` pattern that reaches a path inside the package
+//    other than its export map's entries;
 // 2. cast: a cast of a widget value to a type it does not satisfy, `any`
 //    and `unknown` included;
-// 3. member: a read of a member the package does not make public, by a dot
-//    or a bracket on a widget value or one cast from it, `in`, `vi.spyOn`
-//    or `Reflect.get`;
+// 3. member: a read of a member the package does not make public, by a
+//    dot, a bracket or a destructuring on a widget value or one cast from
+//    it, `in`, `vi.spyOn`, `Reflect.get`, `Reflect.has`,
+//    `getOwnPropertyDescriptor` or `Object.hasOwn`, a key under a cast
+//    included;
 // 4. patch: a write to a member of a widget object, `Object.assign` and its
 //    kin on one, and any reach of a widget's prototype: a widget class's
 //    `prototype`, or a widget value's `constructor`, `Object.getPrototypeOf`
@@ -315,22 +318,48 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const target = normalize(`${from.slice(0, from.lastIndexOf("/"))}/${bare}`);
     return target === WIDGET || target.startsWith(`${WIDGET}/`);
   };
+  /// Whether a Vite glob can match a file in the package: a package
+  /// specifier past the export map, or a path whose part before the first
+  /// wildcard is in the package or a directory above it.
+  const globReaches = (pattern: string, from: string) => {
+    if (pattern.startsWith("!")) return false;
+    if (!pattern.startsWith(".") && !pattern.startsWith("/")) return isDeep(pattern, from);
+    const wild = pattern.search(/[*?[{(]/);
+    const fixed = wild === -1 ? pattern : pattern.slice(0, wild);
+    const base = pattern.startsWith("/") ? APP : from.slice(0, from.lastIndexOf("/"));
+    const target = normalize(`${base}/${fixed.slice(0, fixed.lastIndexOf("/") + 1)}`);
+    return target === WIDGET || target.startsWith(`${WIDGET}/`) || WIDGET.startsWith(`${target}/`);
+  };
 
   const MOCKS = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
   const DEFINERS: Record<string, ReadonlySet<string>> = {
     Object: new Set(["assign", "defineProperty", "defineProperties", "setPrototypeOf"]),
     Reflect: new Set(["set", "defineProperty", "deleteProperty", "setPrototypeOf"]),
   };
-  const READERS = new Set(["vi.spyOn", "Reflect.get", "Reflect.has"]);
+  const READERS = new Set([
+    "vi.spyOn",
+    "Reflect.get",
+    "Reflect.has",
+    "Reflect.getOwnPropertyDescriptor",
+    "Object.getOwnPropertyDescriptor",
+    "Object.hasOwn",
+  ]);
   const PROTOTYPE_READERS = new Set(["Object.getPrototypeOf", "Reflect.getPrototypeOf"]);
+
+  /// A string key as written, through parentheses and casts.
+  function literalKey(e: ts.Expression): string | undefined {
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e) || ts.isSatisfiesExpression(e)) {
+      e = e.expression;
+    }
+    return ts.isStringLiteralLike(e) ? e.text : undefined;
+  }
 
   /// The member a dot or a string-keyed bracket reads, and its receiver.
   function access(node: ts.Node): { name: string; receiver: ts.Expression } | undefined {
     if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) return { name: node.name.text, receiver: node.expression };
-    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
-      return { name: node.argumentExpression.text, receiver: node.expression };
-    }
-    return undefined;
+    if (!ts.isElementAccessExpression(node)) return undefined;
+    const key = literalKey(node.argumentExpression);
+    return key === undefined ? undefined : { name: key, receiver: node.expression };
   }
 
   /// The member a node names, and the receiver it names it on, if any.
@@ -417,6 +446,18 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (specifier && ts.isStringLiteralLike(specifier) && isDeep(specifier.text, source.file)) {
         report("deep", lineOf(specifier), specifier.text);
       }
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isMetaProperty(node.expression.expression) &&
+        node.expression.name.text === "glob" &&
+        node.arguments.length > 0
+      ) {
+        const [first] = node.arguments;
+        for (const pattern of ts.isArrayLiteralExpression(first) ? first.elements : [first]) {
+          if (ts.isStringLiteralLike(pattern) && globReaches(pattern.text, source.file)) report("deep", lineOf(pattern), pattern.text);
+        }
+      }
 
       // 2. Casts of a widget value to a type it does not satisfy.
       if (isCast(node) && source.kind === "shipped") {
@@ -431,12 +472,19 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       // 3. Reads of members the package keeps to itself.
       const reached = access(node);
       if (reached) read(reached.receiver, reached.name, node);
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword && ts.isStringLiteralLike(node.left)) {
-        read(node.right, node.left.text, node);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword) {
+        const key = literalKey(node.left);
+        if (key !== undefined) read(node.right, key, node);
       }
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length >= 2) {
-        const [target, key] = node.arguments;
-        if (READERS.has(node.expression.getText(sf)) && ts.isStringLiteralLike(key)) read(target, key.text, node);
+        const key = literalKey(node.arguments[1]);
+        if (key !== undefined && READERS.has(node.expression.getText(sf))) read(node.arguments[0], key, node);
+      }
+      if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
+        for (const element of node.name.elements) {
+          const key = element.propertyName ?? element.name;
+          if (!element.dotDotDotToken && (ts.isIdentifier(key) || ts.isStringLiteral(key))) read(node.initializer, key.text, element);
+        }
       }
 
       // 4. Patches of widget objects.
@@ -520,6 +568,14 @@ const PLANTS = new Map<string, string>([
       "export const reach = (term: Terminal) => [Object.getPrototypeOf(term), Reflect.getPrototypeOf(term)];",
       "export const maker = (term: Terminal) => (term.constructor as { prototype: object }).prototype;",
       'export const parent = (term: Terminal) => term["__proto__"];',
+      'export const glob = import.meta.glob("../../../ghostty-web-ng/lib/*.ts");',
+      "export const bound = (term: Terminal) => {",
+      "  const { isOpen } = term as unknown as { isOpen: boolean };",
+      "  return isOpen;",
+      "};",
+      'export const described = (term: Terminal) => Object.getOwnPropertyDescriptor(term, "isOpen");',
+      'export const reflected = (term: Terminal) => Reflect.getOwnPropertyDescriptor(term, "isOpen");',
+      'export const owned = (term: Terminal) => Object.hasOwn(term, "isOpen");',
     ].join("\n"),
   ],
   [
@@ -556,6 +612,11 @@ const PLANTS = new Map<string, string>([
       "  return term.selectionManager;",
       "};",
       "export const reach = (term: Terminal) => Object.getPrototypeOf(term);",
+      "export const bound = (term: Terminal) => {",
+      "  const { isOpen } = term as unknown as { isOpen: boolean };",
+      "  return isOpen;",
+      "};",
+      'export const spied = () => vi.spyOn(Terminal.prototype as never, "assertOpen" as never);',
     ].join("\n"),
   ],
 ]);
@@ -572,6 +633,12 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Reflect.getPrototypeOf Terminal" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 14, key: "constructor Terminal" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 15, key: "Terminal.__proto__" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 16, key: "../../../ghostty-web-ng/lib/*.ts" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 18, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 18, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 21, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 22, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 23, key: "Terminal.isOpen" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
@@ -582,6 +649,8 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 3, key: "Terminal.isOpen" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 4, key: "write Terminal.cols" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 10, key: "Terminal.selectionManager" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 14, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 17, key: "Terminal.assertOpen" },
 ];
 
 /// Entries over the planted reads whose counts are off, one each way, and
