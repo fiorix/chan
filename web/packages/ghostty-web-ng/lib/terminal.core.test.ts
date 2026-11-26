@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
+import { widgetInternals } from './internal';
 import { Terminal } from './terminal';
 
 // A structural contract keeps the same test runnable on the pre-facade widget.
@@ -140,7 +141,7 @@ describe('the widget core facade', () => {
     saved.readHistoryRow(0, cells);
     saved.plainText();
     // Package-local observation distinguishes a reader from endFrame().
-    expect(term.wasmTerm!.beginFrame()).not.toBe(0);
+    expect(widgetInternals(term).wasmTerm!.beginFrame()).not.toBe(0);
   });
 
   test('resize subscribers see the old grid and can stop independently', async () => {

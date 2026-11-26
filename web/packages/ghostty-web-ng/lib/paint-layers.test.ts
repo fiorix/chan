@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
+import { widgetInternals } from './internal';
 import { Terminal } from './terminal';
 
 // Structural signatures let the same tests compile against the previous widget.
@@ -246,7 +247,7 @@ describe('paint layer lifetime', () => {
   test('a failure before the layers still repaints everything on the next frame', async () => {
     const term = await open();
     const seen = observe(term);
-    const core = term.wasmTerm!;
+    const core = widgetInternals(term).wasmTerm!;
     vi.spyOn(core, 'getCursor').mockImplementationOnce(() => { throw new Error('core read failed'); });
     term.write('x');
     expect(() => tick()).toThrow('core read failed');
@@ -282,7 +283,7 @@ describe('paint layer lifetime', () => {
   test('clear invalidates the canvas and layers repaint on the next frame', async () => {
     const term = await open();
     const seen = observe(term);
-    term.renderer!.clear();
+    widgetInternals(term).renderer!.clear();
     tick();
     expect(seen.at(-1)?.full).toBe(true);
     expect(texts.join('')).toContain('secret');
@@ -382,7 +383,7 @@ describe('frame coverage and refresh', () => {
     term.clearSelection();
     tick();
     expect(seen.at(-1)?.changedRows).toEqual([1, 2, 3]);
-    term.renderer!.setHoveredLinkRange({ startX: 0, endX: 5, startY: 2, endY: 2 });
+    widgetInternals(term).renderer!.setHoveredLinkRange({ startX: 0, endX: 5, startY: 2, endY: 2 });
     tick();
     expect(seen.at(-1)?.changedRows).toEqual([1, 2, 3]);
   });
@@ -423,8 +424,7 @@ describe('public cell metrics', () => {
     vi.stubGlobal('devicePixelRatio', 2);
     offscreen();
     const term = await open();
-    // Use the old public renderer read in the counterfactual to isolate the algorithm.
-    expect(term.renderer!.getMetrics()).toEqual({ width: 8.5, height: 16.5, baseline: 12.25 });
+    expect(widgetInternals(term).renderer!.getMetrics()).toEqual({ width: 8.5, height: 16.5, baseline: 12.25 });
     const metrics = term.getMetrics()! as Metrics;
     metrics.width = 123;
     expect(term.getMetrics()).toEqual({ width: 8.5, height: 16.5, baseline: 12.25 });
@@ -438,14 +438,14 @@ describe('public cell metrics', () => {
       return this.tagName === 'SPAN' ? 17 : 0;
     });
     const term = await open();
-    expect(term.renderer!.getMetrics()).toEqual({ width: 8, height: 17, baseline: 12.5 });
+    expect(widgetInternals(term).renderer!.getMetrics()).toEqual({ width: 8, height: 17, baseline: 12.5 });
     expect(document.querySelector('span')).toBeNull();
   });
 
   test('clamps baseline into short cells and updates metrics when font options change', async () => {
     offscreen(8.7, 1);
     const term = await open();
-    expect(term.renderer!.getMetrics()).toEqual({ width: 8, height: 1, baseline: 1 });
+    expect(widgetInternals(term).renderer!.getMetrics()).toEqual({ width: 8, height: 1, baseline: 1 });
     offscreen(10.4, 20.2);
     term.options.fontSize = 20;
     expect(term.getMetrics()).toEqual({ width: 10, height: 21, baseline: 14.5 });

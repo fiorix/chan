@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
 import { terminalInternals } from '../vt/internal';
 import type { ITheme } from './interfaces';
+import { widgetInternals } from './internal';
 import type { PaintFrame } from './renderer';
 import { Terminal } from './terminal';
 
@@ -88,7 +89,7 @@ function cells(term: Terminal) {
 // Package-local C API snapshots pin effective colors as well as defaults,
 // including cursor and palette slots that a cell read cannot expose.
 function coreColors(term: Terminal): Record<string, number[] | null> {
-  const raw = terminalInternals(term.wasmTerm!);
+  const raw = terminalInternals(widgetInternals(term).wasmTerm!);
   const out: Record<string, number[] | null> = {};
   const ptr = raw.wasm.alloc(768);
   try {

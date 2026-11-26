@@ -3,6 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { GhosttyVt } from '../vt/ghosttyVt';
 import { HighlightsManager } from './highlights';
 import type { ITheme } from './interfaces';
+import { widgetInternals } from './internal';
 import { Terminal } from './terminal';
 
 type Range = { start: { col: number; absoluteRow: number }; end: { col: number; absoluteRow: number } };
@@ -89,7 +90,7 @@ async function open(input = 'abcdefghij', theme: ITheme = {}) {
   fixture.term.open(host);
   fixture.term.write(`\x1b[?25l${input}`);
   frame();
-  const { width, height, baseline } = fixture.term.renderer!.getMetrics();
+  const { width, height, baseline } = fixture.term.getMetrics()!;
   return {
     ...fixture, host, width, height,
     background(col: number, row: number) {
@@ -249,12 +250,12 @@ describe('highlight lifetime', () => {
     term.highlights.set('owned', [range(0, 0, 0, 3)]);
     term.highlights.set('another', [range(0, 4, 0, 5)]);
     term.write(`\x1b[?${mode}h`);
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(true);
     expect(term.highlights.get('owned')).toBeUndefined();
     expect(term.highlights.get('another')).toBeUndefined();
     term.highlights.set('owned', [range(0, 0, 0, 3)]);
     term.write(`\x1b[?${mode}l`);
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(false);
     expect(term.highlights.get('owned')).toBeUndefined();
     expect(seen).toEqual([undefined, undefined]);
   });
@@ -264,7 +265,7 @@ describe('highlight lifetime', () => {
     term.highlights.set('owned', [range(0, 1, 0, 3)]);
     const expected = term.highlights.get('owned');
     term.write('\x1b[?1049halternate\x1b[?1049l');
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(false);
     expect(term.highlights.get('owned')).toEqual(expected);
   });
 });

@@ -69,6 +69,12 @@ export class Terminal {
   // The package's white-box tests set up and read these through ./internal.
   static {
     registerWidgetInternals((term) => ({
+      get wasmTerm() { return term.wasmTerm; },
+      set wasmTerm(wasmTerm) { term.wasmTerm = wasmTerm; },
+      get renderer() { return term.renderer; },
+      set renderer(renderer) { term.renderer = renderer; },
+      get viewportY() { return term.viewportY; },
+      set viewportY(viewportY) { term.viewportY = viewportY; },
       get canvas() { return term.#canvas; },
       set canvas(canvas) { term.#canvas = canvas; },
       get isOpen() { return term.#isOpen; },

@@ -12,6 +12,7 @@ import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { GhosttyVt } from "../vt/ghosttyVt";
 import { CellPictureContext, type CellPictures } from "./__tests__/cellPictureCanvas";
 import type { ITheme } from "./interfaces";
+import { widgetInternals } from "./internal";
 import type { PaintLayer } from "./renderer";
 import { Terminal } from "./terminal";
 
@@ -138,7 +139,7 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
   const rig: Rig = {
     term,
     view(y) {
-      if (y < 0) term.viewportY = y;
+      if (y < 0) widgetInternals(term).viewportY = y;
       else term.viewport.scrollTo(y);
     },
     picture(viewportY) {

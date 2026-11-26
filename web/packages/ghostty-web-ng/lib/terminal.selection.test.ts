@@ -63,7 +63,7 @@ async function open(input: string, cols = 20, rows = 4, copy?: (text: string) =>
     hasPointerCapture: (id: number) => captured.has(id),
     releasePointerCapture: (id: number) => captured.delete(id),
   });
-  const { width, height } = term.renderer!.getMetrics();
+  const { width, height } = term.getMetrics()!;
   const rect = vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(() => new DOMRect(53, 37, cols * width, rows * height));
   const clipboard = vi.fn(async (_text: string) => {});
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } });
@@ -86,7 +86,7 @@ async function open(input: string, cols = 20, rows = 4, copy?: (text: string) =>
 const range = (a: number, b: number, c: number, d: number): Range => ({ start: { col: a, absoluteRow: b }, end: { col: c, absoluteRow: d } });
 
 function trackedCells(term: Terminal) {
-  return terminalInternals(term.wasmTerm!).trackedCells;
+  return terminalInternals(widgetInternals(term).wasmTerm!).trackedCells;
 }
 
 // The core prunes whole pages. Detect the real boundary instead of assuming
@@ -175,13 +175,13 @@ describe('tracked selection lifetime', () => {
     const observations: Array<Range | null> = [];
     term.onChange(() => observations.push(term.getSelectionRange()));
     term.write(`\x1b[?${mode}h`);
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(true);
     expect(term.getSelectionRange()).toBeNull();
     expect(trackedCells(term).size).toBe(0);
     term.write('alternate');
     term.selectAll();
     term.write(`\x1b[?${mode}l`);
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(false);
     expect(term.getSelectionRange()).toBeNull();
     expect(trackedCells(term).size).toBe(0);
     expect(observations).toEqual([null, null, null]);
@@ -194,7 +194,7 @@ describe('tracked selection lifetime', () => {
     const text = term.getSelection();
     expect(text).toBe('normal');
     term.write('\x1b[?1049halternate\x1b[?1049l');
-    expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+    expect(widgetInternals(term).wasmTerm!.isAlternateScreen()).toBe(false);
     // The normal-screen cells remain valid and hold the same text. A
     // screen switch observed between writes still clears the selection.
     expect(term.getSelectionRange()).toEqual(selected);
@@ -222,7 +222,7 @@ describe('tracked selection lifetime', () => {
     term.selectAll();
     const tracked = trackedCells(term);
     expect(tracked.size).toBe(2);
-    const core = term.wasmTerm!;
+    const core = widgetInternals(term).wasmTerm!;
     const free = core.free.bind(core);
     let atFree = -1;
     vi.spyOn(core, 'free').mockImplementation(() => { atFree = tracked.size; free(); });
@@ -239,7 +239,7 @@ describe('tracked selection lifetime', () => {
     let atFree = -1;
     vi.spyOn(CanvasRenderer.prototype, 'render').mockImplementationOnce(() => {
       term.selectAll();
-      const core = term.wasmTerm!;
+      const core = widgetInternals(term).wasmTerm!;
       const tracked = trackedCells(term);
       selected = tracked.size;
       const free = core.free.bind(core);
@@ -359,7 +359,7 @@ describe('public selection ranges', () => {
 
   test('wraps, wide cells and invisible-copy filtering apply to a pointer selection', async () => {
     const { term, pointer, clipboard } = await open('ab界e\u0301👩‍💻xyz\x7fq', 10, 4);
-    expect(term.wasmTerm!.isRowWrapped(1)).toBe(true);
+    expect(widgetInternals(term).wasmTerm!.isRowWrapped(1)).toBe(true);
     pointer('pointerdown', 0, 0);
     pointer('pointermove', 9, 1);
     pointer('pointerup', 9, 1);
@@ -373,7 +373,7 @@ describe('public selection ranges', () => {
     expect(term.getScrollbackLength()).toBe(8);
     // Both endpoints in history above the view: a paint draws no selected row.
     term.setSelection(range(1, 1, 3, 5));
-    const paint = () => term.renderer!.render(term.wasmTerm!, false, term.viewport.offset, 0);
+    const paint = () => widgetInternals(term).renderer!.render(widgetInternals(term).wasmTerm!, false, term.viewport.offset, 0);
     paint();
     const fill = vi.spyOn(VtCells.prototype, 'fill');
     for (let i = 0; i < 5; i++) paint();
@@ -460,7 +460,7 @@ describe('copy operations and click extents', () => {
     const command = '$ cat /var/log/messages.1';
     const { term, click } = await open(`${command}\r\nok`, 20, 2, copy);
     expect(term.getScrollbackLength()).toBe(1);
-    expect(term.wasmTerm!.isRowWrapped(0)).toBe(true);
+    expect(widgetInternals(term).wasmTerm!.isRowWrapped(0)).toBe(true);
     click(detail, 1, 0);
     expect(term.getSelection()).toBe(detail === 2 ? '/var/log/messages.1' : command);
     expect(copy).toHaveBeenCalledExactlyOnceWith(term.getSelection());
@@ -532,7 +532,7 @@ describe('copy operations and click extents', () => {
 
   test('the range reader takes the row fallback when the core cannot format', async () => {
     const { term } = await open('ab界e\u0301👩‍💻xyz\x7fq', 10, 4);
-    vi.spyOn(term.wasmTerm!, 'plainText').mockReturnValue(null);
+    vi.spyOn(widgetInternals(term).wasmTerm!, 'plainText').mockReturnValue(null);
     expect(term.getRangeText(range(1, 0, 9, 1))).toBe('b界e\u0301👩‍💻xyzq');
   });
 
@@ -558,7 +558,7 @@ describe('copy operations and click extents', () => {
   test('the row fallback keeps complete clusters, soft wraps and copy filtering', async () => {
     const { term } = await open('ab界e\u0301👩‍💻xyz\x7fq', 10, 4);
     term.selectAll();
-    vi.spyOn(term.wasmTerm!, 'plainText').mockReturnValue(null);
+    vi.spyOn(widgetInternals(term).wasmTerm!, 'plainText').mockReturnValue(null);
     expect(term.getSelection()).toBe('ab界e\u0301👩‍💻xyzq');
     expect(term.getScrollbackText()).toBe('ab界e\u0301👩‍💻xyzq');
   });

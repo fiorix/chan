@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { widgetInternals } from './internal';
 import { Terminal } from './terminal';
 import { GhosttyVt } from '../vt/ghosttyVt';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -82,9 +83,9 @@ async function museTerminal(input: string | Uint8Array, runsMuse: boolean) {
     hasPointerCapture: (id: number) => captured.has(id),
     releasePointerCapture: (id: number) => captured.delete(id),
   });
-  const cell = term.renderer!.getMetrics();
+  const cell = term.getMetrics()!;
   vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, COLS * cell.width, ROWS * cell.height));
-  const core = term.wasmTerm!;
+  const core = widgetInternals(term).wasmTerm!;
   const history = core.getScrollbackLength();
   const at = ([col, row]: [number, number]) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
   const click = (detail: number, col: number, row: number) => {
