@@ -12,10 +12,10 @@
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
 //    `import.meta.glob` pattern or `new URL(..., import.meta.url)` that
 //    reaches a path inside the package other than its export map's entries;
-// 2. cast: a cast of a widget value to a type it does not satisfy, `any`
-//    and `unknown` included, and a cast of a value typed by a type
-//    parameter to a type that names none of its members (`any`,
-//    `unknown`, `object`, `{}`), which launders whatever a caller passes;
+// 2. cast: a cast of a widget value to a type it does not satisfy or to
+//    one that names none of its members (`any`, `unknown`, `object`,
+//    `{}`), and a cast of a value typed by a type parameter to such a
+//    type, which launders whatever a caller passes;
 // 3. member: a read of a member the package does not make public, by a
 //    dot, a bracket or a variable declaration's destructuring on a widget
 //    value or one cast from it (through variables a cast or an annotation
@@ -41,8 +41,8 @@
 // 7. duck: a widget class instance flowing into a type of the app's that
 //    names a member the class keeps private, lacks, or holds as one of its
 //    implementation members, which reads `undefined` once that member is
-//    `#private`; a type with a widget part (a union of backends) is read
-//    through the widget's own declarations, which rules 3 and 5 see.
+//    `#private`; a type with a widget part (a union with another type) is
+//    read through the widget's own declarations, which rules 3 and 5 see.
 //
 // Shipped modules are held to all seven rules, tests to 1, 3 and 4. A dot
 // read of a private member on a widget-typed value is a type error, but
@@ -65,6 +65,32 @@
 // - a duck type reached through a type parameter's constraint, and the
 //   other parts of a type with a widget part (a union with a duck type, a
 //   generic holder with the widget as its type argument);
+// - a duck type the widget satisfies once a member is `#private`, which is
+//   no property of its type, declared by a callback's parameter or by a
+//   function assigned to a function type that takes a widget
+//   (`[term].map((t: { cols: number; isOpen?: boolean }) => t.isOpen)`):
+//   rule 7 reads the values that flow, not the parameters that take them;
+// - a value of a type parameter's type widened into `unknown`, `object` or
+//   `{}` with no cast (`<T>(o: T): unknown => o`), since at the call the
+//   widget meets a parameter of type `T`, not an opaque one;
+// - a widget widened with its container (`[term]` held as `readonly
+//   unknown[]`, `{ v: vt }` as `{ readonly v: unknown }`,
+//   `Promise.resolve(term)` as `Promise<unknown>`, or a container cast so),
+//   a widget joined with an `unknown` by `??` or `? :`, whose type is then
+//   `unknown`, and a widget thrown and caught;
+// - `Reflect` and `Object` functions called other than as a property
+//   access (`const { get } = Reflect`, `(Reflect.get)(...)`,
+//   `Reflect["get"](...)`, `const { assign, defineProperty } = Object`),
+//   whose target the checker types as the widget itself;
+// - a write through an assignment's destructuring (`[term.cols] = [1]`,
+//   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
+//   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
+//   does not read as a write;
+// - a dynamic import whose specifier is a string literal under
+//   parentheses (`import(("@chan/ghostty-web-ng/lib/internal"))`);
+// - in tests, a `satisfies` inside a cast chain (`(term as unknown)
+//   satisfies unknown as { selectionManager: unknown }`), where rule 3
+//   stops following the casts;
 // - in markup, a name declared in a component's `<script module>` beside
 //   an instance script, or a `$store` read, which has no type there, and a
 //   value markup passes to a component's props, which has no contextual
@@ -77,7 +103,8 @@
 // Readers that other changes remove are listed as pending, each pinned by
 // the text of the node it reports: a reader more or fewer in a listed
 // file fails, and so does one replaced by a reader of another text, while
-// a reader moved with its text unchanged does not.
+// a reader moved with its text unchanged does not, nor one replaced by
+// another of that text in the same file.
 //
 // The package keeps four members TypeScript private on purpose, as its
 // search measurement's seam: `SearchOwner`'s `pump` and `readResults` and
@@ -762,8 +789,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (isCast(node) && source.kind === "shipped") {
         const from = checker.getTypeAtLocation(node.expression);
         const to = checker.getTypeFromTypeNode(node.type);
-        const wide = (to.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-        if (isWidget(from) && (wide || !checker.isTypeAssignableTo(checker.getNonNullableType(from), to))) {
+        if (isWidget(from) && (opaque(to) || !checker.isTypeAssignableTo(checker.getNonNullableType(from), to))) {
           report("cast", node, node.type.getText(sf));
         } else if ((from.isUnion() ? from.types : [from]).some((t) => t.flags & ts.TypeFlags.TypeParameter) && opaque(to)) {
           report("cast", node, `type parameter ${checker.typeToString(from)} to ${node.type.getText(sf)}`);
@@ -973,6 +999,8 @@ const PLANTS = new Map<string, string>([
       "export const ownKey = (term: Terminal) => Object.hasOwn(term, OPEN);",
       "export const ownPropertyKey = (term: Terminal) => term.hasOwnProperty(OPEN);",
       'export const twice = (term: Terminal) => [term["canvas"], term["canvas"]];',
+      "export const walkedObject = (term: Terminal) => Object.entries(term as object).length;",
+      "export const walkedEmpty = (term: Terminal) => Object.entries(term as {}).length;",
     ].join("\n"),
   ],
   [
@@ -1115,6 +1143,8 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 76, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 77, key: "Terminal.canvas" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 77, key: "Terminal.canvas" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 78, key: "object" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 79, key: "{}" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
