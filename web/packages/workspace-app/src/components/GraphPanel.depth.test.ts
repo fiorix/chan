@@ -1873,6 +1873,31 @@ describe("the workspace tree", () => {
     expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ a: 2, drawsX: true });
   });
 
+  test("a folder read, closed, then opened again during a whole spine fetch is read once that fetch lands, over the listing cap", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    await settle(20);
+    expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }, "the first opening reads a").toEqual({ a: 1, drawsX: true });
+    await doubleClick("directory:a");
+    expect(tab.expanded.a).toBeUndefined();
+
+    // The whole fetch takes its list of levels while `a` is closed, and `a`
+    // opens again during it.
+    const release = await holdWholeFetch();
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await doubleClick("directory:a");
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads(""), "the opening starts no other fetch").toBe(2);
+    } finally {
+      release();
+    }
+    await settle(20);
+    expect({ root: levelReads(""), a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ root: 2, a: 2, drawsX: true });
+  });
+
   test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
     serveWholeTree();
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
