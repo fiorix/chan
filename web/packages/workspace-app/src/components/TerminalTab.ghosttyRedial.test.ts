@@ -28,6 +28,7 @@ import {
 } from "../__tests__/ghosttyTab";
 import {
   installTerminalDom,
+  openTerminalMenu,
   output,
   receive,
   resetTerminals,
@@ -305,7 +306,15 @@ async function viewOnTheNormalScreen() {
   await output(socket, "\x1b[?2004h$ ");
   expect(ghosttyAlternateScreen(term), "fixture: the normal screen").toBe(false);
   expect(ghosttyMode(term, 2004), "fixture: the shell's bracketed paste").toBe(true);
-  return { term, socket, cursor: ATTACHED_AT + "\x1b[?2004h$ ".length };
+  return { tab: tab!, term, socket, cursor: ATTACHED_AT + "\x1b[?2004h$ ".length };
+}
+
+/// Open the tab menu and return the status row's `.session-note` labels.
+async function sessionNotes(tab: ReturnType<typeof terminalTab>) {
+  await openTerminalMenu(tab);
+  const row = document.body.querySelector(".terminal-status-row");
+  expect(row, "fixture: the tab menu's status row rendered").not.toBeNull();
+  return [...row!.querySelectorAll(".session-note")].map((el) => (el.textContent ?? "").trim());
 }
 
 describe("a redial after a socket ended inside a replay that continued the view", () => {
@@ -380,7 +389,7 @@ describe("a redial after a socket ended inside a replay that continued the view"
   });
 
   test("that missed bytes writes no line and no notice of them twice on the normal screen", async () => {
-    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const { tab, term, socket, cursor } = await viewOnTheNormalScreen();
     const second = await redialed(socket, cursor);
     const pasteOff = "\x1b[?2004l";
     const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\r\n`).join("");
@@ -396,6 +405,7 @@ describe("a redial after a socket ended inside a replay that continued the view"
     expect(rows.filter((row) => row.includes("terminal replay missed")), "one notice of the loss").toHaveLength(1);
     expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
     expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
+    expect(await sessionNotes(tab), "the status note stays hidden when nothing new was missed").toEqual([]);
   });
 
   test("that missed bytes and is cut again among the bytes the view parsed keeps its position and the loss", async () => {
@@ -421,7 +431,7 @@ describe("a redial after a socket ended inside a replay that continued the view"
   });
 
   test("that missed bytes and is cut inside a sequence, then re-asked after the ring moved past the view, notices the new gap", async () => {
-    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const { tab, term, socket, cursor } = await viewOnTheNormalScreen();
     const second = await redialed(socket, cursor);
     const pasteOff = "\x1b[?2004l";
     const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\x1b[1m!\x1b[0m\r\n`).join("");
@@ -444,6 +454,9 @@ describe("a redial after a socket ended inside a replay that continued the view"
       `terminal replay missed ${lines.indexOf("line 31") - cut} bytes`,
     ]);
     expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+    expect(await sessionNotes(tab), "the status note counts only the new gap").toEqual([
+      `missed ${lines.indexOf("line 31") - cut} bytes`,
+    ]);
   });
 
   test.each([
@@ -453,7 +466,7 @@ describe("a redial after a socket ended inside a replay that continued the view"
   ])(
     "that missed bytes, re-asked with the ring at the parsed position $offset, skips only repeated bytes and counts only a new gap",
     async ({ offset, notices, line21 }) => {
-      const { term, socket, cursor } = await viewOnTheNormalScreen();
+      const { tab, term, socket, cursor } = await viewOnTheNormalScreen();
       const second = await redialed(socket, cursor);
       const pasteOff = "\x1b[?2004l";
       const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\r\n`).join("");
@@ -486,6 +499,9 @@ describe("a redial after a socket ended inside a replay that continued the view"
       if (line21 === 0) expected[1] = 2;
       expect(counts, "every line once, line 21 whole unless its last byte was lost").toEqual(expected);
       expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+      expect(await sessionNotes(tab), "the status note follows only the new gap").toEqual(
+        notices === 1 ? [] : [`missed ${offset} bytes`],
+      );
       await vi.advanceTimersByTimeAsync(1_000);
       expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: cursor + program.written.length });
     },
