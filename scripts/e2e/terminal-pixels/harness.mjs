@@ -814,12 +814,8 @@ async function main() {
     `${scenario.fontSize}px "Source Code Pro"`,
   );
 
-  if (scenario.backend !== "ghostty") {
-    throw new Error(`unsupported terminal backend ${scenario.backend}`);
-  }
-
-  // A reference pattern settles through the ghostty widget's own API and
-  // deterministic scrollbar hook, so it is painted on ghostty alone.
+  // A reference pattern settles through the widget's own API and its
+  // deterministic scrollbar hook.
   const pattern = scenario.pattern ? PATTERNS[scenario.pattern] : null;
   if (scenario.pattern && !pattern) {
     throw new Error(`no pattern named ${scenario.pattern}`);
