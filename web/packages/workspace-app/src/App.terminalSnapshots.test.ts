@@ -63,9 +63,20 @@ test("the load removes the snapshots before it prunes the editor buffers", async
   expect(swept, "the snapshot went before the prune's read").toBeLessThan(pruned);
 });
 
-// A buffer entry the store will not hand over stops neither the app's load
-// nor the sweep: the prune's read of it fails inside the prune.
-test("a buffer entry the prune cannot read stops neither the load nor the sweep", async () => {
+/// The runner's own process, typed here rather than package-wide: an error
+/// thrown out of the app's mount work reaches Node as an uncaught exception,
+/// and a listener on jsdom's `window` never hears it.
+const runner = globalThis as unknown as {
+  process: {
+    on: (event: "uncaughtException", fn: (error: unknown) => void) => void;
+    off: (event: "uncaughtException", fn: (error: unknown) => void) => void;
+  };
+};
+
+// The prune's read of a buffer entry the store will not hand over fails
+// inside the prune, so nothing is thrown out of the app's load, and the
+// snapshot sweep still runs.
+test("a buffer entry the prune cannot read throws nothing out of the app's load, and the sweep still runs", async () => {
   localStorage.setItem("chan:term-snapshot:term_a", "{}");
   localStorage.setItem("chan:editor-buffer:unreadable", JSON.stringify({ content: "x", updatedAt: Date.now(), path: "a.md", sessionId: "previous-load" }));
   const getItem = Storage.prototype.getItem;
@@ -77,11 +88,19 @@ test("a buffer entry the prune cannot read stops neither the load nor the sweep"
     }
     return getItem.call(this, key);
   });
+  const thrown: unknown[] = [];
+  const onThrown = (error: unknown) => void thrown.push(error);
+  runner.process.on("uncaughtException", onThrown);
 
-  await mountApp();
+  try {
+    await mountApp();
+  } finally {
+    runner.process.off("uncaughtException", onThrown);
+  }
 
   const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!);
   expect(refused, "the prune asked for the entry").toBeGreaterThan(0);
+  expect(thrown.map(String), "nothing was thrown out of the app's load").toEqual([]);
   expect(keys.filter((key) => key.startsWith("chan:term-snapshot:")), "no snapshot left").toEqual([]);
   expect(keys, "the entry it could not read is left alone").toContain("chan:editor-buffer:unreadable");
 });

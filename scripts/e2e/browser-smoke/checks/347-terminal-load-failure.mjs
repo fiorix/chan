@@ -36,7 +36,8 @@ const FINAL_NAME = "Load347f";
 const FILE = "load347.md";
 const WAIT_MS = 30_000;
 const KEYBOARD_MS = 5_000;
-// Long enough for a reload or a close an action started to show.
+// Long enough for a reload a key started to ask for its document, or a close
+// it started to show.
 const KEYS_SETTLE_MS = 1_000;
 const CORE = /\/ghostty-vt[^/]*\.wasm(?:[?#]|$)/;
 // The widget's chunk, as the build emits it (`assets/ghostty-web-<hash>.js`).
@@ -642,14 +643,30 @@ export default {
       await ctx.shot("347-final-card-focused");
       assert.equal(fresh.tabindex, "-1", "the card holds the keyboard without joining the Tab order");
       // A key typed ahead onto the card reaches no action: Enter and Space
-      // neither reload the window nor close the tab.
+      // neither reload the window nor close the tab, and the card still holds
+      // the keyboard after them. A reload shows first as the page's request
+      // for its new document, well before that document commits, so the
+      // check waits for that request or a navigation and passes only when
+      // both waits time out.
       await markDocument("final-keys");
+      const keysNavigated = Promise.any([
+        page.waitForRequest((request) => request.isNavigationRequest() && request.frame() === page.mainFrame(),
+          { timeout: KEYS_SETTLE_MS }).then(() => "document request"),
+        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: KEYS_SETTLE_MS }).then(() => "navigation"),
+      ]).catch(() => null);
       for (const key of ["Enter", "Space"]) await page.keyboard.press(key);
-      await sleep(KEYS_SETTLE_MS);
-      fresh.afterKeys = { mark: await documentMark().catch(() => null), state: await tabState(fresh.tabId).catch(() => null) };
-      assert.equal(fresh.afterKeys.mark, "final-keys", "Enter and Space on the final card did not reload the window");
+      fresh.afterKeys = { navigated: await keysNavigated };
+      fresh.afterKeys.mark = await documentMark().catch(() => null);
+      fresh.afterKeys.state = await tabState(fresh.tabId).catch(() => null);
+      fresh.afterKeys.keyboard = await keyboard(fresh.tabId).catch(() => null);
+      assert.equal(fresh.afterKeys.navigated, null, "Enter and Space on the final card did not reload the window");
+      assert.equal(fresh.afterKeys.mark, "final-keys", "the document is still the one the keys were pressed in");
       assert.equal(fresh.afterKeys.state?.mounted, true, "Enter and Space on the final card did not close the tab");
       assert.ok(fresh.afterKeys.state.error?.includes(FAILED), "the tab still shows the final failure");
+      if (fresh.afterKeys.keyboard?.card !== true) {
+        await ctx.shot("347-final-keys-keyboard");
+        assert.fail(`the final card still holds the keyboard after Enter and Space: the keyboard is on ${JSON.stringify(fresh.afterKeys.keyboard)}`);
+      }
       assert.equal(fresh.state.actions.length, 2, `a final failure offers two ways out: ${JSON.stringify(fresh.state.actions)}`);
       assert.equal(fresh.state.actions[0], "Reload window", "a reload first");
       assert.match(fresh.state.actions[1], /^Close \S/, "then Close");

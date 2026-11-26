@@ -237,7 +237,9 @@ export function pruneEditorBuffers(): number {
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
   // A store that refuses a read must not end the caller's work, the app's
   // load among them: an entry it will not hand over is left for a later
-  // prune, and a walk it cuts short prunes what it collected.
+  // prune, and a walk it cuts short prunes what it collected. The store
+  // refuses with a DOMException; anything else thrown from the walk is a
+  // bug and stays loud.
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -263,7 +265,8 @@ export function pruneEditorBuffers(): number {
         entries.push({ key, updatedAt: 0, bytes: raw.length });
       }
     }
-  } catch {
+  } catch (error) {
+    if (!(error instanceof DOMException)) throw error;
     // Prune what the walk collected.
   }
   let evicted = 0;

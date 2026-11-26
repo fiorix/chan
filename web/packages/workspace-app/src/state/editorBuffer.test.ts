@@ -161,13 +161,17 @@ describe("editorBuffer TTL eviction in pruneEditorBuffers", () => {
     expect(localStorage.getItem("unrelated-key")).toBe("value");
   });
 
-  test("an entry the store will not hand over is skipped, and the rest are still pruned", () => {
-    writeForeignBuffer("unreadable", "kept", "a.md");
-    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+  test("an entry the store will not hand over is skipped, and the entries walked on either side of it are still pruned", () => {
+    const eightDaysAgo = Date.now() - 8 * MS_PER_DAY;
+    for (const name of ["first", "second", "third"]) writeForeignBuffer(name, "old", `${name}.md`, eightDaysAgo);
+    // The store refuses the entry it walks second, so a stale entry is walked
+    // on each side of it whatever order the store keeps its keys in, and a
+    // refusal that ended the walk would leave the one after it unpruned.
+    const refused = localStorage.key(1)!;
+    const others = [localStorage.key(0)!, localStorage.key(2)!];
     // The store's own method when it is a Storage, else the stand-in's.
     const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
     const getItem = store.getItem;
-    const refused = bufferKey("unreadable");
     const spy = vi.spyOn(store, "getItem").mockImplementation(function (this: Storage, key: string) {
       if (key === refused) throw new DOMException("storage read refused", "SecurityError");
       return getItem.call(this, key);
@@ -180,9 +184,9 @@ describe("editorBuffer TTL eviction in pruneEditorBuffers", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(evicted, "the stale entry beside it is evicted").toBe(1);
-    expect(readEditorBuffer("stale")).toBeNull();
-    expect(readEditorBuffer("unreadable"), "the entry it could not read is left alone").not.toBeNull();
+    expect(evicted, "the stale entries on either side of it are evicted").toBe(2);
+    expect(others.filter((key) => localStorage.getItem(key) !== null), "no stale entry beside it is left").toEqual([]);
+    expect(localStorage.getItem(refused), "the entry it could not read is left alone").not.toBeNull();
   });
 
   test("a walk the store cuts short still prunes what it read", () => {
@@ -205,6 +209,22 @@ describe("editorBuffer TTL eviction in pruneEditorBuffers", () => {
     expect(evicted, "the entry read before the walk stopped is pruned").toBe(1);
     expect(readEditorBuffer("stale")).toBeNull();
     expect(readEditorBuffer("later"), "the entry after it is left for a later prune").not.toBeNull();
+  });
+
+  test("an error in the walk that is not the store's refusal is thrown", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    writeForeignBuffer("later", "new", "y.md");
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const key = store.key;
+    const spy = vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw new TypeError("a bug in the walk");
+      return key.call(this, index);
+    });
+    try {
+      expect(() => pruneEditorBuffers(), "a bug stays loud").toThrow(TypeError);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
