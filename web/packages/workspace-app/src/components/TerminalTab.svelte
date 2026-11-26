@@ -600,7 +600,8 @@
   // view had parsed up to `parsed` before it, which a replay that starts
   // earlier repeats and the tab does not write again. `lossFrom` is the
   // cursor the bytes it missed start at, while their recovery suffix,
-  // which ends the replay, has not been parsed.
+  // which ends the replay, has not been parsed. Read only while
+  // `attachReplayActive`, and set by the session frame that starts it.
   let continuingReplay: {
     start: number;
     length: number;
@@ -610,7 +611,8 @@
   } | null = null;
   // Where a cut replay that continued the view left it: the redial echoes
   // `parsed`, or `lossFrom` while a loss is owed its suffix, since only a
-  // cursor before the lost bytes gets that suffix sent again.
+  // cursor before the lost bytes gets that suffix sent again. Read only
+  // while `replayCut`, and set with it.
   let cutResume: { parsed: number; lossFrom: number | null } | null = null;
   // The keyboard protocol as it stood when the current replay began, which
   // the reset write's callback restores once the protocol observer has read
@@ -1798,8 +1800,6 @@
         resetBeforeReplay = false;
         attachReplayActive = false;
         replayCut = false;
-        continuingReplay = null;
-        cutResume = null;
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
@@ -2643,7 +2643,6 @@
         lossFrom: continuingReplay.lossFrom,
       };
     }
-    continuingReplay = null;
     attachReplayActive = false;
     suppressAttachReplayGeneratedReplies = false;
     streamAck.stop();
@@ -2708,7 +2707,6 @@
     term?.dispose();
     term = null;
     sawSessionControl = false;
-    cutResume = null;
     termWriter = null;
     ptyWrites.reset();
     mouseFilter = null;
