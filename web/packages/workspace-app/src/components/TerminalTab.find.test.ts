@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { type SearchState, VtSearch } from "@chan/ghostty-web-ng/vt";
+import { VtSearch } from "@chan/ghostty-web-ng/vt";
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
 import { allCommands } from "../state/commands";
@@ -74,11 +74,14 @@ function activeHighlight(term: Terminal) {
   return term.highlights.get("search-active")?.ranges[0] ?? null;
 }
 
-// Finite work (search and fitting) drains; a callback that reschedules
-// itself, such as the widget's render loop, stays live for the next frame.
-function holdFrames() {
+// The widget runs find's scan and placement in its render loop's frame,
+// ahead of its paint, so the test owns that loop's frames: the frame the
+// loop booked before the hold runs once as a task, and books every later
+// one here. `settle` runs frames until the search is complete and two
+// frames in a row change neither its state nor its active match, which
+// leaves a waiting press time to land.
+async function holdFrames(term: Terminal) {
   const queue = new Map<number, FrameRequestCallback>();
-  const recurring = new Set<FrameRequestCallback>();
   let next = 1;
   globalThis.requestAnimationFrame = (cb) => {
     const id = next++;
@@ -86,29 +89,31 @@ function holdFrames() {
     return id;
   };
   globalThis.cancelAnimationFrame = (id) => { queue.delete(id); };
-  const pending = () => [...queue.values()].filter((cb) => !recurring.has(cb)).length;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (queue.size === 0) throw new Error("the widget's render loop booked no held frame");
   const frame = () => {
-    const runs = [...queue.entries()];
-    for (const [id, run] of runs) {
-      if (!queue.delete(id)) continue;
-      run(0);
-      if ([...queue.values()].includes(run)) recurring.add(run);
-    }
+    const runs = [...queue.values()];
+    queue.clear();
+    for (const run of runs) run(0);
   };
+  const reading = () => JSON.stringify([term.search.state, term.highlights.get("search-active")?.ranges ?? null]);
   return {
-    pending,
     frame,
     settle() {
-      for (let i = 0; pending(); i++) {
-        if (i > 1000) throw new Error("finite animation-frame work never stopped");
+      let last = reading();
+      for (let i = 0, still = 0; still < 2; i++) {
+        if (i > 1000) throw new Error("find never settled");
         frame();
+        const now = reading();
+        still = !term.search.state.partial && now === last ? still + 1 : 0;
+        last = now;
       }
     },
   };
 }
 
 async function findNeedle(term: Terminal) {
-  const frames = holdFrames();
+  const frames = await holdFrames(term);
   const input = await openFindWithQuery("needle");
   frames.settle();
   await tick();
@@ -116,6 +121,16 @@ async function findNeedle(term: Terminal) {
   expect(term.getSelectionRange()).toBeNull();
   expect(countElement()?.textContent).toBe("1 of 3");
   return { input, frames };
+}
+
+/// A clock that advances `ms` at each read, so a frame's 4 ms scan and
+/// placement budgets run out after a few reads and a scan takes many
+/// frames. At 2 ms or more a frame's budget is spent before it places a
+/// match, and placement all but stops. A waiting press gives up one second
+/// of this clock after it was pressed.
+function slowClock(ms: number): void {
+  let clock = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => (clock += ms));
 }
 
 function fireCommand(name: string): void {
@@ -174,7 +189,7 @@ describe("find and user selection coexistence", () => {
     term.setSelection(users);
     const text = term.getSelection();
     term.highlights.set("annotation", [match(3)]);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     const input = await openFindWithQuery("needle");
     frames.settle();
     await tick();
@@ -253,7 +268,7 @@ describe("Copy with a find match showing", () => {
   test("copies the scrollback while the bar's query matches nothing", async () => {
     const term = await renderGhostty();
     const writeText = clipboardWrites();
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     await openFindWithQuery("absent");
     frames.settle();
     await tick();
@@ -299,7 +314,7 @@ describe("terminal find command routing", () => {
 
   test("typing a changed query highlights its newest match without creating a selection", async () => {
     const term = await renderGhostty("\x1b[2J\x1b[3J\x1b[Hne a\r\nnee b\r\nxx\r\nne c");
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     const input = await openFindWithQuery("nee");
     frames.settle();
     await tick();
@@ -419,8 +434,8 @@ describe("terminal find count", () => {
   });
 
   test("is heard through a named status region, the shown count hidden from screen readers", async () => {
-    await renderGhostty("needle");
-    const frames = holdFrames();
+    const term = await renderGhostty("needle");
+    const frames = await holdFrames(term);
     await openFindWithQuery("needle");
     frames.settle();
     await tick();
@@ -434,7 +449,7 @@ describe("terminal find count", () => {
 
   test("reads 0 of 0 when nothing matches", async () => {
     const term = await renderGhostty();
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     await openFindWithQuery("absent");
     frames.settle();
     await tick();
@@ -620,20 +635,17 @@ describe("terminal find in a mounted tab", () => {
 
   test("typing selects the newest match, with a plus on the total while the scan runs", async () => {
     const term = await renderGhostty(NEEDLES);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     fireCommand("app.find.open");
     await tick();
     await tick();
-    // One unit of the core's scan per frame: each clock read is past the
-    // last frame's budget.
-    let clock = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => (clock += 5));
+    slowClock(1);
     typeQuery(findInput()!, "needle");
-    expect(frames.pending(), "the scan waits for a frame").toBe(1);
+    expect(activeHighlight(term), "the scan waits for a frame").toBeNull();
     frames.frame();
     await tick();
     expect(activeHighlight(term)).toEqual(match(5));
-    expect(countElement()?.textContent).toBe("1 of 3+");
+    expect(countElement()?.textContent).toMatch(/^1 of \d+\+$/);
     frames.settle();
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
@@ -647,28 +659,25 @@ describe("terminal find in a mounted tab", () => {
     // takes many frames.
     const many = Array.from({ length: 3000 }, (_, i) => `row ${i}${i % 10 === 5 ? " needle" : ""}`).join("\r\n");
     const term = await renderGhostty(`${many}\r\n${NEEDLES.slice(NEEDLES.indexOf("a"))}`);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       fireCommand("app.find.open");
       await tick();
       await tick();
-      // One unit of the core's scan per frame: each clock read is past the
-      // last frame's budget.
-      let clock = 0;
-      vi.spyOn(performance, "now").mockImplementation(() => (clock += 5));
-      const states = vi.spyOn(VtSearch.prototype, "state");
+      slowClock(0.5);
       typeQuery(findInput()!, "needle");
-      /// Per frame: the count of the search state find read last, the count
+      /// Per frame: the count of the terminal search's state, the count
       /// shown and the count heard.
       const read: string[] = [];
       const shown: string[] = [];
       const heard: string[] = [];
-      while (frames.pending()) {
+      for (let i = 0; i === 0 || term.search.state.partial; i++) {
+        expect(i, "the scan completes within 1000 frames").toBeLessThan(1000);
         frames.frame();
         await tick();
-        const state = states.mock.results.at(-1)!.value as SearchState;
-        read.push(`${state.index! + 1} of ${state.total}${state.complete ? "" : "+"}`);
+        const state = term.search.state;
+        read.push(`${state.index ?? "?"} of ${state.total}${state.partial ? "+" : ""}`);
         shown.push(countElement()!.textContent!);
         heard.push(statusRegion()!.textContent!);
       }
@@ -715,7 +724,7 @@ describe("terminal find in a mounted tab", () => {
     // takes many frames, and the oldest needle is on row 5.
     const many = Array.from({ length: 3000 }, (_, i) => `row ${i}${i % 10 === 5 ? " needle" : ""}`).join("\r\n");
     const term = await renderGhostty(`${many}\r\n${NEEDLES.slice(NEEDLES.indexOf("a"))}`);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     const input = await openFindWithQuery("needle");
     frames.settle();
     await tick();
@@ -728,15 +737,13 @@ describe("terminal find in a mounted tab", () => {
     await tick();
     await tick();
     expect(findInput()?.value).toBe("needle");
-    // One unit of the core's scan per frame: each clock read is past the
-    // last frame's budget.
-    let clock = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => (clock += 5));
+    slowClock(0.5);
 
     pressEnter(findInput()!, true);
     await tick();
     expect(activeHighlight(term), "nothing selected while the scan runs").toBeNull();
-    expect(countElement()?.textContent).toBe("");
+    // The press scans a slice before it returns.
+    expect(countElement()?.textContent).toMatch(/^\? of \d+\+$/);
     const shown: string[] = [];
     do {
       expect(shown.length, "the scan completes within 1000 frames").toBeLessThan(1000);
@@ -789,7 +796,7 @@ describe("terminal find in a mounted tab", () => {
 
   test("reads 0 of 0 when nothing matches", async () => {
     const term = await renderGhostty(NEEDLES);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     await openFindWithQuery("absent");
     frames.settle();
     await tick();
@@ -1007,7 +1014,7 @@ describe("terminal find in a mounted tab", () => {
 
   test("a line chan prints when the session ends counts in an open bar", async () => {
     const term = await renderGhostty(`${NEEDLES}\r\na job ended`);
-    const frames = holdFrames();
+    const frames = await holdFrames(term);
     await openFindWithQuery("ended");
     frames.settle();
     await tick();
@@ -1017,7 +1024,7 @@ describe("terminal find in a mounted tab", () => {
 
     await TerminalSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
     expect(term.wasmTerm!.plainText()).toContain("session ended (idle)");
-    expect(frames.pending(), "find heard the line").toBe(1);
+    expect(term.search.state.partial, "find heard the line").toBe(true);
     frames.settle();
     await tick();
     // The core keeps the selection on its text; the line's match is newer.

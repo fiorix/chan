@@ -164,14 +164,18 @@
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
-  import { FIND_HIGHLIGHT_LAYER, GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal, TerminalLinkActivation } from "@chan/ghostty-web-ng";
+  import type {
+    Terminal as GhosttyTerminal,
+    TerminalLinkActivation,
+    TerminalSearch,
+    TerminalSearchState,
+  } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -561,9 +565,9 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
-  /// The find bar's match count (see `FindCount`); null
-  /// leaves the count blank.
-  let findCount = $state<FindCount | null>(null);
+  /// The find bar's match count, the terminal search's state; null leaves
+  /// the count blank.
+  let findCount = $state<TerminalSearchState | null>(null);
   const findCountText = $derived(
     findCount === null
       ? ""
@@ -657,9 +661,9 @@
   // path chan writes to the terminal through (PTY output and writeChanLine),
   // non-null while a terminal is open and disposed with it.
   let ghosttyViewport: GhosttyViewportController | null = null;
-  // Find, made when the find bar first opens (see ghosttyFinder) and
-  // disposed with the terminal.
-  let ghosttyFind: GhosttyFind | null = null;
+  // The find bar's count following the terminal's search, subscribed when
+  // the bar first opens (see terminalSearch) and ended with the terminal.
+  let findSubscription: { dispose(): void } | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   let primarySelectionCleanup: (() => void) | null = null;
@@ -2595,10 +2599,9 @@
     resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
-    // Before the terminal: it frees its search and clears its highlight
-    // layer on the terminal.
-    ghosttyFind?.dispose();
-    ghosttyFind = null;
+    // The terminal's disposal frees its search and removes its layers.
+    findSubscription?.dispose();
+    findSubscription = null;
     term?.dispose();
     term = null;
     sawSessionControl = false;
@@ -2767,7 +2770,7 @@
   /// range. Empty with the bar closed and with no match.
   function findMatchText(): string {
     if (!findOpen) return "";
-    const match = term?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
+    const match = term?.highlights.get("search-active")?.ranges[0];
     return match ? term!.getRangeText(match) : "";
   }
 
@@ -2814,10 +2817,9 @@
 
   function openFind(): void {
     closeTabMenu();
-    // Find searches the terminal through libghostty-vt's search on chan's
-    // binding: with no terminal shown, or a core without search, the bar
-    // stays closed.
-    if (!ghosttyFinder()) return;
+    // Find is the terminal's own search: with no terminal open, the failed
+    // load's card included, the bar stays closed.
+    if (!terminalSearch()) return;
     findOpen = true;
     void tick().then(() => {
       if (searchInput && mayFocus(searchInput)) searchInput.focus();
@@ -2944,21 +2946,21 @@
   // prompt-frame path every terminal uses). Per-terminal text input is the
   // universal Rich Prompt (Cmd+Shift+P) - see RichPrompt.svelte / sendPrompt.
 
-  /// The terminal's find, made on first use; null before the terminal
-  /// exists and on a core without search.
-  function ghosttyFinder(): GhosttyFind | null {
-    if (!ghosttyFind && term && ghosttyViewport) {
-      ghosttyFind = GhosttyFind.attach(term, ghosttyViewport, (count) => {
-        findCount = count;
-      });
-    }
-    return ghosttyFind;
+  /// The open terminal's search, with the find bar's count following its
+  /// state from the first use; null while no terminal is open, since a
+  /// search reached before open is inert and reports nothing.
+  function terminalSearch(): TerminalSearch | null {
+    if (!term?.core) return null;
+    findSubscription ??= term.search.onChange((state) => {
+      findCount = state;
+    });
+    return term.search;
   }
 
   /// The bar closed or its query emptied: drop the highlights and the count,
   /// free the search and stop its scan.
   function clearFind(): void {
-    ghosttyFind?.close();
+    term?.search.close();
     findCount = null;
   }
 
@@ -2969,7 +2971,7 @@
       clearFind();
       return;
     }
-    ghosttyFinder()?.find(findQuery);
+    terminalSearch()?.find(findQuery);
   }
 
   /// Step from the selected match. Next (Enter) walks toward older output,
@@ -2980,7 +2982,7 @@
       clearFind();
       return;
     }
-    ghosttyFinder()?.step(findQuery, direction);
+    terminalSearch()?.step(findQuery, direction);
   }
 
   function onFindKeydown(e: KeyboardEvent): void {
