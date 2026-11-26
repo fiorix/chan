@@ -127,7 +127,7 @@ export class CanvasRenderer {
   #paintedScrollbar = false;
 
   // Cursor blinking state
-  private cursorVisible: boolean = true;
+  #cursorVisible: boolean = true;
   #cursorBlinkInterval?: number;
   #lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
   #lastCursorShown: boolean = true;
@@ -142,7 +142,7 @@ export class CanvasRenderer {
   readonly #cells = new VtCells();
 
   // Selection manager (for rendering selection)
-  private selectionManager?: SelectionManager;
+  #selectionManager?: SelectionManager;
   // Cached selection coordinates for current render pass (viewport-relative)
   #currentSelectionCoords: {
     startCol: number;
@@ -155,11 +155,11 @@ export class CanvasRenderer {
   #currentHighlightRows: HighlightSpan[][] = [];
 
   // Link rendering state
-  private hoveredHyperlinkId: number = 0;
+  #hoveredHyperlinkId: number = 0;
   #previousHoveredHyperlinkId: number = 0;
 
   // Regex link hover tracking (for links without hyperlink_id)
-  private hoveredLinkRange: { startX: number; startY: number; endX: number; endY: number } | null =
+  #hoveredLinkRange: { startX: number; startY: number; endX: number; endY: number } | null =
     null;
   #previousHoveredLinkRange: {
     startX: number;
@@ -415,13 +415,13 @@ export class CanvasRenderer {
     }
 
     // Cache overlays before any cursor-only redraw can paint a row.
-    this.#currentSelectionCoords = this.selectionManager?.hasSelection()
-      ? this.selectionManager.getSelectionCoords() : null;
+    this.#currentSelectionCoords = this.#selectionManager?.hasSelection()
+      ? this.#selectionManager.getSelectionCoords() : null;
     const highlights = this.#highlightSource?.frame(scrollbackLength - historyRows, dims.rows, dims.cols);
     this.cacheHighlights(highlights?.spans ?? []);
 
     const cursorRows = new Set<number>();
-    const cursorShown = cursor.visible && this.cursorVisible;
+    const cursorShown = cursor.visible && this.#cursorVisible;
     const cursorMoved = cursor.x !== this.#lastCursorPosition.x || cursor.y !== this.#lastCursorPosition.y;
     if (historyRows === 0 && (cursorMoved || cursorShown !== this.#lastCursorShown)) {
       cursorRows.add(cursor.y);
@@ -440,22 +440,22 @@ export class CanvasRenderer {
     }
 
     // Always mark dirty selection rows for redraw (to clear old overlay)
-    if (this.selectionManager) {
-      const dirtyRows = this.selectionManager.getDirtySelectionRows();
+    if (this.#selectionManager) {
+      const dirtyRows = this.#selectionManager.getDirtySelectionRows();
       if (dirtyRows.size > 0) {
         for (const row of dirtyRows) {
           selectionRows.add(row);
         }
         // Clear the dirty rows tracking after marking for redraw
-        this.selectionManager.clearDirtySelectionRows();
+        this.#selectionManager.clearDirtySelectionRows();
       }
     }
 
     // Track rows with hyperlinks that need redraw when hover changes
     const hyperlinkRows = new Set<number>();
-    const hyperlinkChanged = this.hoveredHyperlinkId !== this.#previousHoveredHyperlinkId;
+    const hyperlinkChanged = this.#hoveredHyperlinkId !== this.#previousHoveredHyperlinkId;
     const linkRangeChanged =
-      JSON.stringify(this.hoveredLinkRange) !== JSON.stringify(this.#previousHoveredLinkRange);
+      JSON.stringify(this.#hoveredLinkRange) !== JSON.stringify(this.#previousHoveredLinkRange);
 
     if (hyperlinkChanged) {
       // Find rows containing the old or new hovered hyperlink
@@ -464,7 +464,7 @@ export class CanvasRenderer {
         if (this.#readViewRow(term, y, historyRows, scrollbackLength)) {
           for (let x = 0; x < this.#cells.length; x++) {
             const link = this.#cells.at(x)!.hyperlink;
-            if (link === this.hoveredHyperlinkId || link === this.#previousHoveredHyperlinkId) {
+            if (link === this.#hoveredHyperlinkId || link === this.#previousHoveredHyperlinkId) {
               hyperlinkRows.add(y);
               break; // Found hyperlink in this row
             }
@@ -472,7 +472,7 @@ export class CanvasRenderer {
         }
       }
       // Update previous state
-      this.#previousHoveredHyperlinkId = this.hoveredHyperlinkId;
+      this.#previousHoveredHyperlinkId = this.#hoveredHyperlinkId;
     }
 
     // Track rows affected by link range changes (for regex URLs)
@@ -488,12 +488,12 @@ export class CanvasRenderer {
         }
       }
       // Add rows from new range
-      if (this.hoveredLinkRange) {
-        for (let y = this.hoveredLinkRange.startY; y <= this.hoveredLinkRange.endY; y++) {
+      if (this.#hoveredLinkRange) {
+        for (let y = this.#hoveredLinkRange.startY; y <= this.#hoveredLinkRange.endY; y++) {
           hyperlinkRows.add(y);
         }
       }
-      this.#previousHoveredLinkRange = this.hoveredLinkRange;
+      this.#previousHoveredLinkRange = this.#hoveredLinkRange;
     }
 
     // Determine which rows need rendering.
@@ -778,7 +778,7 @@ export class CanvasRenderer {
 
     // Draw hyperlink underline (for OSC8 hyperlinks)
     if (cell.hyperlink > 0) {
-      const isHovered = cell.hyperlink === this.hoveredHyperlinkId;
+      const isHovered = cell.hyperlink === this.#hoveredHyperlinkId;
 
       // Only show underline when hovered (cleaner look)
       if (isHovered) {
@@ -793,8 +793,8 @@ export class CanvasRenderer {
     }
 
     // Draw regex link underline (for plain text URLs)
-    if (this.hoveredLinkRange) {
-      const range = this.hoveredLinkRange;
+    if (this.#hoveredLinkRange) {
+      const range = this.#hoveredLinkRange;
       // Check if this cell is within the hovered link range
       const isInRange =
         (y === range.startY && x >= range.startX && (y < range.endY || x <= range.endX)) ||
@@ -941,7 +941,7 @@ export class CanvasRenderer {
   #startCursorBlink(): void {
     // xterm.js uses ~530ms blink interval
     this.#cursorBlinkInterval = window.setInterval(() => {
-      this.cursorVisible = !this.cursorVisible;
+      this.#cursorVisible = !this.#cursorVisible;
       // Note: Render loop should redraw cursor line automatically
     }, 530);
   }
@@ -951,7 +951,7 @@ export class CanvasRenderer {
       clearInterval(this.#cursorBlinkInterval);
       this.#cursorBlinkInterval = undefined;
     }
-    this.cursorVisible = true;
+    this.#cursorVisible = true;
   }
 
   // ==========================================================================
@@ -1133,7 +1133,7 @@ export class CanvasRenderer {
    * Set selection manager (for rendering selection)
    */
   public setSelectionManager(manager: SelectionManager): void {
-    this.selectionManager = manager;
+    this.#selectionManager = manager;
   }
 
   public setHighlights(source: HighlightsManager): void {
@@ -1204,7 +1204,7 @@ export class CanvasRenderer {
    * Set the currently hovered hyperlink ID for rendering underlines
    */
   public setHoveredHyperlinkId(hyperlinkId: number): void {
-    this.hoveredHyperlinkId = hyperlinkId;
+    this.#hoveredHyperlinkId = hyperlinkId;
   }
 
   /**
@@ -1219,7 +1219,7 @@ export class CanvasRenderer {
       endY: number;
     } | null
   ): void {
-    this.hoveredLinkRange = range;
+    this.#hoveredLinkRange = range;
   }
 
   /**
