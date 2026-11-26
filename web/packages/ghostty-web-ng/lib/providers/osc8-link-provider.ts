@@ -131,8 +131,10 @@ export interface ITerminalForOSC8Provider {
         | undefined;
     };
   };
-  wasmTerm?: Pick<
-    VtTerminal,
-    'getHyperlinkUri' | 'getScrollbackHyperlinkUri' | 'getScrollbackLength'
-  >;
+  // A required key that may hold undefined (before open, after dispose), so
+  // a terminal that stops offering it fails the type check where the
+  // provider is registered, instead of silently losing every OSC 8 link.
+  wasmTerm:
+    | Pick<VtTerminal, 'getHyperlinkUri' | 'getScrollbackHyperlinkUri' | 'getScrollbackLength'>
+    | undefined;
 }

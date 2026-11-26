@@ -80,7 +80,7 @@ export class Terminal {
 
   // Components (created on open())
   private ghostty?: GhosttyVt;
-  public wasmTerm?: VtTerminal; // Made public for link providers
+  public wasmTerm: VtTerminal | undefined; // Made public for link providers
   #coreAccess?: ReturnType<typeof createTerminalCore>;
   /** Available from open to dispose; the widget retains ownership of the raw core. */
   get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
