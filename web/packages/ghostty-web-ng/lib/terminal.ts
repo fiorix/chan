@@ -92,16 +92,16 @@ export class Terminal {
     }));
   }
 
-  // Public properties (xterm.js compatibility)
+  // Public properties
   public cols: number;
   public rows: number;
   public element?: HTMLElement;
 
-  // Buffer API (xterm.js compatibility)
+  // Buffer API
   public readonly buffer: IBufferNamespace;
   public readonly viewport: TerminalViewport;
 
-  // Options (public for xterm.js compatibility)
+  // Options
   public readonly options!: Required<ITerminalOptions>;
 
   // Components (created on open())
@@ -141,7 +141,7 @@ export class Terminal {
   #resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   #changeEmitter = new EventEmitter<TerminalChange>();
   #linkEmitter = new EventEmitter<TerminalLinkActivation>();
-  // Public event accessors (xterm.js compatibility)
+  // Public event accessors
   public readonly onData: IEvent<string> = this.#dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.#resizeEmitter.event;
   public readonly onChange: IEvent<TerminalChange> = this.#changeEmitter.event;
@@ -160,10 +160,10 @@ export class Terminal {
   #writeQueue: Uint8Array[] = [];
   #awaitingEcho = false;
 
-  // Phase 1: Custom event handlers
+  // Custom event handlers
   #customKeyEventHandler?: (event: KeyboardEvent) => boolean;
 
-  // Phase 2: Viewport and scrolling state
+  // Viewport and scrolling state
   #viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   #targetViewportY: number = 0; // Target viewport position for smooth scrolling
   #scrollAnimationStartTime?: number;
@@ -211,7 +211,7 @@ export class Terminal {
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
-    // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
+    // Wrap in Proxy to intercept runtime changes
     (this.options as any) = new Proxy(baseOptions, {
       set: (target: any, prop: string, value: any) => {
         const oldValue = target[prop];
@@ -256,7 +256,6 @@ export class Terminal {
 
   /**
    * Handle runtime option changes (called when options are modified after terminal is open)
-   * This enables xterm.js compatibility where options can be changed at runtime
    */
   #handleOptionChange(key: string, newValue: any, oldValue: any): void {
     if (newValue === oldValue) return;
@@ -576,7 +575,7 @@ export class Terminal {
       parent.addEventListener('mouseleave', this.#handleMouseLeave);
       parent.addEventListener('click', this.#handleClick);
 
-      // Setup wheel event handling for scrolling (Phase 2)
+      // Setup wheel event handling for scrolling
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.#handleWheel, { passive: false, capture: true });
 
@@ -769,8 +768,6 @@ export class Terminal {
 
     // Cancel render loop before resize to prevent accessing detached TypedArray
     // views while WASM reallocates buffers. We restart it after resize completes.
-    // This avoids the background-tab regression of using an isResizing flag
-    // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
     this.#cancelRenderLoop();
 
     try {
@@ -813,7 +810,8 @@ export class Terminal {
       }
       if (errors.length > 0) throw errors[0];
     } finally {
-      // Flush any writes that were queued during resize, then restart render loop
+      // Restart the render loop. Nothing adds to the write queue, so the
+      // flush finds it empty.
       this.#flushWriteQueue();
       this.#startRenderLoop();
     }
@@ -846,7 +844,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Selection API (xterm.js compatible)
+  // Selection API
   // ==========================================================================
 
   /**
@@ -984,7 +982,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Phase 1: Custom Event Handlers
+  // Custom Event Handlers
   // ==========================================================================
 
   /**
@@ -1004,7 +1002,7 @@ export class Terminal {
   }
 
   /**
-   * Attach a custom wheel event handler (Phase 2)
+   * Attach a custom wheel event handler
    * Returns true to prevent default handling
    */
   public attachCustomWheelEventHandler(
@@ -1014,7 +1012,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Phase 2: Scrolling Methods
+  // Scrolling Methods
   // ==========================================================================
 
   /**
@@ -1237,7 +1235,7 @@ export class Terminal {
   }
 
   /**
-   * Flush any writes that were queued during resize
+   * Write what the write queue holds to the core; nothing adds to it.
    */
   #flushWriteQueue(): void {
     while (this.#writeQueue.length > 0) {
@@ -1675,7 +1673,7 @@ export class Terminal {
   };
 
   /**
-   * Handle wheel events for scrolling (Phase 2)
+   * Handle wheel events for scrolling
    */
   #handleWheel = (e: WheelEvent): void => {
     // Always prevent default browser scrolling

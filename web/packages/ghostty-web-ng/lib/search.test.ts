@@ -3,7 +3,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { GhosttyVt, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 
-// Structural contract lets the same assertions run on a widget without search.
 type Count = Readonly<{ index: number | null; total: number; partial: boolean }>;
 type Search = {
   find(query: string): void;
