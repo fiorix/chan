@@ -165,15 +165,6 @@
 // a newly found shape that does not defeat a whole rule is named in the
 // list above with a plant rather than adding another special case.
 //
-// Readers that other changes remove are listed as pending, each pinned by
-// the text of the node it reports: a reader more or fewer in a listed
-// file fails, and so does one replaced by a reader of another text, while
-// a reader moved with its text unchanged does not, nor one replaced by
-// another of that text in the same file. Nothing is pending, and a test
-// pins the list empty: an entry added later is named in that test as
-// well, with the change that removes it, so the commit that lets a reader
-// through says why in the code.
-//
 // The package keeps four members TypeScript private on purpose, as its
 // search measurement's seam: `SearchOwner`'s `pump` and `readResults` and
 // `CanvasRenderer`'s `highlightAt` and `cacheHighlights`, which that
@@ -284,37 +275,6 @@ const TEST_RULES: ReadonlySet<Rule> = new Set(["deep", "member", "patch"]);
 
 /// Where a finding is and what it names.
 type Site = { rule: Rule; file: string; line: number; key: string };
-/// A finding keeps the text of the node it reports, whitespace collapsed,
-/// which a pending entry pins.
-type Finding = Site & { text: string };
-
-/// Who removes a pending reader: the app's terminal code, or the widget
-/// package by taking over what the reader tests.
-type Owner = "app terminal" | "widget package";
-
-/// Readers that are there today and that the change named in `until`
-/// removes. An entry covers the findings of `key` under `rule` in `file`,
-/// and `readers` is the text of each node it covers, as a multiset: the
-/// check fails when the covered findings' texts differ from it, so a
-/// reader more, on a line of its own or beside another, a reader fewer,
-/// and a reader replaced by one of another text all fail, and each reader
-/// that goes takes its text off the list. A reader moved with its text
-/// unchanged passes, and so does a reader replaced by another of the same
-/// text in the same file.
-type Pending = { rule: Rule; file: string; key: string; readers: readonly string[]; owner: Owner; until: string };
-
-/// The entries of one owner, change, rule and file, the readers' texts per
-/// key.
-const pending = (
-  owner: Owner,
-  until: string,
-  rule: Rule,
-  file: string,
-  readers: Record<string, readonly string[]>,
-): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
-
-const PENDING: readonly Pending[] = [];
-
 /// A run of a module's text copied from its file: `at` in the module,
 /// `from` in the file.
 type Span = { at: number; from: number; length: number };
@@ -556,7 +516,7 @@ function loadSources(plants: ReadonlyMap<string, string>): Source[] {
   return sources;
 }
 
-function scan(plants: ReadonlyMap<string, string>): Finding[] {
+function scan(plants: ReadonlyMap<string, string>): Site[] {
   const sources = loadSources(plants);
   const virtual = new Map(sources.filter((s) => s.rel.endsWith(".svelte") || plants.has(s.rel)).map((s) => [s.file, s.text]));
   const declarations = ts.sys
@@ -584,7 +544,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   };
   const program = ts.createProgram({ rootNames: [...sources.map((s) => s.file), ...declarations], options, host });
   const checker = program.getTypeChecker();
-  const findings = new Map<string, Finding>();
+  const findings = new Map<string, Site>();
 
   /// Whether a declaration is the package's own: in its `lib/` or `vt/`,
   /// by whatever path the program read the file, a test excepted.
@@ -906,7 +866,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const report = (rule: Rule, at: ts.Node, key: string) => {
       if (source.kind === "test" && !TEST_RULES.has(rule)) return;
       const start = at.getStart(sf);
-      const finding = { rule, file: source.rel, line: lineIn(source, start), key, text: at.getText(sf).replace(/\s+/g, " ") };
+      const finding = { rule, file: source.rel, line: lineIn(source, start), key };
       // One finding per node: two reads on one line are two findings, and
       // so are two nodes that start at one position (`a.b.b`).
       findings.set(`${show(finding)} @${start}:${at.getEnd()}`, finding);
@@ -1769,47 +1729,14 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 58, key: "Terminal.viewportY" },
 ];
 
-/// Entries over the planted reads that pin a reader too few, a reader too
-/// many, a second read on a line where one is pinned, and a reader of
-/// another text, and one that is right, so the pin shows it fires on each
-/// and only there.
-const PLANT_PENDING: readonly Pending[] = [
-  ...pending("app terminal", "planted", "deep", "src/terminal/boundaryPlant.ts", {
-    "@chan/ghostty-web-ng/lib/renderer": [],
-  }),
-  ...pending("app terminal", "planted", "patch", "src/terminal/boundaryPlant.ts", {
-    "Object.assign Terminal": ["Object.assign(term, { cols: 1 })", "Object.assign(term, { cols: 1 })"],
-  }),
-  ...pending("app terminal", "planted", "member", "src/terminal/boundaryPlant.ts", {
-    "Terminal.canvas": ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]'],
-    "Terminal.__proto__": ["term.__proto__"],
-  }),
-  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", {
-    wasmTerm: ["wasmTerm?: unknown"],
-    renderer: ["renderer: { renderer: number }", "renderer: number", "nest.renderer"],
-  }),
-];
-
 function show(f: Site): string {
   return `${f.rule} ${f.file}:${f.line} ${f.key}`;
 }
-const covers = (p: Pending, f: Finding) => p.rule === f.rule && p.file === f.file && p.key === f.key;
-/// The entries whose readers are not the texts of the findings they cover,
-/// each with the texts it pins and the texts it covers, sorted.
-const mispinned = (entries: readonly Pending[], findings: readonly Finding[]) =>
-  entries.flatMap((p) => {
-    const pins = [...p.readers].sort();
-    const found = findings
-      .filter((f) => covers(p, f))
-      .map((f) => f.text)
-      .sort();
-    return JSON.stringify(found) === JSON.stringify(pins) ? [] : [{ entry: `${p.rule} ${p.file} ${p.key}`, pins, covers: found }];
-  });
 
 // Source-text contract: no app module reaches the terminal widget past its public API, in modules written later too.
 describe("the terminal widget's boundary", () => {
-  let real: Finding[] = [];
-  let planted: Finding[] = [];
+  let real: Site[] = [];
+  let planted: Site[] = [];
   beforeAll(() => {
     if (JSON.parse(readText(`${APP}/package.json`)).name !== "@chan/workspace-app") {
       throw new Error(`vitest runs in ${APP}, not in the workspace app`);
@@ -1826,45 +1753,7 @@ describe("the terminal widget's boundary", () => {
     expect(planted.map(show).sort()).toEqual(PLANTED.map(show).sort());
   });
 
-  test("no app module reaches the widget past its public API, beyond the pending readers", () => {
-    expect(real.filter((f) => !PENDING.some((p) => covers(p, f))).map(show)).toEqual([]);
-  });
-
-  test("each pending entry covers exactly the readers it pins", () => {
-    expect(mispinned(PENDING, real)).toEqual([]);
-  });
-
-  test("no reader is pending", () => {
-    expect(PENDING.map((p) => `${p.rule} ${p.file} ${p.key}, until ${p.until}`)).toEqual([]);
-  });
-
-  test("a pending entry fails on a reader more, fewer or of another text than it pins", () => {
-    expect(mispinned(PLANT_PENDING, planted)).toEqual([
-      {
-        entry: "deep src/terminal/boundaryPlant.ts @chan/ghostty-web-ng/lib/renderer",
-        pins: [],
-        covers: ['"@chan/ghostty-web-ng/lib/renderer"'],
-      },
-      {
-        entry: "patch src/terminal/boundaryPlant.ts Object.assign Terminal",
-        pins: ["Object.assign(term, { cols: 1 })", "Object.assign(term, { cols: 1 })"],
-        covers: ["Object.assign(term, { cols: 1 })"],
-      },
-      {
-        entry: "member src/terminal/boundaryPlant.ts Terminal.canvas",
-        pins: ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]'],
-        covers: ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]', 'term["canvas"]'],
-      },
-      {
-        entry: "member src/terminal/boundaryPlant.ts Terminal.__proto__",
-        pins: ["term.__proto__"],
-        covers: ['term["__proto__"]'],
-      },
-      {
-        entry: "name src/terminal/boundaryPlant.ts renderer",
-        pins: ["nest.renderer", "renderer: number", "renderer: { renderer: number }"],
-        covers: ["nest.renderer", "nest.renderer.renderer", "renderer: number", "renderer: { renderer: number }"],
-      },
-    ]);
+  test("no app module reaches the widget past its public API", () => {
+    expect(real.map(show)).toEqual([]);
   });
 });
