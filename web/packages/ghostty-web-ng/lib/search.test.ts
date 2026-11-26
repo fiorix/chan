@@ -152,18 +152,21 @@ function placementStopsAt(...at: number[]) {
   });
 }
 // Placement held at list entry `at`, its slice spent at each read that
-// reaches it, as feeds that spend every frame's slice hold it, until the
-// returned release.
-function placementHeldAt(at: number): () => void {
-  let held = true;
+// reaches it, as feeds that spend every frame's slice hold it, until
+// `release`; `move` holds it at another entry from then on.
+function placementHold(at: number) {
+  let held: number | null = at;
   const read = VtSearch.prototype.readMatches;
   vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, start: number, budget: number) {
     const batch = read.call(this, start, budget);
-    if (!held || start > at || batch.next <= at) return batch;
+    if (held === null || start > held || batch.next <= held) return batch;
     now += 5;
-    return { ranges: batch.ranges.slice(0, at - start), next: at, total: batch.total };
+    return { ranges: batch.ranges.slice(0, held - start), next: held, total: batch.total };
   });
-  return () => { held = false; };
+  return {
+    move: (to: number) => { held = to; },
+    release: () => { held = null; },
+  };
 }
 const long = () => Array.from({ length: 3000 }, (_, i) => i % 10 === 5 ? `needle ${i}` : `line ${i}`).join('\r\n');
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `needle ${i}`).join('\r\n');
@@ -882,7 +885,7 @@ describe('widget search', () => {
     const head = raw.state().total;
     raw.free();
     expect(head, 'the active-area entries of the three listed pages').toBe(240);
-    const release = placementHeldAt(head);
+    const { release } = placementHold(head);
     term.write('\x1b[m');
     frame();
     frame();
@@ -896,6 +899,55 @@ describe('widget search', () => {
     }
     release();
     settle(search);
+    expect(active(term)).toEqual([wrapped]);
+    expect(search.state).toEqual({ index: 125, total: 241, partial: false });
+  });
+
+  // A newer press from no active match lands at its one-second cap on the
+  // oldest match, with placement held at the three listed pages'
+  // active-area entries. The press reads no ordering rule; where find ran
+  // first, the rule was read and the list found not yet in position order.
+  // Either way the next write takes a window the rule has not passed, and
+  // placement places nothing after it, so newer presses walk the first
+  // listed page, the page above, up to its newest entry, 230:0. That one's
+  // neighbour is the match wrapped across the first page boundary, not yet
+  // placed: the press waits for it rather than land on the middle page's
+  // oldest, 232:0.
+  test.each(['unread', 'read'])('a window taken after a press landed at its cap ends at the first listed page, the ordering rule %s', async (rule) => {
+    const { term } = await create(threeStraddled, 200, 20, 10_000_000);
+    const wrapped = range(230, 197, 231, 2);
+    const hold = placementHold(240);
+    const search = searchOf(term);
+    if (rule === 'read') {
+      search.find('needle');
+      now += 16;
+      frame();
+      expect(search.state, 'placement holds at the active-area entries').toEqual({ index: null, total: 240, partial: true });
+    }
+    search.step('needle', 'newer');
+    for (let i = 0; i < 200 && active(term)?.[0]?.start.absoluteRow !== 0; i++) {
+      now += 16;
+      frame();
+    }
+    expect(active(term), 'the press landed at its cap on the oldest match').toEqual([range(0, 0)]);
+    expect(search.state).toEqual({ index: 240, total: 240, partial: true });
+    hold.move(0);
+    term.write('\x1b[m');
+    const walk: (number | undefined)[] = [];
+    for (let i = 0; i < 115; i++) {
+      search.step('needle', 'newer');
+      walk.push(active(term)?.[0]?.start.absoluteRow);
+    }
+    expect(walk, 'the placed first listed page, oldest to newest').toEqual(Array.from({ length: 115 }, (_, i) => 2 * (i + 1)));
+    search.step('needle', 'newer');
+    expect(active(term), 'the press waits for the wrapped match').toEqual([range(230, 0)]);
+    expect(search.state, 'the press returned before placement').toEqual({ index: null, total: 240, partial: true });
+    hold.release();
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      expect([range(230, 0), wrapped], `frame ${i}: the press waits on its match or lands on its neighbour`).toContainEqual(active(term)?.[0]);
+      now += 16;
+    }
     expect(active(term)).toEqual([wrapped]);
     expect(search.state).toEqual({ index: 125, total: 241, partial: false });
   });
