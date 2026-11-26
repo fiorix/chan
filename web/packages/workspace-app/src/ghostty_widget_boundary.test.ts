@@ -624,6 +624,14 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     }
     return ts.isStringLiteralLike(e) ? e.text : undefined;
   }
+  /// The string keys a key expression names: the literal as written, or
+  /// else each string literal its type is (`const k = "isOpen" as const`).
+  function keysOf(e: ts.Expression): string[] {
+    const written = literalKey(e);
+    if (written !== undefined) return [written];
+    const type = checker.getTypeAtLocation(e);
+    return (type.isUnion() ? type.types : [type]).flatMap((t) => (t.isStringLiteral() ? [t.value] : []));
+  }
 
   /// The member a dot or a string-keyed bracket reads, and its receiver.
   function access(node: ts.Node): { name: string; receiver: ts.Expression } | undefined {
@@ -748,22 +756,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       const reached = access(node);
       if (reached) read(reached.receiver, reached.name, node);
       if (ts.isElementAccessExpression(node) && !reached) {
-        const key = checker.getTypeAtLocation(node.argumentExpression);
-        for (const part of key.isUnion() ? key.types : [key]) {
-          if (part.isStringLiteral()) read(node.expression, part.value, node);
-        }
+        for (const key of keysOf(node.argumentExpression)) read(node.expression, key, node);
       }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword) {
-        const key = literalKey(node.left);
-        if (key !== undefined) read(node.right, key, node);
+        for (const key of keysOf(node.left)) read(node.right, key, node);
       }
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length >= 2) {
-        const key = literalKey(node.arguments[1]);
-        if (key !== undefined && READERS.has(node.expression.getText(sf))) read(node.arguments[0], key, node);
+        if (READERS.has(node.expression.getText(sf))) for (const key of keysOf(node.arguments[1])) read(node.arguments[0], key, node);
       }
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "hasOwnProperty") {
-        const key = node.arguments.length === 1 ? literalKey(node.arguments[0]) : undefined;
-        if (key !== undefined) read(node.expression.expression, key, node);
+        if (node.arguments.length === 1) for (const key of keysOf(node.arguments[0])) read(node.expression.expression, key, node);
       }
       if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
         for (const element of node.name.elements) {
@@ -947,6 +949,11 @@ const PLANTS = new Map<string, string>([
       "export const mapped = (term: Terminal) => [term].map((t: any) => t.isOpen as boolean);",
       "export const mappedUnknown = (term: Terminal) => [term].map((t: unknown) => (t as Raw).isOpen);",
       "export const promised = (term: Terminal) => Promise.resolve(term).then((t: any) => t.isOpen as boolean);",
+      'const OPEN = "isOpen" as const;',
+      "export const reflectedKey = (term: Terminal) => Reflect.get(term, OPEN);",
+      "export const inKey = (term: Terminal) => OPEN in term;",
+      "export const ownKey = (term: Terminal) => Object.hasOwn(term, OPEN);",
+      "export const ownPropertyKey = (term: Terminal) => term.hasOwnProperty(OPEN);",
     ].join("\n"),
   ],
   [
@@ -1029,6 +1036,8 @@ const PLANTS = new Map<string, string>([
       "  const term = box.t as Terminal;",
       "  return (term as unknown as Raw).isOpen;",
       "};",
+      'const KEY = "assertOpen" as const;',
+      "export const reflectedKey = (term: Terminal) => Reflect.get(term, KEY);",
     ].join("\n"),
   ],
 ]);
@@ -1080,6 +1089,11 @@ const PLANTED: readonly Finding[] = [
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 69, key: "Terminal into a parameter any" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 70, key: "Terminal into a parameter unknown" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 71, key: "Terminal into a parameter any" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 73, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 74, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 75, key: "Terminal.isOpen" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 75, key: "Terminal into object" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 76, key: "Terminal.isOpen" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
@@ -1108,6 +1122,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 21, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 27, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 31, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 34, key: "Terminal.assertOpen" },
 ];
 
 /// Entries over the planted reads whose counts are off, one each way, and
