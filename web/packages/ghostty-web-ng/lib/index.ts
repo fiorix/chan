@@ -28,11 +28,10 @@ export type {
 // The key numbering the input handler encodes keys by
 export { Key, KeyEncoderOption } from './types';
 
-// Low-level components (for custom integrations)
-export { CanvasRenderer } from './renderer';
+// The types of the terminal's paint layers, metrics and selections, and the
+// input handler chan's key tests drive on their own
 export type { FontMetrics, PaintFrame, PaintLayer } from './renderer';
 export { InputHandler } from './input-handler';
-export { SelectionManager } from './selection-manager';
 
 export type { SelectionAnchor, SelectionRange } from './selection-manager';
 export type { HighlightRange, HighlightStyle } from './highlights';
