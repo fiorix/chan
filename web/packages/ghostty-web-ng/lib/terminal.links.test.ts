@@ -291,3 +291,62 @@ describe('link gesture completion through registered listeners', () => {
     }
   });
 });
+
+describe('the hovered link underline', () => {
+  // Every link underline is a stroke in this colour, one per hovered cell.
+  const UNDERLINE = '#4A90E2';
+
+  // A context that keeps what is set on it and records each stroke's colour.
+  function recordStrokes(): string[] {
+    const strokes: string[] = [];
+    vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation((() => {
+      const state: Record<string, unknown> = {};
+      return new Proxy(state, {
+        get: (target, key: string) => {
+          if (key === 'measureText') return () => ({ width: 8, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 });
+          if (key === 'stroke') return () => strokes.push(String(target.strokeStyle));
+          return key in target ? target[key] : () => undefined;
+        },
+        set: (target, key: string, value) => {
+          target[key] = value;
+          return true;
+        },
+      });
+    }) as never);
+    return strokes;
+  }
+
+  function underlined(term: Terminal, strokes: string[]): number {
+    strokes.length = 0;
+    term.refresh();
+    return strokes.filter((style) => style === UNDERLINE).length;
+  }
+
+  function move(host: HTMLElement, p: Pointer) {
+    host.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: p.x, clientY: p.y }));
+  }
+
+  // Hover moves are throttled to one per 16 ms and the link lookup resolves
+  // asynchronously; this waits out both.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test('an OSC 8 link loses it when the pointer leaves the terminal or moves off the link', async () => {
+    const strokes = recordStrokes();
+    const { term, host } = await terminal();
+    term.write('see \x1b]8;;./dev/notes.md\x07README\x1b]8;;\x07 plain\r\n');
+    expect(underlined(term, strokes), 'nothing is hovered yet').toBe(0);
+
+    move(host, cell(5, 0));
+    await settle();
+    expect(underlined(term, strokes), 'the hovered link is underlined').toBeGreaterThan(0);
+    host.dispatchEvent(new MouseEvent('mouseleave'));
+    expect(underlined(term, strokes), 'after the pointer left the terminal').toBe(0);
+
+    move(host, cell(5, 0));
+    await settle();
+    expect(underlined(term, strokes)).toBeGreaterThan(0);
+    move(host, cell(13, 0));
+    await settle();
+    expect(underlined(term, strokes), 'after the pointer moved to plain text').toBe(0);
+  });
+});

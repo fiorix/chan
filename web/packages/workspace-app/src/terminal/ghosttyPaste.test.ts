@@ -15,7 +15,6 @@ import {
   handleGhosttyPasteInput,
   pasteIntoGhostty,
   pasteLineEnds,
-  type GhosttyPasteTerminal,
 } from "./ghosttyPaste";
 import { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
 
@@ -193,19 +192,14 @@ describe("pasting into a ghostty terminal", () => {
     expect(sent).toEqual(["a"]);
   });
 
-  test("a terminal over another core pastes through ghostty-web's own paste, line ends converted", () => {
-    const pastes: string[] = [];
-    const term: GhosttyPasteTerminal = {
-      wasmTerm: {},
-      hasBracketedPaste: () => false,
-      paste: (text) => void pastes.push(text),
-      input: () => {
-        throw new Error("input is the binding's path");
-      },
-    };
-    pasteIntoGhostty(term, "a\nb");
-    pasteIntoGhostty(term, "");
-    expect(pastes).toEqual(["a\rb"]);
+  test("a terminal that is not open has no core and refuses the paste", async () => {
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false });
+    opened.push(term);
+    const sent: string[] = [];
+    term.onData((data) => void sent.push(data));
+    expect(() => pasteIntoGhostty(term, "a\nb")).toThrow("Terminal must be opened before a paste");
+    expect(sent).toEqual([]);
   });
 });
 
