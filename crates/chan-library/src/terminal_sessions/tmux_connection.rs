@@ -1273,8 +1273,11 @@ impl TmuxConnection {
 }
 
 /// How many history rows a capture of a pane `cols` wide asks for: the
-/// scrollback setting in lines at that width, inside the submit bound and
-/// half the reply's byte bound at the most a cell can cost.
+/// rows the scrollback setting's byte budget holds at that width at 12
+/// bytes a cell, inside the submit bound and half the reply's byte bound
+/// at the most a cell can cost. The count is an estimate: the terminal's
+/// history keeps what fits of its budget, and a row costs what its
+/// content costs.
 pub(super) fn capture_history_rows(scrollback_mb: u32, cols: u32) -> u32 {
     let cols = cols.max(1) as usize;
     let lines = (scrollback_mb as usize * 1024 * 1024) / (cols * 12);
@@ -1345,7 +1348,7 @@ mod tests {
 
     #[test]
     fn history_rows_follow_the_width_and_the_bounds() {
-        // 10 MB at 80 columns is the SPA's 10,922 lines.
+        // 10 MB at 80 columns is 10,922 rows at 12 bytes a cell.
         assert_eq!(capture_history_rows(10, 80), 10_922);
         // 50 MB at 80 columns would be 54,613 lines; the byte bound caps it.
         assert_eq!(capture_history_rows(50, 80), 17_458);

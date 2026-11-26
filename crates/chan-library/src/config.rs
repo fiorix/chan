@@ -2,8 +2,9 @@
 //!
 //! `TerminalConfig` is the terminal subsystem's own configuration: the
 //! registry (`terminal_sessions`) reads it for idle pruning, the session
-//! cap, the replay-ring budget, and the spawn-time TERM / font / MCP-env
-//! defaults. `chan-server` embeds it in its on-disk `ServerConfig`, loads
+//! cap, the replay-ring budget, the spawn-time TERM, program status, the
+//! tmux gate's policy and a pane capture's size, and the shell profiles.
+//! `chan-server` embeds it in its on-disk `ServerConfig`, loads
 //! and range-clamps it in the settings route, and surfaces it over
 //! `/api/config`; the wire shape lives here so the registry and the route
 //! layer agree on one definition.
@@ -42,11 +43,17 @@ pub struct TerminalConfig {
     pub session_cap: usize,
     #[serde(default = "default_terminal_ring_bytes")]
     pub ring_bytes: usize,
-    /// Per-terminal scrollback budget in MB. Consumed by the SPA when it
-    /// constructs the terminal widget, to compute the scrollback line cap;
-    /// the server only persists + range-clamps the value. Spawn-time-
-    /// only: existing terminals keep their current scrollback until
-    /// the session restarts.
+    /// Per-terminal scrollback budget in MB. The SPA passes it to the
+    /// terminal widget as a byte budget for the history its core keeps
+    /// (1,048,576 bytes per MB), so how many rows fit depends on the
+    /// terminal's width and on what the rows hold. The SPA reads it when
+    /// it builds a terminal widget, so an open widget keeps its budget
+    /// until the SPA builds a new one, as a window reload does. The
+    /// server persists the value, and sizes a tmux pane's capture by the
+    /// value its tenant was built with, so a change reaches the capture
+    /// once the tenant is mounted again. The settings route range-clamps
+    /// a value it is sent and `chan config set` refuses one out of range;
+    /// a hand-edited `server.toml` loads as written.
     #[serde(default = "default_terminal_scrollback_mb")]
     pub scrollback_mb: u32,
     /// Default TERM value handed to newly-spawned PTYs. The SPA
