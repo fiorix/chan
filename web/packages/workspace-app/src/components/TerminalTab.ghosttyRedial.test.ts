@@ -24,6 +24,7 @@ import {
   ghosttyMode,
   ghosttyMouseTracking,
   mountGhosttyTerminal,
+  pressInGhostty,
 } from "../__tests__/ghosttyTab";
 import {
   installTerminalDom,
@@ -510,6 +511,38 @@ describe("a redial whose answer does not continue the view", () => {
     await output(next, NEW_ROWS);
     await receive(next, { type: "ready", cols: 80, rows: 24 });
     expect(newRowsShown(term), "every row of the new life once").toEqual(Array(20).fill(1));
+  });
+
+  test("across a restart, after a cut replay that continued the view, keeps none of the old life's keyboard protocol", async () => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const initial = JSON.parse(JSON.stringify(tab!.keyboardProtocol));
+    const first = TerminalSocket.all.at(-1)!;
+    first.onopen?.();
+    await receive(first, session(ATTACHED_AT, 0, 0));
+    await receive(first, { type: "ready", cols: 80, rows: 24 });
+    // The program asks for modifyOtherKeys and kitty keyboard flags.
+    const negotiated = "\x1b[>4;2m\x1b[>5u";
+    await output(first, negotiated);
+    expect(JSON.parse(JSON.stringify(tab!.keyboardProtocol)), "fixture: the program's keyboard protocol").not.toEqual(initial);
+    const second = await redialed(first, ATTACHED_AT + negotiated.length);
+    const delta = "more output, cut part way";
+    await receive(second, session(ATTACHED_AT + negotiated.length + delta.length, 0, delta.length));
+    await output(second, delta.slice(0, 10));
+    const third = await redialedAfterCut(second);
+    expect(dialed(third), "fixture: the redial resumes from the cut").toMatchObject({
+      since: String(ATTACHED_AT + negotiated.length + 10), generation: String(GENERATION),
+    });
+    // The session restarted in place while the tab redialed: the reset
+    // ahead of the new life's session frame, its prompt, then ready.
+    await output(third, "\x1bc");
+    await receive(third, { ...session(2, 0, 2), generation: GENERATION + 1 });
+    await output(third, "$ ");
+    await receive(third, { type: "ready", cols: 80, rows: 24 });
+    expect(JSON.parse(JSON.stringify(tab!.keyboardProtocol)), "the new life's keyboard protocol").toEqual(initial);
+    pressInGhostty(term, { key: "Enter", code: "Enter", shiftKey: true });
+    expect(sentFrames(third).filter((frame) => frame.type === "input").map((frame) => frame.data), "no modifyOtherKeys Enter")
+      .not.toContain("\x1b[27;2;13~");
   });
 
   test("answered by another session writes that session's whole replay", async () => {
