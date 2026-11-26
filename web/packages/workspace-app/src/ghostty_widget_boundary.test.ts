@@ -6,7 +6,8 @@
 // them at run time, and a member reached that way reads `undefined` once
 // the package spells it `#private`: the reader does not fail, it takes
 // whatever fallback it has. This check reads every app module through the
-// TypeScript checker and reports, with file and line:
+// TypeScript checker, a component as its scripts and the expressions of
+// its markup, and reports, with file and line:
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock
 //    or `import.meta.glob` pattern that reaches a path inside the package
@@ -24,16 +25,25 @@
 //    or `Reflect.getPrototypeOf` (tests may reach one to read and spy on
 //    its public members);
 // 5. name: the name of one of the widget's implementation members, which
-//    catches what has no widget type to check: a duck-typed parameter, a
-//    Svelte template expression.
+//    catches what has no widget type to check, such as a duck-typed
+//    parameter.
 //
 // Shipped modules are held to all five rules, tests to 1, 3 and 4. A dot
 // read of a private member on a widget-typed value is a type error, but
 // `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
-// so rule 3 reads dots as well. It is a property of every module,
-// including ones not written yet, that no mounted test can observe, so it
-// reads the source.
+// so rule 3 reads dots as well.
+//
+// It does not follow a widget value through a parameter or a property
+// typed `any`, `unknown` or a duck type, where in shipped code only rule
+// 5's names are seen; a key held in a variable; or a destructuring that is
+// not a declaration. Markup is read in the instance script's scope, so a name
+// declared in a component's `<script module>` beside an instance script,
+// or a `$store` read, has no type there.
+//
+// It is a property of every module, including ones not written yet, that
+// no mounted test can observe, so it reads the source.
 
+import { parse } from "svelte/compiler";
 import ts from "typescript";
 import { beforeAll, describe, expect, test } from "vitest";
 
@@ -174,11 +184,15 @@ const PENDING: readonly Pending[] = [
   }),
 ];
 
-/// A module as the program reads it: a `.ts` file whole, or one script
-/// block of a component (`line` is its first line in the component), or a
-/// component's markup with its scripts, styles and comments blanked so
-/// lines keep their numbers (`markup`).
-type Source = { file: string; rel: string; kind: Kind; text: string; line: number; markup: boolean };
+/// A run of a module's text copied from its file: `at` in the module,
+/// `from` in the file.
+type Span = { at: number; from: number; length: number };
+type Range = { start: number; end: number };
+
+/// A module as the program reads it: a `.ts` file whole, or a component's
+/// `<script module>`, or its instance script followed by its markup's
+/// expressions. `spans` lead a module position back to the file's text.
+type Source = { file: string; rel: string; kind: Kind; text: string; spans: Span[]; original: string };
 
 function kindOf(rel: string): Kind | null {
   if (rel.endsWith(".d.ts") || !/\.(ts|svelte)$/.test(rel)) return null;
@@ -188,22 +202,194 @@ function kindOf(rel: string): Kind | null {
   return /^(vitest\.setup|[^/]+\.test)\.ts$/.test(rel) ? "test" : null;
 }
 
-const blank = (text: string) => text.replace(/[^\n]/g, " ");
+/// Svelte's template node types; any other node in a template is an ESTree
+/// expression or pattern.
+const TEMPLATE_NODES = new Set([
+  "Fragment",
+  "Text",
+  "Comment",
+  "ExpressionTag",
+  "HtmlTag",
+  "ConstTag",
+  "DebugTag",
+  "RenderTag",
+  "AttachTag",
+  "Attribute",
+  "SpreadAttribute",
+  "AnimateDirective",
+  "BindDirective",
+  "ClassDirective",
+  "LetDirective",
+  "OnDirective",
+  "StyleDirective",
+  "TransitionDirective",
+  "UseDirective",
+  "Component",
+  "TitleElement",
+  "SlotElement",
+  "RegularElement",
+  "SvelteBody",
+  "SvelteBoundary",
+  "SvelteComponent",
+  "SvelteDocument",
+  "SvelteElement",
+  "SvelteFragment",
+  "SvelteHead",
+  "SvelteOptions",
+  "SvelteSelf",
+  "SvelteWindow",
+  "EachBlock",
+  "IfBlock",
+  "AwaitBlock",
+  "KeyBlock",
+  "SnippetBlock",
+]);
+type TemplateNode = Range & { type: string; [key: string]: unknown };
+const isTemplateNode = (value: unknown): value is TemplateNode =>
+  typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
+
+/// What the markup's statements call to type an each block's item and an
+/// await block's value; declared, never run.
+const TEMPLATE_HELPERS = [
+  "declare function __boundaryEach<T>(items: Iterable<T> | ArrayLike<T> | null | undefined): T[];",
+  "declare function __boundaryAwait<T>(value: T): Awaited<T>;",
+].join("\n");
+
+/// A component as modules, from Svelte's own parser: its `<script module>`
+/// when it also has an instance script, then the instance script (or the
+/// module script, or nothing) followed by its markup as statements. Each
+/// expression is copied as written into the scope the markup gives it: an
+/// each block's item and index, a snippet's parameters, an await block's
+/// value and error, a `{@const}`. A `let:` binding is the slot's and left
+/// out, so a name it binds has no type.
+function componentSources(file: string, rel: string, kind: Kind, text: string): Source[] {
+  const root = parse(text, { modern: true }) as unknown as {
+    module: { content: Range } | null;
+    instance: { content: Range } | null;
+    fragment: TemplateNode;
+  };
+  let code = "";
+  let spans: Span[] = [];
+  const put = (s: string) => {
+    code += s;
+  };
+  const copy = (range: Range) => {
+    spans.push({ at: code.length, from: range.start, length: range.end - range.start });
+    code += text.slice(range.start, range.end);
+  };
+  const take = (part: string): Source => {
+    const source = { file: `${file}.${part}.ts`, rel, kind, text: code, spans, original: text };
+    code = "";
+    spans = [];
+    return source;
+  };
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (!isTemplateNode(value)) return;
+    const node = value;
+    if (!TEMPLATE_NODES.has(node.type)) {
+      put("(");
+      copy(node);
+      put(");\n");
+      return;
+    }
+    switch (node.type) {
+      case "Text":
+      case "Comment":
+      case "LetDirective":
+        return;
+      case "Fragment":
+        put("{\n");
+        walk(node.nodes);
+        put("}\n");
+        return;
+      case "ConstTag":
+        copy(node.declaration as Range);
+        put(";\n");
+        return;
+      case "SnippetBlock": {
+        const parameters = node.parameters as Range[];
+        put("function ");
+        copy(node.expression as Range);
+        if (typeof node.typeParams === "string") put(`<${node.typeParams}>`);
+        put("(");
+        if (parameters.length > 0) copy({ start: parameters[0].start, end: parameters[parameters.length - 1].end });
+        put(") ");
+        walk(node.body);
+        return;
+      }
+      case "EachBlock":
+        put("for (const ");
+        if (isTemplateNode(node.context)) copy(node.context);
+        else put("__boundaryItem");
+        put(" of __boundaryEach(");
+        copy(node.expression as Range);
+        put(")) {\n");
+        if (typeof node.index === "string") put(`const ${node.index} = 0;\n`);
+        walk(node.key);
+        walk(node.body);
+        put("}\n");
+        walk(node.fallback);
+        return;
+      case "AwaitBlock":
+        put("{\nconst __boundaryAwaited = __boundaryAwait(");
+        copy(node.expression as Range);
+        put(");\n");
+        walk(node.pending);
+        put("{\n");
+        if (isTemplateNode(node.value)) {
+          put("const ");
+          copy(node.value);
+          put(" = __boundaryAwaited;\n");
+        }
+        walk(node.then);
+        put("}\n{\n");
+        if (isTemplateNode(node.error)) {
+          put("const ");
+          copy(node.error);
+          put(": any = undefined;\n");
+        }
+        walk(node.catch);
+        put("}\n}\n");
+        return;
+    }
+    for (const child of Object.values(node)) walk(child);
+  };
+
+  const sources: Source[] = [];
+  if (root.module && root.instance) {
+    copy(root.module.content);
+    sources.push(take("module"));
+  }
+  const host = root.instance ?? root.module;
+  if (host) copy(host.content);
+  put("\n");
+  walk(root.fragment);
+  put(TEMPLATE_HELPERS);
+  sources.push(take(root.instance || !root.module ? "instance" : "module"));
+  return sources;
+}
 
 function sourcesOf(rel: string, text: string): Source[] {
   const kind = kindOf(rel);
   if (!kind) return [];
   const file = `${APP}/${rel}`;
-  if (!rel.endsWith(".svelte")) return [{ file, rel, kind, text, line: 1, markup: false }];
-  const sources: Source[] = [];
-  const script = /(<script\b[^>]*>)([\s\S]*?)<\/script>/g;
-  for (let match: RegExpExecArray | null, i = 0; (match = script.exec(text)) !== null; i++) {
-    const line = text.slice(0, match.index + match[1].length).split("\n").length;
-    sources.push({ file: `${file}.${i}.ts`, rel, kind, text: match[2], line, markup: false });
+  if (rel.endsWith(".svelte")) return componentSources(file, rel, kind, text);
+  return [{ file, rel, kind, text, spans: [{ at: 0, from: 0, length: text.length }], original: text }];
+}
+
+/// The file's line a module position came from: a copied position maps
+/// into its span, a written one to the end of the span before it.
+function lineIn(source: Source, at: number): number {
+  let from = 0;
+  for (const span of source.spans) {
+    if (span.at > at) break;
+    from = span.from + Math.min(at - span.at, span.length);
   }
-  const markup = text.replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>|<!--[\s\S]*?-->/g, blank);
-  sources.push({ file, rel, kind, text: markup, line: 1, markup: true });
-  return sources;
+  return source.original.slice(0, from).split("\n").length;
 }
 
 /// Every app module, with `plants` read in place of the disk.
@@ -223,8 +409,7 @@ function loadSources(plants: ReadonlyMap<string, string>): Source[] {
 
 function scan(plants: ReadonlyMap<string, string>): Finding[] {
   const sources = loadSources(plants);
-  const modules = sources.filter((s) => !s.markup);
-  const virtual = new Map(modules.filter((s) => s.rel.endsWith(".svelte") || plants.has(s.rel)).map((s) => [s.file, s.text]));
+  const virtual = new Map(sources.filter((s) => s.rel.endsWith(".svelte") || plants.has(s.rel)).map((s) => [s.file, s.text]));
   const config = ts.readConfigFile(`${APP}/tsconfig.json`, ts.sys.readFile);
   const options = { ...ts.parseJsonConfigFileContent(config.config, ts.sys, APP).options, noEmit: true };
   const host = ts.createCompilerHost(options, true);
@@ -237,7 +422,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const text = virtual.get(f);
     return text === undefined ? getSourceFile(f, language, onError, create) : ts.createSourceFile(f, text, language, true);
   };
-  const program = ts.createProgram({ rootNames: modules.map((s) => s.file), options, host });
+  const program = ts.createProgram({ rootNames: sources.map((s) => s.file), options, host });
   const checker = program.getTypeChecker();
   const findings = new Map<string, Finding>();
 
@@ -390,31 +575,21 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     (GENERIC.has(name) && (TERMINAL_MODULE.test(rel) || (receiver !== undefined && TERMINAL_RECEIVER.test(receiver))));
 
   for (const source of sources) {
-    const report = (rule: Rule, line: number, key: string) => {
-      if (source.kind === "test" && !TEST_RULES.has(rule)) return;
-      const finding = { rule, file: source.rel, line: line + source.line - 1, key };
-      findings.set(show(finding), finding);
-    };
-    if (source.markup) {
-      if (source.kind !== "shipped") continue;
-      // The receiver is read back from the dot: a pattern that may start in
-      // whitespace backtracks over the blanked scripts quadratically.
-      const member = /\??\.\s*([\w$]+)/g;
-      for (let match: RegExpExecArray | null; (match = member.exec(source.text)) !== null; ) {
-        const receiver = /([\w$]+)\s*$/.exec(source.text.slice(Math.max(0, match.index - 80), match.index))?.[1];
-        if (isImplementationName(source.rel, match[1], receiver)) {
-          report("name", source.text.slice(0, match.index).split("\n").length, match[1]);
-        }
-      }
-      continue;
-    }
     const sf = program.getSourceFile(source.file);
     if (!sf) throw new Error(`the program did not read ${source.rel}`);
-    const lineOf = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+    // A markup shape componentSources renders wrongly fails here, rather
+    // than reading as a module with nothing to report.
+    const [broken] = source.rel.endsWith(".svelte") ? program.getSyntacticDiagnostics(sf) : [];
+    if (broken) throw new Error(`${source.rel} reads as broken TypeScript: ${ts.flattenDiagnosticMessageText(broken.messageText, " ")}`);
+    const report = (rule: Rule, at: ts.Node, key: string) => {
+      if (source.kind === "test" && !TEST_RULES.has(rule)) return;
+      const finding = { rule, file: source.rel, line: lineIn(source, at.getStart(sf)), key };
+      findings.set(show(finding), finding);
+    };
 
     const read = (receiver: ts.Expression, name: string, at: ts.Node) => {
       const widget = widgetOf(receiver);
-      if (widget && hidden(widget, name)) report("member", lineOf(at), `${nameOf(widget)}.${name}`);
+      if (widget && hidden(widget, name)) report("member", at, `${nameOf(widget)}.${name}`);
     };
     const written = (target: ts.Expression) => {
       const access = outer(target);
@@ -422,7 +597,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       const widget = widgetOf(access.expression);
       if (!widget || !isClassInstance(widget)) return;
       const name = ts.isPropertyAccessExpression(access) ? access.name.getText(sf) : access.argumentExpression.getText(sf);
-      report("patch", lineOf(access), `write ${nameOf(widget)}.${name}`);
+      report("patch", access, `write ${nameOf(widget)}.${name}`);
     };
 
     const visit = (node: ts.Node): void => {
@@ -444,7 +619,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         if (dynamic || mock) specifier = node.arguments[0];
       }
       if (specifier && ts.isStringLiteralLike(specifier) && isDeep(specifier.text, source.file)) {
-        report("deep", lineOf(specifier), specifier.text);
+        report("deep", specifier, specifier.text);
       }
       if (
         ts.isCallExpression(node) &&
@@ -455,7 +630,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       ) {
         const [first] = node.arguments;
         for (const pattern of ts.isArrayLiteralExpression(first) ? first.elements : [first]) {
-          if (ts.isStringLiteralLike(pattern) && globReaches(pattern.text, source.file)) report("deep", lineOf(pattern), pattern.text);
+          if (ts.isStringLiteralLike(pattern) && globReaches(pattern.text, source.file)) report("deep", pattern, pattern.text);
         }
       }
 
@@ -465,7 +640,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         const to = checker.getTypeFromTypeNode(node.type);
         const wide = (to.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
         if (isWidget(from) && (wide || !checker.isTypeAssignableTo(checker.getNonNullableType(from), to))) {
-          report("cast", lineOf(node), node.type.getText(sf));
+          report("cast", node, node.type.getText(sf));
         }
       }
 
@@ -510,16 +685,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         node.arguments.length > 0
       ) {
         const widget = widgetOf(node.arguments[0]);
-        if (widget && isClassInstance(widget)) report("patch", lineOf(node), `${node.expression.getText(sf)} ${nameOf(widget)}`);
+        if (widget && isClassInstance(widget)) report("patch", node, `${node.expression.getText(sf)} ${nameOf(widget)}`);
       }
       if (source.kind === "shipped" && reached?.name === "prototype") {
         let symbol = checker.getSymbolAtLocation(reached.receiver);
         if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
-        if (symbol && widgetClass(symbol)) report("patch", lineOf(node), `prototype ${symbol.getName()}`);
+        if (symbol && widgetClass(symbol)) report("patch", node, `prototype ${symbol.getName()}`);
       }
       if (source.kind === "shipped" && reached?.name === "constructor") {
         const widget = widgetOf(reached.receiver);
-        if (widget) report("patch", lineOf(node), `constructor ${nameOf(widget)}`);
+        if (widget) report("patch", node, `constructor ${nameOf(widget)}`);
       }
       if (
         source.kind === "shipped" &&
@@ -529,14 +704,14 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         PROTOTYPE_READERS.has(node.expression.getText(sf))
       ) {
         const widget = widgetOf(node.arguments[0]);
-        if (widget) report("patch", lineOf(node), `${node.expression.getText(sf)} ${nameOf(widget)}`);
+        if (widget) report("patch", node, `${node.expression.getText(sf)} ${nameOf(widget)}`);
       }
 
       // 5. Implementation names.
       if (source.kind === "shipped") {
         const member = memberNamed(node);
         if (member && isImplementationName(source.rel, member.name, member.receiver?.getText(sf))) {
-          report("name", lineOf(node), member.name);
+          report("name", node, member.name);
         }
       }
       ts.forEachChild(node, visit);
@@ -595,6 +770,9 @@ const PLANTS = new Map<string, string>([
       "</script>",
       "",
       "<p>{links}{term.renderer?.getMetrics()}</p>",
+      "<p>{(term as any)?.isOpen}</p>",
+      "{#each [term] as one}<i>{(one as unknown as { canvas: HTMLCanvasElement }).canvas}</i>{/each}",
+      '{#snippet row(t: Terminal)}<b title={t["isOpen"]}></b>{/snippet}',
     ].join("\n"),
   ],
   [
@@ -645,6 +823,11 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "renderer" },
+  { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "any" },
+  { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "Terminal.isOpen" },
+  { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "unknown" },
+  { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "Terminal.canvas" },
+  { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 10, key: "Terminal.isOpen" },
   { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 2, key: "../../../ghostty-web-ng/lib/renderer" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 3, key: "Terminal.isOpen" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 4, key: "write Terminal.cols" },
