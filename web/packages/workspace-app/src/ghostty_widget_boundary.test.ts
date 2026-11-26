@@ -483,10 +483,9 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
     for (const child of Object.values(node)) walk(child);
   };
 
-  const sources: Source[] = [];
   if (root.module && root.instance) {
     copy(root.module.content);
-    sources.push(take("module"));
+    put("\n");
   }
   const host = root.instance ?? root.module;
   if (host) copy(host.content);
@@ -494,8 +493,7 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
   walk(root.fragment);
   put("}\n");
   put(TEMPLATE_HELPERS);
-  sources.push(take(root.instance || !root.module ? "instance" : "module"));
-  return sources;
+  return [take(root.instance || !root.module ? "instance" : "module")];
 }
 
 function sourcesOf(rel: string, text: string): Source[] {
@@ -1402,6 +1400,28 @@ const PLANTS = new Map<string, string>([
       "",
       "<div use:peek={term} transition:swap={term}></div>",
       "{#each [term] as one (one)}<i animate:shift={term}></i>{/each}",
+      "<div in:swap={term} out:swap={term}></div>",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/BoundaryModuleAction.svelte",
+    [
+      '<script module lang="ts">',
+      '  import type { Terminal as ModTerminal } from "@chan/ghostty-web-ng";',
+      "  export function fit(node: HTMLElement, size: { cols: number; rows: number }) {",
+      "    node.dataset.size = `${size.cols}x${size.rows}`;",
+      "  }",
+      "  export const leak = (node: HTMLElement, t: unknown) => void node.append(String(t));",
+      "  export const shared: ModTerminal | null = null;",
+      "</script>",
+      "",
+      '<script lang="ts">',
+      '  import type { Terminal } from "@chan/ghostty-web-ng";',
+      "  let { term }: { term: Terminal } = $props();",
+      "</script>",
+      "",
+      "<div use:fit={term} use:leak={term}></div>",
+      "<p>{(shared as any)?.isOpen}</p>",
     ].join("\n"),
   ],
   [
@@ -1546,6 +1566,11 @@ const PLANTED: readonly Site[] = [
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 11, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 11, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryModuleAction.svelte", line: 15, key: "Terminal into unknown" },
+  { rule: "cast", file: "src/terminal/BoundaryModuleAction.svelte", line: 16, key: "any" },
+  { rule: "member", file: "src/terminal/BoundaryModuleAction.svelte", line: 16, key: "Terminal.isOpen" },
   { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
   { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
