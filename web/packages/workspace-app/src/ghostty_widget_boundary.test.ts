@@ -533,6 +533,17 @@ function loadSources(plants: ReadonlyMap<string, string>): Source[] {
 function scan(plants: ReadonlyMap<string, string>): Finding[] {
   const sources = loadSources(plants);
   const virtual = new Map(sources.filter((s) => s.rel.endsWith(".svelte") || plants.has(s.rel)).map((s) => [s.file, s.text]));
+  const declarations = ts.sys
+    .readDirectory(`${APP}/src`, [".d.ts", ".d.mts", ".d.cts"], undefined, ["**/*"])
+    .map(normalize)
+    .filter((path) => !plants.has(path.slice(APP.length + 1)));
+  for (const [rel, text] of plants) {
+    if (/^src\/.*\.d\.[mc]?ts$/.test(rel)) {
+      const file = `${APP}/${rel}`;
+      virtual.set(file, text);
+      declarations.push(file);
+    }
+  }
   const config = ts.readConfigFile(`${APP}/tsconfig.json`, ts.sys.readFile);
   const options = { ...ts.parseJsonConfigFileContent(config.config, ts.sys, APP).options, noEmit: true };
   const host = ts.createCompilerHost(options, true);
@@ -545,7 +556,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const text = virtual.get(f);
     return text === undefined ? getSourceFile(f, language, onError, create) : ts.createSourceFile(f, text, language, true);
   };
-  const program = ts.createProgram({ rootNames: sources.map((s) => s.file), options, host });
+  const program = ts.createProgram({ rootNames: [...sources.map((s) => s.file), ...declarations], options, host });
   const checker = program.getTypeChecker();
   const findings = new Map<string, Finding>();
 
@@ -765,6 +776,10 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     );
   };
 
+  /// A template specifier as the glob Vite builds from it: head plus a
+  /// wildcard for each substitution.
+  const templateGlob = (t: ts.TemplateExpression) => t.head.text + t.templateSpans.map((s) => `*${s.literal.text}`).join("");
+
   const MOCKS = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
   const DEFINERS: Record<string, ReadonlySet<string>> = {
     Object: new Set(["assign", "defineProperty", "defineProperties", "setPrototypeOf", "freeze", "seal", "preventExtensions"]),
@@ -894,6 +909,9 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (specifier && ts.isStringLiteralLike(specifier) && isDeep(specifier.text, source.file)) {
         report("deep", specifier, specifier.text);
       }
+      if (specifier && ts.isTemplateExpression(specifier) && globReaches(templateGlob(specifier), source.file)) {
+        report("deep", specifier, specifier.getText(sf));
+      }
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
@@ -915,6 +933,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       ) {
         const [path] = node.arguments;
         if (ts.isStringLiteralLike(path) && isDeep(path.text, source.file)) report("deep", path, path.text);
+        if (ts.isTemplateExpression(path) && globReaches(templateGlob(path), source.file)) report("deep", path, path.getText(sf));
       }
 
       // 2. Casts of a widget value to a type it does not satisfy, and casts
@@ -1244,6 +1263,10 @@ const PLANTS = new Map<string, string>([
       "  t.cols = 1;",
       "  return [raw(t), [t].map((u: unknown) => (u as Raw).isOpen), Object.getOwnPropertyDescriptors(t).isOpen?.value, ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t), Object.assign(t, { cols: 1 }), Object.freeze(t)];",
       "};",
+      "export const dynImport = (name: string) => import(`../../../ghostty-web-ng/lib/${name}.ts`);",
+      "export const dynUrl = (name: string) => new URL(`../../../ghostty-web-ng/lib/${name}.ts`, import.meta.url);",
+      "export const dynSafeUrl = (name: string) => new URL(`./local/${name}.ts`, import.meta.url);",
+      "export const fromGlobalDts = () => (window.boundaryTerminal as unknown as Raw).isOpen;",
     ].join("\n"),
   ],
   [
@@ -1430,6 +1453,20 @@ const PLANTS = new Map<string, string>([
       "export const untyped = (term) => term.isOpen;",
       "export const named = (term) => term.wasmTerm;",
       'import "../../../ghostty-web-ng/lib/internal";',
+      '/** @param {import("@chan/ghostty-web-ng").Terminal} term */',
+      "export const typed = (term) => term.isOpen;",
+      '/** @typedef {import("../../../ghostty-web-ng/lib/internal")} Internal */',
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/boundaryGlobal.d.ts",
+    [
+      'import type { Terminal } from "@chan/ghostty-web-ng";',
+      "declare global {",
+      "  interface Window {",
+      "    boundaryTerminal?: Terminal;",
+      "  }",
+      "}",
     ].join("\n"),
   ],
   [
@@ -1563,6 +1600,10 @@ const PLANTED: readonly Site[] = [
   { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Terminal & { tag?: string | undefined; }.isOpen" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.assign Terminal & { tag?: string | undefined; }" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 169, key: "Object.freeze Terminal & { tag?: string | undefined; }" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 171, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 172, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 174, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 174, key: "Terminal.isOpen" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
@@ -1573,6 +1614,7 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/BoundaryModuleAction.svelte", line: 16, key: "Terminal.isOpen" },
   { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
   { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
+  { rule: "member", file: "src/terminal/boundaryPlant.js", line: 5, key: "Terminal.isOpen" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
