@@ -6,20 +6,22 @@
 //   OPEN   -- the find chord on the terminal's textarea (Cmd+F on macOS,
 //             Ctrl+Shift+F elsewhere, as trusted CDP keys) opens the find
 //             bar with its input focused.
-//   4999   -- typing 4999 selects its one match and the count reads 1 of 1.
-//   99     -- typing 99 instead selects the newest of its matches, the
+//   4999   -- typing 4999 makes its one match the active one, the sole range
+//             on the search-active highlight with no user selection, and
+//             the count reads 1 of 1.
+//   99     -- typing 99 instead makes the newest of its matches active, the
 //             right-hand one on the 4999 row, and the count reads 1 of N,
 //             N counted from 1..5000.
 //   OLDER  -- Enter steps to older matches, through 4999's other one and
 //             4998 to 4990 on the screen with the viewport still, then to
 //             4899 above it: the viewport moves and centres that row.
 //   RESIZE -- the page narrows, then widens back, and the terminal reflows
-//             to each width. libghostty-vt forgets its selected match on a
-//             resize and scans again; find keeps the match itself, so each
-//             time the same match is selected again once the scan finds it:
-//             the count reads the same k of N, the active highlight is that match,
-//             its text the needle, and it is on the screen. Enter then goes
-//             on from it to the next older match, k+1 of N.
+//             to each width. A resize restarts the core's scan, and the
+//             widget's search keeps the active match through the reflow, so
+//             once the scan places it again the count reads the same k of N,
+//             the active highlight is that match, its text the needle, and
+//             it is on the screen. Enter then goes on from it to the next
+//             older match, k+1 of N.
 //   ESCAPE -- Escape closes the bar and clears the search highlight.
 //   OLDEST -- the chord opens the bar again with the query it kept, and
 //             Shift+Enter, the first step of a fresh search, lands on the
@@ -28,9 +30,8 @@
 //             down, which the core would wrap to. The count reads N of N
 //             and the match is on the screen. Escape closes the bar.
 //   REOPEN -- the chord opens the bar again, then Escape and the find
-//             command run in one task: the bar reopens before any zero-delay
-//             refocus ghostty-web could have scheduled, and keeps the
-//             keyboard past it. A trusted Escape closes the bar, the
+//             command run in one task: the bar is open and holds the
+//             keyboard 250 ms later. A trusted Escape closes the bar, the
 //             keyboard goes back to the terminal, and a command typed next
 //             runs in the shell.
 //
