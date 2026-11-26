@@ -84,53 +84,87 @@ const TEST_RULES: ReadonlySet<Rule> = new Set(["deep", "member", "patch"]);
 
 type Finding = { rule: Rule; file: string; line: number; key: string };
 
-/// A reader that is there today and that the change named in `until`
-/// removes. An entry covers every occurrence of `key` (or of any key, with
-/// none) under `rule` in `file`; one that matches nothing fails, so the
-/// list only shrinks.
-type Pending = { rule: Rule; file: string; key?: string; until: string };
+/// Who removes a pending reader: the app's terminal code, or the widget
+/// package by taking over what the reader tests.
+type Owner = "app terminal" | "widget package";
 
+/// Readers that are there today and that the change named in `until`
+/// removes. An entry covers the findings of `key` under `rule` in `file`,
+/// and `count` is how many: the check fails when an entry covers more or
+/// fewer, so a new reader in a listed file fails as it would anywhere
+/// else, and each reader that goes takes its count down with it.
+type Pending = { rule: Rule; file: string; key: string; count: number; owner: Owner; until: string };
+
+/// The entries of one owner, change, rule and file, a count per key.
+const pending = (owner: Owner, until: string, rule: Rule, file: string, counts: Record<string, number>): Pending[] =>
+  Object.entries(counts).map(([key, count]) => ({ rule, file, key, count, owner, until }));
+
+const TAB = "src/components/TerminalTab.svelte";
 const ONE_TERMINAL = "the terminal tab and its helpers hold the widget's terminal alone";
 const METRICS = "the terminal tab reads cell metrics through getMetrics()";
 const REFRESH = "refreshTerminalRows needs refresh() and drops its renderer path";
 const FIND = "the find bar runs on the widget's term.search";
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
+const THEME = "the theme test reads the core's colours off the canvas, or moves into the package";
+const KIT = "the kit test tells two instances apart by what their terminals show";
+const EMPTY_PASTE = "the empty paste emit, which no input event produces, goes";
 
 const PENDING: readonly Pending[] = [
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "GhosttyTerminal", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "GhosttyTerminal | null", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "Terminal", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "Terminal | null", until: ONE_TERMINAL },
-  { rule: "name", file: "src/components/TerminalTab.svelte", key: "viewportY", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/terminal/primarySelection.ts", until: ONE_TERMINAL },
-  { rule: "member", file: "src/terminal/primarySelection.ts", until: ONE_TERMINAL },
-  { rule: "name", file: "src/terminal/secretMaskingXterm.ts", until: ONE_TERMINAL },
-  { rule: "name", file: "src/components/TerminalTab.svelte", key: "renderer", until: METRICS },
-  { rule: "name", file: "src/terminal/renderer.ts", key: "renderer", until: REFRESH },
-  { rule: "name", file: "src/terminal/renderer.ts", key: "wasmTerm", until: REFRESH },
-  { rule: "name", file: "src/terminal/ghosttyFind.ts", key: "wasmTerm", until: FIND },
-  { rule: "member", file: "src/terminal/ghosttyFind.test.ts", until: FIND },
-  { rule: "member", file: "src/terminal/ghosttyRenderer.test.ts", until: RENDERER_TESTS },
-  { rule: "patch", file: "src/terminal/ghosttyRenderer.test.ts", until: RENDERER_TESTS },
-  { rule: "member", file: "src/terminal/ghosttyRenderer.redraw.test.ts", until: RENDERER_TESTS },
-  { rule: "patch", file: "src/terminal/ghosttyRenderer.redraw.test.ts", until: RENDERER_TESTS },
-  {
-    rule: "member",
-    file: "src/terminal/ghosttyTheme.test.ts",
-    until: "the theme test reads the core's colours off the canvas, or moves into the package",
-  },
-  {
-    rule: "member",
-    file: "src/terminal/backend.test.ts",
-    key: "GhosttyVt.wasm",
-    until: "the kit test tells two instances apart by what their terminals show",
-  },
-  {
-    rule: "member",
-    file: "src/terminal/ghosttyViewport.change.test.ts",
-    key: "Terminal.inputHandler",
-    until: "the empty paste emit, which no input event produces, goes",
-  },
+  ...pending("app terminal", ONE_TERMINAL, "cast", TAB, {
+    GhosttyTerminal: 4,
+    "GhosttyTerminal | null": 7,
+    Terminal: 3,
+    "Terminal | null": 1,
+  }),
+  ...pending("app terminal", ONE_TERMINAL, "name", TAB, { viewportY: 1 }),
+  ...pending("app terminal", ONE_TERMINAL, "cast", "src/terminal/primarySelection.ts", {
+    GhosttyTerminal: 1,
+    XtermTerminal: 2,
+  }),
+  ...pending("app terminal", ONE_TERMINAL, "member", "src/terminal/primarySelection.ts", {
+    "Terminal.onSelectionChange": 1,
+  }),
+  ...pending("app terminal", ONE_TERMINAL, "name", "src/terminal/secretMaskingXterm.ts", { viewportY: 2 }),
+  ...pending("app terminal", METRICS, "name", TAB, { renderer: 4 }),
+  ...pending("app terminal", REFRESH, "name", "src/terminal/renderer.ts", { renderer: 3, wasmTerm: 3 }),
+  ...pending("app terminal", FIND, "name", "src/terminal/ghosttyFind.ts", { wasmTerm: 1 }),
+  ...pending("app terminal", FIND, "member", "src/terminal/ghosttyFind.test.ts", {
+    "VtTerminal.resizeListeners": 2,
+    "VtTerminal.wasm": 3,
+  }),
+  ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
+    "Terminal.buildWasmConfig": 3,
+    "Terminal.selectionManager": 1,
+  }),
+  ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.test.ts", {
+    "write Terminal.element": 1,
+    "write Terminal.renderer": 4,
+    "write Terminal.selectionManager": 1,
+    "write Terminal.wasmTerm": 4,
+  }),
+  ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.redraw.test.ts", {
+    "CanvasRenderer.cursorVisible": 1,
+    "CanvasRenderer.hoveredHyperlinkId": 1,
+    "CanvasRenderer.hoveredLinkRange": 1,
+    "CanvasRenderer.selectionManager": 1,
+    "Terminal.selectionManager": 1,
+  }),
+  ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.redraw.test.ts", {
+    "write CanvasRenderer.cursorVisible": 1,
+    "write Terminal.renderer": 1,
+    "write Terminal.selectionManager": 1,
+    "write Terminal.viewportY": 3,
+    "write Terminal.wasmTerm": 1,
+  }),
+  ...pending("app terminal", THEME, "member", "src/terminal/ghosttyTheme.test.ts", {
+    "CanvasRenderer.ctx": 2,
+    "VtTerminal.handle": 1,
+    "VtTerminal.wasm": 4,
+  }),
+  ...pending("app terminal", KIT, "member", "src/terminal/backend.test.ts", { "GhosttyVt.wasm": 1 }),
+  ...pending("app terminal", EMPTY_PASTE, "member", "src/terminal/ghosttyViewport.change.test.ts", {
+    "Terminal.inputHandler": 1,
+  }),
 ];
 
 /// A module as the program reads it: a `.ts` file whole, or one script
@@ -500,11 +534,27 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 4, key: "write Terminal.cols" },
 ];
 
+/// Entries over the planted reads whose counts are off, one each way, and
+/// one that is right, so the count rule shows it fires on a reader more
+/// and a reader fewer, and only there.
+const PLANT_PENDING: readonly Pending[] = [
+  ...pending("app terminal", "planted", "deep", "src/terminal/boundaryPlant.ts", {
+    "@chan/ghostty-web-ng/lib/renderer": 0,
+  }),
+  ...pending("app terminal", "planted", "patch", "src/terminal/boundaryPlant.ts", { "Object.assign Terminal": 2 }),
+  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", { wasmTerm: 1 }),
+];
+
 function show(f: Finding): string {
   return `${f.rule} ${f.file}:${f.line} ${f.key}`;
 }
-const covers = (p: Pending, f: Finding) =>
-  p.rule === f.rule && p.file === f.file && (p.key === undefined || p.key === f.key);
+const covers = (p: Pending, f: Finding) => p.rule === f.rule && p.file === f.file && p.key === f.key;
+/// The entries whose count is not the number of findings they cover.
+const miscounted = (entries: readonly Pending[], findings: readonly Finding[]) =>
+  entries.flatMap((p) => {
+    const found = findings.filter((f) => covers(p, f)).length;
+    return found === p.count ? [] : [`${p.rule} ${p.file} ${p.key}: counts ${p.count}, covers ${found}`];
+  });
 
 // Source-text contract: no app module reaches the terminal widget past its public API, in modules written later too.
 describe("the terminal widget's boundary", () => {
@@ -530,7 +580,14 @@ describe("the terminal widget's boundary", () => {
     expect(real.filter((f) => !PENDING.some((p) => covers(p, f))).map(show)).toEqual([]);
   });
 
-  test("every pending reader is still there", () => {
-    expect(PENDING.filter((p) => !real.some((f) => covers(p, f)))).toEqual([]);
+  test("each pending entry covers exactly the readers it counts", () => {
+    expect(miscounted(PENDING, real)).toEqual([]);
+  });
+
+  test("a pending entry fails on a reader more or fewer than it counts", () => {
+    expect(miscounted(PLANT_PENDING, planted)).toEqual([
+      "deep src/terminal/boundaryPlant.ts @chan/ghostty-web-ng/lib/renderer: counts 0, covers 1",
+      "patch src/terminal/boundaryPlant.ts Object.assign Terminal: counts 2, covers 1",
+    ]);
   });
 });
