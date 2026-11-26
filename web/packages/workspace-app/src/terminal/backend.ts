@@ -6,12 +6,15 @@
 /// `vt/ghosttyVt.ts`, the core the widget is typed against. It is the one
 /// wasm the package carries.
 ///
-/// WHY lazy: the wasm is about 1.2MB. A static import would put that
-/// asset on the critical path of every window, including the ones that
-/// never open a terminal, so the library and the wasm URL load through
-/// dynamic imports and only ever fetch when a terminal actually spawns.
-/// Vite emits `ghostty-vt.wasm` as a hashed asset; the `?url` import hands
-/// us its served path, which the loader fetches and compiles itself.
+/// WHY lazy: the wasm is about 1.2MB. Fetched with the app, it would sit
+/// on the critical path of every window, including the ones that never
+/// open a terminal, so the library loads through a dynamic import and the
+/// wasm is fetched only when a terminal actually spawns. Vite emits
+/// `ghostty-vt.wasm` as a hashed asset; the `?url` import hands us its
+/// served path, a string in the loader's own chunk, which the loader
+/// fetches and compiles itself. No module import of its own carries the
+/// URL, since an engine may keep a failed module import for the page's
+/// life (see `importWidget`).
 ///
 /// WHY one WASM instance per terminal: a wasm memory only grows, so on a
 /// shared instance the scrollback of every terminal ever opened would stay
@@ -36,7 +39,9 @@
 /// has passed.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
+import wasmUrl from "@chan/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm?url";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
+import widgetUrl from "virtual:ghostty-widget-url";
 
 /// Everything TerminalTab needs to construct a ghostty terminal without
 /// holding a static (bundle-eager) import of the library.
@@ -122,17 +127,36 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
   return kitPromise;
 }
 
+type Widget = typeof import("@chan/ghostty-web-ng");
+
+/// The imports of the widget's module that failed on this page.
+let failedWidgetImports = 0;
+
+/// Imports the widget's module. An engine may keep a failed module import
+/// for the page's life and answer the same URL from it without asking the
+/// network again (WebKit does), so after a failure the widget is asked for
+/// under a URL this page has not failed: its chunk's own URL with a query.
+/// A URL that loaded stays the one asked for, so the page holds one
+/// instance of the widget.
+async function importWidget(): Promise<Widget> {
+  const retry = failedWidgetImports;
+  try {
+    if (retry === 0) return await import("@chan/ghostty-web-ng");
+    return (await import(/* @vite-ignore */ `${widgetUrl}?retry=${retry}`)) as Widget;
+  } catch (error) {
+    failedWidgetImports = retry + 1;
+    throw error;
+  }
+}
+
 /// Fetches the library and the wasm asset and compiles the module; a
 /// compile failure goes through `forever`.
 async function compileGhosttyKit(forever: (error: unknown) => never): Promise<GhosttyKit> {
-  const [mod, wasmUrl] = await Promise.all([
-    import("@chan/ghostty-web-ng"),
-    import("@chan/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm?url"),
-  ]);
-  const response = await fetch(wasmUrl.default);
+  const mod = await importWidget();
+  const response = await fetch(wasmUrl);
   if (!response.ok) {
     throw new Error(
-      `fetching ${wasmUrl.default}: ${response.status} ${response.statusText}`,
+      `fetching ${wasmUrl}: ${response.status} ${response.statusText}`,
     );
   }
   const bytes = await response.arrayBuffer();

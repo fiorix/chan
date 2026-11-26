@@ -1,8 +1,9 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "vite";
-import { expect, test } from "vitest";
+import { build, type Plugin } from "vite";
+import { describe, expect, test } from "vitest";
 
 test("the terminal bundle ships the vendored wasm without an inline copy", async () => {
   const result = await build({
@@ -27,6 +28,124 @@ test("the terminal bundle ships the vendored wasm without an inline copy", async
   const wasm = result.output.filter((item) => item.type === "asset" && item.fileName.endsWith(".wasm"));
   expect(wasm).toHaveLength(1);
   expect(Buffer.from(wasm[0].source)).toEqual(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
+  const loader = chunks.filter((chunk) => Object.keys(chunk.modules).some((id) => id.endsWith("/src/terminal/backend.ts")));
+  expect(loader.map((chunk) => chunk.fileName), "the loader is bundled in one chunk").toHaveLength(1);
+  // An engine may keep a failed module import for the page's life. The
+  // loader's own chunk names the core's URL, so no module import stands
+  // between a spawn and the core's fetch.
+  const core = posix.basename(wasm[0].fileName);
+  expect(chunks.filter((chunk) => chunk.code.includes(core)).map((chunk) => chunk.fileName), "the chunks naming the core").toEqual([loader[0].fileName]);
+  // And after an import of the widget failed, the loader asks for the
+  // widget's chunk at the chunk's own URL.
+  const widget = posix.basename(renderer[0].fileName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  expect(loader[0].code).toMatch(new RegExp(`new URL\\(\\s*(["'\`])${widget}\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`));
+});
+
+// After a failed import the loader asks for the widget's chunk at a new URL,
+// which leaves the chunks it imports at theirs, so the widget's chunk may
+// import only chunks loaded with the chunk that asks for it. Each leg builds
+// the loader in a layout the app may come to use, with `modules` served as
+// virtual modules by name. A module the widget shares with another chunk is
+// the layout's own `virtual:shared`, which `intoWidget` adds to the widget's
+// entry, found by the package's name: a leg needs none of the widget's own
+// modules.
+describe("the widget's chunk imports only chunks loaded with the chunk that asks for it", () => {
+  const backend = fileURLToPath(new URL("./src/terminal/backend.ts", import.meta.url));
+  const shared = { "virtual:shared": "globalThis.layoutShared = [];" };
+  const late = /the terminal widget's chunk assets\/ghostty-web-[\w-]+\.js imports assets\/_layout_virtual_shared-[\w-]+\.js,/;
+
+  /// Prepends `code` to the widget's entry module in a layout's build.
+  function intoWidget(code: string): Plugin {
+    let entry: Promise<string | undefined> | undefined;
+    return {
+      name: "into-widget",
+      async transform(source, id) {
+        entry ??= this.resolve("@chan/ghostty-web-ng").then((resolved) => resolved?.id);
+        return id === (await entry) ? `${code}\n${source}` : undefined;
+      },
+    };
+  }
+  const sharing = intoWidget('import "virtual:shared";');
+
+  function buildLayout(input: string | Record<string, string>, modules: Record<string, string>, extra: Plugin[] = []) {
+    const prefix = "\0layout:";
+    const layout: Plugin = {
+      name: "layout-modules",
+      resolveId: (id) => (id in modules ? prefix + id : undefined),
+      load: (id) => (id.startsWith(prefix) ? modules[id.slice(prefix.length)] : undefined),
+    };
+    return build({
+      configFile: fileURLToPath(new URL("./vite.config.ts", import.meta.url)),
+      logLevel: "silent",
+      plugins: [layout, ...extra],
+      build: { write: false, rollupOptions: { input, preserveEntrySignatures: "strict" } },
+    });
+  }
+
+  /// What a build of the layout came to: its error's message, or "built".
+  function outcome(input: string | Record<string, string>, modules: Record<string, string>, extra: Plugin[] = []): Promise<string> {
+    return buildLayout(input, modules, extra).then(
+      () => "built",
+      (error: Error) => error.message,
+    );
+  }
+
+  // A lazily loaded module that shares a module with the widget makes the
+  // bundler put that module in a chunk of its own, which the widget's chunk
+  // imports and the loader's page loads only on demand.
+  test("a build fails when a lazily loaded module shares a module with the widget", async () => {
+    const built = await outcome(
+      "virtual:entry",
+      {
+        ...shared,
+        "virtual:entry": `export * from ${JSON.stringify(backend)};\nexport const lazy = () => import("virtual:lazy");`,
+        "virtual:lazy": 'import "virtual:shared";\nexport const lazy = true;',
+      },
+      [sharing],
+    );
+    expect(built).toMatch(late);
+  });
+
+  // A chunk another entry loads at startup is still loaded on demand in the
+  // loader's page.
+  test("a build fails when only another entry loads a chunk the widget imports", async () => {
+    const built = await outcome({ app: backend, other: "virtual:other" }, { ...shared, "virtual:other": 'import "virtual:shared";' }, [sharing]);
+    expect(built).toMatch(late);
+  });
+
+  // Each chunk that asks for the widget runs in a page of its own: what one of
+  // them loads, the other may not.
+  test("a build fails when one of two chunks that ask for the widget does not load a chunk it imports", async () => {
+    const built = await outcome(
+      { app: backend, other: "virtual:other" },
+      { ...shared, "virtual:other": 'import "virtual:shared";\nexport const widget = () => import("@chan/ghostty-web-ng");' },
+      [sharing],
+    );
+    expect(built).toMatch(late);
+    expect(built, "the chunk that does not load it").toMatch(/which the app chunk assets\/app-[\w-]+\.js that asks for it/);
+  });
+
+  // A retry imports the widget's chunk outside the preload helper, which
+  // loads the stylesheets a chunk carries.
+  test("a build fails when the widget's chunk carries a stylesheet", async () => {
+    const styles = fileURLToPath(new URL("./src/__tests__/widgetStylesheet.css", import.meta.url));
+    const built = await outcome(backend, {}, [intoWidget(`import ${JSON.stringify(styles)};`)]);
+    expect(built).toMatch(/the terminal widget's chunk assets\/ghostty-web-[\w-]+\.js carries assets\/[\w-]+\.css, which the loader's retry/);
+  });
+
+  // The chunk the widget's imports come from is the loader's own, which is
+  // loaded whenever it asks for the widget, though no entry loads it.
+  test("the loader builds in a lazily loaded chunk the widget imports", async () => {
+    const result = await buildLayout("virtual:lazyloader", {
+      "virtual:lazyloader": `export const terminal = () => import(${JSON.stringify(backend)});`,
+    });
+    if (Array.isArray(result) || !("output" in result)) throw new Error("expected one bundle");
+    const chunks = result.output.filter((item) => item.type === "chunk");
+    const loader = chunks.find((chunk) => Object.keys(chunk.modules).some((id) => id.endsWith("/src/terminal/backend.ts")))!;
+    const widget = chunks.find((chunk) => /^assets\/ghostty-web-[\w-]+\.js$/.test(chunk.fileName))!;
+    expect(loader.isEntry, "the loader is no entry").toBe(false);
+    expect(widget.imports, "the widget imports the loader's chunk").toContain(loader.fileName);
+  });
 });
 
 // The app's one terminal is the Ghostty widget. @xterm/xterm stays installed

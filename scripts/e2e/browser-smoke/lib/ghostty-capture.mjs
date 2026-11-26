@@ -1,5 +1,7 @@
 // Keep emitted-chunk discovery and prototype instrumentation in one place.
 // Callers read their own registry and restore it before the page is reused.
+// It patches the widget at its chunk's plain URL: a document that loaded it
+// at `?retry=N` needs a fresh one.
 export async function captureGhosttyTerminals(page, key, { notices = false } = {}) {
   return page.evaluate(async ({ key, notices }) => {
     if (window[key]) throw new Error(`Ghostty terminal capture already installed: ${key}`);

@@ -213,3 +213,81 @@ describe("onGhosttyKitLoaded", () => {
     expect(removed, "a removed listener").not.toHaveBeenCalled();
   });
 });
+
+describe("the widget's import on an engine that keeps a failed module import", () => {
+  const mocked: string[] = [];
+  afterEach(() => {
+    for (const id of mocked.splice(0)) vi.doUnmock(id);
+  });
+
+  /// The widget's module as an engine that keeps a failed import serves it,
+  /// as WebKit does: an import at a URL that failed rejects for the page's
+  /// life, and at any other URL loads while `serving`. `asked` lists the
+  /// URLs the page asked for; `chunk` stands for the chunk's own URL.
+  async function widgetEngine() {
+    const { default: url } = await import("virtual:ghostty-widget-url");
+    const engine = { serving: true, asked: [] as string[] };
+    const failed = new Set<string>();
+    const serve = (name: string) => async (importOriginal: () => Promise<unknown>) => {
+      engine.asked.push(name);
+      if (!engine.serving || failed.has(name)) {
+        failed.add(name);
+        throw new TypeError("Importing a module script failed.");
+      }
+      return importOriginal();
+    };
+    const ids: Array<[string, string]> = [["@chan/ghostty-web-ng", "chunk"]];
+    for (const retry of [1, 2, 3]) ids.push([`${url}?retry=${retry}`, `chunk?retry=${retry}`]);
+    for (const [id, name] of ids) {
+      mocked.push(id);
+      vi.doMock(id, serve(name));
+    }
+    return engine;
+  }
+
+  test("each failed import moves the next to a URL the page has not failed", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(bytes))));
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const engine = await widgetEngine();
+    const { loadGhosttyKit, ghosttyLoadIsFinal } = await import("./backend");
+    engine.serving = false;
+    const failed = loadGhosttyKit();
+    await expect(failed).rejects.toThrow();
+    expect(ghosttyLoadIsFinal(await failed.catch((reason: unknown) => reason)), "the next spawn may pass").toBe(false);
+    await expect(loadGhosttyKit(), "the network still down").rejects.toThrow();
+    engine.serving = true;
+    const kit = loadGhosttyKit();
+    await expect(kit).resolves.toHaveProperty("instantiate");
+    expect(engine.asked).toEqual(["chunk", "chunk?retry=1", "chunk?retry=2"]);
+    await expect((await kit).instantiate(), "the kit hands out terminals").resolves.toBeDefined();
+  });
+
+  test("a widget that loaded is asked for at the same URL when the core's fetch fails", async () => {
+    const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
+    fetch.mockRejectedValueOnce(new Error("connection lost"));
+    vi.stubGlobal("fetch", fetch);
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const engine = await widgetEngine();
+    const { loadGhosttyKit } = await import("./backend");
+    await expect(loadGhosttyKit()).rejects.toThrow("connection lost");
+    await expect(loadGhosttyKit()).resolves.toHaveProperty("instantiate");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(engine.asked.length, "the widget was asked for").toBeGreaterThan(0);
+    expect(engine.asked.filter((name) => name !== "chunk"), "only at the chunk's own URL").toEqual([]);
+  });
+
+  test("a widget that loaded at a retry URL is asked for there when the core's fetch fails", async () => {
+    const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
+    fetch.mockRejectedValueOnce(new Error("connection lost"));
+    vi.stubGlobal("fetch", fetch);
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const engine = await widgetEngine();
+    const { loadGhosttyKit } = await import("./backend");
+    engine.serving = false;
+    await expect(loadGhosttyKit(), "the widget's chunk failed").rejects.toThrow();
+    engine.serving = true;
+    await expect(loadGhosttyKit(), "the widget loaded, the core's fetch failed").rejects.toThrow("connection lost");
+    await expect(loadGhosttyKit()).resolves.toHaveProperty("instantiate");
+    expect(engine.asked).toEqual(["chunk", "chunk?retry=1"]);
+  });
+});
