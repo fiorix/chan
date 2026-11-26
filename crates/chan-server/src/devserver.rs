@@ -381,7 +381,7 @@ pub const DEVSERVER_TOKEN_MARKER: &str = "CHAN_DEVSERVER_TOKEN=";
 
 /// Maximum age of the persisted bearer token: 30 days. A cold start whose
 /// token is older (or whose mint time is unrecorded) re-mints instead of
-/// reusing it, so a token that leaked through a scrollback snapshot, a
+/// reusing it, so a token that leaked through saved terminal scrollback, a
 /// backup, or a pasted log stops working at the next start after the
 /// window instead of forever. Within the window restarts keep the token,
 /// preserving the reconnecting-client property.

@@ -33,6 +33,7 @@ import type {
   GraphViewEdge,
   GraphViewNode,
 } from "../api/types";
+import type { GraphTreeCoverage } from "../api/client";
 import { ApiError } from "../api/errors";
 import { directoryNodeId } from "../graph/canvasNodes";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
@@ -86,6 +87,10 @@ export const graphServer = {
   /// while a full rebuild holds the index; the test serves the empty view
   /// that answer carries.
   gated: false,
+  /// When set, graphStream answers over the listing cap: a second `meta`
+  /// carries it, behind a keep-alive's empty batch, as the route's does when
+  /// its build outlasts the keep-alive.
+  tree: null as GraphTreeCoverage | null,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
   /// What languageGraph answers for a single language's detail, which a
@@ -106,6 +111,7 @@ export function resetGraphServer(): void {
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
   graphServer.gated = false;
+  graphServer.tree = null;
   graphServer.fsGate = null;
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
@@ -194,6 +200,7 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
               path: string;
               depth: number;
               gated?: true;
+              tree?: GraphTreeCoverage;
             }) => void;
             onView?: (view: GraphView) => void;
           } = {},
@@ -202,13 +209,18 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
           await Promise.resolve();
           if (graphServer.streamGate) await graphServer.streamGate;
           // The route's first event, as it sends it for the window's graph.
-          opts.onMeta?.({
-            type: "meta",
-            scope: "workspace",
+          const meta = {
+            type: "meta" as const,
+            scope: "workspace" as const,
             path: "",
             depth: 6,
             ...(graphServer.gated ? { gated: true as const } : {}),
-          });
+          };
+          opts.onMeta?.(meta);
+          if (graphServer.tree !== null) {
+            opts.onView?.({ nodes: [], edges: [] });
+            opts.onMeta?.({ ...meta, tree: graphServer.tree });
+          }
           // One animation frame publishes the accumulated batches.
           const { nodes, edges } = graphServer.view;
           opts.onView?.({ nodes: [...nodes], edges: [...edges] });

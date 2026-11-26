@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
-// The scrollback snapshot a terminal writes to localStorage when the page is
-// hidden, so a reload resumes from it, and the cursor a reattach resumes
-// from. A control terminal never writes a snapshot: its output carries the
-// devserver token the desktop re-scrapes. A TerminalTab is mounted over the
-// stand-in xterm and attached on its socket; the assertions read the
-// snapshot cache, the URL each dial asks for and what reaches xterm.
+// The cursor a reattach resumes from, and the scrollback snapshots a control
+// terminal clears: its output carries the devserver token the desktop
+// re-scrapes, so no snapshot of it may stay in localStorage. A TerminalTab
+// is mounted on the real widget over a stand-in socket; the assertions read
+// the snapshot cache, the URL each dial asks for and what the terminal shows.
 
+import type { Terminal } from "@chan/ghostty-web-ng";
 import { unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -17,24 +17,23 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
-  (await import("../__tests__/xterm")).xtermStandInBackendModule(importOriginal));
+  (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
+import { ghosttyFixture, ghosttyLineText, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
 import {
   attach,
   installTerminalDom,
-  mountTerminal,
   output,
   receive,
   resetTerminals,
   seatTerminals,
   terminalTab,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -42,16 +41,17 @@ installTerminalDom();
 const SESSION = "sess-1";
 const startControl = ui.terminalControl;
 
+// Every case runs on the fake clock: uninstalling it after teardown has
+// put the file's frames back deletes requestAnimationFrame, which a case
+// on the real clock after it would need.
 beforeEach(() => {
+  vi.useFakeTimers();
   localStorage.clear();
-  xterm.serialized = "$ ls\r\nnotes\r\n";
 });
 
 afterEach(() => {
-  // Before resetTerminals, which puts back the requestAnimationFrame
-  // stand-in that uninstalling the fake clock removes.
-  vi.useRealTimers();
   resetTerminals();
+  vi.useRealTimers();
   __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
   localStorage.clear();
@@ -59,7 +59,7 @@ afterEach(() => {
 
 async function attached() {
   const [tab] = seatTerminals([terminalTab()]);
-  const mounted = await mountTerminal(TerminalTab, tab!);
+  const mounted = await mountGhosttyTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket, { id: SESSION, generation: 3, seq: 42 });
   // The server ends every attach's replay with `ready`.
@@ -71,41 +71,14 @@ function leftover(): void {
   writeTerminalSnapshot(SESSION, { ansi: "old", generation: 1, lastSeq: 1, cols: 80, rows: 24, updatedAt: 1 });
 }
 
-describe("hiding the page", () => {
-  test("snapshots an ordinary terminal's screen at its cursor", async () => {
-    ui.terminalControl = false;
-    await attached();
-    window.dispatchEvent(new Event("pagehide"));
+function dialed(socket: TerminalSocket): { since: string | null; generation: string | null } {
+  const query = new URL(socket.url, "http://chan.test").searchParams;
+  return { since: query.get("since"), generation: query.get("generation") };
+}
 
-    expect(readTerminalSnapshot(SESSION)).toMatchObject({
-      ansi: "$ ls\r\nnotes\r\n",
-      generation: 3,
-      lastSeq: 42,
-      cols: 80,
-      rows: 24,
-    });
-  });
-
-  test("writes no snapshot once a devserver shutdown has ended the session", async () => {
-    ui.terminalControl = false;
-    await attached();
-    // The screen now ends with the line the tab wrote below the session's
-    // output, which the reattach after a reload must not paint back.
-    await receive(TerminalSocket.all.at(-1)!, { type: "closed", reason: "shutdown" });
-    window.dispatchEvent(new Event("pagehide"));
-
-    expect(readTerminalSnapshot(SESSION)).toBeNull();
-  });
-
-  test("writes no snapshot for a control terminal", async () => {
-    ui.terminalControl = true;
-    await attached();
-    window.dispatchEvent(new Event("pagehide"));
-    window.dispatchEvent(new Event("beforeunload"));
-
-    expect(readTerminalSnapshot(SESSION)).toBeNull();
-  });
-});
+function screen(term: Terminal): string[] {
+  return Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "");
+}
 
 describe("a control terminal", () => {
   test("clears a snapshot left for its session when it attaches, and again when it goes", async () => {
@@ -128,68 +101,42 @@ describe("a control terminal", () => {
 });
 
 describe("resuming a reattach", () => {
-  const SNAPSHOT = { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 };
-
-  function dialed(socket: TerminalSocket): { since: string | null; generation: string | null } {
-    const query = new URL(socket.url, "http://chan.test").searchParams;
-    return { since: query.get("since"), generation: query.get("generation") };
-  }
-
-  async function reattach() {
-    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
-    return { term, socket: TerminalSocket.all.at(-1)! };
-  }
-
   test("without a snapshot, asks for the whole ring", async () => {
-    const { socket } = await reattach();
-    expect(dialed(socket)).toEqual({ since: "0", generation: null });
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    await mountGhosttyTerminal(TerminalTab, tab!);
+    expect(dialed(TerminalSocket.all.at(-1)!)).toEqual({ since: "0", generation: null });
   });
 
-  test("with a snapshot at the live size, resumes from its cursor and generation", async () => {
-    writeTerminalSnapshot(SESSION, SNAPSHOT);
-    const { socket } = await reattach();
-    expect(dialed(socket)).toEqual({ since: "42", generation: "3" });
-  });
+  // The ring's replay restores the screen, so a snapshot the cache still
+  // holds for the session is neither dialed from nor painted.
+  test("a snapshot cached at the live size does not prime the terminal", async () => {
+    ui.terminalControl = false;
+    writeTerminalSnapshot(SESSION, { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 });
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    expect({ cols: term.cols, rows: term.rows }, "the snapshot's size is the terminal's").toEqual({ cols: 80, rows: 24 });
+    const socket = TerminalSocket.all.at(-1)!;
+    expect.soft(dialed(socket), "the dial asks for the whole ring").toEqual({ since: "0", generation: null });
 
-  test("a snapshot taken at another size is not used", async () => {
-    writeTerminalSnapshot(SESSION, { ...SNAPSHOT, cols: 120 });
-    const { socket } = await reattach();
-    expect(dialed(socket)).toEqual({ since: "0", generation: null });
-  });
-
-  test("paints the snapshot when the server confirms its generation with nothing missed", async () => {
-    writeTerminalSnapshot(SESSION, SNAPSHOT);
-    const { term, socket } = await reattach();
+    // The session frame confirms the snapshot's generation with nothing
+    // missed, the one answer a primed dial would paint the snapshot on.
     await attach(socket, { id: SESSION, generation: 3, seq: 42, missed_bytes: 0 });
-    expect(term.written.join("")).toContain("SNAPSHOT SCREEN");
-  });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
 
-  for (const [name, prelude] of [
-    ["another generation", { generation: 4 }],
-    ["missed bytes", { generation: 3, missed_bytes: 7 }],
-  ] as const) {
-    test(`drops the snapshot for a full replay on ${name}`, async () => {
-      writeTerminalSnapshot(SESSION, SNAPSHOT);
-      const { term, socket } = await reattach();
-      await attach(socket, { id: SESSION, seq: 0, ...prelude });
-      expect(term.written.join("")).not.toContain("SNAPSHOT SCREEN");
-    });
-  }
+    expect(screen(term).filter(Boolean), "nothing of the snapshot is painted").toEqual([]);
+  });
 
   test("a dropped socket redials the same session from the live cursor", async () => {
     const [tab] = seatTerminals([terminalTab()]);
-    await mountTerminal(TerminalTab, tab!);
+    await mountGhosttyTerminal(TerminalTab, tab!);
     const first = TerminalSocket.all.at(-1)!;
     await attach(first, { id: SESSION, generation: 2, seq: 10 });
     await receive(first, { type: "ready", cols: 80, rows: 24 });
-    // PTY output arrives as an ArrayBuffer of this realm.
-    const output = new ArrayBuffer(5);
-    new Uint8Array(output).set([...new TextEncoder().encode("hello")]);
-    await first.onmessage?.({ data: output });
+    await output(first, "hello");
 
     first.close();
-    await vi.waitFor(() => expect(TerminalSocket.all.length).toBe(2), { timeout: 3000 });
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+    expect(TerminalSocket.all, "one redial after the close").toHaveLength(2);
     const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
     expect(query.get("session")).toBe(SESSION);
     expect({ since: query.get("since"), generation: query.get("generation") }).toEqual({
@@ -198,45 +145,33 @@ describe("resuming a reattach", () => {
     });
   });
 
-  for (const cached of [false, true]) {
-    test(`a dial that fails before its session frame leaves the next one on the live cursor${cached ? ", over a cached snapshot" : ""}`, async () => {
-      vi.useFakeTimers();
-      if (cached) writeTerminalSnapshot(SESSION, SNAPSHOT);
-      const [tab] = seatTerminals([terminalTab()]);
-      await mountTerminal(TerminalTab, tab!);
-      const first = TerminalSocket.all.at(-1)!;
-      await attach(first, { id: SESSION, generation: 2, seq: 10 });
-      await receive(first, { type: "ready", cols: 80, rows: 24 });
-      await output(first, "hello");
+  test("a dial that fails before its session frame leaves the next one on the live cursor", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    await mountGhosttyTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first, { id: SESSION, generation: 2, seq: 10 });
+    await receive(first, { type: "ready", cols: 80, rows: 24 });
+    await output(first, "hello");
 
-      // A crash restart's window: the socket drops, and the redial is
-      // refused before any server answers it.
-      first.close();
-      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
-      TerminalSocket.all.at(-1)!.failDial();
-      await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+    // A crash restart's window: the socket drops, and the redial is
+    // refused before any server answers it.
+    first.close();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+    TerminalSocket.all.at(-1)!.failDial();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
 
-      expect(TerminalSocket.all, "one redial after each close").toHaveLength(3);
-      expect(xterm.terminals, "the xterm that shows the screen").toHaveLength(1);
-      expect(dialed(TerminalSocket.all[2]!)).toEqual({ since: "15", generation: "2" });
-    });
-  }
+    expect(TerminalSocket.all, "one redial after each close").toHaveLength(3);
+    expect(ghosttyFixture.terminals, "the terminal that shows the screen").toHaveLength(1);
+    expect(dialed(TerminalSocket.all[2]!)).toEqual({ since: "15", generation: "2" });
+  });
 });
 
 // A socket that drops between a session frame and its `ready` has painted part
 // of the replay, and the prelude's cursor already names the end of it.
 describe("a replay the socket cuts short", () => {
-  const SNAPSHOT = { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 };
-
-  function dialed(socket: TerminalSocket): { since: string | null; generation: string | null } {
-    const query = new URL(socket.url, "http://chan.test").searchParams;
-    return { since: query.get("since"), generation: query.get("generation") };
-  }
-
   async function cutReplay(tail = "") {
-    vi.useFakeTimers();
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
-    const { term } = await mountTerminal(TerminalTab, tab!);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     const first = TerminalSocket.all.at(-1)!;
     await attach(first, { id: SESSION, generation: 3, seq: 60 });
     await output(first, `part of the replay${tail}`);
@@ -250,13 +185,8 @@ describe("a replay the socket cuts short", () => {
     return TerminalSocket.all[1]!;
   }
 
-  test("redials for the whole ring, not from its prelude's cursor or a cached snapshot", async () => {
-    writeTerminalSnapshot(SESSION, SNAPSHOT);
+  test("redials for the whole ring, not from its prelude's cursor", async () => {
     await cutReplay();
-    expect(dialed(TerminalSocket.all[0]!), "the first dial resumes from the snapshot").toEqual({
-      since: "42",
-      generation: "3",
-    });
 
     const second = await redial();
 
@@ -275,81 +205,13 @@ describe("a replay the socket cuts short", () => {
         __testSetStandalonePreferences(terminalPreferences({ mouse_capture: false }));
       }
       const { term } = await cutReplay(tail);
+      expect(screen(term)[0], "the cut replay painted its part").toBe("part of the replay");
       const second = await redial();
-      const before = term.written.length;
 
       await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
       await output(second, "the whole ring");
 
-      expect(term.written.slice(before).join(""), "a reset, then the replay alone").toBe("\x1bcthe whole ring");
+      expect(screen(term).filter(Boolean), "a reset screen, then the replay alone").toEqual(["the whole ring"]);
     });
   }
-
-  test("puts the keyboard protocol back as it stood before the cut replay", async () => {
-    vi.useFakeTimers();
-    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
-    await mountTerminal(TerminalTab, tab!);
-    const first = TerminalSocket.all.at(-1)!;
-    await attach(first, { id: SESSION, generation: 3, seq: 60 });
-    const protocol = tab!.keyboardProtocol!;
-    const before = JSON.parse(JSON.stringify(protocol));
-    // The stand-in xterm parses nothing: this is the push a replayed
-    // `CSI > 1 u` would have made before the cut.
-    protocol.kitty.mainStack.push(protocol.kitty.mainFlags);
-    protocol.kitty.mainFlags = 1;
-    first.close();
-    const second = await redial();
-
-    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
-    await output(second, "the whole ring");
-
-    expect(tab!.keyboardProtocol, "the handlers' own object").toBe(protocol);
-    expect(JSON.parse(JSON.stringify(protocol)), "as it stood before the cut replay").toEqual(before);
-  });
-
-  test("writes no snapshot while a replay has not reached its ready", async () => {
-    ui.terminalControl = false;
-    const [tab] = seatTerminals([terminalTab()]);
-    await mountTerminal(TerminalTab, tab!);
-    const socket = TerminalSocket.all.at(-1)!;
-    await attach(socket, { id: SESSION, generation: 3, seq: 42 });
-    await output(socket, "part of the replay");
-
-    window.dispatchEvent(new Event("pagehide"));
-    expect(readTerminalSnapshot(SESSION), "no snapshot of a half-painted screen").toBeNull();
-
-    await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    window.dispatchEvent(new Event("pagehide"));
-    expect(readTerminalSnapshot(SESSION), "the screen after ready is the session's").toMatchObject({
-      generation: 3,
-      lastSeq: 42,
-    });
-  });
-
-  test("writes no snapshot between a cut replay and the redial's ready", async () => {
-    ui.terminalControl = false;
-    await cutReplay();
-    const second = await redial();
-
-    window.dispatchEvent(new Event("pagehide"));
-    expect(readTerminalSnapshot(SESSION), "before the redial's session frame").toBeNull();
-
-    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
-    await output(second, "the whole ring");
-    window.dispatchEvent(new Event("pagehide"));
-    expect(readTerminalSnapshot(SESSION), "during the redial's replay").toBeNull();
-  });
-
-  test("snapshots again once the redial's replay reaches its ready", async () => {
-    ui.terminalControl = false;
-    await cutReplay();
-    const second = await redial();
-    await attach(second, { id: SESSION, generation: 3, seq: 60, replay_bytes: 14 });
-    await output(second, "the whole ring");
-    await receive(second, { type: "ready", cols: 80, rows: 24 });
-
-    window.dispatchEvent(new Event("pagehide"));
-
-    expect(readTerminalSnapshot(SESSION), "the whole ring's screen").toMatchObject({ generation: 3, lastSeq: 60 });
-  });
 });

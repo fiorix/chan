@@ -29,14 +29,17 @@
 /// other failure of the instance that checks the core, such as a wasm
 /// memory RangeError on a page short of memory. That retry instantiates
 /// the module compiled before: fetching and compiling the 1.2MB again
-/// cannot cure a failure of the instance. Callers fall back to xterm.js
-/// for each terminal whose load fails.
+/// cannot cure a failure of the instance. A terminal whose load fails shows
+/// the failure in its own area and opens no other terminal in its place;
+/// `ghosttyLoadIsFinal` tells it whether a retry can pass or only a reload
+/// can, and `onGhosttyKitLoaded` tells it when a load another terminal made
+/// has passed.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
 
-/// The engine a live terminal runs on: Ghostty, or xterm.js when its
-/// Ghostty load failed.
+/// The engine TerminalTab's code paths branch on. Every terminal opens on
+/// Ghostty; no terminal reaches the "xterm" paths.
 export type TerminalBackend = "xterm" | "ghostty";
 
 /// Everything TerminalTab needs to construct a ghostty terminal without
@@ -65,6 +68,26 @@ let kitPromise: Promise<GhosttyKit> | null = null;
 /// The kit over the compiled module, unchecked; set once the compile
 /// succeeds and kept when the instance that checks the core fails.
 let compiledKit: GhosttyKit | null = null;
+/// The failure the load keeps for the page's life, once it has one.
+let finalFailure: { error: unknown } | null = null;
+const loadedListeners = new Set<() => void>();
+
+/// Call `listener` each time a load of the kit passes: at the first spawn,
+/// and after a failed load, when the next one does. A cached answer is not
+/// a load, so a terminal that retries on this and fails again on its own
+/// instance does not start another round. Returns the removal.
+export function onGhosttyKitLoaded(listener: () => void): () => void {
+  loadedListeners.add(listener);
+  return () => void loadedListeners.delete(listener);
+}
+
+/// Whether `error`, from `loadGhosttyKit` or a kit's `instantiate`, stays
+/// the answer for the page's life, so only a reload, with a corrected
+/// build or another engine, can get past it: the compile failed or the
+/// binding refused the core. Any other failure may pass at the next try.
+export function ghosttyLoadIsFinal(error: unknown): boolean {
+  return error instanceof GhosttyVtRefusal || (finalFailure !== null && finalFailure.error === error);
+}
 
 /// Load the ghostty kit, fetching the library and compiling the wasm
 /// asset on first use. Compile failures and a refused core stay cached;
@@ -76,6 +99,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
     let permanent = false;
     const forever = (error: unknown): never => {
       permanent = true;
+      finalFailure = { error };
       throw error;
     };
     kitPromise = (async () => {
@@ -90,9 +114,14 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
       });
       return kit;
     })();
-    kitPromise.catch(() => {
-      if (!permanent) kitPromise = null;
-    });
+    kitPromise.then(
+      () => {
+        for (const listener of [...loadedListeners]) listener();
+      },
+      () => {
+        if (!permanent) kitPromise = null;
+      },
+    );
   }
   return kitPromise;
 }

@@ -1,7 +1,12 @@
+// The replay check's page: TerminalTab on the real widget and vendored core
+// (the shared fixture in ./ghosttyTab, which the case file declares), over
+// real WebSockets to a throwaway server behind the cutting proxy.
+
+import type { Terminal } from "@chan/ghostty-web-ng";
 import { mount, tick, unmount, type Component } from "svelte";
-import type { Terminal } from "@xterm/xterm";
 import { vi } from "vitest";
-import { FakeTerminal, installTerminalDom, seatTerminals, terminalTab, xterm } from "./terminalTab";
+import { ghosttyAlternateScreen, ghosttyFixture, seatedGhostty } from "./ghosttyTab";
+import { installTerminalDom, seatTerminals, terminalTab } from "./terminalTab";
 
 type ByteBuffer = Uint8Array & { toString(encoding?: string): string };
 type Network = { readyState: number; on(event: string, handler: (...args: any[]) => void): void; send(data: string): void; close(): void; terminate(): void };
@@ -138,65 +143,46 @@ export class ReplaySocket {
   }
 }
 
-type ParserTerminal = FakeTerminal & { model: Terminal; queued: number; completed: number };
-export const parsers: ParserTerminal[] = [];
+/// The showing screen as the core reads it: every row, history first on the
+/// normal screen, and the cursor. `baseY` is the history length.
+export type Screen = { rows: string[]; cursorX: number; cursorY: number; baseY: number };
 
-export async function parserTerminalModule() {
-  HTMLCanvasElement.prototype.getContext = (() => ({ createLinearGradient: () => ({ addColorStop() {} }) })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
-  const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
-  return {
-    Terminal: class extends FakeTerminal {
-      model: Terminal;
-      queued = 0;
-      completed = 0;
-      constructor(options: Record<string, unknown>) {
-        super(options);
-        this.model = new Terminal({ allowProposedApi: true, cols: 80, rows: 24, scrollback: 10_000 });
-        parsers.push(this);
-        Object.defineProperty(this, "buffer", { get: () => this.model.buffer });
-        for (const method of ["registerCsiHandler", "registerEscHandler", "registerOscHandler"] as const) {
-          Object.assign(this.parser, { [method]: this.model.parser[method].bind(this.model.parser) });
-        }
-        this.model.onData((data) => this.type(data));
-      }
-      write(data: string | Uint8Array, done?: () => void) {
-        const write = ++this.queued;
-        observations.push({ event: "write", write, bytes: bytes.from(data).toString("base64") });
-        this.model.write(data, () => {
-          done?.();
-          this.completed++;
-          observations.push({ event: "parsed", write });
-          changed();
-        });
-      }
-      writeln(data: string) { this.write(`${data}\r\n`); }
-      resize(cols: number, rows: number) { super.resize(cols, rows); this.model.resize(cols, rows); }
-      dispose() { this.model.dispose(); super.dispose(); }
-    },
-  };
-}
+/// A snapshot holds the screen that showed when it was taken. The core reads
+/// only that screen, so reading the other one throws rather than comparing
+/// two absent screens as equal.
+export type Reading = { readonly active: "normal" | "alternate"; readonly normal: Screen; readonly alternate: Screen };
 
-export async function drainParser(label: string) {
-  const terminal = parsers.at(-1);
-  if (!terminal) throw new Error("no terminal parser");
-  let drained = false;
-  terminal.model.write("", () => { drained = true; changed(); });
-  await until(`parser drain ${label}`, () => drained ? true : undefined);
-  if (terminal.queued !== terminal.completed) throw new Error("buffer read before writes completed");
-  return terminal;
-}
-
-export async function snapshot(label: string) {
-  for (const socket of ReplaySocket.all) await socket.handled();
-  const terminal = await drainParser(label);
-  const read = (buffer: Terminal["buffer"]["normal"]) => ({
-    rows: Array.from({ length: buffer.length }, (_, index) => buffer.getLine(index)!.translateToString(true)),
-    cursorX: buffer.cursorX, cursorY: buffer.cursorY, baseY: buffer.baseY,
+function readScreen(term: Terminal, label: string): Screen {
+  const buffer = term.buffer.active;
+  const rows = Array.from({ length: buffer.length }, (_, index) => {
+    const line = buffer.getLine(index);
+    if (!line) throw new Error(`${label}: row ${index} of ${buffer.length} did not read`);
+    return line.translateToString(true);
   });
-  const value = { event: "snapshot", label, queued: terminal.queued, completed: terminal.completed,
-    active: terminal.model.buffer.active.type, normal: read(terminal.model.buffer.normal), alternate: read(terminal.model.buffer.alternate) };
-  observations.push(value);
-  return value;
+  const cursor = term.getCursor();
+  if (!cursor) throw new Error(`${label}: the terminal is not open`);
+  return { rows, cursorX: cursor.x, cursorY: cursor.y, baseY: term.getScrollbackLength() };
+}
+
+/// Read the terminal once every delivery the page received is processed.
+/// The widget parses a write before the write returns, so a processed
+/// delivery is a parsed one and nothing is left to drain.
+export async function snapshot(label: string): Promise<Reading> {
+  for (const socket of ReplaySocket.all) await socket.handled();
+  const term = ghosttyFixture.terminals.at(-1);
+  if (!term) throw new Error(`${label}: no terminal opened`);
+  const active = ghosttyAlternateScreen(term) ? "alternate" : "normal";
+  const screen = readScreen(term, label);
+  observations.push({ event: "snapshot", label, active, [active]: screen });
+  const shown = (name: "normal" | "alternate"): Screen => {
+    if (name !== active) throw new Error(`${label}: the ${name} screen is not showing, and the core reads only the screen that shows`);
+    return screen;
+  };
+  return {
+    active,
+    get normal() { return shown("normal"); },
+    get alternate() { return shown("alternate"); },
+  };
 }
 
 export async function mountRealTerminal(component: Component<any>) {
@@ -207,16 +193,21 @@ export async function mountRealTerminal(component: Component<any>) {
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => networkFetch(
     typeof input === "string" ? new URL(input, window.location.href).href : input, init,
   ));
-  xterm.fit.size = { cols: 80, rows: 24 };
   const [tab] = seatTerminals([terminalTab({ terminalSessionId: env.CHAN_REPLAY_SESSION! })]);
   const target = document.createElement("div");
   document.body.append(target);
   const instance = mount(component, { target, props: { tab, paneId: "terminal-test-pane", side: "a", active: true, focused: true } });
   await tick();
+  let term: Terminal;
   let socket: ReplaySocket;
-  try { socket = await ReplaySocket.dial(1); }
-  catch (error) { await unmount(instance); target.remove(); throw error; }
-  return { tab, socket, async close() {
+  try {
+    // The widget dials once it has opened. jsdom lays out no host for the
+    // tab to fit, so the widget keeps its 80 by 24 grid, the fixture PTY's.
+    term = await seatedGhostty(target);
+    if (term.cols !== 80 || term.rows !== 24) throw new Error(`the terminal opened at ${term.cols} by ${term.rows}, not 80 by 24`);
+    socket = await ReplaySocket.dial(1);
+  } catch (error) { await unmount(instance); target.remove(); throw error; }
+  return { tab, term, socket, async close() {
     ReplaySocket.acknowledge = null;
     await unmount(instance);
     for (const peer of ReplaySocket.all) if (!peer.closed) peer.disconnect();

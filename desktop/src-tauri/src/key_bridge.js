@@ -29,7 +29,7 @@
   }
   // True while the keyboard belongs to a terminal. This script shares the
   // SPA's document, so the focused element answers that with no protocol
-  // between the two: both renderer backends mount inside `.terminal-host`,
+  // between the two: the terminal widget mounts inside `.terminal-host`,
   // a child of the tab root, and the find bar and the Rich Prompt composer
   // sit in the same subtree, which is exactly the region whose root keydown
   // handler owns terminal find. `activeElement` is tested for null before
@@ -172,7 +172,7 @@
         // Ctrl+Shift+R (shift branch below) so plain Ctrl+R reaches a
         // focused terminal's shell reverse-search. Gating on metaKey
         // here leaves Linux/macOS plain Ctrl+R untouched (no
-        // preventDefault -> falls through to xterm), mirroring the
+        // preventDefault -> falls through to the terminal), mirroring the
         // Cmd+W idiom below.
         case 'KeyR': if (e.metaKey) invokeIpc(e, 'reload_window'); return;
         // New terminal: Cmd+T on macOS. Off-mac the chord is Ctrl+Shift+T
@@ -182,11 +182,11 @@
         // Cmd+W closes the tab
         // on macOS. On Linux the platform mod is Ctrl and Ctrl+W is
         // readline delete-word inside a focused terminal, so DON'T
-        // claim it - let it reach xterm. Linux closes tabs with
+        // claim it - let it reach the terminal. Linux closes tabs with
         // Ctrl+Shift+W (the shift branch below) or Ctrl+D
         // (context-aware via the SPA's onCtrlDCapture, which leaves a
         // focused terminal to its EOF). Gating on metaKey (Cmd) leaves
-        // Linux Ctrl+W untouched (no preventDefault -> reaches xterm).
+        // Linux Ctrl+W untouched (no preventDefault -> reaches the terminal).
         case 'KeyW':
           if (e.metaKey) {
             // On the connecting/retry page there are no tabs and the

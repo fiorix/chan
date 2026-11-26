@@ -18,6 +18,7 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import GraphPanel from "./GraphPanel.svelte";
+import { api } from "../api/client";
 import {
   canvas,
   fsg,
@@ -31,7 +32,7 @@ import {
   unmountGraphPanels,
   visibleIds,
 } from "../__tests__/graphPanel";
-import { invalidateGraph } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -992,6 +993,240 @@ describe("the workspace tree", () => {
     expect(visibleIds()).not.toContain(A);
     expect(visibleIds(), "the directory itself stays").toContain(NOTES);
     expect(graphServer.graphStreamCalls, "the tree was already loaded").toBe(streams);
+  });
+
+  /// Folder `a` holds `a/x.md` and subfolder `a/b`; the shared graph holds
+  /// both folders and no file of `a`, as an answer over the listing cap does
+  /// for a folder whose files the index does not hold.
+  function serveFoldersWithoutFiles(): void {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md")],
+    };
+  }
+
+  test.each(["folders", "depth"] as const)("a double-click on a folder an answer over the listing cap (%s) holds without its files reads its level", async (tree) => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = tree;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(graphServer.fsGraphCalls.map((call) => call.path)).not.toContain("a");
+
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.a).toBe(true);
+    expect(graphServer.fsGraphCalls.map((call) => call.path), "the subfolder does not prove the files are drawn").toContain("a");
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
+  });
+
+  test("a double-click on a folder an answer of the whole tree holds a child of reads nothing", async () => {
+    serveFoldersWithoutFiles();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const reads = graphServer.fsGraphCalls.length;
+
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.a).toBe(true);
+    expect(graphServer.fsGraphCalls.length, "the shared graph holds the folder's level").toBe(reads);
+    expect(visibleIds()).toContain("directory:a/b");
+  });
+
+  test("a double-click while a first load over the listing cap still streams reads the level", async () => {
+    serveFoldersWithoutFiles();
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => (finish = resolve));
+    vi.mocked(api.graphStream).mockImplementationOnce(async (_scope, opts = {}) => {
+      graphServer.graphStreamCalls += 1;
+      await Promise.resolve();
+      const meta = { type: "meta" as const, scope: "workspace" as const, path: "", depth: 6 };
+      opts.onMeta?.(meta);
+      opts.onView?.({ nodes: [], edges: [] });
+      opts.onMeta?.({ ...meta, tree: "folders" });
+      opts.onView?.({ nodes: [...graphServer.view.nodes], edges: [...graphServer.view.edges] });
+      await finished;
+      return graphServer.view;
+    });
+    try {
+      const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+      expect(graphData.partial, "the load has not completed").toBe(true);
+      expect(visibleIds(), "its partial view is drawn").toContain("directory:a");
+      canvas.props!.onSelect("directory:a");
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the partial view's mark decides").toHaveLength(1);
+      expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
+    } finally {
+      finish();
+    }
+  });
+
+  test("a tab over an answer over the listing cap decides by the mark it took while the window's graph reloads", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let release!: () => void;
+    graphServer.streamGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      invalidateGraph();
+      await settle();
+      expect(graphServer.graphStreamCalls, "the shown tab asked again").toBe(2);
+      expect(graphData.tree, "the reload has said nothing yet").toBeNull();
+      expect(visibleIds(), "the tab still draws the answer it took").toContain("directory:a");
+      canvas.props!.onSelect("directory:a");
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the mark taken with the drawn view").toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  test("a folder opened over an answer of the whole tree is read once a refresh comes back over the listing cap", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.view.nodes.push(g.file("a/x.md"));
+    graphServer.view.edges.push(g.edge("directory:a", "a/x.md", "contains"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    canvas.props!.onSelect("directory:a");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(graphServer.fsGraphCalls.map((call) => call.path), "the whole tree holds the level").not.toContain("a");
+    expect(visibleIds()).toContain("a/x.md");
+
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    await refreshGraph();
+    await settle();
+    expect(graphData.tree).toBe("folders");
+    expect(graphServer.fsGraphCalls.filter((call) => call.path === "a"), "the opened folder's level").toHaveLength(1);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a/b", "a/x.md"]));
+  });
+
+  /// Folders `a` and `a/b` with `a/x.md`, `a/b/c.md` and `a/b/y.md`, and
+  /// `notes/n.md` linking to `a/b/c.md`. Marked, the answer holds every
+  /// folder and of the files only the note and the file it links to.
+  function serveLinkBelowClosedFolder(tree: "folders" | null): void {
+    graphServer.view = {
+      nodes: [
+        g.dir(""), g.dir("a"), g.dir("a/b"), g.dir("notes"), g.file("notes/n.md"), g.file("a/b/c.md"),
+        ...(tree === null ? [g.file("a/x.md"), g.file("a/b/y.md")] : []),
+      ],
+      edges: [
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "directory:a/b", "contains"),
+        g.edge("directory:a/b", "a/b/c.md", "contains"),
+        g.edge("", "directory:notes", "contains"),
+        g.edge("directory:notes", "notes/n.md", "contains"),
+        g.edge("notes/n.md", "a/b/c.md", "link"),
+        ...(tree === null
+          ? [g.edge("directory:a", "a/x.md", "contains"), g.edge("directory:a/b", "a/b/y.md", "contains")]
+          : []),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.dir("notes"),
+        fsg.file("a/x.md"), fsg.file("a/b/c.md"), fsg.file("a/b/y.md"), fsg.file("notes/n.md"),
+      ],
+      edges: [
+        fsg.contains("", "a"),
+        fsg.contains("a", "a/b"),
+        fsg.contains("a", "a/x.md"),
+        fsg.contains("a/b", "a/b/c.md"),
+        fsg.contains("a/b", "a/b/y.md"),
+        fsg.contains("", "notes"),
+        fsg.contains("notes", "notes/n.md"),
+      ],
+    };
+    graphServer.tree = tree;
+  }
+
+  async function doubleClick(id: string): Promise<void> {
+    canvas.props!.onSelect(id);
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+  }
+
+  /// The note's link shows `a/b` under the closed `a`; `a/b` is opened
+  /// there, then `a`, then `a/b` is closed and opened again.
+  async function openBelowClosedParent(): Promise<void> {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, notes: true } }));
+    canvas.props!.onSelect("notes/n.md");
+    await settle(2);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["directory:a", "directory:a/b", "a/b/c.md"]));
+    await doubleClick("directory:a/b");
+    expect(tab.expanded["a/b"]).toBe(true);
+    expect(tab.expanded.a).toBeUndefined();
+    await doubleClick("directory:a");
+    expect(tab.expanded.a).toBe(true);
+    await doubleClick("directory:a/b");
+    expect(tab.expanded["a/b"]).toBeUndefined();
+    await doubleClick("directory:a/b");
+    expect(tab.expanded["a/b"]).toBe(true);
+  }
+
+  const levelReads = (path: string): number => graphServer.fsGraphCalls.filter((call) => call.path === path).length;
+  const filesOfA = (): string[] => visibleIds().filter((id) => id.startsWith("a/"));
+
+  test("a folder opened under its closed parent draws its files once the parent opens", async () => {
+    serveLinkBelowClosedFolder(null);
+    await openBelowClosedParent();
+    expect(filesOfA()).toEqual(["a/b/c.md", "a/b/y.md", "a/x.md"]);
+  });
+
+  test("a folder opened under its closed parent over the listing cap is read once the parent opens", async () => {
+    serveLinkBelowClosedFolder("folders");
+    await openBelowClosedParent();
+    expect({ a: levelReads("a"), "a/b": levelReads("a/b") }, "each opened level read once").toEqual({ a: 1, "a/b": 1 });
+    expect(filesOfA()).toEqual(["a/b/c.md", "a/b/y.md", "a/x.md"]);
+  });
+
+  test("a tab whose spine lands after an answer over the listing cap reads each opened folder once", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true } }));
+    expect(graphData.partial, "the answer is in").toBe(false);
+    expect(graphData.tree).toBe("folders");
+    release();
+    await settle();
+    expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 1, a: 1 });
+    expect(visibleIds()).toContain("a/x.md");
+  });
+
+  test("taking an answer of the whole tree reads no opened folder", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.file("a/x.md")],
+      edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "a/x.md", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/x.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+    // `a/x.md` is deleted: the next answer of the whole tree holds `a` empty.
+    graphServer.view = { nodes: [g.dir(""), g.dir("a")], edges: [g.edge("", "directory:a", "contains")] };
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.dir("a")], edges: [fsg.contains("", "a")] };
+    await refreshGraph();
+    await settle();
+    expect(levelReads("a"), "nor does the next").toBe(0);
+    expect(visibleIds()).toEqual(["", "directory:a"]);
   });
 
   test("the depth reads a double-click on the selected directory", async () => {

@@ -59,7 +59,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | Item | State | Next |
 | --- | --- | --- |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [cap: three walks, no folder layer][capwalks] | not started | build |
+| [cap: three walks, no folder layer][capwalks] | built | GA |
 | [AppImage children get its environment][appenv] | built | review |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [ConPTY pulls history into the screen][conpty] | partly built | measure |
@@ -72,7 +72,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [Workspace details clears a selection][detailsclear] | built | review |
 | [four places show wikilinks as typed][wikiplaces] | partly built | review |
 | [a hidden control terminal stops resizing][ctlresize] | not started | build |
-| [an unfocused survey takes Tab and keys][surveytab] | not started | build |
+| [an unfocused survey takes Tab and keys][surveytab] | built | GA |
 | [the wake fix unread on macOS][wakemac] | not started | measure |
 | [a cs command takes its terminal's focus][csfocus] | not started | build |
 | [a YouTube embed plays under the lock][ytlock] | not started | build |

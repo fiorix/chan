@@ -310,3 +310,113 @@ test("abort refuses buffered events before any final snapshot", async () => {
   expect(clock.callbacks.size).toBe(0);
   expect(count()).toBe(0);
 });
+
+test.each(["folders", "depth"] as const)("a first load over the listing cap publishes its tree mark (%s) when the second meta comes, behind a keep-alive's empty batch", async (tree) => {
+  const source = stream();
+  const clock = frames();
+  const load = ensureGraphLoaded();
+  source.send([meta, { type: "nodes", nodes: [] }]);
+  await drain();
+  clock.run();
+  expect(graphData.tree, "the opening meta never carries the mark").toBeNull();
+
+  source.send([{ ...meta, tree }]);
+  await drain();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.tree, "published as it arrives, ahead of the first node").toBe(tree);
+
+  source.send(batches);
+  await drain();
+  clock.run();
+  expect(graphData.view).toEqual(completed);
+  expect(graphData.tree).toBe(tree);
+
+  source.send([done]);
+  source.close();
+  await load;
+  expect(graphData.partial).toBe(false);
+  expect(graphData.tree).toBe(tree);
+
+  invalidateGraph();
+  expect(graphData.tree).toBeNull();
+});
+
+test("a refresh keeps the drawn answer's tree mark until its own answer replaces the view", async () => {
+  const first = stream();
+  frames();
+  const loaded = ensureGraphLoaded();
+  first.send([meta, { ...meta, tree: "folders" }, ...batches, done]);
+  first.close();
+  await loaded;
+  const previous = graphData.view;
+  expect(graphData.tree).toBe("folders");
+
+  const next = stream();
+  const refreshed = refreshGraph();
+  next.send([meta, ...batches]);
+  await drain();
+  expect(graphData.view, "a refresh keeps the previous view on screen").toBe(previous);
+  expect(graphData.tree, "and the mark of the answer that view came from").toBe("folders");
+
+  next.send([done]);
+  next.close();
+  await refreshed;
+  expect(graphData.view).not.toBe(previous);
+  expect(graphData.tree, "an answer that holds the whole tree carries no mark").toBeNull();
+});
+
+test.each(["superseded", "failed"])("a first load starts with no tree mark after a first load over the listing cap was %s", async (end) => {
+  const first = stream();
+  const clock = frames();
+  const loadA = ensureGraphLoaded();
+  first.send([meta, { ...meta, tree: "folders" }, ...batches.slice(0, 2)]);
+  await drain();
+  clock.run();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.tree).toBe("folders");
+  if (end === "failed") {
+    first.fail(new Error("dropped"));
+    await loadA;
+    expect(graphData.tree, "the failed load's partial view keeps its mark").toBe("folders");
+  }
+
+  const second = stream();
+  const loadB = end === "superseded" ? refreshGraph() : ensureGraphLoaded();
+  expect(graphData.partial).toBe(true);
+  expect(graphData.view).toEqual({ nodes: [], edges: [] });
+  expect(graphData.tree, "the old mark goes with the view it described").toBeNull();
+  second.send([meta, ...batches, done]);
+  second.close();
+  await loadB;
+  expect(graphData.tree).toBeNull();
+});
+
+test("a load an invalidate dropped publishes no tree mark from a stream that goes on after the abort", async () => {
+  const opened: Array<() => void> = [];
+  // A stream that ignores its abort, which the real client never does: the
+  // store's own guard is all that drops what it delivers.
+  vi.spyOn(api, "graphStream").mockImplementation(async (_scope, opts = {}) => {
+    await new Promise<void>((resolve) => opened.push(resolve));
+    opts.onMeta?.({ type: "meta", scope: "workspace", path: "", depth: 6 });
+    opts.onMeta?.({ type: "meta", scope: "workspace", path: "", depth: 6, tree: "folders" });
+    opts.onView?.(firstView);
+    return completed;
+  });
+  void ensureGraphLoaded();
+  await drain();
+  invalidateGraph();
+  void ensureGraphLoaded();
+  await drain();
+  expect(opened).toHaveLength(2);
+
+  opened[0]!();
+  await drain();
+  expect(graphData.tree, "the dropped load's mark").toBeNull();
+  expect(graphData.view, "nor its view").toEqual({ nodes: [], edges: [] });
+  expect(graphData.partial).toBe(true);
+
+  opened[1]!();
+  await drain();
+  expect(graphData.tree, "the live load's own mark").toBe("folders");
+  expect(graphData.view).toEqual(completed);
+});

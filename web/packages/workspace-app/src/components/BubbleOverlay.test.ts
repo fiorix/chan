@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import { api } from "../api/client";
 import { surveyState } from "../state/survey.svelte";
-import { layout, setActivePane, tabFocusPulse, type LeafNode } from "../state/tabs.svelte";
+import { activeTabInPane, layout, setActivePane, tabFocusPulse, type LeafNode } from "../state/tabs.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
 
@@ -380,6 +380,38 @@ describe("the survey card's keys", () => {
     await tick();
     const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
     target.querySelector(".survey-card")!.dispatchEvent(event);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ surveyId: "survey-1", kind, ...(optionIndex === undefined ? {} : { optionIndex }) }));
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  // A window-wide survey is no pane's: whatever the focused pane shows,
+  // everything in its card stays in the Tab order, its body's link and its
+  // buttons alike, and its card answers its keys.
+  test.each([
+    ["1", "option", 0],
+    ["F", "followup", undefined],
+    ["X", "dismissed", undefined],
+  ])("%s answers a window-wide survey over a focused pane showing no terminal, as %s", async (key, kind, optionIndex) => {
+    resetLayout([{ kind: "dashboard", id: "dashboard-1", title: "Dashboard", autoRotate: false }]);
+    expect(activeTabInPane(layout.nodes[layout.activePaneId] as LeafNode)?.kind, "the focused pane shows a dashboard")
+      .toBe("dashboard");
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    surveyState.windowWide = {
+      spec: spec({ bodyMarkdown: "Pick a backend; [the notes](https://example.com/notes) compare them." }),
+      busy: false,
+    };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    const tabbable = [...card.querySelectorAll<HTMLElement>("*")].filter((el) => el.tabIndex >= 0);
+    expect(tabbable.map((el) => el.localName), "the body's link and every button in the Tab order")
+      .toEqual(["a", "button", "button", "button", "button"]);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    card.dispatchEvent(event);
     await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
     expect(reply).toHaveBeenCalledWith(expect.objectContaining({ surveyId: "survey-1", kind, ...(optionIndex === undefined ? {} : { optionIndex }) }));
     expect(event.defaultPrevented).toBe(true);

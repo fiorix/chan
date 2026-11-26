@@ -3,7 +3,7 @@ import {
   PtyWriteTracker,
   isReplayGeneratedTerminalInput,
   isTerminalGeneratedReply,
-  routeXtermData,
+  routeTerminalData,
   shouldForwardGeneratedTerminalInput,
   terminalMessageBytes,
   terminalMouseReport,
@@ -94,9 +94,9 @@ describe("terminal connection invariants", () => {
       new Uint8Array([27, 91, 54, 110]),
     );
 
-    routeXtermData("\x1b[1;1R", tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData("\x1b[1;1R", tracker, (data) => direct.push(data), (data) => user.push(data));
     drain?.();
-    routeXtermData("a", tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData("a", tracker, (data) => direct.push(data), (data) => user.push(data));
 
     expect(direct).toEqual(["\x1b[1;1R"]);
     expect(user).toEqual(["a"]);
@@ -108,7 +108,7 @@ describe("terminal connection invariants", () => {
     const user: string[] = [];
 
     for (const report of ["\x1b[I", "\x1b[O"]) {
-      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+      routeTerminalData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
     }
 
     expect(tracker.currentOrigin).toBeNull();
@@ -122,7 +122,7 @@ describe("terminal connection invariants", () => {
     const user: string[] = [];
 
     for (const typed of ["typed", "\x1b[Ityped"]) {
-      routeXtermData(typed, tracker, (data) => direct.push(data), (data) => user.push(data));
+      routeTerminalData(typed, tracker, (data) => direct.push(data), (data) => user.push(data));
     }
 
     expect(direct).toEqual([]);
@@ -145,7 +145,7 @@ describe("terminal connection invariants", () => {
 
     expect(tracker.currentOrigin).toBe("live");
     for (const report of ["\x1b[I", "\x1b[O"]) {
-      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+      routeTerminalData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
     }
     drain?.();
 
@@ -171,7 +171,7 @@ describe("terminal connection invariants", () => {
 
     expect(tracker.currentOrigin).toBe("replay");
     for (const report of ["\x1b[I", "\x1b[O"]) {
-      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+      routeTerminalData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
     }
     drain?.();
 
@@ -196,8 +196,8 @@ describe("terminal connection invariants", () => {
       "replay",
     );
 
-    routeXtermData("\x1b[1;1R", tracker, (data) => direct.push(data), (data) => user.push(data));
-    routeXtermData("typed", tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData("\x1b[1;1R", tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData("typed", tracker, (data) => direct.push(data), (data) => user.push(data));
     expect(shouldForwardGeneratedTerminalInput(tracker)).toBe(false);
     drain?.();
 
@@ -223,7 +223,7 @@ describe("terminal connection invariants", () => {
       "replay",
     );
 
-    routeXtermData(paste, tracker, (data) => direct.push(data), (data) => user.push(data));
+    routeTerminalData(paste, tracker, (data) => direct.push(data), (data) => user.push(data));
     drain?.();
 
     expect(direct).toEqual([]);
@@ -266,7 +266,7 @@ describe("data the user made, marked by xterm.js", () => {
     const direct: string[] = [];
     const group: string[] = [];
     const route = (data: string, user: boolean) =>
-      routeXtermData(data, tracker, (d) => direct.push(d), (d) => group.push(d), user);
+      routeTerminalData(data, tracker, (d) => direct.push(d), (d) => group.push(d), user);
     return { tracker, direct, group, route, drain: () => drain?.() };
   }
 
@@ -292,7 +292,7 @@ describe("data the user made, marked by xterm.js", () => {
     const idle = new PtyWriteTracker();
     const direct: string[] = [];
     const group: string[] = [];
-    routeXtermData("\x1b[I", idle, (d) => direct.push(d), (d) => group.push(d), true);
+    routeTerminalData("\x1b[I", idle, (d) => direct.push(d), (d) => group.push(d), true);
     const live = pending("live");
     live.route("\x1b[O", true);
     expect(direct).toEqual(["\x1b[I"]);
