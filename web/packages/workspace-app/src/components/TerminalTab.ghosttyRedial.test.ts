@@ -661,4 +661,33 @@ describe("a redial whose answer does not continue the view", () => {
       session: SESSION, since: "0", generation: null, ack: "1",
     });
   });
+
+  test("a fresh answer that reached ready clears the cut, so a clean close redials from the cursor", async () => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    first.onopen?.();
+    expect(dialed(first), "fixture: a fresh dial").toMatchObject({ since: "0", generation: null });
+    await receive(first, session(500, 0, 0));
+    await output(first, ALT_SCREEN_ATTACH_PRELUDE + "\x1b[?1000h");
+    // Cut inside the fresh answer: the next dial is fresh too.
+    const second = await redialedAfterCut(first);
+    expect(dialed(second), "fixture: the redial after the cut is fresh").toMatchObject({ since: "0", generation: null });
+    await receive(second, session(520, 0, 0));
+    await output(second, ALT_SCREEN_ATTACH_PRELUDE + "\x1b[?1000h");
+    await receive(second, { type: "ready", cols: 80, rows: 24 });
+    const live = `\x1b[1;1H${KEPT}`;
+    await output(second, live);
+    expect(ghosttyAlternateScreen(term)).toBe(true);
+    // A clean close after ready: the view shows the stream to 520 + live.
+    const third = await closedAndRedialed(second);
+    expect(dialed(third), "the redial echoes the cursor and the generation").toEqual({
+      session: SESSION, since: String(520 + live.length), generation: String(GENERATION), ack: "1",
+    });
+    third.onopen?.();
+    await receive(third, session(520 + live.length, 0, 0));
+    await receive(third, { type: "ready", cols: 80, rows: 24 });
+    expect(ghosttyLineText(term, 0), "the continuing answer keeps the screen").toContain(KEPT);
+    expect(ghosttyMode(term, 1000), "the continuing answer keeps the program's mouse tracking").toBe(true);
+  });
 });
