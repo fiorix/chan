@@ -193,7 +193,7 @@ export default {
     const dir = mkdtempSync(join(tmpdir(), "chan-copy-223-"));
     const ran = join(dir, "ran");
     const failures = [];
-    const result = { backend: "ghostty", browser: await ctx.browser.browser().version(), copies: {}, runs: [], pastes: [] };
+    const result = { browser: await ctx.browser.browser().version(), copies: {}, runs: [], pastes: [] };
     try {
       if (!(await captureGhosttyTerminals(page, "__ghostty223"))) throw new Error("no entry module of the page names a ghostty-web chunk");
 

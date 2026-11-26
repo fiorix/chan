@@ -218,7 +218,7 @@ export default {
     const dir = mkdtempSync(join(tmpdir(), "chan-paste-216-"));
     const page = await ctx.browser.newPage();
     const failures = [];
-    const result = { backend: "ghostty", browser: await ctx.browser.browser().version(), legs: [] };
+    const result = { browser: await ctx.browser.browser().version(), legs: [] };
     let primary = null;
     try {
       await page.setViewport({ width: 1280, height: 800 });

@@ -19,7 +19,7 @@ export default {
       const inspector = await openProgramInspector(tab);
       assert.match(inspector.title, new RegExp(tab.subject));
       assert.ok(inspector.records.some((record) => ["program", "deploy", "blocked", "App: release+cli", `Title: ${title}`, `Message: ${msg}`].every((part) => record.includes(part))), "the inspector lists the record's source, id, state and decoded fields");
-      await ctx.shot(`${tab.backend}-program-inspector`, tab.page);
+      await ctx.shot("program-inspector", tab.page);
     });
   },
 };

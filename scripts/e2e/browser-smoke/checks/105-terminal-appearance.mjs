@@ -279,7 +279,7 @@ export default {
         const bodyBackground = pixel(canvas.width / 2, canvas.height / 2);
         const trackBackground = pixel(canvas.width - 8 * canvas.width / canvasRect.width, canvas.height / 2);
         return {
-          backend: "ghostty", label,
+          label,
           grid,
           cellWidth: canvasRect.width / grid.cols,
           cellHeight: canvasRect.height / grid.rows,
@@ -617,7 +617,7 @@ export default {
       return (await response.json()).preferences;
     }, authToken);
     let opened = false;
-    const details = { backend: "ghostty" };
+    const details = {};
     let runError = null;
     try {
       await ctx.waitWindowLive(windowId);

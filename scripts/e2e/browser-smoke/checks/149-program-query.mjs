@@ -40,11 +40,11 @@ export default {
       const data = await runPtyPython(ctx, tab, "query", reader);
       const input = data.toString("latin1");
       const device = /\x1b\[\?[0-9;]*c/.exec(input);
-      assert.ok(device, `${tab.backend} device-attributes reply reached the PTY reader: ${data.toString("hex")}`);
+      assert.ok(device, `device-attributes reply reached the PTY reader: ${data.toString("hex")}`);
       const replies = [...input.matchAll(/\x1b\]7501;[^\x07\x1b]*(?:\x07|\x1b\\)/g)].map((match) => match[0]);
       assert.deepEqual(replies, ["\x1b]7501;?\x07", "\x1b]7501;?\x1b\\"], "one byte-exact reply for each terminator");
       assert.ok(input.indexOf(replies[1]) < device.index, "both 7501 replies precede the engine's CSI c answer");
-      await ctx.shot(`${tab.backend}-query-answers`, tab.page);
+      await ctx.shot("query-answers", tab.page);
     });
   },
 };

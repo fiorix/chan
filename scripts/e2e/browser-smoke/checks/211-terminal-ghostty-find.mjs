@@ -1,9 +1,9 @@
-// Find in a ghostty terminal, end to end over libghostty-vt's search.
+// Find in a terminal, end to end over libghostty-vt's search.
 //
-//   OUTPUT -- a ghostty terminal runs `seq 1 5000` under a bare prompt, with
+//   OUTPUT -- a terminal runs `seq 1 5000` under a bare prompt, with
 //             the screen and its history cleared first, so the buffer holds
 //             the numbers, a marker line and the prompt.
-//   OPEN   -- the find chord on ghostty's textarea (Cmd+F on macOS,
+//   OPEN   -- the find chord on the terminal's textarea (Cmd+F on macOS,
 //             Ctrl+Shift+F elsewhere, as trusted CDP keys) opens the find
 //             bar with its input focused.
 //   4999   -- typing 4999 selects its one match and the count reads 1 of 1.

@@ -153,7 +153,7 @@ export default {
       await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 });
     }
 
-    /// The opaque rectangles of the mask colour on ghostty's canvas, read
+    /// The opaque rectangles of the mask colour on the terminal's canvas, read
     /// back from its pixels: runs of mask pixels at least 16px long on a
     /// row, merged with the same run on the rows below. Text in the
     /// palette's bright black (the same colour) never makes a solid run
@@ -282,7 +282,7 @@ export default {
       return copied;
     }
 
-    const details = { backend: "ghostty" };
+    const details = {};
     let runError = null;
     try {
       await ctx.waitWindowLive(windowId);

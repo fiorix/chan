@@ -105,7 +105,7 @@ export default {
     let cs;
     const names = [];
     const failures = [];
-    const result = { backend: "ghostty", overrideConfig: config, legs: [] };
+    const result = { overrideConfig: config, legs: [] };
     const record = (label, bytes, payload, submitted) => {
       const expected = `${OPEN}${payload}${CLOSE}${submitted ? "\r" : ""}`;
       const events = inputEvents(bytes);

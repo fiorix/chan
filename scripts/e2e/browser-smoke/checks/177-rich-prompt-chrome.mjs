@@ -6,7 +6,7 @@
 // source and back with no scroller or paint of the source editor's own; and a
 // bold tapped on the toolbar reaches the text the card sends. The card's
 // first message starts `cat` into a workspace file, which is how the check
-// reads what the card sends; either terminal backend serves.
+// reads what the card sends.
 
 import assert from "node:assert/strict";
 import { readFileSync, rmSync } from "node:fs";

@@ -51,7 +51,7 @@ async function suiteWindow(ctx, name) {
   return page;
 }
 
-async function openTerminal(page, engine) {
+async function openTerminal(page) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
@@ -97,7 +97,7 @@ async function launcherRow(page) {
   return menuClosed && launcherClosed;
 }
 
-async function terminalArm(page, file, engine, arm, action, otherPane = false) {
+async function terminalArm(page, file, arm, action, otherPane = false) {
   const offset = statSync(file).size;
   if (otherPane) {
     const point = await page.evaluate(() => {
@@ -135,7 +135,7 @@ async function terminalArm(page, file, engine, arm, action, otherPane = false) {
     await page.mouse.click(host.x, host.y);
   }
   await page.keyboard.type("x");
-  return { arm, engine, opened, closed, focus, pty: await recordedSince(arm, file, offset, TYPED) };
+  return { arm, opened, closed, focus, pty: await recordedSince(arm, file, offset, TYPED) };
 }
 
 function checkTerminal(result, failures) {
@@ -151,20 +151,20 @@ function checkTerminal(result, failures) {
   if (JSON.stringify(result.pty) !== JSON.stringify([TYPED])) failures.push(`${result.arm}: the PTY read ${JSON.stringify(result.pty)}, not only x`);
 }
 
-async function terminalWindow(ctx, dir, engine, failures) {
+async function terminalWindow(ctx, dir, failures) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-  const page = await suiteWindow(ctx, engine);
+  const page = await suiteWindow(ctx, "terminal");
   const results = [];
   let originalStrip = null;
   let primary = null;
   try {
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await openTerminal(page, engine);
-    const file = join(dir, `${engine}.bytes`);
+    await openTerminal(page);
+    const file = join(dir, "terminal.bytes");
     await startRecorder(page, file);
     for (const action of ["control", "escape", "outside", "launcher", "left"]) {
-      const result = await terminalArm(page, file, engine, `${engine}-${action}`, action);
+      const result = await terminalArm(page, file, `terminal-${action}`, action);
       results.push(result);
       checkTerminal(result, failures);
     }
@@ -174,14 +174,14 @@ async function terminalWindow(ctx, dir, engine, failures) {
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
     const splitHost = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(splitHost.x, splitHost.y);
-    const split = await terminalArm(page, file, engine, `${engine}-split`, "split", true);
+    const split = await terminalArm(page, file, "terminal-split", "split", true);
     results.push(split);
     checkTerminal(split, failures);
-    await ctx.shot(`209-${engine}`, page);
+    await ctx.shot("209-terminal", page);
     return results;
   } catch (error) {
     primary = error;
-    await ctx.shot(`209-${engine}-failure`, page).catch(() => {});
+    await ctx.shot("209-terminal-failure", page).catch(() => {});
     throw error;
   } finally {
     console.log(`[smoke]   strip focus ${JSON.stringify(results)}`);
@@ -199,7 +199,7 @@ async function terminalWindow(ctx, dir, engine, failures) {
     try { if (originalStrip?.on) await writePaneStripPreference(page, token, true); }
     catch (error) { if (primary) console.log(`[smoke]   strip preference cleanup also failed: ${error?.message ?? error}`); else primary = error; }
     await page.close().catch(() => {});
-    if (primary && !results.length) console.log(`[smoke]   ${engine}: no completed arms`);
+    if (primary && !results.length) console.log("[smoke]   terminal: no completed arms");
     if (!failedBeforeCleanup && primary) throw primary;
   }
 }
@@ -220,7 +220,7 @@ async function emptyWindow(ctx, failures) {
     await page.keyboard.press("Escape");
     const escapeClosed = await page.waitForSelector(MENU, { hidden: true, timeout: 2_000 }).then(() => true, () => false);
     const escapeFocus = await focusOf(page);
-    const escape = { arm: "empty-escape", engine: null, opened: escapeOpened, closed: escapeClosed, focus: escapeFocus, pty: null };
+    const escape = { arm: "empty-escape", opened: escapeOpened, closed: escapeClosed, focus: escapeFocus, pty: null };
     results.push(escape);
     if (escape.opened !== "welcome" || !escape.closed || escape.focus !== "welcome") failures.push(`${escape.arm}: ${JSON.stringify(escape)}`);
     await page.mouse.click(welcome.x, welcome.y);
@@ -228,7 +228,7 @@ async function emptyWindow(ctx, failures) {
     const launcherOpened = await focusOf(page);
     const launcherClosed = await launcherRow(page);
     const launcherFocus = await focusOf(page);
-    const command = { arm: "empty-launcher", engine: null, opened: launcherOpened, closed: launcherClosed, focus: launcherFocus, pty: null };
+    const command = { arm: "empty-launcher", opened: launcherOpened, closed: launcherClosed, focus: launcherFocus, pty: null };
     results.push(command);
     if (command.opened !== "welcome" || !command.closed || command.focus !== "welcome") failures.push(`${command.arm}: ${JSON.stringify(command)}`);
     await page.mouse.click(welcome.x, welcome.y);
@@ -237,7 +237,7 @@ async function emptyWindow(ctx, failures) {
     await clickStretchOutsideMenu(page);
     const leftClosed = await page.waitForSelector(MENU, { hidden: true, timeout: 2_000 }).then(() => true, () => false);
     const leftFocus = await focusOf(page);
-    const left = { arm: "empty-left", engine: null, opened: leftOpened, closed: leftClosed, focus: leftFocus, pty: null };
+    const left = { arm: "empty-left", opened: leftOpened, closed: leftClosed, focus: leftFocus, pty: null };
     results.push(left);
     if (left.opened !== "welcome" || !left.closed || left.focus !== "welcome") failures.push(`${left.arm}: ${JSON.stringify(left)}`);
     await ctx.shot("209-empty", page);
@@ -256,11 +256,11 @@ export default {
     const failures = [];
     try {
       const details = {
-        ghostty: await terminalWindow(ctx, dir, "ghostty", failures),
+        terminal: await terminalWindow(ctx, dir, failures),
         empty: await emptyWindow(ctx, failures),
       };
       for (const [kind, required] of Object.entries({
-        ghostty: ["ghostty-control", "ghostty-escape", "ghostty-outside", "ghostty-launcher", "ghostty-left", "ghostty-split"],
+        terminal: ["terminal-control", "terminal-escape", "terminal-outside", "terminal-launcher", "terminal-left", "terminal-split"],
         empty: ["empty-escape", "empty-launcher", "empty-left"],
       })) {
         if (JSON.stringify(details[kind].map((arm) => arm.arm)) !== JSON.stringify(required)) failures.push(`${kind}: required arms incomplete`);

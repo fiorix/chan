@@ -60,10 +60,9 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const failures = [];
-    const name = `Deck300-${backend}`;
-    const result = { backend, legs: {}, cleanupErrors: [] };
+    const name = "Deck300";
+    const result = { legs: {}, cleanupErrors: [] };
     const calls = [];
     const deckState = async () => ({ panes: (await panes(page)).length, deckOpen: Boolean(await page.$(DECK)) });
     // Select the row in the deck, press Enter, and wait for `panesAfter`
@@ -72,11 +71,11 @@ export default {
       await selectLauncherCommand(page, ROW);
       const deck = await keyboardAt(page);
       assert.equal(deck, "deck", "precondition: the deck holds the keyboard with the row selected");
-      await ctx.shot(`300-${backend}-${label}-deck-selected`);
+      await ctx.shot(`300-${label}-deck-selected`);
       await page.keyboard.press("Enter");
       const after = await until("the row runs", deckState, (state) => state.panes === panesAfter && !state.deckOpen, 5000)
         .catch(async () => ({ ...(await deckState()), timedOut: true }));
-      await ctx.shot(`300-${backend}-${label}-after-enter`);
+      await ctx.shot(`300-${label}-after-enter`);
       return { deck, after };
     };
     const cleanLeg = async (label) => {
@@ -98,7 +97,7 @@ export default {
       try {
         await page.click(`${terminal} .terminal-host`);
         const survey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
-          "--title", `Keyboard owners: 300-${backend} focused pane`,
+          "--title", "Keyboard owners: 300 focused pane",
           "--option", "Alpha", "--option", "Beta",
           "A survey over the active terminal of the only pane."]);
         calls.push(survey);
@@ -113,8 +112,8 @@ export default {
         focusedLeg.passed = true;
       } catch (error) {
         focusedLeg.failure = String(error.message ?? error);
-        failures.push(`${backend} focused pane: ${focusedLeg.failure}`);
-        await ctx.shot(`300-${backend}-focused-failure`).catch(() => {});
+        failures.push(`focused pane: ${focusedLeg.failure}`);
+        await ctx.shot("300-focused-failure").catch(() => {});
       } finally {
         await cleanLeg("focused pane");
       }
@@ -138,7 +137,7 @@ export default {
           (list) => list.find((pane) => pane.id === empty.id)?.focused === true);
 
         const survey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
-          "--title", `Keyboard owners: 300-${backend} unfocused pane`,
+          "--title", "Keyboard owners: 300 unfocused pane",
           "--option", "Alpha", "--option", "Beta",
           "A survey over the terminal of the pane that is not focused."]);
         calls.push(survey);
@@ -155,20 +154,20 @@ export default {
         unfocusedLeg.passed = true;
       } catch (error) {
         unfocusedLeg.failure = String(error.message ?? error);
-        failures.push(`${backend} unfocused pane: ${unfocusedLeg.failure}`);
-        await ctx.shot(`300-${backend}-unfocused-failure`).catch(() => {});
+        failures.push(`unfocused pane: ${unfocusedLeg.failure}`);
+        await ctx.shot("300-unfocused-failure").catch(() => {});
       } finally {
         await cleanLeg("unfocused pane");
       }
     } catch (error) {
       result.failure = String(error.message ?? error);
-      failures.push(`${backend}: ${result.failure}`);
-      await ctx.shot(`300-${backend}-failure`).catch(() => {});
+      failures.push(result.failure);
+      await ctx.shot("300-failure").catch(() => {});
     } finally {
-      await closeEveryTerminal(page, `${backend} cleanup`, token)
+      await closeEveryTerminal(page, "cleanup", token)
         .catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
-      for (const error of result.cleanupErrors) failures.push(`${backend}: cleanup: ${error}`);
-      writeFileSync(join(ctx.outDir, `300-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+      for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
+      writeFileSync(join(ctx.outDir, "300-result.json"), `${JSON.stringify(result, null, 2)}\n`);
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },

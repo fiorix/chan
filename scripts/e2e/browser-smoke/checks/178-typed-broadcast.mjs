@@ -96,7 +96,7 @@ export default {
     let sourcePid = null;
     let streaming = false;
     let failed = false;
-    const details = { backend: "ghostty", arms: [] };
+    const details = { arms: [] };
     try {
       for (const [role, name] of [["source", SOURCE], ["target", TARGET]]) {
         await openAttachedTerminal(ctx, page, cs, windowId, name);

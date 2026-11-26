@@ -109,9 +109,9 @@ export default {
     const capture = { engine: await page.browser().version(), readings: [] };
     let opened = [];
     try {
-      const source = `FtripghosttySource`;
-      const control = `FtripghosttyControl`;
-      const path = join(ctx.outDir, `ghostty-input.jsonl`);
+      const source = "FtripSource";
+      const control = "FtripControl";
+      const path = join(ctx.outDir, "ftrip-input.jsonl");
       await openAttachedTerminal(ctx, page, cs, windowId, source);
       opened.push(source);
       await cs(["write", "--tab-name", source, `node ${reader} ${path}\n`]);
@@ -126,7 +126,7 @@ export default {
       const requireNoLateReport = (before) => {
         const current = snapshot();
         if (current.input !== lastReading.input || current.messages.length !== lastReading.messages.length) {
-          throw new Error(`ghostty ${lastReading.action}: late report before ${before}: ` +
+          throw new Error(`${lastReading.action}: late report before ${before}: ` +
             `${current.input.slice(lastReading.input.length)} / ${JSON.stringify(current.messages.slice(lastReading.messages.length))}`);
         }
         return current;
@@ -138,18 +138,18 @@ export default {
         const after = await waitFor(snapshot,
           (value) => value.input.length >= before.input.length + expected.length &&
             value.messages.length >= before.messages.length + expectedMessages.length,
-          `ghostty ${name} report`);
+          `${name} report`);
         const focus = await focusEvents(page);
         const reading = {
-          backend: "ghostty", action: name, expected, input: after.input.slice(before.input.length),
+          action: name, expected, input: after.input.slice(before.input.length),
           messages: after.messages.slice(before.messages.length), ...focus,
         };
         capture.readings.push(reading);
         if (reading.input !== expected) {
-          throw new Error(`ghostty ${name}: ${reading.input} != ${expected}`);
+          throw new Error(`${name}: ${reading.input} != ${expected}`);
         }
         if (JSON.stringify(reading.messages.map((message) => message.focused)) !== JSON.stringify(expectedMessages)) {
-          throw new Error(`ghostty ${name}: focus messages ${JSON.stringify(reading.messages)} != ${JSON.stringify(expectedMessages)}`);
+          throw new Error(`${name}: focus messages ${JSON.stringify(reading.messages)} != ${JSON.stringify(expectedMessages)}`);
         }
         lastReading = { ...after, action: name };
       };
@@ -173,17 +173,18 @@ export default {
       await runAction("drag-subject", () => dragTab(page, source, control), "1b5b49", [true]);
       const dragEvents = capture.readings.at(-1).events.map((event) => event.type);
       if (!dragEvents.includes("dragstart") || !dragEvents.includes("dragend")) {
-        throw new Error(`ghostty drag-subject: native drag did not start and end: ${JSON.stringify(dragEvents)}`);
+        throw new Error(`drag-subject: native drag did not start and end: ${JSON.stringify(dragEvents)}`);
       }
       const selected = await page.evaluate(() => document.querySelector('.tab.active .path')?.textContent?.trim());
-      if (selected !== source) throw new Error(`ghostty drag-subject: selected ${selected} instead of ${source}`);
+      if (selected !== source) throw new Error(`drag-subject: selected ${selected} instead of ${source}`);
       await pause(500);
       requireNoLateReport("tab close");
       for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
       opened = [];
       const required = ["click-subject", "click-active", "click-away", "keyboard-jump", "click-away-again", "command-jump", "click-away-before-drag", "drag-subject"];
-      if (JSON.stringify(capture.readings.map(({ backend, action }) => `${backend}/${action}`)) !==
-          JSON.stringify(required.map((action) => `ghostty/${action}`))) throw new Error("Ghostty focus arms incomplete");
+      if (JSON.stringify(capture.readings.map(({ action }) => action)) !== JSON.stringify(required)) {
+        throw new Error("focus arms incomplete");
+      }
       console.log(`FTRIP_RESULT ${JSON.stringify(capture)}`);
     } finally {
       writeFileSync(join(ctx.outDir, "ftrip-cause.json"), JSON.stringify(capture, null, 2));

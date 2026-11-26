@@ -163,7 +163,7 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 30_000,
     });
-    const details = { engine: "ghostty" };
+    const details = {};
     const opened = [];
     let away = null;
     try {

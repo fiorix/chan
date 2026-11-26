@@ -20,7 +20,7 @@ async function waitProcessState(ctx, pid, expected) {
 }
 
 async function startJob(ctx, tab, script, label, mode = "full") {
-  const infoPath = join(ctx.workspaceDir, `status-153-${tab.backend}-${label}.json`);
+  const infoPath = join(ctx.workspaceDir, `status-153-${label}.json`);
   const command = `python3 ${shellQuote(script)} ${shellQuote(label)} ${shellQuote(infoPath)} ${shellQuote(mode)}; printf 'REAPED_<${label}>\\n'`;
   await tab.cs(["write", "--tab-name", tab.subject, `${command}\n`]);
   await ctx.pollFile(infoPath, 20_000);
@@ -69,7 +69,7 @@ sys.stdin.readline()
       await tab.wait("kill-cleanup", (state) =>
         !ids(state).some((id) => id?.startsWith("kill/") && id !== "kill/done") &&
         ids(state).includes("kill/done") && state.mark?.activity === "icon" && state.mark?.attention === "done", 30_000);
-      await ctx.shot(`${tab.backend}-kill-cleared-working-blocked-kept-done`, tab.page);
+      await ctx.shot("kill-cleared-working-blocked-kept-done", tab.page);
       await clearJob(tab, "kill");
 
       await startJob(ctx, tab, script, "interrupt");
@@ -98,9 +98,9 @@ sys.stdin.readline()
         state.mark?.activity === "spinner", 30_000);
       process.kill(-next.pgid, "SIGKILL");
       await tab.wait("second-cleanup", (state) => !ids(state).includes("next/working"), 30_000);
-      await ctx.shot(`${tab.backend}-stopped-and-sequential-jobs`, tab.page);
+      await ctx.shot("stopped-and-sequential-jobs", tab.page);
 
-      const release = join(ctx.workspaceDir, `status-153-${tab.backend}-background.fifo`);
+      const release = join(ctx.workspaceDir, "status-153-background.fifo");
       await ctx.exec("mkfifo", [release]);
       const reporter = `python3 -c 'import os,sys; f=open(sys.argv[1]); f.readline(); os.write(1,b"\\x1b]7501;state=working:id=background\\x07")' ${shellQuote(release)} & printf 'BG_WAITING\\n'`;
       await tab.cs(["write", "--tab-name", tab.subject, `${reporter}\n`]);
@@ -112,7 +112,7 @@ sys.stdin.readline()
       await tab.wait("background-inherits-foreground-limit", (state) =>
         !ids(state).includes("foreground/working") && !ids(state).includes("background") &&
         state.mark?.activity === "icon", 30_000);
-      await ctx.shot(`${tab.backend}-background-limit`, tab.page);
+      await ctx.shot("background-limit", tab.page);
     }, { subjectArgs: ["--command", "exec bash --noprofile --norc -i", "--env", "PS1=STATUS_PROMPT>", "--env", "PROMPT_COMMAND="] });
   },
 };

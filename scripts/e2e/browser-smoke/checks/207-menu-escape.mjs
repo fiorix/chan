@@ -118,8 +118,8 @@ async function settledTerminalCount(page) {
   return last;
 }
 
-/// Open a terminal on `engine` in the window's pane and wait for its renderer.
-async function openTerminal(page, engine) {
+/// Open a terminal in the window's pane and wait for its renderer.
+async function openTerminal(page) {
   const before = await settledTerminalCount(page);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
@@ -128,21 +128,21 @@ async function openTerminal(page, engine) {
   await sleep(1_000);
 }
 
-/// The control and the menu arms on `engine`, each checked: with no menu
+/// The control and the menu arms, each checked: with no menu
 /// open the PTY reads ESC and then x; every menu opens with the terminal
 /// focused, closes on Escape, leaves the terminal focused, and the PTY reads
 /// only the x.
-async function terminalArms(page, dir, prefix, engine, menus, failures) {
-  const file = join(dir, `${prefix}-${engine}.bytes`);
+async function terminalArms(page, dir, prefix, menus, failures) {
+  const file = join(dir, `${prefix}.bytes`);
   await startRecorder(page, file);
   const results = [];
-  const control = await terminalArm(page, file, `${prefix}-${engine}-control`, null);
+  const control = await terminalArm(page, file, `${prefix}-control`, null);
   results.push(control);
   if (JSON.stringify(control.pty) !== JSON.stringify([ESC, TYPED])) {
     failures.push(`${control.arm}: with no menu open the PTY read ${JSON.stringify(control.pty)}, not ESC then x; the recorder cannot see an ESC`);
   }
   for (const menu of menus) {
-    const result = await terminalArm(page, file, `${prefix}-${engine}-${menu}`, OPEN[menu]);
+    const result = await terminalArm(page, file, `${prefix}-${menu}`, OPEN[menu]);
     results.push(result);
     if (result.opened !== "terminal") failures.push(`${result.arm}: the menu opened with focus on ${result.opened}, not the terminal`);
     if (!result.closed) failures.push(`${result.arm}: Escape left the menu open`);
@@ -217,7 +217,7 @@ async function suiteWindow(ctx, name) {
   return { page, windowId };
 }
 
-/// The suite server's tenant, with the strip drawn: Ghostty's terminal arms.
+/// The suite server's tenant, with the strip drawn: the terminal arms.
 async function workspaceTerminals(ctx, dir, failures) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const { page } = await suiteWindow(ctx, "terminal");
@@ -227,8 +227,8 @@ async function workspaceTerminals(ctx, dir, failures) {
   try {
     strip = await readPaneStripPreference(page, token);
     if (strip.on) await writePaneStripPreference(page, token, false);
-    await openTerminal(page, "ghostty");
-    results.push(...await terminalArms(page, dir, "workspace", "ghostty", ["body", "strip"], failures));
+    await openTerminal(page);
+    results.push(...await terminalArms(page, dir, "workspace", ["body", "strip"], failures));
     await ctx.shot("207-workspace-terminal", page);
     return results;
   } catch (error) {
@@ -302,7 +302,7 @@ function terminalWindowUrl(origin, row) {
   return url.toString();
 }
 
-/// A throwaway devserver's terminal window: Ghostty's body menu and control.
+/// A throwaway devserver's terminal window: its body menu and control.
 async function standaloneTerminals(ctx, dir, failures) {
   let chanHome = null;
   let devserver = null;
@@ -323,8 +323,8 @@ async function standaloneTerminals(ctx, dir, failures) {
     const address = terminalWindowUrl(origin, row);
     await goto(page, address);
     await page.waitForSelector(".pane .terminal-tab", { timeout: 30_000 });
-    await openTerminal(page, "ghostty");
-    results.push(...await terminalArms(page, dir, "standalone", "ghostty", ["body"], failures));
+    await openTerminal(page);
+    results.push(...await terminalArms(page, dir, "standalone", ["body"], failures));
     await ctx.shot("207-standalone-terminal", page);
     return results;
   } catch (error) {
@@ -351,9 +351,9 @@ export default {
         standalone: await standaloneTerminals(ctx, dir, failures),
       };
       for (const [kind, required] of Object.entries({
-        workspace: ["workspace-ghostty-control", "workspace-ghostty-body", "workspace-ghostty-strip"],
+        workspace: ["workspace-control", "workspace-body", "workspace-strip"],
         editor: ["editor-control", "editor-body", "editor-strip"],
-        standalone: ["standalone-ghostty-control", "standalone-ghostty-body"],
+        standalone: ["standalone-control", "standalone-body"],
       })) {
         if (JSON.stringify(details[kind].map((arm) => arm.arm)) !== JSON.stringify(required)) failures.push(`${kind}: required arms incomplete`);
       }

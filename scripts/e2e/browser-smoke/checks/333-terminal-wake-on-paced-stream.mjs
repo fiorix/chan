@@ -1,5 +1,5 @@
 // Two ways a page under a fast paced stream reads as a machine sleep without
-// being one, in headless Chrome on ghostty. In both the socket is healthy, so
+// being one, in headless Chrome. In both the socket is healthy, so
 // it must be kept and the stream must arrive whole and in order.
 //
 //   late:     a 4.8 s stall, inside the server's 5 s bound, that starts 1.9 s

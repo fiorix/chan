@@ -597,7 +597,7 @@ async function browserPass(ctx, bar) {
         Date.now() + RECOVERY_GUARD_MS, relay, silentTerminal(`${name} reopening`, relay));
       await hold(page, SETTLE_PERIOD_MS, silentTerminal(`${name} reopened with nothing typed`, relay));
     }
-    return { backend: "ghostty", pass: name, relayFlows: relay.flows.length };
+    return { pass: name, relayFlows: relay.flows.length };
   } catch (error) {
     error.smokeDetails = { pass: name, relay: relay.summary(), seen: page ? await observe(page).catch(() => null) : null };
     if (page) await ctx.shot(`${name}-check-failure`, page).catch(() => {});

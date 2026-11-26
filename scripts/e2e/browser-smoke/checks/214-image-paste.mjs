@@ -219,7 +219,7 @@ export default {
       timeout: 60_000,
     });
     const result = {
-      backend: "ghostty", browser: await ctx.browser.browser().version(), legs: {},
+      browser: await ctx.browser.browser().version(), legs: {},
       applicationRouting: "pending", nativeAcceptance: { status: "not-tested" },
     };
     let openedBrowser = false;

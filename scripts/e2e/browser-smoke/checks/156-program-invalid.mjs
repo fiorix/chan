@@ -69,7 +69,7 @@ export default {
         await tab.sendReport("state=done:id=guard:app=recovered");
         previous = await waitRevision(tab, previous.revision, `${label} recovery`);
         assert.equal(previous.records.find((record) => record.id === "guard")?.app, "recovered", `${label} did not poison the next valid report`);
-        await ctx.shot(`${tab.backend}-${label}-recovery`, tab.page);
+        await ctx.shot(`${label}-recovery`, tab.page);
       }
 
       // Syntax skips a malformed pair. This valid clear still removes a and a/b.

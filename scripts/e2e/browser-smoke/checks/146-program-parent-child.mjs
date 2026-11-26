@@ -21,7 +21,7 @@ export default {
       const inspector = await openProgramInspector(tab);
       assert.match(inspector.title, new RegExp(tab.subject));
       assert.ok(inspector.records.some((record) => record.includes("a") && record.includes("App: deploy") && record.includes("blocked")), "child inspector row inherits the parent's app");
-      await ctx.shot(`${tab.backend}-parent-child-inspector`, tab.page);
+      await ctx.shot("parent-child-inspector", tab.page);
     });
   },
 };

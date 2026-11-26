@@ -130,18 +130,17 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
-    const backend = "ghostty";
     const directory = mkdtempSync(join(ctx.workspaceDir, ".surveydrain-292-"));
     const failures = [];
     try {
       await page.evaluate(traceSurveyDrain);
       try {
-        const name = `Prompt292-${backend}`;
+        const name = "Prompt292";
         // No `1` in the text: the recorder must hold none but a stray key.
-        const text = `PROMPT292-${backend}`;
-        const stop = join(directory, `${backend}.stop`);
-        const recorder = join(directory, `${backend}.bytes`);
-        const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
+        const text = "PROMPT292";
+        const stop = join(directory, "recorder.stop");
+        const recorder = join(directory, "recorder.bytes");
+        const result = { passed: false, pageErrors: [], cleanupErrors: [] };
         const onError = (error) => result.pageErrors.push(String(error));
         page.on("pageerror", onError);
         let opened = false;
@@ -156,7 +155,7 @@ export default {
           const row = await openAttachedTerminal(ctx, page, cs, windowId, name, ["--command", command]);
           opened = true;
           const attachment = await readTerminalAttachment(page, cs, (entry) => entry.session_id === row.session_id);
-          assert.ok(attachment.attached, `the ${backend} terminal is attached`);
+          assert.ok(attachment.attached, "the terminal is attached");
           await page.evaluate(() => { window.__prompt292.prompts.length = 0; });
           const terminal = attachment.selector;
           const card = `${terminal} .rich-prompt`;
@@ -189,7 +188,7 @@ export default {
           // resolves, so its result is read back, never awaited.
           survey = { result: null };
           cs(["survey", "--tab-name", name, "--timeout", "60",
-            "--title", `Keyboard ownership: 292-${backend}`,
+            "--title", "Keyboard ownership: 292",
             "--option", "Alpha", "--option", "Beta",
             "The composer holds a queued prompt while this survey shows.",
           ]).then(
@@ -201,7 +200,7 @@ export default {
             "precondition: the survey holds the keyboard while the prompt still waits",
             (value) => value.focus === "survey" && value.pending
               && !value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id)));
-          await ctx.shot(`292-${backend}-queued-under-survey`);
+          await ctx.shot("292-queued-under-survey");
 
           // Release the queue: the output stops and the prompt drains
           // under the survey, which keeps the keyboard.
@@ -211,7 +210,7 @@ export default {
               && value.text === "" && !value.pending && value.focus === "survey" && value.note === null, 20_000);
           await recordedSince("the drained prompt reaches the PTY", recorder, 0, "50");
           result.drainedBytes = await settledSize(recorder);
-          await ctx.shot(`292-${backend}-drained-under-survey`);
+          await ctx.shot("292-drained-under-survey");
 
           await page.keyboard.press("1");
           await waitFor(page, card, "the survey card closes", (value) => !value.card, 20_000);
@@ -229,19 +228,19 @@ export default {
           assert.equal(bytes.length, result.drainedBytes,
             `no byte reached the PTY after the drain: ${JSON.stringify(bytes.slice(result.drainedBytes))}`);
           assert.deepEqual(result.pageErrors, []);
-          await ctx.shot(`292-${backend}-answered-composer-empty`);
+          await ctx.shot("292-answered-composer-empty");
           result.passed = true;
         } catch (error) {
           result.failure = String(error.message ?? error);
-          failures.push(`${backend}: ${result.failure}`);
+          failures.push(result.failure);
           result.final = await state(page, null).catch(() => null);
-          await ctx.shot(`292-${backend}-failure`).catch(() => {});
+          await ctx.shot("292-failure").catch(() => {});
         } finally {
           page.off("pageerror", onError);
           const cleanup = async (label, action) => {
             try { await action(); } catch (error) {
               result.cleanupErrors.push(`${label}: ${error.message}`);
-              failures.push(`${backend}: ${label}: ${error.message}`);
+              failures.push(`${label}: ${error.message}`);
               result.passed = false;
             }
           };
@@ -250,14 +249,14 @@ export default {
           await cleanup("owned terminal cleanup", async () => {
             // The recorder is a live process, so the close asks first;
             // the helper confirms it so no prompt keeps the keyboard.
-            if (opened) await closeActiveTerminal(page, `${backend} cleanup`);
+            if (opened) await closeActiveTerminal(page, "cleanup");
           });
         }
         if (result.passed && result.pageErrors.length) {
           result.passed = false;
-          failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
+          failures.push(`browser exceptions: ${result.pageErrors.join("; ")}`);
         }
-        writeFileSync(join(ctx.outDir, `292-${backend}.json`),
+        writeFileSync(join(ctx.outDir, "292-result.json"),
           `${JSON.stringify(result, null, 2)}\n`);
       } finally {
         await page.evaluate(() => window.__prompt292?.restore());

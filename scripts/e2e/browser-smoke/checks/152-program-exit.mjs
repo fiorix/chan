@@ -44,16 +44,16 @@ sys.stdout.buffer.flush()
             frames: trace.frames.filter((frame) => frame.type === "exit" || frame.type === "program-status"),
           };
         }, tab.subject);
-        throw new Error(`${tab.backend} final status and exit did not coexist: ${JSON.stringify(observed)}`, { cause: error });
+        throw new Error(`final status and exit did not coexist: ${JSON.stringify(observed)}`, { cause: error });
       }
       const mark = await tab.page.evaluate((name) => {
         window.__programStatusTrace.subject = name;
         return window.__programStatusTrace.readMark();
       }, tab.subject);
       assert.equal(mark.attention, "done", "the terminal tab retains the unseen check after process exit");
-      await ctx.shot(`${tab.backend}-done-after-process-exit`, tab.page);
+      await ctx.shot("done-after-process-exit", tab.page);
       await tab.focusSubject();
-      await ctx.shot(`${tab.backend}-process-exited-message`, tab.page);
+      await ctx.shot("process-exited-message", tab.page);
     }, { subjectArgs: ["--command", `python3 ${shellQuote(script)}`] });
   },
 };

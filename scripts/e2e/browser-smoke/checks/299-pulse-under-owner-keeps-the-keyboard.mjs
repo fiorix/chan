@@ -68,18 +68,17 @@ export default {
     const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], { cwd: ctx.workspaceDir, env, timeout: 90_000 });
     const csOpen = (path) => ctx.exec(ctx.chanBin, ["shell", "open", path], { cwd: ctx.workspaceDir, env, timeout: 30_000 });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const fixtures = [];
     const failures = [];
     try {
-      const name = `Pulse299-${backend}`;
-      const result = { backend, legs: {}, cleanupErrors: [] };
+      const name = "Pulse299";
+      const result = { legs: {}, cleanupErrors: [] };
       const calls = [];
       try {
         const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
         const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-        const file = `owner299-${backend}.md`;
-        const directory = `owner299-${backend}-dir`;
+        const file = "owner299.md";
+        const directory = "owner299-dir";
         writeFileSync(join(ctx.workspaceDir, file), FIXTURE);
         mkdirSync(join(ctx.workspaceDir, directory), { recursive: true });
         writeFileSync(join(ctx.workspaceDir, directory, "a299.txt"), FIXTURE);
@@ -92,7 +91,7 @@ export default {
           try {
             await page.click(`${terminal} .terminal-host`);
             const survey = raiseSurvey(cs, ["--tab-group", "default", "--timeout", "60",
-              "--title", `Keyboard owners: 299-${backend} ${kind}`,
+              "--title", `Keyboard owners: 299 ${kind}`,
               "--option", "Alpha", "--option", "Beta",
               `A window-wide survey is up when cs open brings a ${kind} tab forward.`]);
             calls.push(survey);
@@ -113,13 +112,13 @@ export default {
             await settle(page);
             await sleep(500);
             leg.afterOpen = await keyboardAt(page);
-            await ctx.shot(`299-${backend}-${kind}-opened-under-survey`);
+            await ctx.shot(`299-${kind}-opened-under-survey`);
             await page.keyboard.press("1");
             leg.outcome = await surveyOutcome(survey, 5000);
             await sleep(2500);
             leg.surfaceAfter = await surfaceText(page, kind, marker);
             if (kind === "editor") leg.disk = readFileSync(join(ctx.workspaceDir, file), "utf8");
-            await ctx.shot(`299-${backend}-${kind}-after-1`);
+            await ctx.shot(`299-${kind}-after-1`);
             assert.equal(leg.outcome?.stdout, "Alpha",
               `1 answers the window-wide survey: it reads ${JSON.stringify(leg.outcome)}; ` +
               `after the open the keyboard was at ${leg.afterOpen}`);
@@ -130,11 +129,11 @@ export default {
             leg.passed = true;
           } catch (error) {
             leg.failure = String(error.message ?? error);
-            failures.push(`${backend} ${kind}: ${leg.failure}`);
+            failures.push(`${kind}: ${leg.failure}`);
           } finally {
             await answerOpenSurveys(page, calls).catch((error) => result.cleanupErrors.push(`${kind} surveys: ${error.message}`));
             if (opened) {
-              await closeActiveTab(page, `${backend} ${kind} tab`)
+              await closeActiveTab(page, `${kind} tab`)
                 .catch((error) => result.cleanupErrors.push(`${kind} tab: ${error.message}`));
             }
             writeFileSync(join(ctx.workspaceDir, file), FIXTURE);
@@ -142,14 +141,14 @@ export default {
         }
       } catch (error) {
         result.failure = String(error.message ?? error);
-        failures.push(`${backend}: ${result.failure}`);
-        await ctx.shot(`299-${backend}-failure`).catch(() => {});
+        failures.push(result.failure);
+        await ctx.shot("299-failure").catch(() => {});
       } finally {
         await answerOpenSurveys(page, calls).catch((error) => result.cleanupErrors.push(`surveys: ${error.message}`));
-        await closeEveryTerminal(page, `${backend} cleanup`, token)
+        await closeEveryTerminal(page, "cleanup", token)
           .catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
-        for (const error of result.cleanupErrors) failures.push(`${backend}: cleanup: ${error}`);
-        writeFileSync(join(ctx.outDir, `299-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+        for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
+        writeFileSync(join(ctx.outDir, "299-result.json"), `${JSON.stringify(result, null, 2)}\n`);
       }
     } finally {
       for (const path of fixtures) {

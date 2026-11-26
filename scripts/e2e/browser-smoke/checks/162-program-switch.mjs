@@ -84,7 +84,7 @@ async function toggleInSettings(ctx, tab, enabled) {
     }, { timeout: 20_000 }, enabled);
     assert.equal((await readTerminalPrefs(page, token)).program_status, enabled, "settings round trip returns the switch value");
     await assertTerminalPrefs(ctx, { program_status: enabled });
-    await ctx.shot(tab.backend + (enabled ? "-settings-on" : "-settings-off"), page);
+    await ctx.shot(enabled ? "settings-on" : "settings-off", page);
   } finally {
     if (await page.$('[aria-label="Settings sections"]')) {
       await page.keyboard.press("Escape");
@@ -131,7 +131,7 @@ export default {
         assert.equal(ignored.programCell, "-", "off-state report leaves the program list cell empty");
         assert.equal(ignored.mark?.activity, "icon", "off-state report leaves the leading terminal icon");
         assert.equal(ignored.mark?.attention, "output", "off-state PTY output leaves only the ordinary unread-output dot");
-        await ctx.shot(tab.backend + "-off-report-ignored", tab.page);
+        await ctx.shot("off-report-ignored", tab.page);
 
         let refused = null;
         try {

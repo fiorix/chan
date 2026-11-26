@@ -246,7 +246,7 @@ export default {
       const print = `cd ${DIR} && stty size > size316-ghostty && printf '%s' "$HOME" > home316-ghostty && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
       await cs(["write", "--tab-name", name, print]);
       await waitScrollback(name, "L316_READY");
-      if (!existsSync(sizeFile)) throw new Error(`ghostty: the shell wrote no ${sizeFile}`);
+      if (!existsSync(sizeFile)) throw new Error(`the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
       assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
         "the PTY grid fits the link fixtures without wrapping");
@@ -491,7 +491,7 @@ export default {
       await waitScrollback(name, "T316_READY");
       const deadline = Date.now() + 15_000;
       while (!existsSync(record) && Date.now() < deadline) await sleep(100);
-      if (!existsSync(record)) throw new Error(`ghostty: the recorder never started`);
+      if (!existsSync(record)) throw new Error("the recorder never started");
       await sleep(500);
       const recorded = () => readFileSync(record).toString("latin1");
 

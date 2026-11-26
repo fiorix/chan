@@ -82,7 +82,6 @@ export default {
       return Object.values(JSON.parse(listed.stdout).groups ?? {}).flat().map((row) => row.name);
     };
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const directory = mkdtempSync(join(ctx.workspaceDir, ".screenlock-305-"));
     // Wake the lock's card with a key and wait for its PIN field to hold the keyboard.
     const wake = async (label) => {
@@ -121,7 +120,7 @@ export default {
       keyboard: await keyboardSurface(page),
       pinFocused: await page.evaluate((pin) => document.activeElement === document.querySelector(pin), PIN),
     });
-    const result = { backend, legs: {}, cleanupErrors: [] };
+    const result = { legs: {}, cleanupErrors: [] };
     const failures = [];
     const leg = async (name, fn) => {
       const record = { passed: false };
@@ -142,9 +141,9 @@ export default {
       }
     };
     try {
-      await leg(`terminal-${backend}`, async (r) => {
-        const name = `Lock305-${backend}`;
-        const recorder = join(directory, `${backend}.bytes`);
+      await leg("terminal", async (r) => {
+        const name = "Lock305";
+        const recorder = join(directory, "recorder.bytes");
         const row = await openAttachedTerminal(ctx, page, cs, windowId, name,
           ["--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`]);
         await until("precondition: the recorder started", () => existsSync(recorder), Boolean);
@@ -167,10 +166,10 @@ export default {
           await sleep(100);
         } while (Date.now() < deadline);
         r.bytesSinceLock = bytes;
-        await ctx.shot(`305-terminal-${backend}-after-unlock`);
+        await ctx.shot("305-terminal-after-unlock");
         assert.equal(r.afterUnlock, `terminal:${row.tab}`, "the keyboard returns to the terminal after unlock");
         assert.deepEqual(bytes, ["5a"], "after unlock a typed Z reaches the PTY, and nothing typed under the lock did");
-        await closeEveryTerminal(page, `${backend} terminal`, token);
+        await closeEveryTerminal(page, "terminal", token);
       });
       const plain = await openAttachedTerminal(ctx, page, cs, windowId, "Plain305");
       await page.click(`.pane[data-pane-id="${plain.pane}"] .terminal-tab.active .terminal-host`);

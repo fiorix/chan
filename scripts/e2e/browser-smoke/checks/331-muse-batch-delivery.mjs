@@ -113,7 +113,7 @@ export default {
     const stub = join(dir, "muse");
     const name = "MuseBatch331";
     const failures = [];
-    const result = { backend: "ghostty", legs: [] };
+    const result = { legs: [] };
     let opened = false;
 
     const queueDepth = async () => {

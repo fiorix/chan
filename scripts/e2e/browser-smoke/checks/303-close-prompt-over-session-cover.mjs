@@ -88,7 +88,7 @@ export default {
       if (!read.cover) throw new Error(`${label}: the cover went when the prompt showed: ${JSON.stringify(read)}`);
       return read;
     };
-    const result = { backend: "ghostty", legs: {}, cleanupErrors: [] };
+    const result = { legs: {}, cleanupErrors: [] };
     const failures = [];
     const check = (name, ok, detail) => {
       result.legs[name] = { ok, detail };

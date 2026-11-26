@@ -135,7 +135,7 @@ export default {
     const write = (identity, text) => cs(["write", "--tab-name", tabName(identity), text]);
 
     const engine = await ctx.browser.browser().version();
-    const readings = { engine, backend: "ghostty", terminals: {} };
+    const readings = { engine, terminals: {} };
     let second = null;
     const opened = [];
     const sessions = new Set();

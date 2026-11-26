@@ -13,9 +13,7 @@ import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs
 const CPR = "\x1b[3;12R";
 const QUERY = "\x1b[3;12H\x1b[6n";
 const TRACKED_MODES = [1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
-const SUPPORT = {
-  ghostty: "web/packages/ghostty-web-ng/lib/terminal.ts passes only hasSgrMouseMode(1006); lib/input-handler.ts sendMouseEvent chooses SGR cells or X10, and vt/ghosttyVt.ts hasMouseTracking excludes 9; this input binding implements none of the newly tracked modes 9, 1001, 1005, 1015, 1016",
-};
+const MOUSE_MODE_SUPPORT = "web/packages/ghostty-web-ng/lib/terminal.ts passes only hasSgrMouseMode(1006); lib/input-handler.ts sendMouseEvent chooses SGR cells or X10, and vt/ghosttyVt.ts hasMouseTracking excludes 9; this input binding implements none of the newly tracked modes 9, 1001, 1005, 1015, 1016";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const inputSince = (fixture, index) => Buffer.concat(fixture.records.slice(index)
   .filter((record) => record.type === "keys")
@@ -110,15 +108,15 @@ async function currentRow(cs, name, id) {
   }, (row) => row?.session_id === id && row.pane && row.tab);
 }
 
-function screenSelector(row, backend) {
+function screenSelector(row) {
   const tab = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
   return `${tab} ${TERMINAL_SURFACE}`;
 }
 
-async function screenBox(page, row, backend) {
-  const screen = await page.waitForSelector(screenSelector(row, backend), { visible: true, timeout: 20_000 });
+async function screenBox(page, row) {
+  const screen = await page.waitForSelector(screenSelector(row), { visible: true, timeout: 20_000 });
   const box = await screen.boundingBox();
-  assert.ok(box && box.width > 100 && box.height > 100, `${backend}: renderer has a visible box`);
+  assert.ok(box && box.width > 100 && box.height > 100, "renderer has a visible box");
   return box;
 }
 
@@ -217,10 +215,10 @@ async function selectionCopy(page, receipt, phase, sentinel, timeoutMs, required
 
 // Select the visible grid so the copy represents the alternate-screen draw
 // without including saved normal-buffer history.
-async function copyVisible(page, row, backend, receipts) {
+async function copyVisible(page, row, receipts) {
   const receipt = { gesture: "ordinary-drag" };
   receipts.push(receipt);
-  const box = await screenBox(page, row, backend);
+  const box = await screenBox(page, row);
   const sentinel = "270-selection-not-copied";
   await observeCopies(page);
   try {
@@ -239,7 +237,7 @@ async function copyVisible(page, row, backend, receipts) {
     await selectionCopy(page, receipt.beforeFocus, "before-focus", `${sentinel}-before-focus`, 1000, false);
     await page.$eval(`${tab} textarea`, (input) => input.focus());
     receipt.afterFocus = await selectionFocus(page, tab);
-    assert.ok(receipt.afterFocus.textareaFocused, `${backend}: the owned textarea takes focus`);
+    assert.ok(receipt.afterFocus.textareaFocused, "the owned textarea takes focus");
     return await selectionCopy(page, receipt.afterFocus, "after-focus", sentinel, 20_000, true);
   } finally {
     receipt.clipboard = await page.evaluate(() => {
@@ -259,23 +257,10 @@ async function parsedOutput(fixture, bytes = "") {
   return inputSince(fixture, index).toString("base64");
 }
 
-async function reloadSame(ctx, page, cs, trace, row, name, before, fullReplay = false) {
+async function reloadSame(ctx, page, cs, trace, row, name, before) {
   await waitSaved(ctx, row.window, name, before.session.id);
   const connectionStart = trace.connections.length;
-  let hook;
-  try {
-    if (fullReplay) {
-      // Unload captures the old view again. Remove only its snapshot in the
-      // new document, before the component can select that resume cursor.
-      hook = await page.evaluateOnNewDocument((sessionId, origin) => {
-        if (window.top !== window || location.origin !== origin) return;
-        localStorage.removeItem(`chan:term-snapshot:${sessionId}`);
-      }, before.session.id, new URL(ctx.serverUrl).origin);
-    }
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-  } finally {
-    if (hook) await page.removeScriptToEvaluateOnNewDocument(hook.identifier);
-  }
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 20_000 });
   await ctx.waitWindowLive(row.window);
   const after = await prelude(trace, name, connectionStart);
@@ -301,17 +286,16 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
-    const backend = "ghostty";
     const failures = [];
     const results = [];
     try {
       await writeTerminalPrefs(page, token, { mouse_capture: true });
       for (const arm of ["1047", "modes"]) {
-        const name = `AltReplay270-${backend}-${arm}`;
-        const result = { backend, arm, support: SUPPORT[backend], accepted: false };
+        const name = `AltReplay270-${arm}`;
+        const result = { arm, support: MOUSE_MODE_SUPPORT, accepted: false };
         const trace = await traceTerminalSockets(page);
         const fixture = await startTerminalFixture({
-          logPath: join(ctx.outDir, `270-${backend}-${arm}-fixture.bin`), deadlineMs: 20_000,
+          logPath: join(ctx.outDir, `270-${arm}-fixture.bin`), deadlineMs: 20_000,
         });
         let privateDir;
         let creationAttempted = false;
@@ -319,7 +303,7 @@ export default {
           const message = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
           result.accepted = false;
           (result.errors ??= []).push(message);
-          failures.push(`${backend}/${arm}: ${message}`);
+          failures.push(`${arm}: ${message}`);
         };
         try {
           // Spawn env travels in the browser's initial socket URL, which the
@@ -331,8 +315,8 @@ export default {
           creationAttempted = true;
           let row = await openAttachedTerminal(ctx, page, cs, windowId, name);
           result.before = await prelude(trace, name);
-          const normal = `NORMAL270_${backend}`;
-          const initial = `ALT270_${backend}`;
+          const normal = "NORMAL270";
+          const initial = "ALT270";
           const mode = arm === "1047" ? "1047" : "1049";
           result.bootstrap = "stty -opost -echo && printf '\\033[H\\033[2J\\033[3J' && "
             + `printf '%s\\r\\n' ${shellQuote(normal)} && `
@@ -346,19 +330,19 @@ export default {
 
           if (arm === "1047") {
             result.selectionCopies = [];
-            result.initialVisible = await copyVisible(page, row, backend, result.selectionCopies);
+            result.initialVisible = await copyVisible(page, row, result.selectionCopies);
             assert.ok(result.initialVisible.includes(initial), "the alternate-screen draw is visible before reload");
             assert.ok(!result.initialVisible.includes(normal), "the initial alternate screen excludes normal text");
-            await ctx.shot(`270-${backend}-1047-before`);
-            const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before, true);
+            await ctx.shot("270-1047-before");
+            const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
             row = restored.row;
             result.after = restored.prelude;
             assert.equal(result.after.request.session, result.before.session.id, "the reload request attaches the same PTY");
             assert.equal(result.after.request.since, "0", "full replay requires an explicit since=0 request");
-            const live = `AFTER270_${backend}`;
+            const live = "AFTER270";
             result.restoredParserReply = await parsedOutput(fixture, `\x1b[H${live}`);
-            result.restoredVisible = await copyVisible(page, row, backend, result.selectionCopies);
-            await ctx.shot(`270-${backend}-1047-after`);
+            result.restoredVisible = await copyVisible(page, row, result.selectionCopies);
+            await ctx.shot("270-1047-after");
             assert.ok(result.restoredVisible.includes(live), "the reattached view draws live output");
             assert.ok(!result.restoredVisible.includes(normal), "normal-screen text never enters the reattached view");
             assert.equal(result.after.session.replay_bytes, 0, "the 1047 attach replays no normal-screen bytes");
@@ -369,16 +353,16 @@ export default {
             const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
             row = restored.row;
             result.after = restored.prelude;
-            result.restoredParserReply = await parsedOutput(fixture, `\x1b[HMODES270_${backend}`);
+            result.restoredParserReply = await parsedOutput(fixture, "\x1b[HMODES270");
             result.reassertedModes = TRACKED_MODES.filter((mode) => result.after.binary.includes(`\x1b[?${mode}h`));
-            await ctx.shot(`270-${backend}-modes-after`);
+            await ctx.shot("270-modes-after");
             assert.deepEqual(result.reassertedModes, TRACKED_MODES, "the real attach prelude reasserts every mode the program set, including 1015");
-            result.clickAcceptance = { applicable: false, reason: SUPPORT.ghostty, coverage: "socket prelude only" };
+            result.clickAcceptance = { applicable: false, reason: MOUSE_MODE_SUPPORT, coverage: "socket prelude only" };
           }
           result.accepted = true;
         } catch (error) {
           fail(error);
-          await ctx.shot(`270-${backend}-${arm}-failure`).catch(() => {});
+          await ctx.shot(`270-${arm}-failure`).catch(() => {});
         } finally {
           result.flush = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
             fail(new Error(`fixture flush: ${error.message}`));
@@ -400,18 +384,18 @@ export default {
           result.records = fixture.records;
           result.connections = trace.connections;
           await trace.close().then(() => { result.traceClosed = true; }).catch(fail);
-          writeFileSync(join(ctx.outDir, `270-${backend}-${arm}.json`), JSON.stringify(result, null, 2) + "\n");
-          results.push({ backend, arm, accepted: result.accepted, errors: result.errors ?? [],
-            evidence: `270-${backend}-${arm}.json` });
+          writeFileSync(join(ctx.outDir, `270-${arm}.json`), JSON.stringify(result, null, 2) + "\n");
+          results.push({ arm, accepted: result.accepted, errors: result.errors ?? [],
+            evidence: `270-${arm}.json` });
         }
       }
     } finally {
       await writeTerminalPrefs(page, token, { mouse_capture: originalMouseCapture });
     }
-    const details = { arms: results, support: SUPPORT };
+    const details = { arms: results, support: MOUSE_MODE_SUPPORT };
     if (failures.length) throw Object.assign(new Error(failures.join("\n")), { smokeDetails: details });
-    assert.deepEqual(results.map(({ backend, arm }) => `${backend}/${arm}`), ["ghostty/1047", "ghostty/modes"],
-      "Ghostty ran every required replay and prelude arm");
+    assert.deepEqual(results.map(({ arm }) => arm), ["1047", "modes"],
+      "every required replay and prelude arm ran");
     return details;
   },
 };

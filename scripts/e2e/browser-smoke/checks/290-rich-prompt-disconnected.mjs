@@ -123,14 +123,13 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 90_000,
     });
-    const backend = "ghostty";
     const failures = [];
-    const name = `Prompt290-${backend}`;
-    const text = `PROMPT290-${backend}`;
+    const name = "Prompt290";
+    const text = "PROMPT290";
     const revised = `${text} revised`;
-    const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
+    const result = { passed: false, pageErrors: [], cleanupErrors: [] };
     const onError = (error) => result.pageErrors.push(String(error));
-    const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, `290-${backend}-output.bin`), deadlineMs: 20_000 });
+    const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, "290-output.bin"), deadlineMs: 20_000 });
     let proxy, script, card = null, opened = false;
     page.on("pageerror", onError);
     try {
@@ -194,7 +193,7 @@ export default {
       // Release before the terminal's normal connect deadline. The real
       // note lifetime is observed after reconnect, with no clock shim.
       proxy.releaseRedial();
-      await ctx.shot(`290-${backend}-refusal-notice`);
+      await ctx.shot("290-refusal-notice");
       await waitFor(page, card, "the redial has received ready", (value) => value.sockets[1]?.ready && value.sockets[1].state === 1);
       // Neither reconnect nor the refusal timer may send the draft.
       result.reconnected = await waitFor(page, card, "the refusal is transient and the connected draft remains unsent", (value) => value.note === null, 7000);
@@ -203,7 +202,7 @@ export default {
       assert.equal(result.reconnected.pending, false);
       assert.deepEqual(result.reconnected.prompts, []);
       assert.equal(keys(fixture), "");
-      await ctx.shot(`290-${backend}-reconnected-unsent`);
+      await ctx.shot("290-reconnected-unsent");
       await page.click(`${card} .rp-primary`);
       result.sent = await waitFor(page, card, "the explicit retry sends one prompt", (value) => value.prompts.length === 1);
       assert.equal(result.sent.prompts[0].data, revised);
@@ -219,20 +218,20 @@ export default {
       assert.equal(result.ptyInput.split(revised).length - 1, 1, "the PTY receives the revised text once");
       assert.deepEqual(proxy.records.filter((record) => record.event === "failure"), []);
       assert.deepEqual(result.pageErrors, []);
-      await ctx.shot(`290-${backend}-delivered`);
+      await ctx.shot("290-delivered");
       result.passed = true;
     } catch (error) {
       result.failure = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
-      failures.push(`${backend}: ${result.failure}`);
+      failures.push(result.failure);
       result.final = await state(page, card).catch(() => null);
-      await ctx.shot(`290-${backend}-failure`).catch(() => {});
+      await ctx.shot("290-failure").catch(() => {});
     } finally {
       result.proxy = proxy?.records ?? [];
       result.records = fixture.records;
       const cleanup = async (label, action) => {
         try { await action(); } catch (error) {
           result.cleanupErrors.push(`${label}: ${error.message}`);
-          failures.push(`${backend}: ${label}: ${error.message}`);
+          failures.push(`${label}: ${error.message}`);
           result.passed = false;
         }
       };
@@ -247,9 +246,9 @@ export default {
       page.off("pageerror", onError);
       if (result.passed && result.pageErrors.length) {
         result.passed = false;
-        failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
+        failures.push(`browser exceptions: ${result.pageErrors.join("; ")}`);
       }
-      writeFileSync(join(ctx.outDir, `290-${backend}.json`),
+      writeFileSync(join(ctx.outDir, "290-result.json"),
         JSON.stringify(result, null, 2).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]") + "\n");
     }
     if (failures.length) throw new Error(failures.join("\n"));

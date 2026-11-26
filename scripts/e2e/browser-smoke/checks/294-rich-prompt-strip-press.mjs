@@ -100,7 +100,7 @@ async function waitFor(page, card, label, accept, timeout = 15_000) {
 async function openComposer(ctx, page, cs, windowId, name, text) {
   const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
   const attachment = await readTerminalAttachment(page, cs, (entry) => entry.session_id === row.session_id);
-  assert.ok(attachment.attached, "the ghostty terminal is attached");
+  assert.ok(attachment.attached, "the terminal is attached");
   const terminal = attachment.selector;
   const card = `${terminal} .rich-prompt`;
   await page.click(`${terminal} .terminal-host`);
@@ -254,18 +254,17 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const shot = (label) => ctx.shot(`294-${label}`).catch(() => {});
     const failures = [];
     await page.evaluate(tracePrompts);
     try {
-      const name = `Press294-${backend}`;
-      const text = `PROMPT294-${backend}`;
-      const result = { backend, passed: false, pageErrors: [], cleanupErrors: [], steps: {} };
+      const name = "Press294";
+      const text = "PROMPT294";
+      const result = { passed: false, pageErrors: [], cleanupErrors: [], steps: {} };
       const onError = (error) => result.pageErrors.push(String(error));
       page.on("pageerror", onError);
       let opened = false;
-      const stop = join(ctx.workspaceDir, `.press294-${backend}.stop`);
+      const stop = join(ctx.workspaceDir, ".press294.stop");
       try {
         const { card, terminal } = await openComposer(ctx, page, cs, windowId, name, text);
         opened = true;
@@ -276,14 +275,14 @@ export default {
         // Step 1: a real press on Submit holds the composer, and the
         // next key reaches it with no click. The release submits the
         // draft; once it delivers, the typed key starts the next one.
-        result.steps.pressRecord = (await pressSubmit(page, card, `294-${backend}-press-held`, shot)).record;
+        result.steps.pressRecord = (await pressSubmit(page, card, "294-press-held", shot)).record;
         await waitFor(page, card, "the submit delivers",
           (value) => (value.text === "" && !value.pending ? value : false));
         await page.keyboard.type("x");
         result.steps.press = await waitFor(page, card, "the next key reaches the composer",
           (value) => (value.text === "x" && value.where === "composer" ? value : false));
         assert.equal(result.steps.press.editable, true);
-        await shot(`294-${backend}-pressed`);
+        await shot("294-pressed");
         await page.keyboard.down("Control");
         await page.keyboard.press("Enter");
         await page.keyboard.up("Control");
@@ -320,11 +319,11 @@ export default {
         if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
           throw new Error("never caught a pending prompt in 4 submits");
         }
-        result.steps.recallPress = (await pressSubmit(page, card, `294-${backend}-recall-press`, shot)).record;
+        result.steps.recallPress = (await pressSubmit(page, card, "294-recall-press", shot)).record;
         result.steps.recall = await waitFor(page, card, "the run recalls",
           (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
         assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
-        await shot(`294-${backend}-recalled`);
+        await shot("294-recalled");
 
         // The failed recall: the cancel frame never goes out, so the
         // ack timer fails the run instead. The drop is installed before
@@ -339,7 +338,7 @@ export default {
         if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
           throw new Error("never caught a pending prompt for the failed recall");
         }
-        result.steps.failedPress = (await pressSubmit(page, card, `294-${backend}-failed-press`, shot)).record;
+        result.steps.failedPress = (await pressSubmit(page, card, "294-failed-press", shot)).record;
         const failed = await waitFor(page, card, "the failed recall says the connection was lost",
           (value) => value.note === "connection lost, message may still be queued", 9000);
         const dropped = (await page.evaluate(() => window.__prompt294.droppedCancels)) - droppedBefore;
@@ -350,7 +349,7 @@ export default {
           window.__prompt294.dropCancel = false;
         });
         result.steps.failedRecall = { where: failed.where, text: failed.text, dropped };
-        await shot(`294-${backend}-failed`);
+        await shot("294-failed");
 
         // The secondary action: the failed recall's prompt is still
         // queued behind the printing shell, and recall is offered once
@@ -454,7 +453,7 @@ export default {
         assert.equal(sentB.where, "composer", "B's composer keeps the keyboard");
         assert.equal(await activePaneId(page), paneA, "A is still the active pane");
         result.steps.twoPane = { pane: paneA, prompts: promptsB.length, record: recordB };
-        await shot(`294-${backend}-twopane`);
+        await shot("294-twopane");
 
         // A deck run opened over Search returns to the Search input.
         await dispatchCommand(page, "app.search.toggle");
@@ -501,16 +500,16 @@ export default {
         await page.keyboard.type("Q");
         const query = await page.$eval(searchInput, (input) => input.value);
         assert.equal(query, `${queryBefore}Q`, "typed text lands in the Search input");
-        await shot(`294-${backend}-search`);
+        await shot("294-search");
         result.steps.search = { queryBefore, query, dispatched };
         await dispatchCommand(page, "app.search.toggle");
 
         result.passed = true;
       } catch (error) {
         result.failure = String(error.message ?? error);
-        failures.push(`${backend}: ${result.failure}`);
+        failures.push(result.failure);
         result.final = await focusState(page, null).catch(() => null);
-        await shot(`294-${backend}-failure`).catch(() => {});
+        await shot("294-failure").catch(() => {});
       } finally {
         page.off("pageerror", onError);
         try { writeFileSync(stop, ""); } catch (error) { result.cleanupErrors.push(`queue release: ${error.message}`); }
@@ -528,11 +527,11 @@ export default {
             result.cleanupErrors.push(`terminal cleanup: ${error.message}`);
           });
         }
-        writeFileSync(join(ctx.outDir, `294-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+        writeFileSync(join(ctx.outDir, "294-result.json"), `${JSON.stringify(result, null, 2)}\n`);
       }
       if (result.passed && result.pageErrors.length) {
         result.passed = false;
-        failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
+        failures.push(`browser exceptions: ${result.pageErrors.join("; ")}`);
       }
     } finally {
       await page.evaluate(() => window.__prompt294?.restore?.());
