@@ -1425,14 +1425,9 @@ export class Terminal {
       hyperlinkId = cell.hyperlink;
     }
 
-    // Update renderer for underline rendering
-    const previousHyperlinkId = (this.renderer as any).hoveredHyperlinkId || 0;
-    if (hyperlinkId !== previousHyperlinkId) {
-      this.renderer.setHoveredHyperlinkId(hyperlinkId);
-
-      // The 60fps render loop will pick up the change automatically
-      // No need to force a render - this keeps performance smooth
-    }
+    // The renderer repaints the link's rows only when the id changes, and
+    // the render loop picks that up, so setting it on every move is free.
+    this.renderer.setHoveredHyperlinkId(hyperlinkId);
 
     // Check if there's a link at this position (for click handling and cursor)
     // Buffer API expects absolute buffer coordinates (including scrollback)
@@ -1516,15 +1511,9 @@ export class Terminal {
    * Handle mouse leave to clear link hover
    */
   private handleMouseLeave = (): void => {
-    // Clear hyperlink underline
+    // Clear both underlines: the OSC 8 link's and the matched URL's.
     if (this.renderer && this.wasmTerm) {
-      const previousHyperlinkId = (this.renderer as any).hoveredHyperlinkId || 0;
-      if (previousHyperlinkId > 0) {
-        this.renderer.setHoveredHyperlinkId(0);
-
-        // The 60fps render loop will pick up the change automatically
-      }
-      // Clear regex link underline
+      this.renderer.setHoveredHyperlinkId(0);
       this.renderer.setHoveredLinkRange(null);
     }
 

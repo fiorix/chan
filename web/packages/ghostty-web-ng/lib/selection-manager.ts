@@ -141,11 +141,7 @@ export class SelectionManager {
    * Get current viewport Y position (how many lines scrolled into history)
    */
   private getViewportY(): number {
-    const rawViewportY =
-      typeof (this.terminal as any).getViewportY === 'function'
-        ? (this.terminal as any).getViewportY()
-        : (this.terminal as any).viewportY || 0;
-    return Math.max(0, Math.floor(rawViewportY));
+    return Math.max(0, Math.floor(this.terminal.getViewportY()));
   }
 
   /**

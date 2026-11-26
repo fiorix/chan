@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
+import { GhosttyVt, VtCells, VtTerminal } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -475,6 +475,15 @@ describe('copy operations and click extents', () => {
     expect(term.getScrollbackText()).toBe('abcdefghij\nklmnop\nlast');
     expect(term.getSelectionRange()).toEqual(range(0, 2, 3, 2));
     expect(copy).not.toHaveBeenCalled();
+  });
+
+  test('scrollback text is one core read that joins a wrapped command and leaves out what is not drawn', async () => {
+    const { term } = await open('$ ab\x7fcdefghijkl\r\nnext', 10, 4);
+    const plainText = vi.spyOn(VtTerminal.prototype, 'plainText');
+    const rows = [vi.spyOn(VtTerminal.prototype, 'readRow'), vi.spyOn(VtTerminal.prototype, 'readHistoryRow')];
+    expect(term.getScrollbackText()).toBe('$ abcdefghijkl\nnext');
+    expect(plainText).toHaveBeenCalledTimes(1);
+    for (const read of rows) expect(read).not.toHaveBeenCalled();
   });
 
   test('a range reads as its selection would, without selecting or copying', async () => {
