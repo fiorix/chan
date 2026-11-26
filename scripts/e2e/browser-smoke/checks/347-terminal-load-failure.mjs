@@ -36,6 +36,8 @@ const FINAL_NAME = "Load347f";
 const FILE = "load347.md";
 const WAIT_MS = 30_000;
 const KEYBOARD_MS = 5_000;
+// Long enough for a reload or a close an action started to show.
+const KEYS_SETTLE_MS = 1_000;
 const CORE = /\/ghostty-vt[^/]*\.wasm(?:[?#]|$)/;
 // The widget's chunk, as the build emits it (`assets/ghostty-web-<hash>.js`).
 const CHUNK = /\/assets\/ghostty-web-[A-Za-z0-9_-]+\.js(?:[?#]|$)/;
@@ -558,7 +560,8 @@ export default {
       assert.equal(reload.state.canvases, 1, "one terminal in the terminal's area");
       assert.deepEqual(reload.sessions.map((row) => row.session_id), [session], "attached to the live session, with no PTY spawned");
       await ctx.shot("347-chunk-reloaded");
-      reload.keyboardAtLoad = await keyboardSoon(reload.reloadedTabId, (k) => k.terminal);
+      reload.keyboardAtLoad = await keyboardWhen(reload.reloadedTabId, (k) => k.terminal,
+        "the reloaded terminal takes the keyboard by itself", "347-reloaded-keyboard-at-load");
       await page.click(hostOf(reload.reloadedTabId));
       reload.keyboard = await keyboardWhen(reload.reloadedTabId, (k) => k.terminal, "a click hands the reloaded terminal the keyboard",
         "347-reloaded-keyboard");
@@ -581,7 +584,8 @@ export default {
       await page.waitForSelector(".pane", { visible: true, timeout: WAIT_MS });
       await ctx.waitWindowLive(windowId);
       const restored = (final.restored = await restoredFailure("347-final-no-load-error"));
-      restored.keyboard = await keyboardSoon(restored.tabId, (k) => k.card);
+      restored.keyboard = await keyboardWhen(restored.tabId, (k) => k.card,
+        "the restored terminal's final card itself takes the keyboard", "347-final-restored-keyboard");
       final.coreRequests = details.coreRequests.slice(coreBeforeFinal).map((request) => request.answer);
       assert.ok(final.coreRequests.length >= 1 && final.coreRequests.every((answer) => answer === "not wasm"),
         `the page asked for the core and was answered with a page that is not wasm: ${JSON.stringify(final.coreRequests)}`);
@@ -636,8 +640,16 @@ export default {
         document.querySelector(`.terminal-tab[data-terminal-tab-id="${id}"] .terminal-main [role=alert]`)?.getAttribute("tabindex") ?? null,
       fresh.tabId);
       await ctx.shot("347-final-card-focused");
-      assert.equal(fresh.keyboard.action, null, "no action holds the keyboard, so no key typed ahead reloads or closes");
       assert.equal(fresh.tabindex, "-1", "the card holds the keyboard without joining the Tab order");
+      // A key typed ahead onto the card reaches no action: Enter and Space
+      // neither reload the window nor close the tab.
+      await markDocument("final-keys");
+      for (const key of ["Enter", "Space"]) await page.keyboard.press(key);
+      await sleep(KEYS_SETTLE_MS);
+      fresh.afterKeys = { mark: await documentMark().catch(() => null), state: await tabState(fresh.tabId).catch(() => null) };
+      assert.equal(fresh.afterKeys.mark, "final-keys", "Enter and Space on the final card did not reload the window");
+      assert.equal(fresh.afterKeys.state?.mounted, true, "Enter and Space on the final card did not close the tab");
+      assert.ok(fresh.afterKeys.state.error?.includes(FAILED), "the tab still shows the final failure");
       assert.equal(fresh.state.actions.length, 2, `a final failure offers two ways out: ${JSON.stringify(fresh.state.actions)}`);
       assert.equal(fresh.state.actions[0], "Reload window", "a reload first");
       assert.match(fresh.state.actions[1], /^Close \S/, "then Close");
@@ -650,8 +662,8 @@ export default {
       assert.deepEqual(fresh.sessions.map((row) => row.session_id), [session], "no PTY was spawned for the fresh terminal");
 
       await shell(["pane", "focus", placed.editorPane]);
-      fresh.keyboardPaneLeft = await keyboardWhen(fresh.tabId, (k) => !k.inCard,
-        "the card gives up the keyboard once the editor's pane takes focus", "347-final-keyboard-kept");
+      fresh.keyboardPaneLeft = await keyboardWhen(fresh.tabId, (k) => !k.inCard && k.editor && k.pane === placed.editorPane,
+        "the card gives up the keyboard to the editor once its pane takes focus", "347-final-keyboard-kept");
       await ctx.shot("347-final-pane-left");
 
       assert.deepEqual(details.continueErrors, [], "every intercepted request was answered");
