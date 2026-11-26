@@ -262,19 +262,20 @@ describe('content changes', () => {
 
   test('a throwing change listener cannot leave a resize unpublished or unpainted', async () => {
     const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
     const sizes: string[] = [];
     term.onResize(({ cols, rows }) => sizes.push(`${cols}x${rows}`));
     term.onChange(() => { throw new Error('observer failed'); });
     renderer.render.mockClear();
-    let thrown: unknown;
-    try { term.resize(30, 8); } catch (error) { thrown = error; }
+    expect(() => term.resize(30, 8), 'the caller sizing the terminal sees no error').not.toThrow();
     expect(sizes, 'the PTY hears the new size').toEqual(['30x8']);
     expect(renderer.render, 'the screen repaints whole at the new size')
       .toHaveBeenCalledWith(expect.anything(), true, 0, expect.any(Number));
-    expect(thrown, "the listener's error reaches the caller").toEqual(new Error('observer failed'));
+    expect(reported, "the listener's error is reported").toEqual([new Error('observer failed')]);
   });
 
-  test('a resize runs every observer and its paint before it throws the first error', async () => {
+  test('a resize runs every observer and its paint, and reports each failure in turn', async () => {
     const { term, renderer } = await terminal();
     const reported: unknown[] = [];
     vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
@@ -286,9 +287,13 @@ describe('content changes', () => {
       heard.push('paint');
       throw new Error('paint failed');
     });
-    expect(() => term.resize(30, 8)).toThrow('change listener failed');
+    expect(() => term.resize(30, 8)).not.toThrow();
     expect(heard).toEqual(['change', 'resize', 'paint']);
-    expect(reported, 'a failed paint is reported, as a write reports one').toEqual([new Error('paint failed')]);
+    expect(reported, 'each failure is reported, as a write reports a failed paint').toEqual([
+      new Error('change listener failed'),
+      new Error('resize listener failed'),
+      new Error('paint failed'),
+    ]);
   });
 
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {

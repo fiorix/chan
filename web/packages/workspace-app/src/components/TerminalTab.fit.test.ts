@@ -12,6 +12,7 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 import TerminalTab from "./TerminalTab.svelte";
 import {
   attach,
+  collectReports,
   installTerminalDom,
   receive,
   resetTerminals,
@@ -197,6 +198,27 @@ describe("the PTY's size", () => {
 
     await vi.advanceTimersByTimeAsync(16);
     expect(resizeFrames(socket).slice(before)).toEqual([{ type: "resize", cols: 80, rows: 24 }]);
+  });
+
+  test("a listener failing in each fit's resize leaves every leading fit published", async () => {
+    hostSize = { cols: 80, rows: 24 };
+    const { term, socket } = await mounted();
+    await attach(socket);
+    const reported = collectReports();
+    term.onChange(({ kind }) => {
+      if (kind === "resize") throw new Error("change listener failed");
+    });
+    const observer = resizeObservers.at(-1)!;
+    for (const [cols, rows] of [[100, 30], [110, 35], [120, 40]] as const) {
+      hostSize = { cols, rows };
+      observer.callback();
+      await vi.advanceTimersByTimeAsync(16);
+      expect(resizeFrames(socket).at(-1), `the leading fit to ${cols}x${rows} is published`)
+        .toEqual({ type: "resize", cols, rows });
+    }
+    expect(reported, "each failure is reported, not taken for an unmeasured host").toEqual(
+      Array.from({ length: 3 }, () => new Error("change listener failed")),
+    );
   });
 
   test("a size another view set is adopted by a hidden terminal only", async () => {

@@ -56,7 +56,7 @@ function isButtonlessMotionReport(data: string): boolean {
 }
 
 /** Report an error as an uncaught one, without unwinding the caller. */
-function reportPaintError(error: unknown): void {
+function reportUncaught(error: unknown): void {
   if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
   else setTimeout(() => { throw error; });
 }
@@ -683,7 +683,7 @@ export class Terminal {
           this.#searchOwner?.runDue();
           this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
         } catch (error) {
-          reportPaintError(error);
+          reportUncaught(error);
         }
       }
     }
@@ -786,14 +786,14 @@ export class Terminal {
       this.#renderer!.resize(cols, rows);
 
       // Each kind of observer hears the resize, the PTY gets the new size and
-      // the screen repaints even when an observer throws. The first error
-      // then reaches the caller, as a write's does once its replies are sent.
-      const errors: unknown[] = [];
+      // the screen repaints even when an observer throws. An observer's error
+      // is reported rather than thrown, as a failed paint is, so a caller
+      // sizing the terminal never takes a listener's failure for its own.
       const notify = (observe: () => void) => {
         try {
           observe();
         } catch (error) {
-          errors.push(error);
+          reportUncaught(error);
         }
       };
       notify(() => this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen()));
@@ -802,13 +802,12 @@ export class Terminal {
       notify(() => this.#resizeEmitter.fire({ cols, rows }));
 
       // Force full render. A failed paint is reported, as a write's echo
-      // paint is, rather than thrown in place of an observer's error.
+      // paint is.
       try {
         this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
       } catch (error) {
-        reportPaintError(error);
+        reportUncaught(error);
       }
-      if (errors.length > 0) throw errors[0];
     } finally {
       // Restart the render loop. Nothing adds to the write queue, so the
       // flush finds it empty.

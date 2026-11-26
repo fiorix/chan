@@ -48,7 +48,7 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { dockTerminal, terminalLayer, terminalPlacements } from "../state/terminalDock.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
 import {
-  attach, installTerminalDom, receive, resetTerminals, resizeObservers,
+  attach, collectReports, installTerminalDom, receive, resetTerminals, resizeObservers,
   seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
 } from "../__tests__/terminalTab";
 
@@ -329,6 +329,26 @@ describe("widget size ownership", () => {
     expect([query.get("cols"), query.get("rows")], "an adoption is not the host's measured candidate")
       .toEqual([null, null]);
     expect(query.get("size_if_unset"), "no sizing qualifier without a candidate").toBeNull();
+  });
+
+  test("a hidden redial does not declare an adopted grid when a listener fails in the adoption", async () => {
+    const { props, socket, term } = await shown();
+    await visibility(props, false);
+    const reported = collectReports();
+    term.onChange(({ kind }) => {
+      if (kind === "resize") throw new Error("change listener failed");
+    });
+    let handler: unknown = "completed";
+    await receive(socket, gridFrame(100, 30)).catch((error: unknown) => { handler = error; });
+    expect([term.cols, term.rows]).toEqual([100, 30]);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "an adoption is not the host's measured candidate")
+      .toEqual([null, null]);
+    expect(handler, "the socket's handler completes").toBe("completed");
+    expect(reported, "the failure is reported").toEqual([new Error("change listener failed")]);
   });
 
   test("a shown reattach waits for its reveal measurement before declaring a grid", async () => {

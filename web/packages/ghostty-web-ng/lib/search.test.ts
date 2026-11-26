@@ -1809,12 +1809,13 @@ describe('widget search', () => {
     search.onChange(() => { throw new Error('find bar listener failed'); });
     const changes: string[] = [];
     term.onChange(({ kind }) => changes.push(kind));
-    let thrown: unknown;
-    try { term.resize(30, 6); } catch (error) { thrown = error; }
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    expect(() => term.resize(30, 6), 'the caller sizing the terminal sees no error').not.toThrow();
     expect(changes, 'change listeners still hear the resize').toEqual(['resize']);
     expect(sizes, 'the PTY hears the new size').toEqual(['30x6']);
     expect(paint, 'the screen repaints at the new size').toHaveBeenCalled();
-    expect(thrown, "the listener's error reaches the caller").toEqual(new Error('find bar listener failed'));
+    expect(reported, "the listener's error is reported").toEqual([new Error('find bar listener failed')]);
   });
 
   test('a resize keeps a deep active match highlighted until the rescan places it, past one second', async () => {
