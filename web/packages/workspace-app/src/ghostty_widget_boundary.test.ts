@@ -16,8 +16,10 @@
 //    or a bracket on a widget value or one cast from it, `in`, `vi.spyOn`
 //    or `Reflect.get`;
 // 4. patch: a write to a member of a widget object, `Object.assign` and its
-//    kin on one, and any reach of a widget class's `prototype` (tests may
-//    read and spy on its public members);
+//    kin on one, and any reach of a widget's prototype: a widget class's
+//    `prototype`, or a widget value's `constructor`, `Object.getPrototypeOf`
+//    or `Reflect.getPrototypeOf` (tests may reach one to read and spy on
+//    its public members);
 // 5. name: the name of one of the widget's implementation members, which
 //    catches what has no widget type to check: a duck-typed parameter, a
 //    Svelte template expression.
@@ -320,13 +322,21 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     Reflect: new Set(["set", "defineProperty", "deleteProperty", "setPrototypeOf"]),
   };
   const READERS = new Set(["vi.spyOn", "Reflect.get", "Reflect.has"]);
+  const PROTOTYPE_READERS = new Set(["Object.getPrototypeOf", "Reflect.getPrototypeOf"]);
 
-  /// The member a node names, and the receiver it names it on, if any.
-  function memberNamed(node: ts.Node): { name: string; receiver?: ts.Expression } | undefined {
+  /// The member a dot or a string-keyed bracket reads, and its receiver.
+  function access(node: ts.Node): { name: string; receiver: ts.Expression } | undefined {
     if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) return { name: node.name.text, receiver: node.expression };
     if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
       return { name: node.argumentExpression.text, receiver: node.expression };
     }
+    return undefined;
+  }
+
+  /// The member a node names, and the receiver it names it on, if any.
+  function memberNamed(node: ts.Node): { name: string; receiver?: ts.Expression } | undefined {
+    const reached = access(node);
+    if (reached) return reached;
     if (
       (ts.isPropertySignature(node) ||
         ts.isPropertyDeclaration(node) ||
@@ -419,10 +429,8 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       }
 
       // 3. Reads of members the package keeps to itself.
-      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) read(node.expression, node.name.text, node);
-      if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
-        read(node.expression, node.argumentExpression.text, node);
-      }
+      const reached = access(node);
+      if (reached) read(reached.receiver, reached.name, node);
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword && ts.isStringLiteralLike(node.left)) {
         read(node.right, node.left.text, node);
       }
@@ -456,10 +464,24 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         const widget = widgetOf(node.arguments[0]);
         if (widget && isClassInstance(widget)) report("patch", lineOf(node), `${node.expression.getText(sf)} ${nameOf(widget)}`);
       }
-      if (ts.isPropertyAccessExpression(node) && node.name.text === "prototype" && source.kind === "shipped") {
-        let symbol = checker.getSymbolAtLocation(node.expression);
+      if (source.kind === "shipped" && reached?.name === "prototype") {
+        let symbol = checker.getSymbolAtLocation(reached.receiver);
         if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
         if (symbol && widgetClass(symbol)) report("patch", lineOf(node), `prototype ${symbol.getName()}`);
+      }
+      if (source.kind === "shipped" && reached?.name === "constructor") {
+        const widget = widgetOf(reached.receiver);
+        if (widget) report("patch", lineOf(node), `constructor ${nameOf(widget)}`);
+      }
+      if (
+        source.kind === "shipped" &&
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.arguments.length > 0 &&
+        PROTOTYPE_READERS.has(node.expression.getText(sf))
+      ) {
+        const widget = widgetOf(node.arguments[0]);
+        if (widget) report("patch", lineOf(node), `${node.expression.getText(sf)} ${nameOf(widget)}`);
       }
 
       // 5. Implementation names.
@@ -495,6 +517,9 @@ const PLANTS = new Map<string, string>([
       "  // @ts-expect-error a private member",
       "  return term.isOpen;",
       "};",
+      "export const reach = (term: Terminal) => [Object.getPrototypeOf(term), Reflect.getPrototypeOf(term)];",
+      "export const maker = (term: Terminal) => (term.constructor as { prototype: object }).prototype;",
+      'export const parent = (term: Terminal) => term["__proto__"];',
     ].join("\n"),
   ],
   [
@@ -530,6 +555,7 @@ const PLANTS = new Map<string, string>([
       "  // @ts-expect-error a private member",
       "  return term.selectionManager;",
       "};",
+      "export const reach = (term: Terminal) => Object.getPrototypeOf(term);",
     ].join("\n"),
   ],
 ]);
@@ -542,6 +568,10 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 6, key: "prototype Terminal" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 7, key: "wasmTerm" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 11, key: "Terminal.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Object.getPrototypeOf Terminal" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Reflect.getPrototypeOf Terminal" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 14, key: "constructor Terminal" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 15, key: "Terminal.__proto__" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
