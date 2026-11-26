@@ -5,17 +5,20 @@
 // `private` members are private to the compiler only, so a cast reaches
 // them at run time, and a member reached that way reads `undefined` once
 // the package spells it `#private`: the reader does not fail, it takes
-// whatever fallback it has. This check reads every app module through the
-// TypeScript checker, a component as its scripts and the expressions of
-// its markup, and reports, with file and line:
+// whatever fallback it has. This check reads every app module, each
+// `.ts`, `.js` and `.svelte` file under `src/` (and the `.mts`, `.cts`,
+// `.mjs` and `.cjs` kin) and the test files beside the app's
+// configuration, through the TypeScript checker, a component as its
+// scripts and the expressions of its markup, and reports, with file and
+// line:
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
 //    module augmentation (`declare module`), `import.meta.glob` pattern or
 //    `new URL(..., import.meta.url)` that reaches a path inside the package
-//    other than its export map's entries,
-//    by the package's name or by a relative path with its links resolved
-//    (the workspace's `node_modules/@chan/ghostty-web-ng` is a link to the
-//    package, so a path through it reaches the package's own files);
+//    other than its export map's entries, by the package's name or by a
+//    relative path with its links resolved (the workspace's
+//    `node_modules/@chan/ghostty-web-ng` is a link to the package, so a
+//    path through it reaches the package's own files);
 // 2. cast: a cast of a widget value to a type it does not satisfy or to
 //    one that names none of its members (`any`, `unknown`, `object`,
 //    `{}`), and a cast of a value typed by a type parameter to such a
@@ -116,6 +119,15 @@
 //   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
 //   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
 //   does not read as a write;
+// - an import, mock or URL specifier that reaches the package other than
+//   by its name or a relative path: an absolute or root-relative path, or
+//   an alias of tsconfig's `paths` or Vite's `resolve.alias` (the app has
+//   none to the package);
+// - in a JavaScript module, a value with no type, which rules 1 and 5
+//   alone can read (`untyped` in `boundaryPlant.js`);
+// - the `.d.ts` files under `src/`, which hold no code: rule 1 does not
+//   read their `declare module` names, though any member they add to a
+//   widget class still reads as lacking under rule 3;
 // - a dynamic import whose specifier is a string literal under
 //   parentheses (`import(("@chan/ghostty-web-ng/lib/internal"))`);
 // - in tests, a `satisfies` inside a cast chain (`(term as unknown)
@@ -286,12 +298,16 @@ type Range = { start: number; end: number };
 /// expressions. `spans` lead a module position back to the file's text.
 type Source = { file: string; rel: string; kind: Kind; text: string; spans: Span[]; original: string };
 
+/// The extensions of the modules TypeScript reads under the app's
+/// tsconfig, which allows JavaScript; a component is read apart.
+const MODULE_EXTENSIONS = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"];
+
 function kindOf(rel: string): Kind | null {
-  if (rel.endsWith(".d.ts") || !/\.(ts|svelte)$/.test(rel)) return null;
+  if (/\.d\.[mc]?ts$/.test(rel) || !/\.([mc]?[jt]s|svelte)$/.test(rel)) return null;
   if (rel.startsWith("src/")) {
-    return rel.includes("/__tests__/") || /\.(test|e2e|measure)\.ts$/.test(rel) ? "test" : "shipped";
+    return rel.includes("/__tests__/") || /\.(test|e2e|measure)\.[mc]?[jt]s$/.test(rel) ? "test" : "shipped";
   }
-  return /^(vitest\.setup|[^/]+\.test)\.ts$/.test(rel) ? "test" : null;
+  return /^(vitest\.setup|[^/]+\.test)\.[mc]?[jt]s$/.test(rel) ? "test" : null;
 }
 
 /// Svelte's template node types; any other node in a template is an ESTree
@@ -505,8 +521,8 @@ function lineIn(source: Source, at: number): number {
 function loadSources(plants: ReadonlyMap<string, string>): Source[] {
   const sources: Source[] = [];
   const files = [
-    ...ts.sys.readDirectory(`${APP}/src`, [".ts", ".svelte"], undefined, ["**/*"]),
-    ...ts.sys.readDirectory(APP, [".ts"], undefined, ["*"]),
+    ...ts.sys.readDirectory(`${APP}/src`, [...MODULE_EXTENSIONS, ".svelte"], undefined, ["**/*"]),
+    ...ts.sys.readDirectory(APP, MODULE_EXTENSIONS, undefined, ["*"]),
   ];
   for (const path of files) {
     const rel = normalize(path).slice(APP.length + 1);
@@ -1263,6 +1279,14 @@ const PLANTS = new Map<string, string>([
     ].join("\n"),
   ],
   [
+    "src/terminal/boundaryPlant.js",
+    [
+      "export const untyped = (term) => term.isOpen;",
+      "export const named = (term) => term.wasmTerm;",
+      'import "../../../ghostty-web-ng/lib/internal";',
+    ].join("\n"),
+  ],
+  [
     "src/terminal/BoundaryGeneric.svelte",
     [
       '<script lang="ts" generics="T extends Terminal">',
@@ -1364,6 +1388,8 @@ const PLANTED: readonly Site[] = [
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
