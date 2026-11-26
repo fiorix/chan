@@ -1506,6 +1506,15 @@ describe("the workspace tree", () => {
     expect(canvas.props!.nodes, "a patch that read no level does not lay the spine out again").toBe(drawn);
   });
 
+  /// A change in the workspace that names `paths`, once the watcher's
+  /// debounce has passed.
+  async function changeNames(paths: string[]): Promise<void> {
+    graphReloadSignal.paths = paths;
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 400));
+    await settle();
+  }
+
   /// A change that names no path, whose whole spine fetch is held in flight
   /// until the returned release is called.
   async function holdWholeFetch(): Promise<() => void> {
@@ -1660,6 +1669,43 @@ describe("the workspace tree", () => {
     await settle(20);
     expect({ a: levelReads("a"), "a/b": levelReads("a/b") }).toEqual({ a: 2, "a/b": 1 });
     expect(filesOfA()).toEqual(["a/b/y.md", "a/x.md"]);
+  });
+
+  test("a folder kept asked under a parent whose read found it gone is read once a later level of that parent brings it, over the listing cap", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("p"), g.dir("p/c"), g.dir("a")],
+      edges: [g.edge("", "directory:p", "contains"), g.edge("directory:p", "directory:p/c", "contains"), g.edge("", "directory:a", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("p"), fsg.dir("a"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "p"), fsg.contains("", "a"), fsg.contains("a", "a/x.md")],
+    };
+    graphServer.tree = "folders";
+    // `p/c` is open under the closed `p`, which leaves the disk after the
+    // spine listed it, before a change says so.
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, "p/c": true } }));
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => n.path !== "p");
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "p");
+    await doubleClick("directory:p");
+    await settle(20);
+    expect(tab.expanded.p).toBe(true);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c") }, "p's read finds it gone, and p/c is not read under it").toEqual({ p: 1, "p/c": 0 });
+
+    // `p` comes back, then `p/c` is moved into it with its file, and that
+    // change names `p/c` alone: the patch reads `p`, which brings its node.
+    graphServer.fs.nodes.push(fsg.dir("p"));
+    graphServer.fs.edges.push(fsg.contains("", "p"));
+    await changeNames(["p"]);
+    graphServer.fs.nodes.push(fsg.dir("p/c"), fsg.file("p/c/y.md"));
+    graphServer.fs.edges.push(fsg.contains("p", "p/c"), fsg.contains("p/c", "p/c/y.md"));
+    await changeNames(["p/c"]);
+    await settle(20);
+    expect({ p: levelReads("p"), "p/c": levelReads("p/c") }).toEqual({ p: 2, "p/c": 0 });
+
+    // The next opening reads what the opened set lacks.
+    await doubleClick("directory:a");
+    await settle(20);
+    expect({ "p/c": levelReads("p/c"), drawsY: visibleIds().includes("p/c/y.md") }).toEqual({ "p/c": 1, drawsY: true });
   });
 
   test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
