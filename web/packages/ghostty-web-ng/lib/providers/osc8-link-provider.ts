@@ -21,7 +21,10 @@ import type { IBufferRange, ILink, ILinkProvider } from '../types';
  * hyperlink_id across wrapped lines.
  */
 export class OSC8LinkProvider implements ILinkProvider {
-  constructor(private terminal: ITerminalForOSC8Provider) {}
+  #terminal: ITerminalForOSC8Provider;
+  constructor(terminal: ITerminalForOSC8Provider) {
+    this.#terminal = terminal;
+  }
 
   /**
    * Provide all OSC 8 links on the given row
@@ -31,7 +34,7 @@ export class OSC8LinkProvider implements ILinkProvider {
     const links: ILink[] = [];
     const visitedPositions = new Set<number>(); // Track which columns we've already processed
 
-    const line = this.terminal.buffer.active.getLine(y);
+    const line = this.#terminal.buffer.active.getLine(y);
     if (!line) {
       callback(undefined);
       return;
@@ -55,18 +58,18 @@ export class OSC8LinkProvider implements ILinkProvider {
       // Get the URI from WASM
       // The y parameter is a buffer row - we need to determine if it's in
       // scrollback or the active viewport and use the appropriate API
-      if (!this.terminal.wasmTerm) continue;
-      const scrollbackLength = this.terminal.wasmTerm.getScrollbackLength();
+      if (!this.#terminal.wasmTerm) continue;
+      const scrollbackLength = this.#terminal.wasmTerm.getScrollbackLength();
       const viewportRow = y - scrollbackLength;
 
       let uri: string | null;
       if (viewportRow < 0) {
         // Row is in scrollback - use scrollback API
         // y is the buffer row (0 = oldest), scrollback offset is also 0 = oldest
-        uri = this.terminal.wasmTerm.getScrollbackHyperlinkUri(y, x);
+        uri = this.#terminal.wasmTerm.getScrollbackHyperlinkUri(y, x);
       } else {
         // Row is in active viewport
-        uri = this.terminal.wasmTerm.getHyperlinkUri(viewportRow, x);
+        uri = this.#terminal.wasmTerm.getHyperlinkUri(viewportRow, x);
       }
 
       if (uri) {
@@ -80,8 +83,8 @@ export class OSC8LinkProvider implements ILinkProvider {
           // Check if this cell has the same URI (use appropriate API for scrollback vs viewport)
           const nextUri =
             viewportRow < 0
-              ? this.terminal.wasmTerm!.getScrollbackHyperlinkUri(y, col)
-              : this.terminal.wasmTerm!.getHyperlinkUri(viewportRow, col);
+              ? this.#terminal.wasmTerm!.getScrollbackHyperlinkUri(y, col)
+              : this.#terminal.wasmTerm!.getHyperlinkUri(viewportRow, col);
           if (nextUri !== uri) break;
 
           endX = col;

@@ -58,53 +58,56 @@ function ordered(range: HighlightRange): HighlightRange {
 
 /** Internal storage and paint bookkeeping; the terminal exposes only its facade. */
 export class HighlightsManager implements TerminalHighlights {
-  private readonly layers = new Map<string, StoredLayer>();
-  private dirty: RowInterval = { start: Infinity, end: -Infinity };
+  #alternateScreen: boolean;
+  readonly #layers = new Map<string, StoredLayer>();
+  #dirty: RowInterval = { start: Infinity, end: -Infinity };
 
-  constructor(private alternateScreen: boolean) {}
+  constructor(alternateScreen: boolean) {
+    this.#alternateScreen = alternateScreen;
+  }
 
   set(name: string, ranges: readonly HighlightRange[], style: HighlightStyle = {}): void {
     // Validate and copy the whole replacement before changing any state.
     const copied = ranges.map(ordered);
     const next: StoredLayer = { blocks: [], style: { ...style }, bounds: { start: Infinity, end: -Infinity } };
     for (let i = 0; i < copied.length; i += 256) appendBlock(next, block(copied.slice(i, i + 256)));
-    this.invalidate(this.layers.get(name));
-    this.layers.set(name, next);
-    this.invalidate(next);
+    this.#invalidate(this.#layers.get(name));
+    this.#layers.set(name, next);
+    this.#invalidate(next);
   }
 
   /** Takes ownership of internal, normalized ranges; public callers use set. */
   append(name: string, ranges: HighlightRange[], style: HighlightStyle): void {
-    let layer = this.layers.get(name);
+    let layer = this.#layers.get(name);
     if (!layer) {
       layer = { blocks: [], style: { ...style }, bounds: { start: Infinity, end: -Infinity } };
-      this.layers.set(name, layer);
+      this.#layers.set(name, layer);
     }
     for (let i = 0; i < ranges.length; i += 256) {
       const next = block(ranges.length <= 256 ? ranges : ranges.slice(i, i + 256));
-      this.dirty.start = Math.min(this.dirty.start, next.start);
-      this.dirty.end = Math.max(this.dirty.end, next.end);
+      this.#dirty.start = Math.min(this.#dirty.start, next.start);
+      this.#dirty.end = Math.max(this.#dirty.end, next.end);
       appendBlock(layer, next);
     }
   }
 
   /** Replaces a layer's style, keeping its ranges and its place; internal, for find's theme colours. */
   restyle(name: string, style: HighlightStyle): void {
-    const layer = this.layers.get(name);
+    const layer = this.#layers.get(name);
     if (!layer) return;
     layer.style = { ...style };
-    this.invalidate(layer);
+    this.#invalidate(layer);
   }
 
   clear(name: string): boolean {
-    const layer = this.layers.get(name);
+    const layer = this.#layers.get(name);
     if (!layer) return false;
-    this.invalidate(layer);
-    return this.layers.delete(name);
+    this.#invalidate(layer);
+    return this.#layers.delete(name);
   }
 
   get(name: string): HighlightLayer | undefined {
-    const layer = this.layers.get(name);
+    const layer = this.#layers.get(name);
     if (!layer) return undefined;
     const ranges: HighlightRange[] = [];
     const visit = (node: Block) => {
@@ -120,25 +123,25 @@ export class HighlightsManager implements TerminalHighlights {
   }
 
   observeScreen(alternate: boolean): void {
-    if (alternate === this.alternateScreen) return;
-    for (const layer of this.layers.values()) this.invalidate(layer);
-    this.layers.clear();
-    this.alternateScreen = alternate;
+    if (alternate === this.#alternateScreen) return;
+    for (const layer of this.#layers.values()) this.#invalidate(layer);
+    this.#layers.clear();
+    this.#alternateScreen = alternate;
   }
 
-  private invalidate(layer: StoredLayer | undefined): void {
+  #invalidate(layer: StoredLayer | undefined): void {
     if (!layer) return;
-    this.dirty.start = Math.min(this.dirty.start, layer.bounds.start);
-    this.dirty.end = Math.max(this.dirty.end, layer.bounds.end);
+    this.#dirty.start = Math.min(this.#dirty.start, layer.bounds.start);
+    this.#dirty.end = Math.max(this.#dirty.end, layer.bounds.end);
   }
 
   /** Reject offscreen blocks before visiting their ranges; never expand history rows. */
   frame(top: number, rows: number, cols: number): { spans: HighlightSpan[]; dirtyRows: Set<number> } {
     const dirtyRows = new Set<number>();
-    const first = Math.max(0, this.dirty.start - top);
-    const last = Math.min(rows - 1, this.dirty.end - top);
+    const first = Math.max(0, this.#dirty.start - top);
+    const last = Math.min(rows - 1, this.#dirty.end - top);
     for (let row = first; row <= last; row++) dirtyRows.add(row);
-    this.dirty = { start: Infinity, end: -Infinity };
+    this.#dirty = { start: Infinity, end: -Infinity };
 
     const spans: HighlightSpan[] = [];
     const append = (layer: StoredLayer | undefined) => {
@@ -168,16 +171,16 @@ export class HighlightsManager implements TerminalHighlights {
     };
     // Find owns these names. Other layers use stable registration order;
     // replacing a layer does not change its position among its peers.
-    append(this.layers.get('search-all'));
-    for (const [name, layer] of this.layers) {
+    append(this.#layers.get('search-all'));
+    for (const [name, layer] of this.#layers) {
       if (name !== 'search-all' && name !== 'search-active') append(layer);
     }
-    append(this.layers.get('search-active'));
+    append(this.#layers.get('search-active'));
     return { spans, dirtyRows };
   }
 
   dispose(): void {
-    this.layers.clear();
-    this.dirty = { start: Infinity, end: -Infinity };
+    this.#layers.clear();
+    this.#dirty = { start: Infinity, end: -Infinity };
   }
 }
