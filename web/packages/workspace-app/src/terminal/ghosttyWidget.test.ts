@@ -12,6 +12,10 @@ describe("the ghostty widget's class fields", () => {
   test("a field declared without an initializer is not an own property until it is assigned", () => {
     // The constructor only stores the core; nothing here calls into it.
     const term = new Terminal({ ghostty: {} as GhosttyVt, cols: 20, rows: 4 });
+    expect(
+      Object.getOwnPropertyDescriptor(Terminal.prototype, "element"),
+      "the probe is a field, not an accessor",
+    ).toBeUndefined();
     expect(Object.hasOwn(term, "element"), "a field assigned at open").toBe(false);
     expect(Object.hasOwn(term, "cols"), "a field the constructor assigns").toBe(true);
     expect(term.cols).toBe(20);
