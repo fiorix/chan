@@ -42,11 +42,13 @@ pub struct TerminalConfig {
     pub session_cap: usize,
     #[serde(default = "default_terminal_ring_bytes")]
     pub ring_bytes: usize,
-    /// Per-terminal scrollback budget in MB. Consumed by the SPA when it
-    /// constructs the terminal widget, to compute the scrollback line cap;
-    /// the server only persists + range-clamps the value. Spawn-time-
-    /// only: existing terminals keep their current scrollback until
-    /// the session restarts.
+    /// Per-terminal scrollback budget in MB. The SPA passes it to the
+    /// terminal widget as a byte budget for the history its core keeps
+    /// (1,048,576 bytes per MB), so how many rows fit depends on the
+    /// terminal's width and on what the rows hold. The server persists
+    /// and range-clamps the value and sizes a tmux pane's capture by
+    /// it. Spawn-time-only: existing terminals keep their current
+    /// scrollback until the session restarts.
     #[serde(default = "default_terminal_scrollback_mb")]
     pub scrollback_mb: u32,
     /// Default TERM value handed to newly-spawned PTYs. The SPA
