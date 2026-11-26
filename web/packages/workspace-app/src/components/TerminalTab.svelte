@@ -1446,8 +1446,8 @@
     // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
     osc52Bridge = new Osc52Bridge();
     ghosttyStatusGuard = new GhosttyStatusGuard();
-    // The widget owns output following; the adapter calibrates macOS
-    // pixel travel and gives find the current view.
+    // The widget owns output following; the adapter forwards the tab's
+    // writes and calibrates macOS pixel travel.
     const viewport = new GhosttyViewportController(ghosttyTerm, {
       os: currentOS,
       hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),

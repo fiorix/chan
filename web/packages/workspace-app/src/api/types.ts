@@ -163,7 +163,7 @@ export type TerminalPreferences = {
   /// Per-terminal scrollback budget in MB. Consumed when the tab builds
   /// its terminal; spawn-time only (existing terminals keep
   /// their current scrollback until the session restarts). Server
-  /// clamps to [10, 50]; default 10.
+  /// clamps to [10, 50]; default 50.
   scrollback_mb?: number;
   /// Default TERM env var on the spawned PTY. Optional on the wire
   /// so older servers (no field) deserialize cleanly; the SPA
