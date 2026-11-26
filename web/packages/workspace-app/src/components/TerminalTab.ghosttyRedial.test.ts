@@ -395,6 +395,49 @@ describe("a redial after a socket ended inside a replay that continued the view"
     expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
   });
 
+  test("that missed bytes and is cut again among the bytes the view parsed keeps its position and the loss", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    const pasteOff = "\x1b[?2004l";
+    const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\r\n`).join("");
+    const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
+    await deliver(second, served(second, program), lines.indexOf("line 21"));
+    const third = await redialedAfterCut(second);
+    // This replay repeats the lines the view parsed, and its socket ends
+    // among them.
+    await deliver(third, served(third, program), lines.indexOf("line 11"));
+    const fourth = await redialedAfterCut(third);
+    await deliver(fourth, served(fourth, program));
+    const buffer = term.buffer.normal;
+    const rows = Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+    const counts = Array.from({ length: 40 }, (_, i) => rows.filter((row) => row === `line ${i + 1}`).length);
+    expect(counts, "every ring line once").toEqual(Array(40).fill(1));
+    expect(rows.filter((row) => row.includes("terminal replay missed")), "one notice of the loss").toHaveLength(1);
+    expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+    expect(dialed(fourth).since, "the redial still echoes the cursor the lost bytes start at").toBe(String(cursor));
+  });
+
+  test("that missed bytes and ended after its suffix resumes from the replay's end", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    const ring = REDRAWN + "\x1b[13;1Hring end";
+    const program = { at: VIEW_AT, written: MOUSE_OFF + ring, ringStart: VIEW_AT + MOUSE_OFF.length, alternate: true };
+    const lossy = served(second, program);
+    // Every replay byte and the suffix arrive; the socket ends before `ready`.
+    await deliver(second, lossy, ring.length);
+    await output(second, lossy.after);
+    expect(ghosttyMode(term, 1000), "fixture: the suffix was parsed").toBe(false);
+    const third = await redialedAfterCut(second);
+    expect(dialed(third).since, "the redial echoes the replay's end, since the loss is answered").toBe(
+      String(VIEW_AT + program.written.length),
+    );
+    await deliver(third, served(third, program));
+    expect(screen(term), "the program's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+    expect(ghosttyLineText(term, 0), "no attach prelude cleared the screen the view kept").toContain(KEPT);
+  });
+
   test("of a recovery on the live socket resumes from the byte the view parsed", async () => {
     const { term, socket } = await viewOnTheAlternateScreen();
     const program = { at: VIEW_AT, written: REDRAWN + MOUSE_OFF + AFTER_RESET, ringStart: VIEW_AT, alternate: true };
