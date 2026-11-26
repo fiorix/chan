@@ -227,7 +227,8 @@
   let spineReload = $state(0);
   /// Directories asked for their level, so one that is empty or gone on
   /// disk is asked once while its parent's level stands. Only a directory a
-  /// patch can read is asked (`loadOpenedChildren`). One the patch then
+  /// patch may read is asked, and none that a whole fetch in flight lists
+  /// (`loadOpenedChildren`). One the patch then
   /// finds no node of is forgotten, so the first ask after a level brings
   /// its node reads it, except under a parent asked whose level the spine
   /// does not hold, as one found gone (`askedUnread`): asked again before
