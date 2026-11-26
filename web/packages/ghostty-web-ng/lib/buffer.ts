@@ -21,7 +21,6 @@ import type {
   IBufferLine,
   IBufferNamespace,
 } from './interfaces';
-import type { Terminal } from './terminal';
 
 /// A cell nothing was written to, in ghostty-web's default colours.
 function nullCell(): VtCell {
@@ -48,19 +47,19 @@ function nullCell(): VtCell {
  * Provides access to active, normal, and alternate screen buffers
  */
 export class BufferNamespace implements IBufferNamespace {
-  #terminal: Terminal;
+  #readCore: () => VtTerminal | undefined;
 
   // Lazy-initialized buffer wrappers (stateless, so we can cache them)
   #_normalBuffer?: Buffer;
   #_alternateBuffer?: Buffer;
 
-  constructor(terminal: Terminal) {
-    this.#terminal = terminal;
+  constructor(readCore: () => VtTerminal | undefined) {
+    this.#readCore = readCore;
   }
 
   get active(): IBuffer {
     // Query WASM to determine which buffer is active
-    const wasmTerm = this.#terminal.wasmTerm;
+    const wasmTerm = this.#readCore();
     if (!wasmTerm) {
       return this.normal; // Default to normal if not initialized
     }
@@ -70,14 +69,14 @@ export class BufferNamespace implements IBufferNamespace {
 
   get normal(): IBuffer {
     if (!this.#_normalBuffer) {
-      this.#_normalBuffer = new Buffer(this.#terminal, 'normal');
+      this.#_normalBuffer = new Buffer(this.#readCore, 'normal');
     }
     return this.#_normalBuffer;
   }
 
   get alternate(): IBuffer {
     if (!this.#_alternateBuffer) {
-      this.#_alternateBuffer = new Buffer(this.#terminal, 'alternate');
+      this.#_alternateBuffer = new Buffer(this.#readCore, 'alternate');
     }
     return this.#_alternateBuffer;
   }
@@ -91,14 +90,14 @@ export class BufferNamespace implements IBufferNamespace {
  * A terminal buffer (normal or alternate screen)
  */
 export class Buffer implements IBuffer {
-  #terminal: Terminal;
+  #readCore: () => VtTerminal | undefined;
   #bufferType: 'normal' | 'alternate';
   // A view for each screen row its lines are read into, which reads nothing
   // while its row is unchanged.
   #screenRows: VtCells[] = [];
 
-  constructor(terminal: Terminal, type: 'normal' | 'alternate') {
-    this.#terminal = terminal;
+  constructor(readCore: () => VtTerminal | undefined, type: 'normal' | 'alternate') {
+    this.#readCore = readCore;
     this.#bufferType = type;
   }
 
@@ -166,7 +165,7 @@ export class Buffer implements IBuffer {
   }
 
   #getWasmTerm(): VtTerminal | undefined {
-    return this.#terminal.wasmTerm;
+    return this.#readCore();
   }
 }
 

@@ -22,8 +22,10 @@ import type { IBufferRange, ILink, ILinkProvider } from '../types';
  */
 export class OSC8LinkProvider implements ILinkProvider {
   #terminal: ITerminalForOSC8Provider;
-  constructor(terminal: ITerminalForOSC8Provider) {
+  #readCore: () => OSC8Core | undefined;
+  constructor(terminal: ITerminalForOSC8Provider, readCore: () => OSC8Core | undefined) {
     this.#terminal = terminal;
+    this.#readCore = readCore;
   }
 
   /**
@@ -58,18 +60,19 @@ export class OSC8LinkProvider implements ILinkProvider {
       // Get the URI from WASM
       // The y parameter is a buffer row - we need to determine if it's in
       // scrollback or the active viewport and use the appropriate API
-      if (!this.#terminal.wasmTerm) continue;
-      const scrollbackLength = this.#terminal.wasmTerm.getScrollbackLength();
+      const core = this.#readCore();
+      if (!core) continue;
+      const scrollbackLength = core.getScrollbackLength();
       const viewportRow = y - scrollbackLength;
 
       let uri: string | null;
       if (viewportRow < 0) {
         // Row is in scrollback - use scrollback API
         // y is the buffer row (0 = oldest), scrollback offset is also 0 = oldest
-        uri = this.#terminal.wasmTerm.getScrollbackHyperlinkUri(y, x);
+        uri = core.getScrollbackHyperlinkUri(y, x);
       } else {
         // Row is in active viewport
-        uri = this.#terminal.wasmTerm.getHyperlinkUri(viewportRow, x);
+        uri = core.getHyperlinkUri(viewportRow, x);
       }
 
       if (uri) {
@@ -83,8 +86,8 @@ export class OSC8LinkProvider implements ILinkProvider {
           // Check if this cell has the same URI (use appropriate API for scrollback vs viewport)
           const nextUri =
             viewportRow < 0
-              ? this.#terminal.wasmTerm!.getScrollbackHyperlinkUri(y, col)
-              : this.#terminal.wasmTerm!.getHyperlinkUri(viewportRow, col);
+              ? core.getScrollbackHyperlinkUri(y, col)
+              : core.getHyperlinkUri(viewportRow, col);
           if (nextUri !== uri) break;
 
           endX = col;
@@ -116,6 +119,11 @@ export class OSC8LinkProvider implements ILinkProvider {
   }
 }
 
+export type OSC8Core = Pick<
+  VtTerminal,
+  'getHyperlinkUri' | 'getScrollbackHyperlinkUri' | 'getScrollbackLength'
+>;
+
 /**
  * Minimal terminal interface required by OSC8LinkProvider
  */
@@ -134,10 +142,4 @@ export interface ITerminalForOSC8Provider {
         | undefined;
     };
   };
-  // A required key that may hold undefined (before open, after dispose), so
-  // a terminal that stops offering it fails the type check where the
-  // provider is registered, instead of silently losing every OSC 8 link.
-  wasmTerm:
-    | Pick<VtTerminal, 'getHyperlinkUri' | 'getScrollbackHyperlinkUri' | 'getScrollbackLength'>
-    | undefined;
 }

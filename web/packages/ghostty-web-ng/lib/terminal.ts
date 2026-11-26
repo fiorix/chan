@@ -224,7 +224,7 @@ export class Terminal {
     this.rows = this.options.rows;
 
     // Initialize buffer API
-    this.buffer = new BufferNamespace(this);
+    this.buffer = new BufferNamespace(() => this.wasmTerm);
     const terminal = this;
     const emptySearch = Object.freeze({ index: 0, total: 0, partial: false });
     this.search = Object.freeze({
@@ -556,7 +556,7 @@ export class Terminal {
 
       // Register link providers
       // OSC8 first (explicit hyperlinks take precedence)
-      this.#linkDetector.registerProvider(new OSC8LinkProvider(this));
+      this.#linkDetector.registerProvider(new OSC8LinkProvider(this, () => this.wasmTerm));
       // URL regex second (fallback for plain text URLs)
       this.#linkDetector.registerProvider(new UrlRegexProvider(this));
 
