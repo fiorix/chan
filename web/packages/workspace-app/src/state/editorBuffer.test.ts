@@ -160,6 +160,52 @@ describe("editorBuffer TTL eviction in pruneEditorBuffers", () => {
     pruneEditorBuffers();
     expect(localStorage.getItem("unrelated-key")).toBe("value");
   });
+
+  test("an entry the store will not hand over is skipped, and the rest are still pruned", () => {
+    writeForeignBuffer("unreadable", "kept", "a.md");
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    // The store's own method when it is a Storage, else the stand-in's.
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const getItem = store.getItem;
+    const refused = bufferKey("unreadable");
+    const spy = vi.spyOn(store, "getItem").mockImplementation(function (this: Storage, key: string) {
+      if (key === refused) throw new DOMException("storage read refused", "SecurityError");
+      return getItem.call(this, key);
+    });
+    let evicted = -1;
+    try {
+      expect(() => {
+        evicted = pruneEditorBuffers();
+      }, "a read the store refuses stays inside the prune").not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(evicted, "the stale entry beside it is evicted").toBe(1);
+    expect(readEditorBuffer("stale")).toBeNull();
+    expect(readEditorBuffer("unreadable"), "the entry it could not read is left alone").not.toBeNull();
+  });
+
+  test("a walk the store cuts short still prunes what it read", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    writeForeignBuffer("later", "new", "y.md");
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const key = store.key;
+    const spy = vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw new DOMException("storage walk refused", "SecurityError");
+      return key.call(this, index);
+    });
+    let evicted = -1;
+    try {
+      expect(() => {
+        evicted = pruneEditorBuffers();
+      }, "a walk the store refuses stays inside the prune").not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(evicted, "the entry read before the walk stopped is pruned").toBe(1);
+    expect(readEditorBuffer("stale")).toBeNull();
+    expect(readEditorBuffer("later"), "the entry after it is left for a later prune").not.toBeNull();
+  });
 });
 
 describe("divergentBufferOrNull recovery decision", () => {

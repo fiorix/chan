@@ -62,3 +62,26 @@ test("the load removes the snapshots before it prunes the editor buffers", async
   expect(pruned, "the prune read the buffer entry").toBeGreaterThanOrEqual(0);
   expect(swept, "the snapshot went before the prune's read").toBeLessThan(pruned);
 });
+
+// A buffer entry the store will not hand over stops neither the app's load
+// nor the sweep: the prune's read of it fails inside the prune.
+test("a buffer entry the prune cannot read stops neither the load nor the sweep", async () => {
+  localStorage.setItem("chan:term-snapshot:term_a", "{}");
+  localStorage.setItem("chan:editor-buffer:unreadable", JSON.stringify({ content: "x", updatedAt: Date.now(), path: "a.md", sessionId: "previous-load" }));
+  const getItem = Storage.prototype.getItem;
+  let refused = 0;
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key: string) {
+    if (key === "chan:editor-buffer:unreadable") {
+      refused += 1;
+      throw new DOMException("storage read refused", "SecurityError");
+    }
+    return getItem.call(this, key);
+  });
+
+  await mountApp();
+
+  const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!);
+  expect(refused, "the prune asked for the entry").toBeGreaterThan(0);
+  expect(keys.filter((key) => key.startsWith("chan:term-snapshot:")), "no snapshot left").toEqual([]);
+  expect(keys, "the entry it could not read is left alone").toContain("chan:editor-buffer:unreadable");
+});
