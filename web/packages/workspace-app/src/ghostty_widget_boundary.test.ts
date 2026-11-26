@@ -80,9 +80,9 @@
 // argument its function takes.
 //
 // It does not see:
-// - in tests, a widget value laundered through `any` or `unknown`, which
-//   is how the package's white-box tests read, or a spy on a private
-//   member of the prototype `Object.getPrototypeOf` returns;
+// - in tests, a widget value laundered through `any` or `unknown`, or a
+//   spy on a private member of the prototype `Object.getPrototypeOf`
+//   returns;
 // - a key held in a variable typed `string`, one whose literal type a cast
 //   hides (`KEY as never`), or one computed from parts (`"is" + "Open"`);
 // - a destructuring other than at the top of a variable declaration: a
