@@ -257,9 +257,12 @@ describe("the mount", () => {
   });
 
   test("the terminal is built on the wasm instance its own spawn created", async () => {
-    await mountGhostty();
+    const { term } = await mountGhostty();
     expect(observed.instances).toHaveLength(1);
-    expect(vi.mocked(observed.instances[0]!.createTerminal).mock.results[0]?.value).toBe(ghosttyFixture.terminals[0]!.wasmTerm);
+    const created = vi.mocked(observed.instances[0]!.createTerminal).mock.results;
+    expect(created, "the instance created one core").toHaveLength(1);
+    term.write("built on its own core");
+    expect(created[0]!.value.plainText(), "the widget writes into the core its instance created").toContain("built on its own core");
   });
 
   test("a resize fits with chan's own measurement", async () => {

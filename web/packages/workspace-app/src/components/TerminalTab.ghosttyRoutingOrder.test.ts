@@ -17,7 +17,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
-  attachGhostty, compileGhosttyCore, ghosttyLineText, installSoftwareCanvas, mountGhostty,
+  attachGhostty, compileGhosttyCore, ghosttyCellMetrics, ghosttyLineText, installSoftwareCanvas, mountGhostty,
 } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
@@ -130,7 +130,7 @@ test("Ghostty publishes its resized PTY grid before scanning and painting rewrap
     return ranges;
   });
   const context = canvas.context(host);
-  const { width, height } = term.renderer!.getMetrics();
+  const { width, height } = ghosttyCellMetrics(term);
   const mask = { r: 108, g: 108, b: 112, a: 1 };
   const pixel = (column: number, row: number) => context.pixelAt((column + 0.5) * width, (row + 0.5) * height);
   await output(socket, secret);

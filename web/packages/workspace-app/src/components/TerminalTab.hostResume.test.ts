@@ -15,7 +15,7 @@ import { tick, unmount } from "svelte";
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import {
-  attachGhostty, compileGhosttyCore, ghosttyLineText, installSoftwareCanvas, mountGhostty,
+  attachGhostty, compileGhosttyCore, ghosttyCellMetrics, ghosttyLineText, installSoftwareCanvas, mountGhostty,
 } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
@@ -75,7 +75,7 @@ async function attached() {
 describe("a host resume after a canvas state reset at ratio 2", () => {
   test("repaints at full scale with the grid unchanged and no PTY resize", async () => {
     const { host, socket, term } = await attached();
-    const { width, height } = term.renderer!.getMetrics();
+    const { width, height } = ghosttyCellMetrics(term);
     const cols = term.cols;
     const rows = term.rows;
     // Device pixels of a cell centre: the backing store is measured in

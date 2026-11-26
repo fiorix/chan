@@ -39,8 +39,8 @@ async function openTerminal() {
   term.open(host);
   opened.push(term);
   const canvas = host.querySelector("canvas");
-  if (!canvas || !term.renderer) throw new Error("the widget did not open its canvas");
-  const metrics = term.renderer.getMetrics();
+  const metrics = term.getMetrics();
+  if (!canvas || !metrics) throw new Error("the widget did not open its canvas");
   vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, COLS * metrics.width, ROWS * metrics.height));
   modelPointerCapture(canvas);
   return {
