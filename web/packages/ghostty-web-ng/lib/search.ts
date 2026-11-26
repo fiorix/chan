@@ -413,6 +413,9 @@ export class SearchOwner {
     if (this.#search) this.#due = true;
   }
 
+  // TypeScript private, not `#`: the search measurement
+  // (search.perf.test.ts) wraps it on the prototype to time the owner's
+  // frame work, and an ES private method is not on the prototype.
   private pump(): void {
     const search = this.#search;
     if (!search) return;
@@ -443,6 +446,8 @@ export class SearchOwner {
     this.#show(reveal && this.#askStands());
   }
 
+  // TypeScript private, not `#`, for the search measurement, which wraps it
+  // on the prototype to time placement's de-duplication.
   private readResults(deadline: number): void {
     const search = this.#search!;
     const state = search.state();

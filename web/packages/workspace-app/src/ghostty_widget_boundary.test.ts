@@ -54,6 +54,13 @@
 // instruments (the browser checks, the pixel harness) are not app
 // modules: they are read by grep only.
 //
+// The package keeps four members TypeScript private on purpose, as its
+// search measurement's seam: `SearchOwner`'s `pump` and `readResults` and
+// `CanvasRenderer`'s `highlightAt` and `cacheHighlights`, which that
+// package test wraps on their prototypes, where an ES private method is
+// not. No app module has a reason to read them, and rule 3 reports a read
+// of one as it does any private member.
+//
 // It is a property of every module, including ones not written yet, that
 // no mounted test can observe, so it reads the source.
 

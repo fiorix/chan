@@ -1140,6 +1140,9 @@ export class CanvasRenderer {
     this.#highlightSource = source;
   }
 
+  // TypeScript private, not `#`: the search measurement
+  // (search.perf.test.ts) wraps it and highlightAt on the prototype to time
+  // highlight paint, and an ES private method is not on the prototype.
   private cacheHighlights(spans: HighlightSpan[]): void {
     const rows: HighlightSpan[][] = [];
     for (const span of spans) {
@@ -1150,7 +1153,11 @@ export class CanvasRenderer {
     this.#currentHighlightRows = rows;
   }
 
-  /** Last covering span wins; a wide glyph includes either of its cells. */
+  /**
+   * Last covering span wins; a wide glyph includes either of its cells.
+   * TypeScript private for the search measurement, which wraps it to time
+   * highlight paint and count its lookups.
+   */
   private highlightAt(x: number, y: number, width: number): Readonly<HighlightStyle> | null {
     const spans = this.#currentHighlightRows[y];
     if (!spans) return null;
