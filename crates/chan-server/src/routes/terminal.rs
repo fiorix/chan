@@ -68,7 +68,9 @@ pub struct TerminalQuery {
     /// The session incarnation epoch the client counted its `since` cursor
     /// in. Absent, `since` is honored as sent; present, `since` is honored
     /// only while this matches the live session's generation (a restart
-    /// bumps it), and a stale generation replays the ring.
+    /// bumps it), and a stale generation replays the ring. On the alternate
+    /// screen, only a non-zero cursor of the live generation replays its
+    /// delta; any other dial, a stale generation's included, replays nothing.
     generation: Option<u64>,
     mcp_env: Option<TerminalMcpEnv>,
     cwd: Option<String>,
@@ -340,7 +342,8 @@ enum ServerFrame {
         seq: u64,
         /// This session incarnation's epoch. A restart reuses the id but bumps
         /// this and resets `seq`, so a client that redials echoes it with its
-        /// `since` cursor, and a stale generation's cursor replays the ring.
+        /// `since` cursor, and a stale generation's cursor replays the ring,
+        /// except on the alternate screen, where it replays nothing.
         generation: u64,
         missed_bytes: u64,
         /// Ring bytes sent immediately after this frame, excluding the
