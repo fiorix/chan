@@ -1255,6 +1255,32 @@ describe("the workspace tree", () => {
     expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ a: 1, drawsX: true });
   });
 
+  test("a raise a new selection ends leaves a folder whose read failed to its retry", async () => {
+    serveLinkBelowClosedFolder("folders");
+    graphServer.view.nodes.push(g.dir("bad"));
+    graphServer.view.edges.push(g.edge("", "directory:bad", "contains"));
+    graphServer.fs.nodes.push(fsg.dir("bad"), fsg.file("bad/z.md"));
+    graphServer.fs.edges.push(fsg.contains("", "bad"), fsg.contains("bad", "bad/z.md"));
+    graphServer.fsFail = (path) => (path === "bad" ? new TypeError("Failed to fetch") : null);
+    const { tab, slider } = await selectBelowClosedParent({ bad: true });
+    await settle(20);
+    expect(levelReads("bad"), "its read and one retry").toBe(2);
+
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      await slideTo(slider, 1);
+      expect(tab.expanded.a).toBe(true);
+      canvas.props!.onSelect("notes/n.md");
+      await settle();
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    expect({ a: levelReads("a"), bad: levelReads("bad") }, "the selection reads the folder above and leaves bad").toEqual({ a: 1, bad: 2 });
+  });
+
   test("a depth change leaves a folder whose read failed to its retry", async () => {
     graphServer.view = {
       nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.dir("bad")],
