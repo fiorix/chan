@@ -33,7 +33,7 @@ type Callable = (...args: any[]) => any;
 function wrap(proto: object, name: string, around: (call: Callable, args: any[]) => any) {
   const target = proto as Record<string, Callable>;
   const original = target[name];
-  if (!original) return;
+  if (typeof original !== 'function') throw new Error(`the measurement times ${name}, which its class does not have`);
   target[name] = function (...args) { return around(original.bind(this), args); };
   restores.push(() => { target[name] = original; });
 }
@@ -156,6 +156,16 @@ function save() {
     results, coreLimits,
   }, null, 2) + '\n');
 }
+
+// Runs in every unit run, so a renamed or sealed method fails here rather
+// than leaving the opt-in measurement without that phase.
+test('the measurement wraps only methods its classes have', () => {
+  try {
+    instrument();
+  } finally {
+    for (const restore of restores.splice(0).reverse()) restore();
+  }
+});
 
 describe.skipIf(!output)('maximum-history search work', () => {
   beforeAll(async () => {
