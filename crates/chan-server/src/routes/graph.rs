@@ -2305,9 +2305,11 @@ fn build_graph_view(
     // target is a directory (e.g. `[notes](../notes/)`) stay out of
     // `ghost_set`, and the edge filter below drops their edges.
     //
-    // Over the listing cap the walk lists directories alone, so each link
-    // target that is a file is looked up on disk instead;
-    // `link_targets_on_disk` states the cost.
+    // Over the listing cap the walk lists no file, so the link targets on
+    // disk are looked up instead, files and directories both, and the
+    // directories found are the set the edge filter reads; the walked
+    // directories answer for a directory target and the directories above
+    // a target, and `link_targets_on_disk` states the cost.
     let graph_file_set: std::collections::BTreeSet<&str> =
         files.iter().map(String::as_str).collect();
     let walk = TreeWalk::of(&workspace);
@@ -2333,7 +2335,7 @@ fn build_graph_view(
         TreeWalk::OverCap { dirs } => {
             looked_up =
                 link_targets_on_disk(&workspace, &all_edges, &graph_file_set, dirs.as_ref());
-            (&looked_up.0, dirs.as_ref().unwrap_or(&looked_up.1))
+            (&looked_up.0, &looked_up.1)
         }
         TreeWalk::Failed => {
             looked_up = Default::default();
