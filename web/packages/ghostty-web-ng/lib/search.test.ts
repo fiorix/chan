@@ -2173,3 +2173,129 @@ describe('widget search', () => {
     sub.dispose();
   });
 });
+
+describe('press deadlines and reveals', () => {
+  test('steps queued behind a capped step apply in order, each as the scan or its own cap allows', async () => {
+    const { term } = await create(long());
+    const search = searchOf(term);
+    // Newer from no active match waits for the oldest; older 600 ms later
+    // queues behind it with its own deadline.
+    search.step('needle', 'newer');
+    now = 600;
+    search.step('needle', 'older');
+    expect(active(term) ?? []).toEqual([]);
+    now = 1000;
+    frame();
+    // The first press's cap ran out: it lands on the oldest found so far.
+    // Older from there would wrap to the newest, and its own cap has 600 ms
+    // to go, so it waits for the scan's next older match.
+    const found = search.state.total;
+    expect(found).toBeGreaterThan(1);
+    expect(found).toBeLessThan(300);
+    expect(search.state).toEqual({ index: found, total: found, partial: true });
+    // The clock stays inside its cap: it lands as the scan finds the next
+    // older match, and never wraps.
+    for (let i = 0; search.state.index === found; i++) {
+      if (i > 1000) throw new Error('the queued step never landed');
+      frame();
+    }
+    expect(search.state.index).toBe(found + 1);
+    expect(search.state.partial).toBe(true);
+  });
+
+  test('a queued step with nothing more found wraps at its own cap, not at the cap of the step before it', async () => {
+    const { term } = await create(long());
+    const search = searchOf(term);
+    search.step('needle', 'newer');
+    now = 600;
+    search.step('needle', 'older');
+    now = 1000;
+    frame();
+    const found = search.state.total;
+    expect(search.state).toEqual({ index: found, total: found, partial: true });
+    // The scan stalls: no frame finds another match.
+    vi.mocked(VtSearch.prototype.step).mockImplementation(() => 'running');
+    now = 1599;
+    frame();
+    expect(search.state.index, 'inside its own cap').toBe(found);
+    now = 1600;
+    frame();
+    expect(search.state.index, 'wrapped to the newest at its cap').toBe(1);
+  });
+
+  test('a step that waited reveals its match when the selection is the one at its press', async () => {
+    const { term } = await create(long());
+    const search = searchOf(term);
+    const reveal = vi.spyOn(term.viewport, 'reveal');
+    const selected = range(2998, 0, 2998, 3);
+    term.setSelection(selected);
+    search.step('needle', 'newer');
+    expect(active(term) ?? [], 'nothing moves while it waits').toEqual([]);
+    settle(search);
+    expect(active(term)).toEqual([range(5, 0)]);
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(5);
+    expect(term.getSelectionRange()).toEqual(selected);
+  });
+
+  // 100 lines with needles on lines 10, 50 and 95, each 37 cells long, on
+  // a 40x6 screen: narrowing to 20 columns wraps every line into two rows.
+  const sparse = () => Array.from({ length: 100 }, (_, i) =>
+    `row ${String(i).padStart(3, '0')} ${[10, 50, 95].includes(i) ? 'needle' : 'xxxxxx'} yyyyyyyyyyyyyy`).join('\r\n');
+  const onScreen = (term: Terminal, row: number) => {
+    const top = term.getScrollbackLength() - Math.floor(term.viewport.offset);
+    return row >= top && row < top + term.rows;
+  };
+
+  test('a reflow that takes an active match on the screen off it reveals the match', async () => {
+    const { term } = await create(sparse());
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    expect(onScreen(term, active(term)![0].start.absoluteRow)).toBe(true);
+    const reveal = vi.spyOn(term.viewport, 'reveal');
+    term.resize(20, 6);
+    const kept = active(term)![0];
+    expect(term.getRangeText(kept)).toBe('needle');
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(kept.start.absoluteRow);
+    expect(onScreen(term, kept.start.absoluteRow)).toBe(true);
+    settle(search);
+    expect(onScreen(term, active(term)![0].start.absoluteRow)).toBe(true);
+    expect(search.state).toEqual({ index: 1, total: 3, partial: false });
+  });
+
+  test('a reflow leaves the viewport where it is when the active match was off the screen', async () => {
+    const { term } = await create(sparse());
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    term.viewport.scrollToBottom();
+    frame();
+    expect(onScreen(term, active(term)![0].start.absoluteRow)).toBe(false);
+    const offset = term.viewport.offset;
+    const reveal = vi.spyOn(term.viewport, 'reveal');
+    term.resize(20, 6);
+    settle(search);
+    expect(reveal).not.toHaveBeenCalled();
+    expect(term.viewport.offset).toBe(offset);
+    expect(onScreen(term, active(term)![0].start.absoluteRow)).toBe(false);
+    expect(search.state).toEqual({ index: 2, total: 3, partial: false });
+  });
+
+  test('a match below a scrolled-back screen is not revealed when the screen grows', async () => {
+    const { term } = await create(numbered(200), 40, 10);
+    const search = searchOf(term);
+    search.find('needle 150');
+    settle(search);
+    expect(active(term)).toEqual([range(150, 0, 150, 9)]);
+    // Scrolled back to where the match is the row just below the screen.
+    term.viewport.scrollTo(term.getScrollbackLength() - 140);
+    expect(onScreen(term, 149)).toBe(true);
+    expect(onScreen(term, 150)).toBe(false);
+    const reveal = vi.spyOn(term.viewport, 'reveal');
+    term.resize(40, 14);
+    settle(search);
+    expect(reveal).not.toHaveBeenCalled();
+    expect(active(term)).toEqual([range(150, 0, 150, 9)]);
+  });
+});
