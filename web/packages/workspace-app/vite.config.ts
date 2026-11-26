@@ -139,15 +139,21 @@ function ghosttyWidgetUrl(): Plugin {
       const widget = Object.values(chunks).find(
         (rendered) => rendered.facadeModuleId !== null && normalize(rendered.facadeModuleId) === ghosttyWidgetEntry,
       );
-      if (!widget) this.error(`${chunk.fileName} asks for the terminal widget's chunk, which this build does not make`);
+      if (!widget) this.error(`the ${chunk.name} chunk asks for the terminal widget's chunk, which this build does not make`);
       return code.replaceAll(GHOSTTY_WIDGET_CHUNK, posix.relative(posix.dirname(chunk.fileName), widget.fileName));
     },
-    // The query renames the widget's chunk only: the chunks it imports keep
-    // their URLs, so one that failed would stay failed on an engine that keeps
-    // failed imports. The widget may import only chunks an entry loads at
-    // startup.
+    // A stand-in left in a chunk would send the loader's retry to a file that
+    // does not exist. The query renames the widget's chunk only: the chunks it
+    // imports keep their URLs, so one that failed would stay failed on an
+    // engine that keeps failed imports. The widget may import only chunks an
+    // entry loads at startup.
     generateBundle(_options, bundle) {
       const chunks = Object.values(bundle).flatMap((item) => (item.type === "chunk" ? [item] : []));
+      for (const chunk of chunks) {
+        if (chunk.code.includes(GHOSTTY_WIDGET_CHUNK)) {
+          this.error(`the ${chunk.name} chunk ${chunk.fileName} still holds the stand-in for the terminal widget's chunk's file name`);
+        }
+      }
       const widget = chunks.find((chunk) => chunk.facadeModuleId !== null && normalize(chunk.facadeModuleId) === ghosttyWidgetEntry);
       if (!widget) return;
       const byFile = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
