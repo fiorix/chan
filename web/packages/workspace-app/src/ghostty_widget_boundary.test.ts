@@ -794,8 +794,9 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (source.kind === "test" && !TEST_RULES.has(rule)) return;
       const start = at.getStart(sf);
       const finding = { rule, file: source.rel, line: lineIn(source, start), key, text: at.getText(sf).replace(/\s+/g, " ") };
-      // One finding per node: two reads on one line are two findings.
-      findings.set(`${show(finding)} @${start}`, finding);
+      // One finding per node: two reads on one line are two findings, and
+      // so are two nodes that start at one position (`a.b.b`).
+      findings.set(`${show(finding)} @${start}:${at.getEnd()}`, finding);
     };
 
     const read = (receiver: ts.Expression, name: string, at: ts.Node) => {
@@ -1144,6 +1145,7 @@ const PLANTS = new Map<string, string>([
       "const peekBuffer = (b: unknown) => b;",
       "export const bufferEscape = (term: Terminal) => [peekBuffer(term.buffer), peekBuffer(term.buffer.active)];",
       "export const bufferDuck = (term: Terminal) => ((b: { type: string; terminal?: Terminal }) => b.terminal)(term.buffer.active);",
+      "export const nested = (nest: { renderer: { renderer: number } }) => nest.renderer.renderer;",
     ].join("\n"),
   ],
   [
@@ -1355,6 +1357,10 @@ const PLANTED: readonly Site[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 116, key: "Object.seal Terminal" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 116, key: "Object.preventExtensions Terminal" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 118, key: "Terminal into unknown" },
+  { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
+  { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
+  { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
+  { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 134, key: "renderer" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
@@ -1412,7 +1418,10 @@ const PLANT_PENDING: readonly Pending[] = [
     "Terminal.canvas": ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]'],
     "Terminal.__proto__": ["term.__proto__"],
   }),
-  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", { wasmTerm: ["wasmTerm?: unknown"] }),
+  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", {
+    wasmTerm: ["wasmTerm?: unknown"],
+    renderer: ["renderer: { renderer: number }", "renderer: number", "nest.renderer"],
+  }),
 ];
 
 function show(f: Site): string {
@@ -1484,6 +1493,11 @@ describe("the terminal widget's boundary", () => {
         entry: "member src/terminal/boundaryPlant.ts Terminal.__proto__",
         pins: ["term.__proto__"],
         covers: ['term["__proto__"]'],
+      },
+      {
+        entry: "name src/terminal/boundaryPlant.ts renderer",
+        pins: ["nest.renderer", "renderer: number", "renderer: { renderer: number }"],
+        covers: ["nest.renderer", "nest.renderer.renderer", "renderer: number", "renderer: { renderer: number }"],
       },
     ]);
   });
