@@ -18,7 +18,7 @@ The CLI serializes these under the `server.*` namespace, so terminal fields are 
 | `terminal.idle_timeout_secs` | `u64` | `1800` | CLI, API | Not surfaced in Settings; how long an idle terminal session lives before it is pruned; zero in the file selects the default |
 | `terminal.session_cap` | `usize` | `32` | CLI, API | Not surfaced in Settings; the most terminal sessions the registry creates at once |
 | `terminal.ring_bytes` | `usize` | `2 << 20` | CLI, API | Not surfaced in Settings; the server-side scrollback ring per session |
-| `terminal.scrollback_mb` | `u32` | `10`, clamped `10..=50` | CLI, API, Settings | Settings → Terminal → scrollback; the renderer's scrollback cap |
+| `terminal.scrollback_mb` | `u32` | `50`, clamped `10..=50` | CLI, API, Settings | Settings → Terminal → scrollback; the renderer's scrollback cap |
 | `terminal.default_term` | `String` | `xterm-256color` | CLI, API, Settings | Settings → Terminal → TERM; the `TERM` a PTY spawns with |
 | `terminal.font` | `TerminalFontChoice` | `os-default` | CLI, API, Settings | Settings → Terminal → font; `source-code-pro` selects the font bundled with the app |
 | `terminal.font_size` | `u32` | `14`, clamped `8..=32` | CLI, API, Settings | Settings → Terminal → font size; read when a terminal renderer is constructed |

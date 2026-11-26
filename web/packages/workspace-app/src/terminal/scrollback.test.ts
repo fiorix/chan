@@ -7,6 +7,14 @@ import {
 } from "./scrollback";
 
 describe("clampScrollbackMb", () => {
+  it("defaults to 50 MB inside the server's bounds of 10 and 50 MB", () => {
+    expect(clampScrollbackMb(undefined)).toBe(50);
+    expect(clampScrollbackMb(0)).toBe(50);
+    expect(clampScrollbackMb(9)).toBe(10);
+    expect(clampScrollbackMb(10)).toBe(10);
+    expect(clampScrollbackMb(51)).toBe(50);
+  });
+
   it("returns the default for undefined / null / NaN / Infinity", () => {
     expect(clampScrollbackMb(undefined)).toBe(SCROLLBACK_MB_DEFAULT);
     expect(clampScrollbackMb(null)).toBe(SCROLLBACK_MB_DEFAULT);

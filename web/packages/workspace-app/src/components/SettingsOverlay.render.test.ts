@@ -15,11 +15,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { settingsPanel, workspace } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
-import {
-  SCROLLBACK_MB_DEFAULT,
-  SCROLLBACK_MB_MAX,
-  SCROLLBACK_MB_MIN,
-} from "../terminal/scrollback";
+import { SCROLLBACK_MB_MAX, SCROLLBACK_MB_MIN } from "../terminal/scrollback";
 
 type Cfg = {
   revision: number;
@@ -595,7 +591,7 @@ describe("settings surface render", () => {
     expect(slider.value).toBe("30"); // the fixture's stored value
   });
 
-  test("the scrollback fallback is SCROLLBACK_MB_DEFAULT when the field is absent", async () => {
+  test("the scrollback slider sits at the 50 MB default when the field is absent", async () => {
     const terminal = server.preferences.terminal as Record<string, unknown>;
     delete terminal.scrollback_mb;
     const target = openSurface();
@@ -605,7 +601,7 @@ describe("settings surface render", () => {
     const slider = target.querySelector(
       'input[aria-label="Terminal scrollback megabytes"]',
     ) as HTMLInputElement;
-    expect(slider.value).toBe(String(SCROLLBACK_MB_DEFAULT));
+    expect(slider.value).toBe("50");
   });
 
   test("every pill renders inside a SettingField .control scope", async () => {

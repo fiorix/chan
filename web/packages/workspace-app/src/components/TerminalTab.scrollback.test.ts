@@ -11,7 +11,7 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { SCROLLBACK_MB_DEFAULT, SCROLLBACK_MB_MAX } from "../terminal/scrollback";
+import { SCROLLBACK_MB_MAX } from "../terminal/scrollback";
 import {
   installTerminalDom,
   resetTerminals,
@@ -46,10 +46,10 @@ describe("the scrollback budget", () => {
     expect(term.options.scrollback, "no line cap converted from the setting").toBe(WIDGET_DEFAULT_LINES);
   });
 
-  test("falls back to the clamped default without a setting", async () => {
+  test("falls back to the 50 MB default without a setting", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
-    expect(term.options.scrollbackBytes).toBe(SCROLLBACK_MB_DEFAULT * MIB);
+    expect(term.options.scrollbackBytes).toBe(50 * MIB);
   });
 
   test("takes a setting over the slider's range at its top", async () => {

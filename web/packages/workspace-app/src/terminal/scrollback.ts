@@ -8,9 +8,10 @@
 export const SCROLLBACK_MB_MIN = 10;
 export const SCROLLBACK_MB_MAX = 50;
 
-/// Default budget for first-launch users (and for `default_term` clear
-/// fallbacks coming back from the server).
-export const SCROLLBACK_MB_DEFAULT = 10;
+/// The budget when the preference is absent, not a finite number, or
+/// zero or less. Kept equal to the server's
+/// `default_terminal_scrollback_mb()` in `crates/chan-library/src/config.rs`.
+export const SCROLLBACK_MB_DEFAULT = 50;
 
 /// Round-trip a raw MB value from `Preferences.terminal.scrollback_mb`
 /// into the Settings slider's accepted range. `undefined` / NaN /
