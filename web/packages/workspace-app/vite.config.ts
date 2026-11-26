@@ -145,8 +145,9 @@ function ghosttyWidgetUrl(): Plugin {
     // A stand-in left in a chunk would send the loader's retry to a file that
     // does not exist. The query renames the widget's chunk only: the chunks it
     // imports keep their URLs, so one that failed would stay failed on an
-    // engine that keeps failed imports. The widget may import only chunks an
-    // entry loads at startup.
+    // engine that keeps failed imports. The widget may therefore import only
+    // chunks loaded with each chunk that asks for it, which are loaded by the
+    // time that chunk runs its import.
     generateBundle(_options, bundle) {
       const chunks = Object.values(bundle).flatMap((item) => (item.type === "chunk" ? [item] : []));
       for (const chunk of chunks) {
@@ -157,19 +158,24 @@ function ghosttyWidgetUrl(): Plugin {
       const widget = chunks.find((chunk) => chunk.facadeModuleId !== null && normalize(chunk.facadeModuleId) === ghosttyWidgetEntry);
       if (!widget) return;
       const byFile = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
-      const atStartup = new Set<string>();
-      const load = (file: string): void => {
-        if (atStartup.has(file)) return;
-        atStartup.add(file);
-        for (const next of byFile.get(file)?.imports ?? []) load(next);
+      const loadedWith = (file: string, loaded = new Set<string>()): Set<string> => {
+        if (loaded.has(file)) return loaded;
+        loaded.add(file);
+        for (const next of byFile.get(file)?.imports ?? []) loadedWith(next, loaded);
+        return loaded;
       };
-      for (const chunk of chunks) if (chunk.isEntry) load(chunk.fileName);
-      const late = widget.imports.filter((file) => !atStartup.has(file));
-      if (late.length > 0) {
-        this.error(
-          `the terminal widget's chunk ${widget.fileName} imports ${late.join(", ")}, which no entry loads at startup, ` +
-            "so a failed import of it would outlast the loader's retry at a new URL (src/terminal/backend.ts)",
-        );
+      const importers = chunks.filter((chunk) => chunk.dynamicImports.includes(widget.fileName));
+      if (importers.length === 0) return;
+      for (const importer of importers) {
+        const loaded = loadedWith(importer.fileName);
+        const late = widget.imports.filter((file) => !loaded.has(file));
+        if (late.length > 0) {
+          this.error(
+            `the terminal widget's chunk ${widget.fileName} imports ${late.join(", ")}, which the ${importer.name} chunk ` +
+              `${importer.fileName} that asks for it does not load, so a failed import of it would outlast the loader's ` +
+              "retry at a new URL (src/terminal/backend.ts)",
+          );
+        }
       }
     },
   };
