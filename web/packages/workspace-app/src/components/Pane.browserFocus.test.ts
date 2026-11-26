@@ -15,7 +15,7 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 
 import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyHasFocus, ghosttyTextarea, seatedGhostty } from "../__tests__/ghosttyTab";
 import { terminalTab } from "../__tests__/tabs";
 import { fbTreeInstance } from "../state/store.svelte";
 import { api } from "../api/client";
@@ -126,8 +126,7 @@ function terminal(): Promise<Terminal> {
 /// into it.
 async function terminalHoldsKeyboard(): Promise<Terminal> {
   const term = await terminal();
-  if (!term.textarea) throw new Error("the widget opened no input textarea");
-  term.textarea.focus();
+  ghosttyTextarea(term).focus();
   await settleLong();
   expect(ghosttyHasFocus(term), "the terminal holds the keyboard").toBe(true);
   return term;

@@ -116,7 +116,7 @@ export async function attachGhostty(
 // Widget observations live here so tests state behavior independently of
 // the widget's current representation.
 export function ghosttyCore(term: Terminal) {
-  return term.wasmTerm;
+  return term.core;
 }
 
 export function ghosttyMode(term: Terminal, mode: number): boolean {
@@ -124,7 +124,7 @@ export function ghosttyMode(term: Terminal, mode: number): boolean {
 }
 
 export function ghosttyAlternateScreen(term: Terminal): boolean {
-  return term.wasmTerm!.isAlternateScreen();
+  return term.buffer.active.type === "alternate";
 }
 
 export function ghosttyMouseTracking(term: Terminal): boolean {
@@ -132,7 +132,19 @@ export function ghosttyMouseTracking(term: Terminal): boolean {
 }
 
 export function ghosttyCellMetrics(term: Terminal) {
-  return term.renderer!.getMetrics();
+  const metrics = term.getMetrics();
+  if (!metrics) throw new Error("the widget is not open");
+  return metrics;
+}
+
+/// The widget's repaints from now on, seen through an ordinary paint layer:
+/// one entry per paint that repainted rows, `full` when it repainted every
+/// viewport row. Registering the layer invalidates the next frame, so a
+/// caller that needs a quiet start runs that frame and clears the list.
+export function observeGhosttyPaints(term: Terminal): Array<{ full: boolean }> {
+  const paints: Array<{ full: boolean }> = [];
+  term.addPaintLayer({ order: 0, paint: ({ full }) => { paints.push({ full }); } });
+  return paints;
 }
 
 export function ghosttyLineText(term: Terminal, row: number): string | undefined {
@@ -276,6 +288,14 @@ function resetGhosttyFixture(): void {
 /// Data the terminal emits as typed input, as a key or a paste does.
 export function typeInGhostty(term: Terminal, data: string): void {
   term.input(data, true);
+}
+
+/// The widget's input textarea, the hidden field a press on the canvas
+/// focuses, found in the element the widget opened in.
+export function ghosttyTextarea(term: Terminal): HTMLTextAreaElement {
+  const textarea = term.element?.querySelector("textarea");
+  if (!textarea) throw new Error("the widget opened no input textarea");
+  return textarea;
 }
 
 /// Whether keyboard focus is inside the terminal: on its element, which

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { VtCells, VtTerminal } from "@chan/ghostty-web-ng/vt";
+import { VtCells } from "@chan/ghostty-web-ng/vt";
 import { flushSync, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
 
@@ -89,7 +89,7 @@ test("waits for the bundled face before constructing or opening the Ghostty widg
   expect(beforeFont.widgets, "no widget is measured while the font is loading").toBe(0);
   expect(beforeFont.canvas, "the renderer has not opened").toBeNull();
   const term = ghostty.terminals[0]!;
-  expect(ghosttyCore(term)).toBeInstanceOf(VtTerminal);
+  expect(ghosttyCore(term), "the widget opened its core").toBeDefined();
   expect(target.querySelector("canvas"), "the real widget opened after the font loaded").not.toBeNull();
   expect(ghosttyFontFamily(term)).toContain("Source Code Pro");
 });
@@ -105,7 +105,7 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
   canvas.frame();
   const body = target.querySelector<HTMLElement>(".terminal-tab")!;
   const core = ghosttyCore(term);
-  expect(core).toBeInstanceOf(VtTerminal);
+  expect(core, "the widget's core").toBeDefined();
   const colors = () => {
     const cells = new VtCells();
     expect(core!.readRow(0, cells)).toBe(true);

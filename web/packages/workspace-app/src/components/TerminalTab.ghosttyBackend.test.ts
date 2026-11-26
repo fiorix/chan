@@ -39,7 +39,9 @@ import { loadGhosttyKit } from "../terminal/backend";
 import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
 import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { Osc52Bridge } from "../terminal/osc52Bridge";
-import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
+import {
+  ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, observeGhosttyPaints, pressInGhostty,
+} from "../__tests__/ghosttyTab";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
@@ -257,9 +259,12 @@ describe("the mount", () => {
   });
 
   test("the terminal is built on the wasm instance its own spawn created", async () => {
-    await mountGhostty();
+    const { term } = await mountGhostty();
     expect(observed.instances).toHaveLength(1);
-    expect(vi.mocked(observed.instances[0]!.createTerminal).mock.results[0]?.value).toBe(ghosttyFixture.terminals[0]!.wasmTerm);
+    const created = vi.mocked(observed.instances[0]!.createTerminal).mock.results;
+    expect(created, "the instance created one core").toHaveLength(1);
+    term.write("built on its own core");
+    expect(created[0]!.value.plainText(), "the widget writes into the core its instance created").toContain("built on its own core");
   });
 
   test("a resize fits with chan's own measurement", async () => {
@@ -485,17 +490,19 @@ describe("focus recovery after a host resume", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
 
-  // ghostty-web has no refresh() and its frame loop repaints dirty rows
-  // only, so pixels the host dropped while the window sat off-screen come
-  // back only through a forced full pass of its renderer; the resume must
-  // ask for one even though the grid is unchanged and the fit is a no-op.
+  // The widget's frame loop repaints dirty rows only, so pixels the host
+  // dropped while the window sat off-screen come back only through a full
+  // repaint; the resume must ask for one even though the grid is unchanged
+  // and the fit is a no-op.
   test("the resume forces a full render pass of the ghostty renderer", async () => {
     const { term } = await mountGhostty();
+    const paints = observeGhosttyPaints(term);
     canvas.frame();
-    const rendered = vi.spyOn(term.renderer!, "render");
+    expect(paints.length, "the layer sees the frame its registration invalidated").toBeGreaterThan(0);
+    paints.splice(0);
     const resized = vi.spyOn(term, "resize");
     await resume();
-    expect(rendered.mock.calls.some((call) => call[1] === true), "a forced pass").toBe(true);
+    expect(paints.some(({ full }) => full), "a full repaint").toBe(true);
     expect(resized, "the repaint is not a resize").not.toHaveBeenCalled();
   });
 
@@ -612,7 +619,7 @@ test("the VT reads current renderer metrics and sends a resize reply to its own 
   expect(observed.hosts).toHaveLength(1);
   const host = observed.hosts[0]!;
   expect(host.cellSize?.()).toMatchObject({ width: 8, height: 19 * 1.2 });
-  vi.spyOn(term.renderer!, "getMetrics").mockReturnValue({ ...term.renderer!.getMetrics(), width: 10, height: 20 });
+  vi.spyOn(term, "getMetrics").mockReturnValue({ ...term.getMetrics()!, width: 10, height: 20 });
   expect(host.cellSize?.()).toMatchObject({ width: 10, height: 20 });
   host.onResizeReply?.("\x1b[48;30;100;600;1000t");
   expect(inputs(socket)).toEqual(["\x1b[48;30;100;600;1000t"]);

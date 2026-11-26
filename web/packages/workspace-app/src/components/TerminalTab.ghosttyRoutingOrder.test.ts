@@ -17,7 +17,8 @@ vi.mock("../terminal/backend", async (importOriginal) => {
 
 import TerminalTab from "./TerminalTab.svelte";
 import {
-  attachGhostty, compileGhosttyCore, ghosttyLineText, installSoftwareCanvas, mountGhostty,
+  attachGhostty, compileGhosttyCore, ghosttyCellMetrics, ghosttyLineText, installSoftwareCanvas, mountGhostty,
+  observeGhosttyPaints,
 } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
@@ -90,12 +91,12 @@ test("a letter typed before the Ghostty write callback reaches the group while i
       done?.();
     });
   });
-  const paint = vi.spyOn(term.renderer!, "render");
+  const paints = observeGhosttyPaints(term);
   await output(socket, "streamed\x1b[12;3H\x1b[6n");
 
   expect(ghosttyLineText(term, 0), "the real core has parsed the output").toBe("streamed");
   expect(callbacksPending, "the widget callback still awaits an animation frame").toBe(1);
-  expect(paint, "the pending output has not painted").not.toHaveBeenCalled();
+  expect(paints, "the pending output has not painted").toEqual([]);
   expect(sentFrames(socket).filter((frame) => frame.type === "input" || frame.type === "broadcast-input"))
     .toEqual([{ type: "input", data: "\x1b[12;3R" }]);
   expect(siblingInput, "the parser-generated report is not broadcast").toEqual([]);
@@ -114,6 +115,7 @@ test("a letter typed before the Ghostty write callback reaches the group while i
   expect(siblingInput, "the actual widget key reaches the same-window sibling").toEqual(["a"]);
   canvas.frame();
   expect(callbacksPending, "the held callback completes when the frame advances").toBe(0);
+  expect(paints.length, "the frame paints the output").toBeGreaterThan(0);
 });
 
 test("Ghostty publishes its resized PTY grid before scanning and painting rewrapped secrets", async () => {
@@ -130,7 +132,7 @@ test("Ghostty publishes its resized PTY grid before scanning and painting rewrap
     return ranges;
   });
   const context = canvas.context(host);
-  const { width, height } = term.renderer!.getMetrics();
+  const { width, height } = ghosttyCellMetrics(term);
   const mask = { r: 108, g: 108, b: 112, a: 1 };
   const pixel = (column: number, row: number) => context.pixelAt((column + 0.5) * width, (row + 0.5) * height);
   await output(socket, secret);

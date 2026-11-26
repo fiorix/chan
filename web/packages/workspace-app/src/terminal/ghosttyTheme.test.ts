@@ -11,11 +11,11 @@
 // package's theme test reads it.
 
 import { readFileSync } from "node:fs";
-import { Terminal, type ITheme } from "@chan/ghostty-web-ng";
+import { Terminal, type ITheme, type TerminalCore } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { applyGhosttyTheme } from "./ghosttyTheme";
-import { VtCells, VtTerminal, GhosttyVt, type VtCell } from "@chan/ghostty-web-ng/vt";
+import { VtCells, GhosttyVt, type VtCell } from "@chan/ghostty-web-ng/vt";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 24;
@@ -127,9 +127,9 @@ function frame(): void {
   for (const callback of due) callback(performance.now());
 }
 
-function core(term: Terminal): VtTerminal {
-  const vt: unknown = term.wasmTerm;
-  if (!(vt instanceof VtTerminal)) throw new Error("not chan's binding");
+function core(term: Terminal): TerminalCore {
+  const vt = term.core;
+  if (!vt) throw new Error("the terminal is not open");
   return vt;
 }
 
@@ -247,7 +247,7 @@ describe("a theme switch on a live ghostty terminal", () => {
     expect(pixels(term)).toEqual(pixels(fresh));
     expect(cellPixel(term, COLS - 1, 0), "an unstyled cell").toBe(opaque(LIGHT.background!));
     expect(cellPixel(term, 2, SCREEN_BG_ROW), "a red background cell").toBe(opaque(LIGHT.red!));
-    const cursor = core(term).getCursor();
+    const cursor = term.getCursor()!;
     expect(cellPixel(term, cursor.x, cursor.y), "the cursor").toBe(opaque(LIGHT.cursor!));
     expect(pixels(term)).not.toEqual(dark);
 
@@ -296,7 +296,7 @@ describe("a theme switch on a live ghostty terminal", () => {
       text: text(),
       history: term.getScrollbackLength(),
       viewport: term.getViewportY(),
-      cursor: core(term).getCursor(),
+      cursor: term.getCursor(),
       selection: term.getSelection(),
       selected: term.hasSelection(),
       focus: document.activeElement,
