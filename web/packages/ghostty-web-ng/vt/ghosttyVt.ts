@@ -570,20 +570,18 @@ export class GhosttyVt {
 
   readonly #wasm: VtWasm;
   readonly #replySinks = new Map<number, (ptr: number, len: number) => void>();
-  readonly #writePtyCallback: number;
-  readonly #deviceAttributesCallback: number;
   readonly #terminalOwner: VtTerminalOwner;
 
-  constructor(instance: WebAssembly.Instance, readonly host?: VtHost) {
+  constructor(instance: WebAssembly.Instance, host?: VtHost) {
     this.#wasm = new VtWasm(instance);
-    this.#writePtyCallback = this.#wasm.addFunction(
+    const writePtyCallback = this.#wasm.addFunction(
       (terminal, _userdata, data, len) => {
         this.#replySinks.get(terminal >>> 0)?.(data >>> 0, len >>> 0);
       },
       4,
       false,
     );
-    this.#deviceAttributesCallback = this.#wasm.addFunction(
+    const deviceAttributesCallback = this.#wasm.addFunction(
       (_terminal, _userdata, out) => {
         writeDeviceAttributes(this.#wasm, out >>> 0);
         return 1;
@@ -592,9 +590,9 @@ export class GhosttyVt {
       true,
     );
     this.#terminalOwner = {
-      host: this.host,
-      writePtyCallback: this.#writePtyCallback,
-      deviceAttributesCallback: this.#deviceAttributesCallback,
+      host,
+      writePtyCallback,
+      deviceAttributesCallback,
       encodePaste: (data, bracketed) => this.encodePaste(data, bracketed),
       register: (handle, onReply) => {
         this.#replySinks.set(handle, onReply);
