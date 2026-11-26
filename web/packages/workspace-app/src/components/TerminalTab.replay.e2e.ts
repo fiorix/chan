@@ -504,7 +504,7 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
   }
 });
 
-if (caseName === "overflow") test("an overflow replay retains one exact loss notice and removes evicted history", async () => {
+if (caseName === "overflow") test("an overflow replay after a cut resets the interrupted replay and retains one exact loss notice", async () => {
   let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
   const result: Record<string, unknown> = { name: "overflow", status: "failed" };
   try {
@@ -515,11 +515,14 @@ if (caseName === "overflow") test("an overflow replay retains one exact loss not
     await mounted.socket.bytesInclude("MARKER:OLD_PROMPT\r\n");
     const old = await snapshot("old rows before ring overflow");
     expect(old.normal.rows.filter(Boolean)).toHaveLength(9);
-    // Carriage returns fill the byte ring without exhausting the parser's row history.
-    for (let index = 0; index < 12; index++) {
-      await emit("bytes", { base64: Buffer.from("\r".repeat(262144)).toString("base64") });
-    }
+    // Carriage returns fill the byte ring without exhausting the parser's row
+    // history. Padding sits on both sides of the retained rows so the first
+    // run evicts the old markers while keeping the retained rows past the
+    // ring's start and ahead of the cut inside the remounted dial's replay.
+    const pad = Buffer.from("\r".repeat(262144)).toString("base64");
+    for (let index = 0; index < 5; index++) await emit("bytes", { base64: pad });
     await emit("rows", { prefix: "SURVIVES", count: 64 });
+    for (let index = 0; index < 5; index++) await emit("bytes", { base64: pad });
     await emit("marker", { name: "OVERFLOW_END" });
     await mounted.socket.bytesInclude("MARKER:OVERFLOW_END\r\n");
     const before = await snapshot("overflow before cut");
@@ -528,20 +531,37 @@ if (caseName === "overflow") test("an overflow replay retains one exact loss not
     const emitted = Buffer.from(source.bytes, "base64");
     // A redial would resume from the position the page parsed and miss
     // nothing, so the tab remounts: its new widget's dial asks for the whole
-    // ring, which the overflow has cut to its tail. That dial is cut after
-    // its session; its replay continued no view, so the page dials fresh
-    // again and starts the retained ring on a reset screen.
-    ReplaySocket.acknowledge = async (message) => {
-      if (message.connection === 2 && message.type === "session") {
-        await rpc("ack", { connection: 2, frame: message.frame, drained: false });
-      }
+    // ring, which the overflow has cut to its tail. That dial is cut inside
+    // its replay once the retained SURVIVES rows have reached the new widget;
+    // its replay continued no view, so the page dials fresh again and resets
+    // that interrupted replay before writing the notice and the retained ring.
+    const cutAt = 900_000;
+    let forwarded = 0;
+    let ackTail = Promise.resolve();
+    ReplaySocket.acknowledge = (message) => {
+      if (message.connection !== 2 || !message.binary) return Promise.resolve();
+      ackTail = ackTail.then(async () => {
+        forwarded += Buffer.from(message.bytes, "base64").length;
+        if (forwarded === cutAt) {
+          await rpc("ack", { connection: 2, frame: message.frame, drained: true });
+        }
+      });
+      return ackTail;
     };
-    await rpc("arm", { boundary: "after-session", ordinal: 2 });
+    await rpc("arm", { boundary: "inside-replay", ordinal: 2, bytes: cutAt });
     await mounted.remount();
     const cut = await rpc("cut");
+    expect(cut.boundary).toBe("inside-replay");
     expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
-    expect(cut.replayForwarded).toBe(0);
-    expect((await ReplaySocket.dial(2)).deliveries.map((frame) => frame.type)).toEqual(["session"]);
+    expect(cut.replayForwarded).toBe(cutAt);
+    expect(cut.replayBytes).toBeGreaterThan(cutAt);
+    expect(cut.lastAcknowledged.drained).toBe(true);
+    const interrupted = await ReplaySocket.dial(2);
+    expect(interrupted.deliveries.some((frame) => frame.type === "ready")).toBe(false);
+    const interruptedReplay = Buffer.concat(interrupted.deliveries.filter((frame) => frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")));
+    expect(interruptedReplay.length).toBe(cutAt);
+    expect(interruptedReplay.toString(), "retained rows reached the new widget before the cut").toContain("SURVIVES:00000071\r\n");
+    expect(interruptedReplay.toString(), "the cut stopped inside the replay, before its end").not.toContain("MARKER:OVERFLOW_END\r\n");
     const recovery = await ReplaySocket.dial(3);
     await recovery.ready();
     const session = JSON.parse(Buffer.from(recovery.deliveries.find((frame) => frame.type === "session")!.bytes, "base64").toString());
@@ -560,7 +580,7 @@ if (caseName === "overflow") test("an overflow replay retains one exact loss not
     const notice = `terminal replay missed ${missed} bytes`;
     const recovered = await snapshot("overflow after cut");
     expect(recovered.active).toBe("normal");
-    expect(recovered.normal.rows.filter(Boolean), "one correctly counted notice survives above every retained row").toEqual([notice, ...rows]);
+    expect(recovered.normal.rows.filter(Boolean), "one correctly counted notice survives above every retained row, with none repeated from the interrupted replay").toEqual([notice, ...rows]);
     await emit("marker", { name: "OVERFLOW_LIVE" });
     await recovery.bytesInclude("MARKER:OVERFLOW_LIVE\r\n");
     const final = await snapshot("overflow live suffix");
