@@ -239,7 +239,7 @@ fn default_terminal_ring_bytes() -> usize {
 }
 
 fn default_terminal_scrollback_mb() -> u32 {
-    10
+    50
 }
 
 fn default_terminal_default_term() -> String {
