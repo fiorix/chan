@@ -1680,7 +1680,8 @@ async fn send_attach_prelude(
     let attached_at = tokio::time::Instant::now();
     // Recovery restores a missed resize before replay. A tmux pane always
     // uses the grid owned by tmux, including on its first attach.
-    let size = if recovering || session.tmux_pane().is_some() {
+    let sends_grid = recovering || session.tmux_pane().is_some();
+    let size = if sends_grid {
         let size = session.size();
         if socket
             .frame(
@@ -1733,7 +1734,21 @@ async fn send_attach_prelude(
     {
         return Err(());
     }
-    if !recovering || session.missed_bytes > 0 {
+    // A view that continues its screen and missed nothing shows what its
+    // program drew, so the program is not asked to repaint it, unless the
+    // view may not hold the PTY's grid: the resize a redraw broadcasts is
+    // what tells it the grid when it was not sent above and its dial did
+    // not size the PTY, as a hidden view's dial sizes only an unsized one.
+    let holds_grid = sends_grid
+        || match socket.input.size {
+            None => false,
+            Some(_) if !socket.input.size_conditional => true,
+            Some(declared) => {
+                let grid = session.size();
+                (declared.cols, declared.rows) == (grid.cols, grid.rows)
+            }
+        };
+    if !session.continues_view || session.missed_bytes > 0 || !holds_grid {
         session.request_redraw();
     }
     let (cwd, cwd_rel) = socket.cwd(session).await?;
