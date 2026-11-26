@@ -38,10 +38,11 @@ const WIDGET_DEFAULT_LINES = 10_000;
 
 describe("the scrollback budget", () => {
   test("is the setting in bytes when the terminal spawns, with no line cap", async () => {
-    serveScrollbackMb(50);
+    // Apart from the default, so the fallback cannot pass for the setting.
+    serveScrollbackMb(30);
     const [tab] = seatTerminals([terminalTab()]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
-    expect(term.options.scrollbackBytes).toBe(50 * MIB);
+    expect(term.options.scrollbackBytes).toBe(30 * MIB);
     expect(term.options.scrollback, "no line cap converted from the setting").toBe(WIDGET_DEFAULT_LINES);
   });
 

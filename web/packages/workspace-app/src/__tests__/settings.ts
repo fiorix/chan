@@ -28,7 +28,7 @@ export function settingsPreferences(): Preferences {
       idle_timeout_secs: 900,
       session_cap: 20,
       ring_bytes: 1048576,
-      scrollback_mb: 50,
+      scrollback_mb: 30,
       default_term: "xterm-256color",
       font: "os-default",
       font_size: 14,
