@@ -1568,35 +1568,39 @@ describe("the workspace tree", () => {
 
   // Under an answer of the whole tree, `a/b` holds no child in the shared
   // graph and the spine holds its node: a double-click on it during a whole
-  // fetch starts no other fetch either, under either answer.
+  // fetch starts no other fetch and makes no read of `a/b` while the fetch
+  // is in flight, under either answer.
   test.each([
-    ["an answer of the whole tree", null],
-    ["an answer over the listing cap", "folders"],
-  ] as const)("a double-click during a whole spine fetch on an empty folder the spine holds starts no other fetch, over %s", async (_label, tree) => {
+    ["an answer of the whole tree", null, 0],
+    ["an answer over the listing cap", "folders", 1],
+  ] as const)("a double-click during a whole spine fetch on an empty folder the spine holds starts no other fetch, over %s", async (_label, tree, afterAb) => {
     serveWholeTree();
     graphServer.tree = tree;
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true } }));
     expect(graphData.tree).toBe(tree);
-    expect({ root: levelReads(""), a: levelReads("a") }, "the first fetch reads the root and a").toEqual({ root: 1, a: 1 });
+    expect({ root: levelReads(""), a: levelReads("a"), ab: levelReads("a/b") }, "the first fetch reads the root and a").toEqual({ root: 1, a: 1, ab: 0 });
 
     const release = await holdWholeFetch();
     let during = -1;
+    let duringAb = -1;
     try {
       expect(levelReads(""), "the whole fetch is in flight").toBe(2);
       await doubleClick("directory:a/b");
       expect(tab.expanded["a/b"]).toBe(true);
       during = levelReads("");
+      duringAb = levelReads("a/b");
     } finally {
       release();
     }
     await settle(30);
-    expect({ during, root: levelReads("") }).toEqual({ during: 2, root: 2 });
+    expect({ during, root: levelReads(""), duringAb, ab: levelReads("a/b") }).toEqual({ during: 2, root: 2, duringAb: 0, ab: afterAb });
   });
 
   // Under an answer of the whole tree, `e` is opened during a whole fetch
   // while the shared graph still holds `e/f.md`; `e/f.md` then leaves the
   // disk and the shared graph, and `h` is double-clicked before the fetch
-  // lands. Neither opening starts another fetch.
+  // lands. Neither opening starts another fetch or reads `e` during the
+  // fetch; the landing patches `e` once for the `"e/f.md"` change.
   test("a double-click during a whole spine fetch after a folder opened during it loses its files starts no other fetch, under an answer of the whole tree", async () => {
     graphServer.view = {
       nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.file("a/x.md"), g.file("a/b/z.md"), g.dir("e"), g.file("e/f.md"), g.dir("h"), g.file("h/k.md")],
@@ -1619,7 +1623,7 @@ describe("the workspace tree", () => {
       ],
     };
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, a: true } }));
-    expect({ root: levelReads(""), a: levelReads("a") }, "the first fetch reads the root and a").toEqual({ root: 1, a: 1 });
+    expect({ root: levelReads(""), a: levelReads("a"), e: levelReads("e") }, "the first fetch reads the root and a").toEqual({ root: 1, a: 1, e: 0 });
 
     const release = await holdWholeFetch();
     const seen: Record<string, number> = {};
@@ -1642,11 +1646,12 @@ describe("the workspace tree", () => {
       await doubleClick("directory:h");
       expect(tab.expanded.h).toBe(true);
       seen.afterH = levelReads("");
+      seen.duringE = levelReads("e");
     } finally {
       release();
     }
     await settle(30);
-    expect({ ...seen, root: levelReads("") }).toEqual({ afterE: 2, afterEmpty: 2, afterH: 2, root: 2 });
+    expect({ ...seen, root: levelReads(""), e: levelReads("e") }).toEqual({ afterE: 2, afterEmpty: 2, afterH: 2, duringE: 0, root: 2, e: 1 });
   });
 
   test("an opened folder gone from disk costs a double-click during a whole spine fetch no other fetch", async () => {
