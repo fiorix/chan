@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtTerminal } from '../vt/ghosttyVt';
+import { widgetInternals } from './internal';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -63,7 +64,7 @@ async function open(input = 'hello world\r\nsecond row') {
     hasPointerCapture: (id: number) => captured.has(id),
     releasePointerCapture: release,
   });
-  const { width, height } = term.renderer!.getMetrics();
+  const { width, height } = term.getMetrics()!;
   vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, term.cols * width, term.rows * height));
   const write = vi.fn(async (_text: string) => {});
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: write } });
@@ -858,9 +859,9 @@ describe('scoped context menu and click selection', () => {
     }
     expect(create).toHaveBeenCalledOnce();
     expect(free).toHaveBeenCalledOnce();
-    expect(term.wasmTerm).toBeUndefined();
+    expect(widgetInternals(term).wasmTerm).toBeUndefined();
     expect(term.element).toBeUndefined();
-    expect(term.renderer).toBeUndefined();
+    expect(widgetInternals(term).renderer).toBeUndefined();
     expect(host.childElementCount).toBe(0);
   });
 

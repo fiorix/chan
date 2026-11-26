@@ -294,14 +294,15 @@ describe("a search over the binding's terminal", () => {
   // The geometry the rule's arm depends on, which the case above does not
   // reach: there the first listed page is the page above, so the rule waits
   // for the entry after them whatever the core lists. Lines of one row at 80
-  // columns fill pages of 573 rows, so no page lies above the screen, and
-  // while the first listed page's newest match, row 571, ends on it the rule
-  // waits for the active-area entries alone; once the screen's first row
-  // passes that row it waits for the entry after them too. The page's last
-  // row, 572, wraps a needle from column 77 into row 573. While that boundary
-  // is on the screen no entry, of any shape, starts where the needle does;
-  // once its first row is in history it is listed, as itself, after the
-  // active-area entries.
+  // columns fill pages of 573 rows, so no page lies above the screen: at
+  // history 550 only Page 0 holds matches and the listing is already in
+  // order; across 551..571 Page 1 holds matches too and while Page 0's newest
+  // match, row 571, ends on the screen the rule waits for the active-area
+  // entries alone; at 572 the screen's first row passes that row and the rule
+  // waits for the entry after them too. The page's last row, 572, wraps a
+  // needle from column 77 into row 573. While that boundary is on the screen
+  // no entry, of any shape, starts where the needle does; once its first row
+  // is in history it is listed, as itself, after the active-area entries.
   test("with no page above the screen, a needle wrapped across the page boundary on it is listed only once the boundary is above it", async () => {
     const t = await terminal(80, 24, 10_000_000);
     lines(t, 572, (i) => `needle ${i}`);
@@ -325,7 +326,13 @@ describe("a search over the binding's terminal", () => {
       s.free();
       const fromStart = all.flatMap((m, at) => (m.startRow === across.startRow && m.startCol === across.startCol ? [{ m, at }] : []));
       if (history <= across.startRow) {
-        arms.push(all[0].endRow >= history ? "the entries" : "the entry after them");
+        arms.push(
+          all[head - 1].startRow <= all[0].startRow
+            ? "in order"
+            : all[0].endRow >= history
+              ? "the entries"
+              : "the entry after them",
+        );
         expect(fromStart, `history ${history}: nothing listed from the needle's start while the boundary is on the screen`).toEqual([]);
       } else {
         expect(fromStart.map(({ m }) => m), `history ${history}: listed once, as itself`).toEqual([across]);
@@ -335,7 +342,7 @@ describe("a search over the binding's terminal", () => {
       t.write("\r\nneedle more");
     }
     expect(seen, "from the first history with the boundary on the screen to two rows past it").toEqual(Array.from({ length: 25 }, (_, i) => 550 + i));
-    expect(arms, "what the rule waits for while the boundary is on the screen").toEqual([...Array(22).fill("the entries"), "the entry after them"]);
+    expect(arms, "what the rule waits for while the boundary is on the screen").toEqual(["in order", ...Array(21).fill("the entries"), "the entry after them"]);
   });
 
   test("columns count a wide character as two cells", async () => {
@@ -782,10 +789,10 @@ describe("the scroll policy", () => {
 });
 
 describe("a scan still running", () => {
-  // GhosttyFind holds back a step that would wrap while the scan runs, and
-  // applies any other at once, on what this pins: the core holds the newest
-  // matches found so far, in order, wraps among them, and keeps each one's
-  // place as the scan completes.
+  // The widget's search (`SearchOwner`, behind `term.search`) holds back a
+  // step that would wrap while the scan runs, and applies any other at once,
+  // on what this pins: the core holds the newest matches found so far, in
+  // order, wraps among them, and keeps each one's place as the scan completes.
   test("selects and wraps among the newest matches found so far, which keep their places once it completes", async () => {
     // A needle on every line ending in 5 of 3,000 on a 40x10 terminal: the
     // match k from the newest, counting from 0, is on row 2995 - 10k, and

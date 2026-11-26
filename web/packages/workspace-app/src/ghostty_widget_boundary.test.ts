@@ -35,8 +35,9 @@
 //    is a string literal. A member that only an app module declares on a
 //    widget class (or a subclass, interface or constrained type parameter
 //    derived from one), by a type-only declaration (an interface or
-//    type-literal member, or a `declare` field) or on an intersection with
-//    the class, is not public to this rule;
+//    type-literal member, an ambient (`declare`) class or member, or an
+//    `abstract` member) or on an intersection with the class (other than an
+//    app subclass's own runtime member), is not public to this rule;
 // 4. patch: a write to a member of a widget class instance (skipping
 //    `#private` names and members that only an app subclass's class body
 //    declares); `Object.assign`, `defineProperty`, `defineProperties`,
@@ -61,10 +62,10 @@
 //    exempt, since errors travel as `unknown` by design and are read after
 //    `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
-//    names a member the class keeps private, lacks, or holds as one of its
-//    implementation members, which reads `undefined` once that member is
-//    `#private`; a type with a widget part (a union with another type) is
-//    read through the widget's own declarations, which rules 3 and 5 see.
+//    names a member the class keeps private or lacks, which reads
+//    `undefined` once that member is `#private`; a type with a widget part
+//    (a union with another type) is read through the widget's own
+//    declarations, which rules 3 and 5 see.
 //
 // A widget value is one of a type the package declares, of a class or
 // interface that extends one (`this` in a subclass included), of a type
@@ -119,15 +120,16 @@
 //   state `#private` (`term.buffer.active`), into `unknown` or an app duck
 //   type: rules 6 and 7 take widget class instances only (`bufferEscape`,
 //   `bufferDuck`);
-// - Terminal's `renderer`, `textarea` and `viewportY` outside its modules,
-//   on a receiver not named like a terminal (`offView`, `offText` and
-//   `offOffset` in `src/state/`): TypeScript lists them as public, so only
-//   rule 5 reads them, by that name heuristic, until the package seals
-//   them;
+// - a mapped utility type over a widget class (`Readonly<Terminal>`,
+//   `Partial<Terminal>`, `Pick<Terminal, ...>`): `isWidget` sees its type
+//   argument at the call while `classPart` is false on the mapped type, so
+//   rules 4, 6 and 7 miss writes, escapes and ducks through it
+//   (`readonlyEscape`, `partialPatch`);
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
-//   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
-//   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
-//   does not read as a write;
+//   `({ rows: term.rows } = rows)`), a Svelte `bind:` directive
+//   (`bind:this={live.element}`, `bind:value={live.cols}`), or a nested
+//   widget member reached through an app-declared structural type
+//   (`nestedPatch`), which rule 4 does not read as a widget write;
 // - an import, mock or URL specifier that reaches the package other than
 //   by its name or a relative path: an absolute or root-relative path, or
 //   an alias of tsconfig's `paths` or Vite's `resolve.alias` (the app has
@@ -247,9 +249,9 @@ const ENTRIES = new Set(
   ),
 );
 
-/// Implementation members of the widget an app module has no reason to name:
-/// Terminal's core, which TypeScript still lists as public, and the parts
-/// the widget holds privately.
+/// Implementation members of the widget (all `#private`) an app module has
+/// no reason to name: catches what has no widget type to check, such as a
+/// duck-typed parameter or an untyped JavaScript reader.
 const IMPLEMENTATION = new Set([
   "wasmTerm",
   "selectionManager",
@@ -259,9 +261,10 @@ const IMPLEMENTATION = new Set([
   "buildWasmConfig",
   "hoveredHyperlinkId",
 ]);
-/// Terminal's renderer, textarea and scroll offset, also listed as public:
-/// other modules name objects of their own the same, so these count in the
-/// terminal's own modules and elsewhere only on a receiver named like one.
+/// Terminal's `#private` renderer, textarea and scroll offset: other modules
+/// name objects of their own the same, so rule 5 counts these in the
+/// terminal's own modules and elsewhere only on a receiver named like one;
+/// rule 3 catches any typed read on a Terminal everywhere.
 const GENERIC = new Set(["renderer", "textarea", "viewportY"]);
 const TERMINAL_MODULE = /^src\/(terminal\/|components\/TerminalTab\.svelte$)/;
 const TERMINAL_RECEIVER = /term|ghostty|widget/i;
@@ -608,13 +611,35 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     const declared = (type as ts.TypeReference).target ?? type;
     return declared.isClassOrInterface() && (checker.getBaseTypes(declared) ?? []).some((base) => classPart(base, depth + 1));
   }
+  /// Whether a declaration is in an ambient context: a `.d.ts` file or a
+  /// `declare` declaration or enclosing block (`declare class`, `declare
+  /// namespace`, `declare` member).
+  const hasAmbientContext = (node: ts.Node): boolean => {
+    if (node.getSourceFile().isDeclarationFile) return true;
+    for (let n: ts.Node | undefined = node; n; n = n.parent) {
+      if (ts.canHaveModifiers(n) && ts.getModifiers(n)?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) return true;
+    }
+    return false;
+  };
   /// Whether a declaration adds a member to the type alone, with nothing at
-  /// run time: a member of an interface or type literal, or an ambient
-  /// (`declare`) class member.
+  /// run time: a member of an interface or type literal, an ambient
+  /// (`declare`) class or member, or an `abstract` member.
   const typeOnly = (d: ts.Declaration) =>
     ts.isInterfaceDeclaration(d.parent) ||
     ts.isTypeLiteralNode(d.parent) ||
-    (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) !== 0;
+    hasAmbientContext(d) ||
+    (ts.getCombinedModifierFlags(d) & (ts.ModifierFlags.Ambient | ts.ModifierFlags.Abstract)) !== 0;
+
+  /// Whether a declaration is a runtime member of an app subclass's own
+  /// class body (including constructor parameter properties), not a
+  /// type-only declaration or an unrelated class intersected onto a widget.
+  const ownSubclassMember = (d: ts.Declaration) => {
+    if (!appDeclared(d) || typeOnly(d)) return false;
+    const host = ts.isParameter(d) && ts.isConstructorDeclaration(d.parent) ? d.parent.parent : d.parent;
+    if (!ts.isClassLike(host)) return false;
+    const sym = host.name ? checker.getSymbolAtLocation(host.name) : checker.getTypeAtLocation(host).getSymbol();
+    return !!sym && classPart(checker.getDeclaredTypeOfSymbol(sym));
+  };
 
   function isWidget(type: ts.Type, depth = 0): boolean {
     if (depth > 4) return false;
@@ -755,7 +780,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         classPart(part) &&
         declarations.some(appDeclared) &&
         !declarations.some((d) => inWidget(d.getSourceFile().fileName)) &&
-        declarations.every((d) => !appDeclared(d) || typeOnly(d) || part.isIntersection())
+        declarations.every((d) => !ownSubclassMember(d))
       ) {
         return true;
       }
@@ -890,13 +915,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (ts.isPropertyAccessExpression(access) && ts.isPrivateIdentifier(access.name)) return;
       const key = ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
       const member = key === undefined ? undefined : checker.getApparentType(widget).getProperty(key);
-      if (
-        !parts(widget).some((p) => p.isIntersection()) &&
-        member?.declarations?.length &&
-        member.declarations.every((d) => appDeclared(d) && !typeOnly(d))
-      ) {
-        return;
-      }
+      if (member?.declarations?.length && member.declarations.every(ownSubclassMember)) return;
       const name = ts.isPropertyAccessExpression(access) ? access.name.getText(sf) : access.argumentExpression.getText(sf);
       report("patch", access, `write ${nameOf(widget)}.${name}`);
     };
@@ -1049,7 +1068,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
             if (shape.flags & ts.TypeFlags.TypeParameter) continue;
             for (const property of checker.getPropertiesOfType(checker.getApparentType(shape))) {
               const name = property.getName();
-              if (IMPLEMENTATION.has(name) || GENERIC.has(name) || hidden(type, name)) report("duck", node, `${nameOf(type)}.${name}`);
+              if (hidden(type, name)) report("duck", node, `${nameOf(type)}.${name}`);
             }
           }
         }
@@ -1281,6 +1300,30 @@ const PLANTS = new Map<string, string>([
       "export const dynUrl = (name: string) => new URL(`../../../ghostty-web-ng/lib/${name}.ts`, import.meta.url);",
       "export const dynSafeUrl = (name: string) => new URL(`./local/${name}.ts`, import.meta.url);",
       "export const fromGlobalDts = () => (window.boundaryTerminal as unknown as Raw).isOpen;",
+      "declare class AmbientSub extends Terminal {",
+      "  isOpen: boolean;",
+      "}",
+      "const isAmbientSub = (t: Terminal): t is AmbientSub => t !== null;",
+      "export const viaAmbientSub = (term: Terminal) => (isAmbientSub(term) ? term.isOpen : false);",
+      "abstract class AbstractSub extends Terminal {",
+      "  abstract isOpen: boolean;",
+      "}",
+      "const isAbstractSub = (t: Terminal): t is AbstractSub => t !== null;",
+      "export const viaAbstractSub = (term: Terminal) => (isAbstractSub(term) ? term.isOpen : false);",
+      "class FakeClass {",
+      "  isOpen = true;",
+      "}",
+      "const isFakeClass = (t: Terminal): t is Terminal & FakeClass => t !== null;",
+      "export const viaFakeClass = (term: Terminal) => (isFakeClass(term) ? term.isOpen : false);",
+      "type MaskBuf = { getLine(y: number): unknown };",
+      "type MaskTerm = { readonly buffer: { readonly active: MaskBuf } };",
+      "const patchNested = (t: MaskTerm) => {",
+      "  const a = t.buffer.active;",
+      "  a.getLine = () => undefined;",
+      "};",
+      "export const nestedPatch = (term: Terminal) => patchNested(term);",
+      "export const readonlyEscape = (term: Terminal) => ((t: Readonly<Terminal>) => raw(t))(term);",
+      "export const partialPatch = (term: Terminal) => ((t: Partial<Terminal>) => { t.cols = 1; })(term);",
     ].join("\n"),
   ],
   [
@@ -1384,6 +1427,16 @@ const PLANTS = new Map<string, string>([
       "  s.cols = 1;",
       "  return [Object.assign(s, { cols: 1 }), Object.freeze(s), s.isSealed];",
       "};",
+      "export const sealed = (term: Terminal) => [",
+      "  // @ts-expect-error sealed fields",
+      "  term.wasmTerm,",
+      "  // @ts-expect-error sealed fields",
+      "  term.renderer,",
+      "  // @ts-expect-error sealed fields",
+      "  term.textarea,",
+      "  // @ts-expect-error sealed fields",
+      "  term.viewportY,",
+      "];",
     ].join("\n"),
   ],
   [
@@ -1422,6 +1475,20 @@ const PLANTS = new Map<string, string>([
       "};",
       "export class CustomRefusal extends GhosttyVtRefusal {}",
       'export const reportCustomRefusal = (report: (error: unknown) => void) => report(new CustomRefusal("refused"));',
+      "export class NarrowedSub extends Terminal {",
+      '  label = "main";',
+      "  constructor(public readonly tag: string, opts: ConstructorParameters<typeof Terminal>[0]) {",
+      "    super(opts);",
+      "  }",
+      "}",
+      "const isMountedGen = <T extends Terminal>(t: T): t is T & { element: HTMLElement } => t.element !== undefined;",
+      "export const updateNarrowedSub = (t: NarrowedSub) => {",
+      "  if (isMountedGen(t)) {",
+      '    t.label = "focused";',
+      "    return `${t.label}:${t.tag}`;",
+      "  }",
+      '  return "";',
+      "};",
     ].join("\n"),
   ],
   [
@@ -1618,6 +1685,9 @@ const PLANTED: readonly Site[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 172, key: "`../../../ghostty-web-ng/lib/${name}.ts`" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 174, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 174, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 179, key: "AmbientSub.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 184, key: "AbstractSub.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 189, key: "Terminal & FakeClass.isOpen" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
@@ -1635,10 +1705,14 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 4, key: "wasmTerm" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 7, key: "Terminal.renderer" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 8, key: "Terminal.textarea" },
+  { rule: "member", file: "src/state/boundaryPlant.ts", line: 9, key: "Terminal.viewportY" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
+  { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "Terminal.renderer" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "renderer" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "any" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "Terminal.isOpen" },
@@ -1671,6 +1745,10 @@ const PLANTED: readonly Site[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.assign KinFixture" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "Object.freeze KinFixture" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 48, key: "KinFixture.isSealed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 52, key: "Terminal.wasmTerm" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 54, key: "Terminal.renderer" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 56, key: "Terminal.textarea" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 58, key: "Terminal.viewportY" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too

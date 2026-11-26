@@ -5,6 +5,7 @@ import { terminalInternals } from '../vt/internal';
 import { widgetInternals } from './internal';
 import { LinkDetector } from './link-detector';
 import { UrlRegexProvider } from './providers/url-regex-provider';
+import type { CanvasRenderer } from './renderer';
 import { Terminal } from './terminal';
 import type { ILink } from './types';
 
@@ -38,11 +39,9 @@ async function terminal(rows = 6) {
     getMetrics: () => ({ width: 8, height: 16, baseline: 12 }),
     dispose: vi.fn(),
   };
-  Object.assign(term, {
-    wasmTerm: ghostty.createTerminal(40, rows, { scrollbackLimit: 1000 }),
-    renderer,
-  });
   const internals = widgetInternals(term);
+  internals.wasmTerm = ghostty.createTerminal(40, rows, { scrollbackLimit: 1000 });
+  internals.renderer = renderer as unknown as CanvasRenderer;
   internals.canvas = document.createElement('canvas');
   internals.isOpen = true;
   terminals.push(term);
@@ -258,7 +257,7 @@ describe('content changes', () => {
     // This operating-status query/reply is also recorded in the differential oracle.
     expect(() => term.write('\x1b[5n')).toThrow('observer failed');
     expect(replies, 'the PTY receives the parsed reply before change observers run').toEqual(['\x1b[0n']);
-    expect(term.wasmTerm!.readResponse(), 'no reply is stranded for a later write').toBeNull();
+    expect(widgetInternals(term).wasmTerm!.readResponse(), 'no reply is stranded for a later write').toBeNull();
   });
 
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {
@@ -291,7 +290,7 @@ describe('content changes', () => {
     const { term, renderer } = await terminal();
     expect(term.onChange, 'the widget emits content changes').toBeTypeOf('function');
     const seen: string[] = [];
-    term.onChange(({ kind }) => seen.push(`${kind}:${term.wasmTerm!.cols}x${term.wasmTerm!.rows}`));
+    term.onChange(({ kind }) => seen.push(`${kind}:${widgetInternals(term).wasmTerm!.cols}x${widgetInternals(term).wasmTerm!.rows}`));
     term.onResize(() => seen.push('resize listener'));
     renderer.render.mockImplementation(() => { seen.push('paint'); });
     term.resize(30, 8);
@@ -365,7 +364,7 @@ describe('content changes', () => {
 async function historyPrune(offset: number | 'oldest' = 7.5, target?: number) {
   const { term } = await terminal();
   term.resize(80, 6);
-  const core = term.wasmTerm!;
+  const core = widgetInternals(term).wasmTerm!;
   const scrolling = widgetInternals(term);
   for (let line = 0; line < 5000; line++) {
     const before = term.getScrollbackLength();
@@ -451,7 +450,7 @@ describe('retained history at the scrollback cap', () => {
 
   test('write anchors are released after a write, a screen change and a parser failure', async () => {
     const { term } = await history();
-    const core = term.wasmTerm!;
+    const core = widgetInternals(term).wasmTerm!;
     const tracked = terminalInternals(core).trackedCells;
     expect(tracked.size).toBe(0);
     term.viewport.scrollTo(7.5);
@@ -480,7 +479,7 @@ describe('retained history at the scrollback cap', () => {
     const scrolling = widgetInternals(term);
     scrolling.targetViewportY = 12.25;
     scrolling.scrollAnimationStartTime = Date.now();
-    const core = term.wasmTerm!;
+    const core = widgetInternals(term).wasmTerm!;
     const track = core.trackCell.bind(core);
     const tracked = terminalInternals(core).trackedCells;
     vi.spyOn(core, 'trackCell')
@@ -522,7 +521,7 @@ describe('history-cap boundary guards', () => {
     const { term, retainedRow, after, next } = await beforeHistoryPrune();
     const offset = term.getScrollbackLength() - retainedRow + 0.75;
     term.viewport.scrollTo(offset);
-    const anchor = term.wasmTerm!.trackCell(retainedRow, 0)!;
+    const anchor = widgetInternals(term).wasmTerm!.trackCell(retainedRow, 0)!;
     expect(anchor).not.toBeNull();
     try {
       term.write(next);
@@ -538,7 +537,7 @@ describe('history-cap boundary guards', () => {
     const { term, retainedRow, after, next } = await beforeHistoryPrune();
     term.viewport.scrollTo(7.5);
     const scrolling = gestureTarget(term, term.getScrollbackLength() - retainedRow + 0.25);
-    const anchor = term.wasmTerm!.trackCell(retainedRow, 0)!;
+    const anchor = widgetInternals(term).wasmTerm!.trackCell(retainedRow, 0)!;
     expect(anchor).not.toBeNull();
     try {
       term.write(next);
@@ -555,7 +554,7 @@ describe('history-cap boundary guards', () => {
     const { term, after, next } = await beforeHistoryPrune();
     term.viewport.scrollTo(7.5);
     const scrolling = gestureTarget(term, term.getScrollbackLength());
-    const anchor = term.wasmTerm!.trackCell(0, 0)!;
+    const anchor = widgetInternals(term).wasmTerm!.trackCell(0, 0)!;
     expect(anchor).not.toBeNull();
     try {
       term.write(next);
@@ -571,7 +570,7 @@ describe('history-cap boundary guards', () => {
     const { term } = await history();
     term.viewport.scrollTo(7.5);
     gestureTarget(term, 12.25);
-    const core = term.wasmTerm!;
+    const core = widgetInternals(term).wasmTerm!;
     const tracked = terminalInternals(core).trackedCells;
     const write = core.write.bind(core);
     const observed: number[] = [];

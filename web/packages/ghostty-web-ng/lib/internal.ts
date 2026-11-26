@@ -7,18 +7,23 @@
 // boundary check refuses an import of any path past that map, so its only
 // importers are the tests beside the widget.
 
+import type { VtTerminal } from '../vt/ghosttyVt';
 import type { EventEmitter } from './event-emitter';
 import type { TerminalChange } from './interfaces';
 import type { LinkDetector } from './link-detector';
+import type { CanvasRenderer } from './renderer';
 import type { SelectionAnchor, SelectionManager } from './selection-manager';
 import type { Terminal } from './terminal';
 
-/// A terminal's private state a test sets up or reads: the canvas, open
-/// state and link detector `open` wires, which the viewport tests set on a
-/// terminal they assemble around a stub renderer; a smooth scroll in
-/// flight; and the parts the terminal delivers changes and selections
-/// through.
+/// A terminal's private state a test sets up or reads: the core, renderer,
+/// viewport offset, canvas, open state and link detector `open` wires,
+/// which the viewport tests set on a terminal they assemble around a stub
+/// renderer; a smooth scroll in flight; and the parts the terminal
+/// delivers changes and selections through.
 export type WidgetInternals = {
+  wasmTerm: VtTerminal | undefined;
+  renderer: CanvasRenderer | undefined;
+  viewportY: number;
   canvas: HTMLCanvasElement | undefined;
   isOpen: boolean;
   linkDetector: LinkDetector | undefined;
