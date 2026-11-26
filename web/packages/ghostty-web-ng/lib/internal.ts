@@ -16,10 +16,11 @@ import type { SelectionAnchor, SelectionManager } from './selection-manager';
 import type { Terminal } from './terminal';
 
 /// A terminal's private state a test sets up or reads: the core, renderer,
-/// viewport offset, canvas, open state and link detector `open` wires,
-/// which the viewport tests set on a terminal they assemble around a stub
-/// renderer; a smooth scroll in flight; and the parts the terminal
-/// delivers changes and selections through.
+/// canvas, open state and link detector `open` wires, which the viewport
+/// tests set on a terminal they assemble around a stub renderer; the
+/// viewport offset, which only `renderer.redraw.test.ts` sets, below the
+/// zero the terminal clamps its own offset at; a smooth scroll in flight;
+/// and the parts the terminal delivers changes and selections through.
 export type WidgetInternals = {
   wasmTerm: VtTerminal | undefined;
   renderer: CanvasRenderer | undefined;
