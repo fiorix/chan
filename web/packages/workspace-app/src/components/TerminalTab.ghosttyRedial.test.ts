@@ -424,7 +424,8 @@ describe("a redial after a socket ended inside a replay that continued the view"
     const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\x1b[1m!\x1b[0m\r\n`).join("");
     const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
     // The socket ends inside line 21's bold sequence.
-    await deliver(second, served(second, program), lines.indexOf("line 21") + "line 21\x1b[".length);
+    const cut = lines.indexOf("line 21") + "line 21\x1b[".length;
+    await deliver(second, served(second, program), cut);
     const third = await redialedAfterCut(second);
     expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
     // While the tab redials, the ring moves past line 30.
@@ -435,7 +436,10 @@ describe("a redial after a socket ended inside a replay that continued the view"
     const counts = Array.from({ length: 40 }, (_, i) => rows.filter((row) => row === `line ${i + 1}!`).length);
     expect(Math.max(...counts), "no line twice").toBeLessThanOrEqual(1);
     expect(counts.slice(30), "lines 31 to 40 whole, once, none run into the sequence the cut split").toEqual(Array(10).fill(1));
-    expect(rows.filter((row) => row.includes("terminal replay missed")), "a notice for each gap").toHaveLength(2);
+    expect(rows.filter((row) => row.includes("terminal replay missed")), "a notice for each gap, of the bytes it lost").toEqual([
+      `terminal replay missed ${pasteOff.length} bytes`,
+      `terminal replay missed ${lines.indexOf("line 31") - cut} bytes`,
+    ]);
     expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
   });
 
