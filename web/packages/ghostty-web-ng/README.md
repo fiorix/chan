@@ -116,7 +116,7 @@ For test instruments only, `testHooks: { scrollbarOpacity: number }` fixes paint
 
 ## Paste
 
-`term.paste(text)` and the widget's own `paste` and `insertFromPaste` listeners send a paste's line ends as Enter sends them (each `\r\n` and `\n` becomes `\r`, bracketed or not) and then encode the text as `encodePaste` does. Either way the paste scrolls the viewport to the bottom, and the next write paints at once, as after typed input. Under bracketed paste `term.paste('')` sends an empty bracketed paste and without it nothing; the listeners send nothing for an empty clipboard.
+`term.paste(text)` and the widget's own `paste` and `insertFromPaste` listeners send a paste's line ends as Enter sends them (each `\r\n` and `\n` becomes `\r`, bracketed or not) and then encode the text as `encodePaste` does. Either way the paste scrolls the viewport to the bottom, and the next write paints at once, as after typed input. Under bracketed paste `term.paste('')` sends an empty bracketed paste and without it nothing; the listeners send nothing for an empty clipboard. The `insertFromPaste` listener reads the input's `data` alone: an input that carries its text only in `dataTransfer` sends nothing, so an embedder that takes such inputs reads `dataTransfer` in a listener of its own.
 
 ## Links
 
