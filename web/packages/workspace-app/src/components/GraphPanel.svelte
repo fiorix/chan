@@ -1638,7 +1638,6 @@
     // A whole fetch reads every change made before it, and every opened
     // directory the tree draws.
     spineChanges = new Set();
-    readOpenedOnShow = false;
     spineAskPending.clear();
     // The first spine is drawn as its levels land, at most every
     // SPINE_DRAW_MS after the root's. A later one replaces the drawn spine
@@ -1646,7 +1645,8 @@
     const first = spine === NO_GRAPH;
     const read: SpineRead = { nodes: new Map(), edges: [], held: new Set() };
     const dirs = openedSpineDirs();
-    spineListing = new Set(dirs);
+    const listed: ReadonlySet<string> = new Set(dirs);
+    spineListing = listed;
     // Up to SPINE_READS_AHEAD levels are asked for at once and laid down in
     // order, parents first.
     const reads: Array<ReturnType<typeof fetchSpineLevel>> = [];
@@ -1693,7 +1693,6 @@
       // or failed it. Any other was not drawn when the list was taken; it is
       // asked again at its next opening or, opened since, by the landing's
       // read below over the listing cap.
-      const listed = new Set(dirs);
       for (const dir of spineAsked) if (!listed.has(dir)) spineAsked.delete(dir);
       rootGone = false;
       landed = true;
@@ -1711,12 +1710,13 @@
     // the listing cap taken since read none: one opened since is read now,
     // or, since a hidden tab fetches nothing, once the tab is shown again.
     // When taking its changes above began another whole fetch, that one
-    // reads them. Under an answer of the whole tree nothing is read, which
-    // spares each landing a pass over the shared graph's nodes: that answer
-    // holds an opened folder's level unless it shows the folder empty, and
-    // an empty one is asked at its opening, or, when only this fetch brought
-    // its node, at the next opening or depth change.
-    if (landed && seq === spineSeq && (kept ?? taken)?.tree != null) {
+    // reads them, and this read asks for nothing while it runs. Under an
+    // answer of the whole tree nothing is read, which spares each landing a
+    // pass over the shared graph's nodes: that answer holds an opened
+    // folder's level unless it shows the folder empty, and an empty one is
+    // asked at its opening, or, when only this fetch brought its node, at
+    // the next opening or depth change.
+    if (landed && (kept ?? taken)?.tree != null) {
       if (visible) loadOpenedChildren(true);
       else readOpenedOnShow = true;
     }
@@ -2344,8 +2344,8 @@
       // Shown again after changes it missed: take them.
       untrack(takeSpineChanges);
     }
-    // A whole fetch begun above clears this, since it reads every opened
-    // directory the tree draws.
+    // A whole fetch begun above reads every opened directory the tree
+    // draws, so this read asks for nothing while it runs.
     if (readOpenedOnShow) {
       readOpenedOnShow = false;
       untrack(() => loadOpenedChildren(true));
