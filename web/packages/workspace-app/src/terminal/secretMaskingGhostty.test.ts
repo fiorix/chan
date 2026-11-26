@@ -669,12 +669,13 @@ describe("ghostty secret masking over the pinned build", () => {
     }
   });
 
-  test("the mask is the widget's one mask layer, and the renderer keeps its own render", async () => {
+  test("the mask is the widget's one mask layer, and the masker replaces no member of the terminal", async () => {
     const screen = await pinnedTerminal();
-    const render = screen.term.renderer!.render;
+    const own = screen.term as unknown as Record<string, unknown>;
+    const before = Object.getOwnPropertyNames(own).map((name) => [name, own[name]] as const);
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
-    expect(screen.term.renderer!.render, "the renderer's render is not replaced").toBe(render);
-    expect(Object.hasOwn(screen.term.renderer!, "render")).toBe(false);
+    expect(Object.getOwnPropertyNames(own), "the terminal's own members").toEqual(before.map(([name]) => name));
+    for (const [name, value] of before) expect(own[name], `the terminal's ${name}`).toBe(value);
     expect(() => screen.term.addPaintLayer({ order: "mask", paint() {} }), "the mask is taken").toThrow(/one mask/);
     masker.setEnabled(false);
     const remove = screen.term.addPaintLayer({ order: "mask", paint() {} });

@@ -619,7 +619,7 @@ test("the VT reads current renderer metrics and sends a resize reply to its own 
   expect(observed.hosts).toHaveLength(1);
   const host = observed.hosts[0]!;
   expect(host.cellSize?.()).toMatchObject({ width: 8, height: 19 * 1.2 });
-  vi.spyOn(term.renderer!, "getMetrics").mockReturnValue({ ...term.renderer!.getMetrics(), width: 10, height: 20 });
+  vi.spyOn(term, "getMetrics").mockReturnValue({ ...term.getMetrics()!, width: 10, height: 20 });
   expect(host.cellSize?.()).toMatchObject({ width: 10, height: 20 });
   host.onResizeReply?.("\x1b[48;30;100;600;1000t");
   expect(inputs(socket)).toEqual(["\x1b[48;30;100;600;1000t"]);
