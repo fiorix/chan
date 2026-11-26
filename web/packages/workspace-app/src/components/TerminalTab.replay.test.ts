@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 //
-// A replay the socket cut short, on the real widget and vendored core: what
-// the next attach's replay keeps of the screen and its history, and the
-// keyboard protocol the reset before it puts back.
+// A fresh view's replay the socket cut short, on the real widget and
+// vendored core: what the next attach's replay keeps of the screen and its
+// history, and the keyboard protocol the reset before it puts back. A cut
+// replay that continued a view's screen resumes from it instead, which
+// TerminalTab.ghosttyRedial.test.ts covers.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -31,22 +33,28 @@ function lines(term: Terminal): string[] {
   return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
 }
 
+/// The tab dials again after `socket` ends inside the first replay of a
+/// fresh view, which continued no screen, and asks for the whole ring.
+async function redialedAfterCut(socket: TerminalSocket) {
+  const before = TerminalSocket.all.length;
+  socket.close();
+  await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
+  expect(TerminalSocket.all, "a redial after the close").toHaveLength(before + 1);
+  const next = TerminalSocket.all.at(-1)!;
+  const dial = new URL(next.url, "http://localhost").searchParams;
+  expect([dial.get("since"), dial.get("generation")], "the redial asks for the whole ring").toEqual(["0", null]);
+  return next;
+}
+
+/// A reloaded tab whose first replay the socket cut after the history.
 async function cut() {
   const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
   const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
   const first = TerminalSocket.all.at(-1)!;
-  await attach(first, { id: SESSION, generation: 3, seq: HISTORY.length, replay_bytes: HISTORY.length });
-  await output(first, HISTORY);
-  await receive(first, READY);
-  first.close();
-  await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
-  const second = TerminalSocket.all.at(-1)!;
-  await attach(second, { id: SESSION, generation: 3, seq: 80, replay_bytes: 10 });
-  await output(second, " partial");
-  second.close();
-  await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
-  expect(TerminalSocket.all, "a redial after each close").toHaveLength(3);
-  return { tab: tab!, term, socket: TerminalSocket.all.at(-1)! };
+  const replay = HISTORY + " partial";
+  await attach(first, { id: SESSION, generation: 3, seq: replay.length + 2, replay_bytes: replay.length + 2 });
+  await output(first, replay);
+  return { tab: tab!, term, socket: await redialedAfterCut(first) };
 }
 
 beforeEach(() => {
@@ -112,30 +120,33 @@ describe("a cut replay on the real parser", () => {
   });
 
   test("the reset parser restores negotiated keyboard modes before replay bytes", async () => {
-    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    // Protocol negotiation predates the ring that a redial can replay, and
+    // the tab carries it across a reload.
+    const [negotiating] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    await mountGhosttyTerminal(TerminalTab, negotiating!);
+    const initial = JSON.parse(JSON.stringify(negotiating!.keyboardProtocol));
+    const live = TerminalSocket.all.at(-1)!;
+    await attach(live, { id: SESSION, generation: 3, seq: 0, replay_bytes: 0 });
+    await receive(live, READY);
+    await output(live, "\x1b[>4;2m\x1b[>5u");
+    const before = JSON.parse(JSON.stringify(negotiating!.keyboardProtocol));
+    expect(before, "the program negotiated its keyboard modes").not.toEqual(initial);
+    resetTerminals();
+    const [tab] = seatTerminals([
+      terminalTab({ terminalSessionId: SESSION, keyboardProtocol: JSON.parse(JSON.stringify(before)) }),
+    ]);
     await mountGhosttyTerminal(TerminalTab, tab!);
     const protocol = tab!.keyboardProtocol!;
-    const initial = JSON.parse(JSON.stringify(protocol));
+    expect(JSON.parse(JSON.stringify(protocol)), "fixture: the reloaded tab carries them").toEqual(before);
     const first = TerminalSocket.all.at(-1)!;
-    await attach(first, { id: SESSION, generation: 3, seq: 0, replay_bytes: 0 });
-    await receive(first, READY);
-    // Protocol negotiation predates the ring that a redial can replay.
-    await output(first, "\x1b[>4;2m\x1b[>5u");
-    const before = JSON.parse(JSON.stringify(protocol));
-    expect(before, "the program negotiated its keyboard modes").not.toEqual(initial);
-    first.close();
-    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
-    const second = TerminalSocket.all.at(-1)!;
-    await attach(second, { id: SESSION, generation: 3, seq: 80, replay_bytes: 20 });
-    await output(second, "\x1b[>1u partial");
+    await attach(first, { id: SESSION, generation: 3, seq: 80, replay_bytes: 20 });
+    await output(first, "\x1b[>1u partial");
     expect(JSON.parse(JSON.stringify(protocol)), "the cut replay pushed a mode").not.toEqual(before);
-    second.close();
-    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MAX_MS);
-    const third = TerminalSocket.all.at(-1)!;
-    await attach(third, { id: SESSION, generation: 3, seq: 80, replay_bytes: 13 });
-    await output(third, "retained ring");
-    await output(third, MODES);
-    await receive(third, READY);
+    const second = await redialedAfterCut(first);
+    await attach(second, { id: SESSION, generation: 3, seq: 80, replay_bytes: 13 });
+    await output(second, "retained ring");
+    await output(second, MODES);
+    await receive(second, READY);
     expect(tab!.keyboardProtocol, "handlers retain their state object").toBe(protocol);
     expect(JSON.parse(JSON.stringify(protocol)), "negotiated modes survive parsing RIS").toEqual(before);
   });

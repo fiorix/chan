@@ -196,25 +196,41 @@ export async function mountRealTerminal(component: Component<any>) {
   const [tab] = seatTerminals([terminalTab({ terminalSessionId: env.CHAN_REPLAY_SESSION! })]);
   const target = document.createElement("div");
   document.body.append(target);
-  const instance = mount(component, { target, props: { tab, paneId: "terminal-test-pane", side: "a", active: true, focused: true } });
-  await tick();
-  let term: Terminal;
-  let socket: ReplaySocket;
-  try {
-    // The widget dials once it has opened. jsdom lays out no host for the
-    // tab to fit, so the widget keeps its 80 by 24 grid, the fixture PTY's.
-    term = await seatedGhostty(target);
-    if (term.cols !== 80 || term.rows !== 24) throw new Error(`the terminal opened at ${term.cols} by ${term.rows}, not 80 by 24`);
-    socket = await ReplaySocket.dial(1);
-  } catch (error) { await unmount(instance); target.remove(); throw error; }
-  return { tab, term, socket, async close() {
-    ReplaySocket.acknowledge = null;
-    await unmount(instance);
-    for (const peer of ReplaySocket.all) if (!peer.closed) peer.disconnect();
-    await Promise.all(ReplaySocket.all.map((peer) => until(`closed ${peer.connection}`, () => peer.closed ? true : undefined)));
-    target.remove();
-    globalThis.fetch = networkFetch;
-  } };
+  let instance: Record<string, unknown>;
+  /// Mount the tab and wait for its widget and the dial it makes.
+  async function opened() {
+    const ordinal = ReplaySocket.all.length + 1;
+    instance = mount(component, { target, props: { tab, paneId: "terminal-test-pane", side: "a", active: true, focused: true } });
+    await tick();
+    try {
+      // The widget dials once it has opened. jsdom lays out no host for the
+      // tab to fit, so the widget keeps its 80 by 24 grid, the fixture PTY's.
+      const term = await seatedGhostty(target);
+      if (term.cols !== 80 || term.rows !== 24) throw new Error(`the terminal opened at ${term.cols} by ${term.rows}, not 80 by 24`);
+      return { term, socket: await ReplaySocket.dial(ordinal) };
+    } catch (error) { await unmount(instance); target.remove(); throw error; }
+  }
+  const mounted = { tab, ...(await opened()),
+    /// The tab's component goes and a new one opens on the same tab, as the
+    /// tab's Retry after a drawing failure does. The tab keeps its session
+    /// and its keyboard protocol object, so its widget is new and its first
+    /// dial asks for the whole ring. A page reload dials the same way but is
+    /// not this: it restores the protocol from the session's saved snapshot
+    /// into a new object, without its push stacks. Returns once that dial is
+    /// made; `term` and `socket` are the new widget's.
+    async remount() {
+      await unmount(instance);
+      Object.assign(mounted, await opened());
+    },
+    async close() {
+      ReplaySocket.acknowledge = null;
+      await unmount(instance);
+      for (const peer of ReplaySocket.all) if (!peer.closed) peer.disconnect();
+      await Promise.all(ReplaySocket.all.map((peer) => until(`closed ${peer.connection}`, () => peer.closed ? true : undefined)));
+      target.remove();
+      globalThis.fetch = networkFetch;
+    } };
+  return mounted;
 }
 
 export function save(name: string, value: unknown) {
