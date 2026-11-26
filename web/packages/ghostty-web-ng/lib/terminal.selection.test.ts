@@ -252,7 +252,7 @@ describe('tracked selection lifetime', () => {
     expect(term.getSelectionRange()).toBeNull();
   });
 
-  test('find writes replace tracked endpoints, follow reflow and release on direct clear', async () => {
+  test('endpoints written through ./internal replace tracked cells, follow reflow and release on direct clear', async () => {
     const { term } = await open('0123456789abcdefghijklmnopqrstuvwxyz', 20, 6);
     term.selectAll();
     const tracked = trackedCells(term);
@@ -424,7 +424,7 @@ describe('public selection ranges', () => {
     expect(clipboard).not.toHaveBeenCalled();
   });
 
-  test('find can still write and read plain anchors that paint and format', async () => {
+  test('plain anchors written and read through ./internal paint and format', async () => {
     const { term } = await open('hello');
     const manager = widgetInternals(term).selectionManager!;
     const endpoints = selectionInternals(manager);
