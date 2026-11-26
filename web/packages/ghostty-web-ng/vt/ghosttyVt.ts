@@ -550,23 +550,35 @@ export type VtHost = {
   onResizeReply: (data: string) => void;
 };
 
+/// Plumbing `GhosttyVt` shares with each `VtTerminal` it creates without
+/// exposing callback table indices or registration on the public class.
+type VtTerminalOwner = {
+  readonly host?: VtHost;
+  readonly writePtyCallback: number;
+  readonly deviceAttributesCallback: number;
+  encodePaste(data: string, bracketed: boolean): string;
+  register(handle: number, onReply: (ptr: number, len: number) => void): void;
+  unregister(handle: number): void;
+};
+
 /// The core ghostty-web's `Terminal` takes as its `ghostty` option.
 export class GhosttyVt {
   readonly #wasm: VtWasm;
-  readonly #terminals = new Map<number, VtTerminal>();
-  readonly writePtyCallback: number;
-  readonly deviceAttributesCallback: number;
+  readonly #replySinks = new Map<number, (ptr: number, len: number) => void>();
+  readonly #writePtyCallback: number;
+  readonly #deviceAttributesCallback: number;
+  readonly #terminalOwner: VtTerminalOwner;
 
   constructor(instance: WebAssembly.Instance, readonly host?: VtHost) {
     this.#wasm = new VtWasm(instance);
-    this.writePtyCallback = this.#wasm.addFunction(
+    this.#writePtyCallback = this.#wasm.addFunction(
       (terminal, _userdata, data, len) => {
-        this.#terminals.get(terminal >>> 0)?.queueReply(data >>> 0, len >>> 0);
+        this.#replySinks.get(terminal >>> 0)?.(data >>> 0, len >>> 0);
       },
       4,
       false,
     );
-    this.deviceAttributesCallback = this.#wasm.addFunction(
+    this.#deviceAttributesCallback = this.#wasm.addFunction(
       (_terminal, _userdata, out) => {
         writeDeviceAttributes(this.#wasm, out >>> 0);
         return 1;
@@ -574,6 +586,18 @@ export class GhosttyVt {
       3,
       true,
     );
+    this.#terminalOwner = {
+      host: this.host,
+      writePtyCallback: this.#writePtyCallback,
+      deviceAttributesCallback: this.#deviceAttributesCallback,
+      encodePaste: (data, bracketed) => this.encodePaste(data, bracketed),
+      register: (handle, onReply) => {
+        this.#replySinks.set(handle, onReply);
+      },
+      unregister: (handle) => {
+        this.#replySinks.delete(handle);
+      },
+    };
   }
 
   createKeyEncoder(): VtKeyEncoder {
@@ -613,15 +637,7 @@ export class GhosttyVt {
   }
 
   createTerminal(cols = 80, rows = 24, config?: VtTerminalConfig): VtTerminal {
-    return new VtTerminal(this.#wasm, this, cols, rows, config);
-  }
-
-  register(handle: number, terminal: VtTerminal): void {
-    this.#terminals.set(handle, terminal);
-  }
-
-  unregister(handle: number): void {
-    this.#terminals.delete(handle);
+    return new VtTerminal(this.#wasm, this.#terminalOwner, cols, rows, config);
   }
 }
 
@@ -716,7 +732,7 @@ export class VtTerminal {
   }
 
   readonly #wasm: VtWasm;
-  readonly #owner: GhosttyVt;
+  readonly #owner: VtTerminalOwner;
   #handle: number;
   #renderState: number;
   #rowIterator: number;
@@ -776,7 +792,7 @@ export class VtTerminal {
   readonly #cellOwner: TrackedCellOwner;
   readonly #resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
 
-  constructor(wasm: VtWasm, owner: GhosttyVt, cols: number, rows: number, config?: VtTerminalConfig) {
+  constructor(wasm: VtWasm, owner: VtTerminalOwner, cols: number, rows: number, config?: VtTerminalConfig) {
     this.#wasm = wasm;
     this.#owner = owner;
     this.#_cols = cols;
@@ -790,7 +806,7 @@ export class VtTerminal {
     const fn = wasm.fn;
     this.#scratch = wasm.alloc(SCRATCH.size);
     this.#handle = wasm.newHandle((slot) => fn.ghostty_terminal_new(0, slot, cols, rows), "terminal");
-    owner.register(this.#handle, this);
+    owner.register(this.#handle, (ptr, len) => this.#queueReply(ptr, len));
     this.#renderState = wasm.newHandle((slot) => fn.ghostty_render_state_new(0, slot), "render state");
     this.#rowIterator = wasm.newHandle((slot) => fn.ghostty_render_state_row_iterator_new(0, slot), "row iterator");
     this.#rowCells = wasm.newHandle((slot) => fn.ghostty_render_state_row_cells_new(0, slot), "row cells");
@@ -1248,7 +1264,7 @@ export class VtTerminal {
   // Replies to the program (DSR, DA, mode reports, ...)
   // ------------------------------------------------------------------
 
-  queueReply(ptr: number, len: number): void {
+  #queueReply(ptr: number, len: number): void {
     const reply = this.#wasm.bytes().slice(ptr, ptr + len);
     if (isColorReport(reply) || isVersionReport(reply) || isKittyKeyboardReport(reply)) return;
     this.#replies.push(reply);
