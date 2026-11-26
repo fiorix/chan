@@ -31,7 +31,7 @@ import {
   resetGraphServer,
   settle,
 } from "../__tests__/graphPanel";
-import { invalidateGraph, noteGraphChanged } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { graphReloadSignal } from "../state/store.svelte";
@@ -86,6 +86,28 @@ async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement
   await settle();
   return { pane, panels: () => [...target.querySelectorAll<HTMLElement>(".graph-tab")] };
 }
+
+/// A pane with graph tabs one and two, two active with the root open.
+async function renderPaneOnTwo(): Promise<LeafNode> {
+  layout.nodes = {
+    [GRAPH_PANE]: {
+      kind: "leaf",
+      id: GRAPH_PANE,
+      tabs: [graphTab({ id: "one" }), graphTab({ id: "two", expanded: { "": true } })],
+      activeTabId: "two",
+    },
+  };
+  layout.rootId = GRAPH_PANE;
+  layout.activePaneId = GRAPH_PANE;
+  const pane = layout.nodes[GRAPH_PANE] as LeafNode;
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane } }) as Record<string, unknown>);
+  await settle();
+  return pane;
+}
+
+const levelReads = (path: string): number => graphServer.fsGraphCalls.filter((call) => call.path === path).length;
 
 describe("graph tabs in a pane", () => {
   test("stay mounted; only the active one is shown", async () => {
@@ -377,6 +399,68 @@ describe("graph tabs in a pane", () => {
     await settle();
     expect(reads("a")).toBe(1);
     expect([...two!.visibleNodeIds]).toContain("a/x.md");
+  });
+
+  test("a whole spine fetch that lands while its tab is hidden reads a folder opened during it once the tab is shown, not before", async () => {
+    // An answer of the whole tree: `a` holds `a/x.md` and the empty `a/b`.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.file("a/x.md")],
+      edges: [
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "directory:a/b", "contains"),
+        g.edge("directory:a", "a/x.md", "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md")],
+    };
+    const pane = await renderPaneOnTwo();
+    const [, two] = canvas.all;
+    const tab = pane.tabs[1] as GraphTab;
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      // A change that names no path fetches the spine whole, held at the
+      // root, its list of levels taken before `a` opens.
+      graphReloadSignal.paths = [];
+      graphReloadSignal.nonce += 1;
+      await new Promise((r) => setTimeout(r, 400));
+      await settle();
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      two!.onSelect("directory:a");
+      await settle(2);
+      two!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+      graphServer.view = {
+        nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+        edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+      };
+      graphServer.tree = "folders";
+      await refreshGraph();
+      await settle();
+      expect(graphData.tree).toBe("folders");
+      expect(levelReads("a"), "taken while the fetch is in flight").toBe(0);
+
+      pane.activeTabId = "one";
+      await settle();
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    const hidden = levelReads("a");
+
+    pane.activeTabId = "two";
+    await settle(20);
+    expect({ hidden, shown: levelReads("a"), drawsFile: [...two!.visibleNodeIds].includes("a/x.md") }).toEqual({
+      hidden: 0,
+      shown: 1,
+      drawsFile: true,
+    });
   });
 
   test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {
