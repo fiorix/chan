@@ -2539,6 +2539,52 @@ describe("the workspace tree", () => {
   });
 
   /// `p` and `a` are open and read. A save in `p` patches it; while that
+  /// read is held `p/c` opens, so its ask waits behind the patch. Once `p`'s
+  /// level lands, `p/c`'s own read is held, `p/c` is closed and opened
+  /// again, and then `p/c` leaves the disk before its held read resolves.
+  test("a folder reopened while its own queued read is held, which finds it gone, is read once, over the listing cap", async () => {
+    serveParentAndChild();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true, p: true, a: true } }));
+    let releaseParent!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (releaseParent = resolve));
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => (releaseChild = resolve));
+    const seen: Record<string, number | boolean> = {};
+    try {
+      await changeNames(["p/f.md"]);
+      seen.p = levelReads("p");
+      await doubleClick("directory:p/c");
+      seen.opened = tab.expanded["p/c"] === true;
+      graphServer.onFsGraph = (request) => {
+        if (request.path === "p/c") graphServer.fsGate = childGate;
+      };
+      releaseParent();
+      await settle(20);
+      seen.heldChild = levelReads("p/c");
+      graphServer.onFsGraph = null;
+      await doubleClick("directory:p/c");
+      await doubleClick("directory:p/c");
+      seen.reopened = tab.expanded["p/c"] === true;
+      graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => !n.path.startsWith("p/c"));
+      graphServer.fs.edges = graphServer.fs.edges.filter((e) => !e.target.startsWith("p/c"));
+    } finally {
+      graphServer.onFsGraph = null;
+      graphServer.fsGate = null;
+      releaseParent();
+      releaseChild();
+    }
+    await settle(30);
+    expect({ ...seen, child: levelReads("p/c"), root: levelReads("") }).toEqual({
+      p: 2,
+      opened: true,
+      heldChild: 1,
+      reopened: true,
+      child: 1,
+      root: 1,
+    });
+  });
+
+  /// `p` and `a` are open and read. A save in `p` patches it; while that
   /// read is held `p/c` opens, so its ask waits behind the patch, and a
   /// whole fetch begins, which drops both patches and reads `p/c`. `p/c`
   /// then leaves the disk, which a save in `p` finds, and comes back with
