@@ -343,10 +343,12 @@ if (caseName === "attach-windows") test("attach cuts preserve complete history a
     const alternateVariants: Array<{ name: string; cuts: Array<{ dial: Dial; boundary: string; frames?: number }>; recovery: Dial }> = [
       { name: "alternate-before-session", cuts: [{ dial: "redial", boundary: "before-session" }], recovery: "redial" },
       // Only a fresh dial gets the prelude and the reassert, so the counted
-      // cuts follow a redial cut after its session.
-      { name: "alternate-after-prelude", cuts: [{ dial: "redial", boundary: "after-session" },
+      // cuts follow a redial cut before its ready: the one boundary that
+      // reads everything the redial gets between its session and its ready
+      // and still leaves the page to dial fresh.
+      { name: "alternate-after-prelude", cuts: [{ dial: "redial", boundary: "before-ready" },
         { dial: "fresh", boundary: "after-replay-frame", frames: 1 }], recovery: "fresh" },
-      { name: "alternate-after-modes", cuts: [{ dial: "redial", boundary: "after-session" },
+      { name: "alternate-after-modes", cuts: [{ dial: "redial", boundary: "before-ready" },
         { dial: "fresh", boundary: "after-replay-frame", frames: 2 }], recovery: "fresh" },
       { name: "alternate-before-ready", cuts: [{ dial: "redial", boundary: "before-ready" }], recovery: "fresh" },
       { name: "alternate-after-ready", cuts: [{ dial: "redial", boundary: "after-ready" }], recovery: "redial" },
