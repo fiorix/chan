@@ -11,6 +11,7 @@
  */
 
 import { EventEmitter } from './event-emitter';
+import { registerSelectionInternals } from './internal';
 import { copiedText } from '../vt/ghosttyCopy';
 import { drawnWrapAbove, scrollbackAcrossDrawnWraps, textAcrossDrawnWraps } from './drawn-wraps';
 import { VtCells, type VtCell, type VtTerminal, type VtTrackedCell } from '../vt/ghosttyVt';
@@ -65,6 +66,17 @@ function assertIntegerRange(range: SelectionRange): void {
 // ============================================================================
 
 export class SelectionManager {
+  // The package's white-box tests write and read the endpoints through
+  // ./internal.
+  static {
+    registerSelectionInternals((manager) => ({
+      get start() { return manager.selectionStart; },
+      set start(anchor) { manager.selectionStart = anchor; },
+      get end() { return manager.selectionEnd; },
+      set end(anchor) { manager.selectionEnd = anchor; },
+    }));
+  }
+
   private terminal: Terminal;
   private renderer: CanvasRenderer;
   private wasmTerm: VtTerminal;
@@ -76,8 +88,9 @@ export class SelectionManager {
   private endCell: VtTrackedCell | null = null;
   private selectionOnAlternateScreen = false;
 
-  // Find assigns these properties directly. Each assignment replaces that
-  // endpoint's reference; reads expose its current absolute coordinates.
+  // Every writer of an endpoint (selection by API, by pointer, select-all)
+  // assigns it here: each assignment replaces that endpoint's tracked cell,
+  // and a read resolves it to its current absolute coordinates.
   private get selectionStart(): SelectionAnchor | null {
     this.syncSelection();
     return this.startAnchor ? { ...this.startAnchor } : null;

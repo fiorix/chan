@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells, VtTerminal } from '../vt/ghosttyVt';
 import { terminalInternals } from '../vt/internal';
+import { selectionInternals } from './internal';
+import type { SelectionManager } from './selection-manager';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -256,17 +258,17 @@ describe('tracked selection lifetime', () => {
     term.selectAll();
     const tracked = trackedCells(term);
     const previous = [...tracked];
-    const manager = (term as unknown as { selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null } }).selectionManager;
-    manager.selectionStart = { col: 2, absoluteRow: 0 };
-    manager.selectionEnd = { col: 7, absoluteRow: 1 };
+    const manager = selectionInternals((term as unknown as { selectionManager: SelectionManager }).selectionManager);
+    manager.start = { col: 2, absoluteRow: 0 };
+    manager.end = { col: 7, absoluteRow: 1 };
     expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
     term.resize(12, 6);
     expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
-    expect(manager.selectionEnd).toEqual({ col: 3, absoluteRow: 2 });
+    expect(manager.end).toEqual({ col: 3, absoluteRow: 2 });
     expect(previous.map((cell) => cell.point())).toEqual([null, null]);
     expect(tracked.size).toBe(2);
-    manager.selectionStart = null;
-    manager.selectionEnd = null;
+    manager.start = null;
+    manager.end = null;
     expect(term.getSelectionRange()).toBeNull();
     expect(tracked.size).toBe(0);
   });
@@ -425,10 +427,11 @@ describe('public selection ranges', () => {
 
   test('find can still write and read plain anchors that paint and format', async () => {
     const { term } = await open('hello');
-    const manager = (term as unknown as { selectionManager: { selectionStart: Anchor; selectionEnd: Anchor; getSelectionCoords(): unknown } }).selectionManager;
-    manager.selectionStart = { col: 1, absoluteRow: 0 };
-    manager.selectionEnd = { col: 3, absoluteRow: 0 };
-    expect(manager.selectionStart).toEqual({ col: 1, absoluteRow: 0 });
+    const manager = (term as unknown as { selectionManager: SelectionManager }).selectionManager;
+    const endpoints = selectionInternals(manager);
+    endpoints.start = { col: 1, absoluteRow: 0 };
+    endpoints.end = { col: 3, absoluteRow: 0 };
+    expect(endpoints.start).toEqual({ col: 1, absoluteRow: 0 });
     expect(manager.getSelectionCoords()).toEqual({ startCol: 1, startRow: 0, endCol: 3, endRow: 0 });
     expect(term.getSelection()).toBe('ell');
   });
