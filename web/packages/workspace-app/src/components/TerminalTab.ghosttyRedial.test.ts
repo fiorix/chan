@@ -459,3 +459,59 @@ describe("a redial after a socket ended inside a replay that continued the view"
     expect(dialed(next).since, "the redial echoes the position the view parsed").toBe(String(VIEW_AT + cut));
   });
 });
+
+describe("a redial whose answer does not continue the view", () => {
+  /// Twenty rows of a program the view never saw.
+  const NEW_ROWS = Array.from({ length: 20 }, (_, i) => `new ${i + 1}\r\n`).join("");
+
+  function normalRows(term: Parameters<typeof ghosttyMode>[0]) {
+    const buffer = term.buffer.normal;
+    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+  }
+
+  function newRowsShown(term: Parameters<typeof ghosttyMode>[0]) {
+    const rows = normalRows(term);
+    return Array.from({ length: 20 }, (_, i) => rows.filter((row) => row === `new ${i + 1}`).length);
+  }
+
+  test("across a restart writes the new generation's whole replay", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const next = await redialed(socket, cursor);
+    // The session restarted while the socket was down: the reset ahead of
+    // the new life's session frame, then its whole ring.
+    await output(next, "\x1bc");
+    await receive(next, { ...session(NEW_ROWS.length, 0, NEW_ROWS.length), generation: GENERATION + 1 });
+    await output(next, NEW_ROWS);
+    await receive(next, { type: "ready", cols: 80, rows: 24 });
+    expect(newRowsShown(term), "every row of the new life once").toEqual(Array(20).fill(1));
+  });
+
+  test("answered by another session writes that session's whole replay", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const next = await redialed(socket, cursor);
+    await receive(next, { ...session(NEW_ROWS.length, 0, NEW_ROWS.length), id: "sess-replacement" });
+    await output(next, NEW_ROWS);
+    await receive(next, { type: "ready", cols: 80, rows: 24 });
+    expect(newRowsShown(term), "every row of the new session once").toEqual(Array(20).fill(1));
+  });
+
+  test("from cursor 0 is cut before its prelude and dials again for the whole screen", async () => {
+    // The view attached before its program wrote anything.
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    socket.onopen?.();
+    await receive(socket, session(0, 0, 0));
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    const second = await redialed(socket, 0);
+    // The program entered its alternate screen while the socket was down.
+    const program = { at: 0, written: "\x1b[?1049h\x1b[1;1Hdrawn", ringStart: 0, alternate: true };
+    await deliver(second, served(second, program), 0);
+    const third = await redialedAfterCut(second);
+    await deliver(third, served(third, program));
+    expect(ghosttyAlternateScreen(term), "the attach prelude put the view on the program's screen").toBe(true);
+    expect(dialed(third), "the redial asks for the whole screen").toEqual({
+      session: SESSION, since: "0", generation: null, ack: "1",
+    });
+  });
+});
