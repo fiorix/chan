@@ -2132,6 +2132,121 @@ async fn a_hidden_live_redial_asks_for_a_redraw_only_for_a_grid_it_missed() {
     );
 }
 
+/// A view that declares no grid on its dial, as a hidden view that adopted
+/// a grid another view broadcast does, did not size the PTY, so a lossless
+/// redial of its live generation asks for the redraw whose resize reports
+/// the grid another view chose while its socket was down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_undeclared_live_redial_hears_a_grid_it_missed() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let (mut shown, _) = rig.attach().await;
+    let id = rig.handle.id().to_owned();
+    let (undeclared, initial, _, _) = dial_until_ready(rig.address, &format!("session={id}")).await;
+    let generation = number(&initial, "generation");
+    let cursor = number(&initial, "seq");
+    assert!(cursor > 0, "fixture: a non-zero cursor");
+    drop(undeclared);
+    let mut watcher = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(&id, None, None)
+        .expect("watch the session");
+    // Both dials asked for a redraw; let their resizes land first.
+    count_resizes(&mut watcher, std::time::Duration::from_secs(1)).await;
+    send(
+        &mut shown,
+        json!({"type": "resize", "cols": 100, "rows": 30}),
+    )
+    .await;
+    bounded("the PTY takes the shown view's grid", async {
+        loop {
+            match watcher.rx.recv().await {
+                Ok(SessionEvent::Resize(size)) if (size.cols, size.rows) == (100, 30) => break,
+                Ok(_) => {}
+                Err(error) => panic!("the watcher may have lost the resize: {error}"),
+            }
+        }
+    })
+    .await;
+    let (mut redial, session, before, _after) = dial_until_ready(
+        rig.address,
+        &format!("session={id}&since={cursor}&generation={generation}"),
+    )
+    .await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        0,
+        "fixture: nothing was lost"
+    );
+    assert_eq!(
+        resizes_heard(&mut redial, std::time::Duration::from_millis(1500)).await,
+        [(100, 30)],
+        "a view that declared no grid is told the grid the PTY took while its socket was down"
+    );
+}
+
+/// A lag recovery sends the PTY's grid ahead of its replay, so a lossless
+/// one asks its program for no redraw even for a view that declared no
+/// grid: the redraw would only wobble the PTY under every attached view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_undeclared_lossless_recovery_asks_for_no_redraw() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
+    let id = rig.handle.id().to_owned();
+    let (mut client, initial, _, _) = dial_until_ready(rig.address, &format!("session={id}")).await;
+    let prefix = b"completed-prefix\n";
+    rig.output(prefix);
+    assert_eq!(next_binary(&mut client).await, prefix);
+    let _pending = rig.block_output().await;
+    rig.handle.resize(pty_size(Some(113), Some(37)));
+    until("co-view resize applied", || {
+        let size = rig.handle.size();
+        (size.cols, size.rows) == (113, 37)
+    })
+    .await;
+    let _flood = rig.flood();
+    finish_blocked_frame(&mut client).await;
+    let mut recovery = None;
+    loop {
+        match next(&mut client).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") => recovery = Some(frame),
+                    Some("ready") if recovery.is_some() => break,
+                    Some("error") => panic!("no terminal error: {frame}"),
+                    _ => {}
+                }
+            }
+            ClientMessage::Binary(_) => {}
+            other => panic!("recovery ended before ready: {other:?}"),
+        }
+    }
+    let recovery = recovery.expect("a recovery session frame");
+    assert_eq!(
+        number(&recovery, "generation"),
+        number(&initial, "generation"),
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&recovery, "missed_bytes"),
+        0,
+        "fixture: a lossless recovery"
+    );
+    let heard = resizes_heard(&mut client, std::time::Duration::from_millis(1500)).await;
+    assert!(
+        heard.is_empty(),
+        "a lossless recovery asks for no redraw: {heard:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_reads() {
     use std::fmt::Write as _;
