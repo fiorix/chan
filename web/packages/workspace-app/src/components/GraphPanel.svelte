@@ -227,7 +227,7 @@
   let spineReload = $state(0);
   /// Directories asked for their level, so one that is empty or gone on
   /// disk is asked once while its parent's level stands. Only a directory a
-  /// patch may read is asked, and none that a whole fetch in flight lists
+  /// patch may read is asked, and none while a whole fetch is in flight
   /// (`loadOpenedChildren`). One the patch then
   /// finds no node of is forgotten, so the first ask after a level brings
   /// its node reads it, except under a parent asked whose level the spine
@@ -243,9 +243,6 @@
   /// read is still to come, so a parent's level landing ahead of it does not
   /// forget their ask. A whole fetch drops the patches queued before it.
   const spineAskPending = new Set<string>();
-  /// The directories the latest whole fetch reads, taken when it began
-  /// (`loadSpine`).
-  let spineListing: ReadonlySet<string> = new Set();
 
   /// A directory asked for whose level the spine does not hold: one a patch
   /// has still to read, or one whose read found it gone.
@@ -273,17 +270,15 @@
   /// of, or one whose parent this ask or one before it asked and the spine
   /// holds no level of (`askedUnread`), since a parent asked is read ahead
   /// of it. Any other (a folder gone from disk, an empty one under a level
-  /// the spine never read) would be skipped, and while a whole fetch is in
-  /// flight asking it would start that fetch again for nothing. The rule
-  /// also admits a folder under a parent whose read found it gone: it is
-  /// asked once, which under an answer of the whole tree, during a whole
-  /// fetch that does not list it, starts that fetch again, and then stays
-  /// asked until a patch reads that parent's level. With no spine yet every
-  /// one is asked, for the fetch that brings their nodes. While a whole
-  /// fetch is in flight, none it lists is asked (`spineListing`): that
-  /// fetch reads its level, and an ask would only start it again. Over the
-  /// listing cap none is asked while one is in flight: its landing reads
-  /// every directory opened since its list was taken (`loadSpine`).
+  /// the spine never read) would be skipped. The rule also admits a folder
+  /// under a parent whose read found it gone: it is asked once and then
+  /// stays asked until a patch reads that parent's level. With no spine yet
+  /// every one is asked, for the fetch that brings their nodes. While a
+  /// whole fetch is in flight nothing is asked under any answer, so no
+  /// opening starts that fetch again: over the listing cap its landing reads
+  /// every directory opened since its list was taken (`loadSpine`), and
+  /// under an answer of the whole tree a folder whose entries only the spine
+  /// carries waits for the next opening or depth change.
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
@@ -292,7 +287,7 @@
   /// opens a level, and the directories it opens above it through this,
   /// leaving a failed one to its retry too.
   function loadOpenedChildren(leaveFailed = false): void {
-    if (spineLoading && (kept ?? taken)?.tree != null) return;
+    if (spineLoading) return;
     const withChildren = new Set<string>();
     if ((kept ?? taken)?.tree == null) {
       for (const n of nodes) {
@@ -303,7 +298,6 @@
     for (const dir of Object.keys(expandedDirs)) {
       if (!dir || !drawsChildren(dir) || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
       if (leaveFailed && spineFailures.has(dir)) continue;
-      if (spineLoading && spineListing.has(dir)) continue;
       missing.push(dir);
     }
     if (missing.length === 0) return;
@@ -320,7 +314,7 @@
     }
     if (reading.size === 0) return;
     for (const dir of reading) spineAsked.add(dir);
-    if (spineRead !== null && !spineLoading && spineError === null) {
+    if (spineRead !== null && spineError === null) {
       for (const dir of reading) spineAskPending.add(dir);
       void patchSpine(reading, { opened: true });
     } else spineReload += 1;
@@ -379,13 +373,12 @@
     }
     // A lowered depth always applies, since it draws less. It opens the
     // directories above `depthDir`, which no read may have reached, and
-    // reads them now. With a whole fetch in flight it leaves them to that
-    // fetch's landing (`loadSpine`), since asking now would start the fetch
-    // again.
+    // reads them now (`loadOpenedChildren` returns while a whole fetch is
+    // in flight).
     depthRaise = null;
     const before = new Set(visibleNodeIds);
     graphState.expanded = openBelow(nodes, expandedDirs, depthDir, value);
-    if (!spineLoading) loadOpenedChildren(true);
+    loadOpenedChildren(true);
     void requestExpansionFitAfterUpdate(depthDir, before);
   }
   /// The depth is the selected node's, so a new selection starts it over:
@@ -396,12 +389,11 @@
       graphState.depth = 1;
       depthDraft = null;
       // A raise under way reads the directories its first pass opened above
-      // its own only once it finishes; one ended here reads them now. With
-      // a whole fetch in flight it leaves them to that fetch's landing
-      // (`loadSpine`), since asking now would start the fetch again.
+      // its own only once it finishes; one ended here reads them now
+      // (`loadOpenedChildren` returns while a whole fetch is in flight).
       if (depthRaise !== null) {
         depthRaise = null;
-        if (!spineLoading) loadOpenedChildren(true);
+        loadOpenedChildren(true);
       }
       depthNote = null;
     }
@@ -1646,7 +1638,6 @@
     const read: SpineRead = { nodes: new Map(), edges: [], held: new Set() };
     const dirs = openedSpineDirs();
     const listed: ReadonlySet<string> = new Set(dirs);
-    spineListing = listed;
     // Up to SPINE_READS_AHEAD levels are asked for at once and laid down in
     // order, parents first.
     const reads: Array<ReturnType<typeof fetchSpineLevel>> = [];
@@ -1714,8 +1705,8 @@
     // answer of the whole tree nothing is read, which spares each landing a
     // pass over the shared graph's nodes: that answer holds an opened
     // folder's level unless it shows the folder empty, and an empty one is
-    // asked at its opening, or, when only this fetch brought its node, at
-    // the next opening or depth change.
+    // asked at its opening, or, when opened during this fetch or brought
+    // only by it, at the next opening or depth change.
     if (landed && (kept ?? taken)?.tree != null) {
       if (visible) loadOpenedChildren(true);
       else readOpenedOnShow = true;
@@ -2185,8 +2176,9 @@
       // The store publishes an answer's mark no later than its view.
       taken = { view, partial, tree: graphData.tree };
       kept = null;
-      // A spine still loading reads them once it lands (`loadSpine`).
-      if (taken.tree != null && spineRead !== null && !spineLoading && spineError === null) loadOpenedChildren(true);
+      // A spine still loading returns in `loadOpenedChildren` and reads
+      // them once it lands (`loadSpine`).
+      if (taken.tree != null && spineRead !== null && spineError === null) loadOpenedChildren(true);
     });
   });
 

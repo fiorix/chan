@@ -3917,9 +3917,9 @@ mod tests {
 
     /// A workspace app whose folders run below the depth the shared graph
     /// asks of its depth-bounded filesystem layer. Its indexed note links a
-    /// second indexed note and an image in the deepest folder, beside a file
-    /// nothing indexes or links, an empty folder, a folder the `.gitignore`
-    /// names and an excluded one.
+    /// second indexed note, an image and an empty folder in the deepest
+    /// folder, beside a file nothing indexes or links, a folder the
+    /// `.gitignore` names and an excluded one.
     fn folder_layer_app() -> GraphRouteApp {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
@@ -3932,7 +3932,10 @@ mod tests {
         put(
             root.path(),
             "notes/index.md",
-            format!("# Index\n\n[[{DEEP}/leaf.md]]\n![pic](../{DEEP}/pic.png)\n").as_bytes(),
+            format!(
+                "# Index\n\n[[{DEEP}/leaf.md]]\n![pic](../{DEEP}/pic.png)\n[empty](../{DEEP}/empty/)\n"
+            )
+            .as_bytes(),
         );
         put(&deep, "leaf.md", b"# Leaf\n");
         put(&deep, "pic.png", b"png");
@@ -4088,8 +4091,11 @@ mod tests {
     // answer for. The tree layer merges every walked folder and joins each
     // file the graph holds to its folder: a merge that finds a file's node,
     // or a folder joined to its parent, classifies nothing, and no folder
-    // the directories-only walk lists is looked up, as a target or above
-    // one. The note's image link is the one target no walk lists.
+    // the directories-only walk lists is looked up, as a target (the note's
+    // link to `{DEEP}/empty`) or above one. The note's image link is the
+    // one target no walk lists. Stopping `ensure_directory_path` at an
+    // already-merged folder saves an in-memory walk to the root and makes
+    // no disk read, so these counters do not count it.
     #[tokio::test]
     async fn over_the_listing_cap_a_graph_load_reads_each_path_once() {
         use super::path_reads::{taken, Read};
