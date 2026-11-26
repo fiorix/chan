@@ -2,8 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells, VtTerminal } from '../vt/ghosttyVt';
 import { terminalInternals } from '../vt/internal';
-import { selectionInternals } from './internal';
-import type { SelectionManager } from './selection-manager';
+import { selectionInternals, widgetInternals } from './internal';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -258,7 +257,7 @@ describe('tracked selection lifetime', () => {
     term.selectAll();
     const tracked = trackedCells(term);
     const previous = [...tracked];
-    const manager = selectionInternals((term as unknown as { selectionManager: SelectionManager }).selectionManager);
+    const manager = selectionInternals(widgetInternals(term).selectionManager!);
     manager.start = { col: 2, absoluteRow: 0 };
     manager.end = { col: 7, absoluteRow: 1 };
     expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
@@ -405,7 +404,7 @@ describe('public selection ranges', () => {
 
   test('selection replacement and clear invalidate the old visible rows', async () => {
     const { term } = await open('first\r\nsecond\r\nthird');
-    const manager = (term as unknown as { selectionManager: { getDirtySelectionRows(): Set<number>; clearDirtySelectionRows(): void } }).selectionManager;
+    const manager = widgetInternals(term).selectionManager!;
     term.setSelection(range(0, 0, 3, 1));
     manager.clearDirtySelectionRows();
     term.setSelection(range(0, 2, 4, 2));
@@ -427,7 +426,7 @@ describe('public selection ranges', () => {
 
   test('find can still write and read plain anchors that paint and format', async () => {
     const { term } = await open('hello');
-    const manager = (term as unknown as { selectionManager: SelectionManager }).selectionManager;
+    const manager = widgetInternals(term).selectionManager!;
     const endpoints = selectionInternals(manager);
     endpoints.start = { col: 1, absoluteRow: 0 };
     endpoints.end = { col: 3, absoluteRow: 0 };

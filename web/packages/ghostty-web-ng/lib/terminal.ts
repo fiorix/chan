@@ -22,6 +22,7 @@ import { parseColor } from './color';
 import { EventEmitter } from './event-emitter';
 import { HighlightsManager } from './highlights';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
+import { registerWidgetInternals } from './internal';
 import type {
   IBufferNamespace,
   IEvent,
@@ -65,6 +66,26 @@ function reportPaintError(error: unknown): void {
 // ============================================================================
 
 export class Terminal {
+  // The package's white-box tests set up and read these through ./internal.
+  static {
+    registerWidgetInternals((term) => ({
+      get canvas() { return term.canvas; },
+      set canvas(canvas) { term.canvas = canvas; },
+      get isOpen() { return term.isOpen; },
+      set isOpen(open) { term.isOpen = open; },
+      get linkDetector() { return term.linkDetector; },
+      set linkDetector(detector) { term.linkDetector = detector; },
+      get targetViewportY() { return term.targetViewportY; },
+      set targetViewportY(target) { term.targetViewportY = target; },
+      get scrollAnimationStartTime() { return term.scrollAnimationStartTime; },
+      set scrollAnimationStartTime(time) { term.scrollAnimationStartTime = time; },
+      get scrollAnimationFrame() { return term.scrollAnimationFrame; },
+      set scrollAnimationFrame(frame) { term.scrollAnimationFrame = frame; },
+      get changeEmitter() { return term.changeEmitter; },
+      get selectionManager() { return term.selectionManager; },
+    }));
+  }
+
   // Public properties (xterm.js compatibility)
   public cols: number;
   public rows: number;
