@@ -8,9 +8,10 @@
 // whatever fallback it has. This check reads every app module, each
 // `.ts`, `.js` and `.svelte` file under `src/` (and the `.mts`, `.cts`,
 // `.mjs` and `.cjs` kin) and the test files beside the app's
-// configuration, through the TypeScript checker, a component as its
-// scripts and the expressions of its markup, and reports, with file and
-// line:
+// configuration, with `src/**/*.d.ts` declaration files in the program's
+// roots, through the TypeScript checker, a component as its `<script
+// module>` followed by its instance `<script>` and the expressions of its
+// markup, and reports, with file and line:
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
 //    module augmentation (`declare module`), `import.meta.glob` pattern or
@@ -18,7 +19,8 @@
 //    other than its export map's entries, by the package's name or by a
 //    relative path with its links resolved (the workspace's
 //    `node_modules/@chan/ghostty-web-ng` is a link to the package, so a
-//    path through it reaches the package's own files);
+//    path through it reaches the package's own files); a template-literal
+//    specifier is read as a glob through the same path check;
 // 2. cast: a cast of a widget value to a type it does not satisfy or to
 //    one that names none of its members (`any`, `unknown`, `object`,
 //    `{}`), and a cast of a value typed by a type parameter to such a
@@ -31,41 +33,47 @@
 //    `Object.hasOwn`, `hasOwnProperty` or `propertyIsEnumerable`, with the
 //    key a literal, one under parentheses or a cast, or a value whose type
 //    is a string literal. A member that only an app module declares on a
-//    widget class, by a module augmentation or a type intersected with the
-//    class, is not public to this rule;
-// 4. patch: a write to a member of a widget object; `Object.assign`,
-//    `defineProperty`, `defineProperties`, `setPrototypeOf`, `freeze`,
-//    `seal` or `preventExtensions`, or `Reflect.set`, `defineProperty`,
-//    `deleteProperty` or `setPrototypeOf`, on one; and any reach of a
-//    widget's prototype: a widget class's `prototype`, or a widget value's
-//    `constructor`, `Object.getPrototypeOf` or `Reflect.getPrototypeOf`
-//    (tests may reach one to read and spy on its public members);
+//    widget class (or a subclass, interface or constrained type parameter
+//    derived from one), by a type-only declaration (an interface or
+//    type-literal member, or a `declare` field) or on an intersection with
+//    the class, is not public to this rule;
+// 4. patch: a write to a member of a widget class instance (skipping
+//    `#private` names and members that only an app subclass's class body
+//    declares); `Object.assign`, `defineProperty`, `defineProperties`,
+//    `setPrototypeOf`, `freeze`, `seal` or `preventExtensions`, or
+//    `Reflect.set`, `defineProperty`, `deleteProperty` or `setPrototypeOf`,
+//    on one; and any reach of a widget class's or subclass's prototype:
+//    its `prototype`, or a widget value's `constructor`,
+//    `Object.getPrototypeOf` or `Reflect.getPrototypeOf` (tests may reach
+//    one to read and spy on its public members);
 // 5. name: the name of one of the widget's implementation members, which
 //    catches what has no widget type to check, such as a duck-typed
 //    parameter;
-// 6. escape: a widget class instance where the program expects a type that
-//    names none of its members (`any`, `unknown`, `object`, `{}`, with or
-//    without `null`): an argument, an initializer, a property value, a
-//    return, a yielded value, an assigned value, an array element, or a
-//    callback's parameter so declared that its caller hands a widget, and
-//    one handed to `Object.getOwnPropertyDescriptors`, which keys each own
-//    property; past it no other rule can follow the value. An Error
-//    subclass is exempt, since errors travel as `unknown` by design and are
-//    read after `instanceof`;
+// 6. escape: a widget class instance (including a subclass, an interface
+//    extending one, an intersection with one, `this`, or a type parameter
+//    constrained to one) where the program expects a type that names none
+//    of its members (`any`, `unknown`, `object`, `{}`, with or without
+//    `null`): an argument, an initializer, a property value, a return, a
+//    yielded value, an assigned value, an array element, or a callback's
+//    parameter so declared that its caller hands a widget, and one handed
+//    to `Object.getOwnPropertyDescriptors`, which keys each own property;
+//    past it no other rule can follow the value. An Error subclass is
+//    exempt, since errors travel as `unknown` by design and are read after
+//    `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
 //    names a member the class keeps private, lacks, or holds as one of its
 //    implementation members, which reads `undefined` once that member is
 //    `#private`; a type with a widget part (a union with another type) is
 //    read through the widget's own declarations, which rules 3 and 5 see.
 //
-// A widget value is one of a type the package declares, of a class that
-// extends one of its classes (`this` in a subclass included), of a type
+// A widget value is one of a type the package declares, of a class or
+// interface that extends one (`this` in a subclass included), of a type
 // parameter constrained to one, or of a type with one as a part. Shipped
 // modules are held to all seven rules, tests to 1, 3 and 4. A dot read of
 // a private member on a widget-typed value is a type error, but
 // `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
 // so rule 3 reads dots as well. Markup is read as the body of a function
-// in the instance script's scope, so a script variable has its declared
+// in the component scripts' scope, so a script variable has its declared
 // type there, as markup sees it after the script assigns it, and a `use:`,
 // `transition:`, `in:`, `out:` or `animate:` directive's value as the
 // argument its function takes.
@@ -90,9 +98,10 @@
 //   function assigned to a function type that takes a widget
 //   (`[term].map((t: { cols: number; isOpen?: boolean }) => t.isOpen)`):
 //   rule 7 reads the values that flow, not the parameters that take them;
-// - a value of a type parameter's type widened into `unknown`, `object` or
-//   `{}` with no cast (`<T>(o: T): unknown => o`), since at the call the
-//   widget meets a parameter of type `T`, not an opaque one;
+// - a value of a type parameter not constrained to a widget class widened
+//   into `unknown`, `object` or `{}` with no cast (`<T>(o: T): unknown =>
+//   o`), since at the call the widget meets a parameter of type `T`, not
+//   an opaque one;
 // - a widget widened with its container (`[term]` held as `readonly
 //   unknown[]`, `{ v: vt }` as `{ readonly v: unknown }`,
 //   `Promise.resolve(term)` as `Promise<unknown>`, or a container cast so),
@@ -123,25 +132,31 @@
 //   by its name or a relative path: an absolute or root-relative path, or
 //   an alias of tsconfig's `paths` or Vite's `resolve.alias` (the app has
 //   none to the package);
-// - in a JavaScript module, a value with no type, which rules 1 and 5
-//   alone can read (`untyped` in `boundaryPlant.js`);
-// - the `.d.ts` files under `src/`, which hold no code: rule 1 does not
-//   read their `declare module` names, though any member they add to a
-//   widget class still reads as lacking under rule 3;
+// - in a JavaScript module, a value with no inferred type (such as an
+//   unannotated parameter), on which rule 5 alone can fire (`untyped` in
+//   `boundaryPlant.js`), and a JSDoc `import()` type inside a comment
+//   (`Internal` in `boundaryPlant.js`);
+// - the `.d.ts` files under `src/`, which are in the program for types
+//   they declare but hold no code: rule 1 does not read their `declare
+//   module` names, though any member they add to a widget class still
+//   reads as lacking under rule 3;
 // - a dynamic import whose specifier is a string literal under
 //   parentheses (`import(("@chan/ghostty-web-ng/lib/internal"))`);
 // - in tests, a `satisfies` inside a cast chain (`(term as unknown)
 //   satisfies unknown as { selectionManager: unknown }`), where rule 3
 //   stops following the casts;
-// - in markup, a name declared in a component's `<script module>` beside
-//   an instance script, or a `$store` read, which has no type there, a
-//   value markup passes to a component's props, which has no contextual
-//   type, and a value typed by a component's `generics` parameters, which
-//   the module this check reads does not declare (`BoundaryGeneric.svelte`).
+// - in markup, a `$store` read, which has no type there, a value markup
+//   passes to a component's props, which has no contextual type, and a
+//   value typed by a component's `generics` parameters, which the module
+//   this check reads does not declare (`BoundaryGeneric.svelte`).
 // Rule 6 also reports a widget kept in a `WeakMap<object>` or a
 // `Set<object>` and never read back as anything else; the app has none.
 // The `scripts/e2e` instruments (the browser checks, the pixel harness)
 // are not app modules: they are read by grep only.
+//
+// This check guards against regressions and does not prove the boundary:
+// a newly found shape that does not defeat a whole rule is named in the
+// list above with a plant rather than adding another special case.
 //
 // Readers that other changes remove are listed as pending, each pinned by
 // the text of the node it reports: a reader more or fewer in a listed
@@ -293,9 +308,9 @@ const PENDING: readonly Pending[] = [];
 type Span = { at: number; from: number; length: number };
 type Range = { start: number; end: number };
 
-/// A module as the program reads it: a `.ts` file whole, or a component's
-/// `<script module>`, or its instance script followed by its markup's
-/// expressions. `spans` lead a module position back to the file's text.
+/// A module as the program reads it: a `.ts` or `.js` file whole, or a
+/// component's scripts followed by its markup's expressions. `spans` lead a
+/// module position back to the file's text.
 type Source = { file: string; rel: string; kind: Kind; text: string; spans: Span[]; original: string };
 
 /// The extensions of the modules TypeScript reads under the app's
@@ -363,15 +378,14 @@ const TEMPLATE_HELPERS = [
   "declare function __boundaryAwait<T>(value: T): Awaited<T>;",
 ].join("\n");
 
-/// A component as modules, from Svelte's own parser: its `<script module>`
-/// when it also has an instance script, then the instance script (or the
-/// module script, or nothing) followed by its markup as the statements of
-/// a function there. Inside a function a script variable has its declared
-/// type, as markup sees it after any assignment, where at the script's top
-/// level the checker would narrow `let term: Terminal | null = null` to
-/// `null`. Each expression is copied as written into the scope the markup
-/// gives it: an each block's item and index, a snippet's parameters, an
-/// await block's value and error, a `{@const}`. A `let:` binding is the
+/// A component as a module, from Svelte's own parser: its `<script module>`
+/// (if any) followed by its instance script (if any) and its markup as the
+/// body of a function there. Inside a function a script variable has its
+/// declared type, as markup sees it after any assignment, where at the
+/// script's top level the checker would narrow `let term: Terminal | null =
+/// null` to `null`. Each expression is copied as written into the scope the
+/// markup gives it: an each block's item and index, a snippet's parameters,
+/// an await block's value and error, a `{@const}`. A `let:` binding is the
 /// slot's and left out, so a name it binds has no type.
 function componentSources(file: string, rel: string, kind: Kind, text: string): Source[] {
   const root = parse(text, { modern: true }) as unknown as {
