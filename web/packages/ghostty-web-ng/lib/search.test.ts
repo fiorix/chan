@@ -900,6 +900,36 @@ describe('widget search', () => {
     expect(search.state).toEqual({ index: 125, total: 241, partial: false });
   });
 
+  // A newer press from no active match that lands at its one-second cap
+  // reads no ordering rule, so the count of entries it waits for is still
+  // unread when the next write takes the window. The write has changed the
+  // core's listing by then, and reading it feeds the core inside the
+  // write, which at the largest history costs a frame's work.
+  test.each([
+    { name: 'a listing a page ahead, its scan running', input: () => paged(1, 4000), cols: 200, rows: 5, partial: true },
+    { name: 'one page in order, its scan complete', input: () => numbered(20_000), cols: 40, rows: 6, partial: false },
+  ])('a write that takes the window reads nothing of the core, $name', async ({ input, cols, rows, partial }) => {
+    const { term } = await create(input(), cols, rows, 10_000_000);
+    const feeds = vi.spyOn(VtSearch.prototype, 'feed');
+    const reads = vi.spyOn(VtSearch.prototype, 'matchAt');
+    const search = searchOf(term);
+    search.step('needle', 'newer');
+    for (let i = 0; i < 200 && !active(term); i++) {
+      now += 16;
+      frame();
+    }
+    expect(active(term), 'the press landed at its cap').toBeDefined();
+    expect(search.state.partial).toBe(partial);
+    expect(search.state.index, 'on a placed index, so the write takes a window').not.toBeNull();
+    feeds.mockClear();
+    reads.mockClear();
+    term.write('\r\nneedle new');
+    expect({ feeds: feeds.mock.calls.length, reads: reads.mock.calls.length }, 'inside the write').toEqual({ feeds: 0, reads: 0 });
+    now += 16;
+    frame();
+    expect(feeds, 'the next frame feeds the write').toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     { name: 'two', input: () => paged(1), rows: 5, steps: 1, from: 236, cut: 118, want: 234, index: 3, total: 120 },
     { name: 'three', input: () => threePaged, rows: 20, steps: 2, from: 474, cut: 224, want: 472, index: 4, total: 230 },

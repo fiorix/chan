@@ -654,12 +654,16 @@ export class SearchOwner {
     // match of the page listed before it, and a match wrapped across the
     // boundary below the first listed page, which the core lists after
     // every page's entries. That holds with the count of the core's
-    // active-area entries unknown, and also once a press has read it and
-    // found the list not yet in position order, which leaves the index it
-    // placed before the read. So the window ends at both newest matches,
-    // the page listed before's and the first page's, on the side away from
-    // the active match.
-    const known = this.complete || (this.head !== null && this.ordered(false));
+    // active-area entries unknown or the rule over it not yet read, and
+    // also once a press has read it and found the list not yet in position
+    // order, which leaves the index it placed before the read. So the
+    // window ends at both newest matches, the page listed before's and the
+    // first page's, on the side away from the active match. It decides from
+    // what placement has read alone: the write that takes it has already
+    // changed the core's listing, and reading that would feed the core
+    // inside the write.
+    const known = this.complete ||
+      (this.head !== null && (this.head === 0 || (this.orderedAt !== null && this.readCursor >= this.orderedAt)));
     const edges = known ? [] : [this.pageAbove, this.firstListed];
     for (const edge of edges) {
       const split = edge ? this.indexOf(edge) : undefined;
