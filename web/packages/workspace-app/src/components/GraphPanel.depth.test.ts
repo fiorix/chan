@@ -2210,6 +2210,33 @@ describe("the workspace tree", () => {
     expect({ start, during }).toEqual({ start: 2, during: 2 });
   });
 
+  /// `a/b` is open under the closed `a` and selected. During a whole fetch
+  /// its depth is lowered to 0, which opens `a`; the fetch's landing reads
+  /// `a` over the cap.
+  test("a depth lowered during a whole spine fetch leaves the folder it opens above to that fetch's landing, over the listing cap", async () => {
+    serveLinkBelowClosedFolder("folders");
+    const { tab, slider } = await selectBelowClosedParent({ "a/b": true });
+    const before = slider.value;
+    const release = await holdWholeFetch();
+    let during = -1;
+    try {
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      await slideTo(slider, 0);
+      expect(tab.expanded.a, "the lowered depth opens the folder above").toBe(true);
+      during = levelReads("");
+    } finally {
+      release();
+    }
+    await settle(30);
+    expect({ before, during, root: levelReads(""), a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({
+      before: "1",
+      during: 2,
+      root: 2,
+      a: 1,
+      drawsX: true,
+    });
+  });
+
   test("the depth reads a double-click on the selected directory", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
