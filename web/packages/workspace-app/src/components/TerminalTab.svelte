@@ -1835,7 +1835,13 @@
           (dialSawSession && frame.id === priorId && frame.generation === serverGeneration);
         // This frame continues the view's screen when the server resumed the
         // non-zero cursor this dial echoed in the live generation, or
-        // recovers this socket's own stream after its `ready`.
+        // recovers this socket's own stream after its `ready`. The frame
+        // does not say so: this is the server's own rule, read again here
+        // (the resume in `get_or_create_for_ws`, crates/chan-library's
+        // `terminal_sessions.rs`, and the live recovery in chan-server's
+        // `routes/terminal.rs`), so a change to when the server resumes a
+        // view changes this expression too, and the redial tests' stand-in
+        // server, which states the same rule.
         const continued =
           frame.id !== priorId
             ? undefined

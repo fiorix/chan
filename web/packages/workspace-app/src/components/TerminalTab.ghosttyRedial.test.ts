@@ -240,7 +240,9 @@ type Program = { at: number; written: string; ringStart: number; alternate: bool
 type Answer = { frame: ReturnType<typeof session>; replay: string; after: string };
 
 /// What the server sends the dial `socket` made (`get_or_create_for_ws`,
-/// `attach_resuming_with_progress` and `send_attach_prelude`): a non-zero
+/// `attach_resuming_with_progress` and `send_attach_prelude`), the rule the
+/// tab's session frame reads again to know whether a replay continues its
+/// view, so the two change together: a non-zero
 /// cursor the live generation proves gets the stream from that cursor, from
 /// the ring's start when the ring has moved past it with the recovery suffix
 /// after; any other dial gets the whole ring on the normal screen, or no
