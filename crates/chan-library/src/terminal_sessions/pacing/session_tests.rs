@@ -529,6 +529,128 @@ fn events_published_once_a_reader_found_no_hold_do_not_hold_an_idle_program() {
     );
 }
 
+#[test]
+fn an_end_of_output_behind_a_full_view_is_reported_at_once() {
+    struct Ended;
+    impl Read for Ended {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+    let session = test_session_with_ring(1024);
+    let attached = attach_acked(&session, None);
+    let progress = attached.output_progress().expect("lease");
+    session.record_output(&[b'x'; 512]);
+    assert_eq!(
+        session.pacing.try_credit(PTY_READ_BYTES),
+        None,
+        "the view is a full window behind"
+    );
+    let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; PTY_READ_BYTES];
+            let read = session.paced_read(&mut Ended, &mut buf, false);
+            let _ = returned_tx.send(());
+            read.expect("read")
+        })
+    };
+    let returned = returned_rx.recv_timeout(Duration::from_secs(1));
+    let clock = progress
+        .with_view(|view| view.blocked_since.is_some())
+        .expect("live view");
+    // Release a reader that waits before joining it.
+    session.pacing.bypass();
+    let read = worker.join().expect("reader thread");
+    returned.expect("an end of output behind a full view is reported at once");
+    assert!(!clock, "an end of output starts no view's clock");
+    assert_eq!(read, 0);
+}
+
+#[test]
+fn a_released_view_leaves_a_readers_reads_whole() {
+    struct Sizes(Vec<usize>);
+    impl Read for Sizes {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.push(buf.len());
+            buf.fill(b'x');
+            Ok(buf.len())
+        }
+    }
+    let session = test_session_with_ring(1024);
+    let attached = attach_acked(&session, None);
+    let progress = attached.output_progress().expect("lease");
+    session.record_output(&[b'x'; 512]);
+    // The view is a full window behind and was released at the bound.
+    for view in session
+        .pacing
+        .state
+        .lock()
+        .expect("pacing")
+        .views
+        .values_mut()
+    {
+        view.released = true;
+    }
+    assert!(progress.needs_replay(), "the view is released");
+    let mut reader = Sizes(Vec::new());
+    let mut buf = vec![0u8; PTY_READ_BYTES];
+    let read = session
+        .paced_read(&mut reader, &mut buf, false)
+        .expect("read");
+    assert_eq!(
+        reader.0,
+        vec![PTY_READ_BYTES],
+        "a released view holds no read"
+    );
+    assert_eq!(read, PTY_READ_BYTES);
+}
+
+#[test]
+fn a_reader_that_polled_waits_for_a_full_view_before_it_reads() {
+    struct Sizes(std::sync::mpsc::Sender<usize>);
+    impl Read for Sizes {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.send(buf.len());
+            buf.fill(b'x');
+            Ok(buf.len())
+        }
+    }
+    let mut session = test_session_with_ring(1024);
+    Arc::get_mut(&mut session).expect("one owner").id = "pacing-polled-full-view".into();
+    let attached = attach_acked(&session, None);
+    let _progress = attached.output_progress().expect("lease");
+    session.record_output(&[b'x'; 512]);
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting_tx.send(());
+        },
+    );
+    let (sizes_tx, sizes_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; PTY_READ_BYTES];
+            session.paced_read(&mut Sizes(sizes_tx), &mut buf, true)
+        })
+    };
+    let waited = waiting_rx.recv_timeout(Duration::from_secs(2));
+    let read_before_credit = sizes_rx.try_recv().ok();
+    // Release the reader's wait before joining it.
+    session.pacing.bypass();
+    let read = worker.join().expect("reader thread").expect("read");
+    waited.expect("a reader that polled waits for the view");
+    assert_eq!(
+        read_before_credit, None,
+        "a reader that polled reads nothing before its credit"
+    );
+    assert_eq!(read, PTY_READ_BYTES, "its read is whole once admitted");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn reader_stop_wakes_a_pacing_wait_before_sealing_the_ring() {
