@@ -1873,7 +1873,16 @@
           // the reassert leaves on exactly the ones the program has on; a
           // replay that starts with a reset clears them again.
           writeParsedPtyOutput(new TextEncoder().encode(trackedModesOffSequence()), "replay");
-        } else if (tab.keyboardProtocol) {
+        }
+        // After a cut, the protocol a reset replay restores is the one its
+        // life had before the cut replay began. An answer in a generation
+        // other than the one the dial echoed is another life, a restart
+        // whose reset came ahead of this frame, and starts from the protocol
+        // as it is now.
+        if (
+          tab.keyboardProtocol &&
+          (!replayCut || (liveResumeGeneration !== undefined && frame.generation !== liveResumeGeneration))
+        ) {
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol);
         }
         dialSawSession = true;
