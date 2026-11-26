@@ -234,9 +234,14 @@
   /// that parent's level is read, it would only be skipped again, so it
   /// stays asked. A patch that reads a directory's level forgets the asks
   /// of its children that the spine holds no level of and the patch does
-  /// not read (`patchSpine`), so each is asked again once it is opened and
-  /// drawn, and a whole fetch forgets those it did not read (`loadSpine`).
+  /// not read, other than one still queued or one whose read failed
+  /// (`patchSpine`), so each is asked again once it is opened and drawn,
+  /// and a whole fetch forgets those it did not read (`loadSpine`).
   const spineAsked = new Set<string>();
+  /// Directories asked for whose patch is queued and has not begun: their
+  /// read is still to come, so a parent's level landing ahead of it does not
+  /// forget their ask. A whole fetch drops the patches queued before it.
+  const spineAskPending = new Set<string>();
 
   /// A directory asked for whose level the spine does not hold: one a patch
   /// has still to read, or one whose read found it gone.
@@ -304,8 +309,10 @@
     }
     if (reading.size === 0) return;
     for (const dir of reading) spineAsked.add(dir);
-    if (spineRead !== null && !spineLoading && spineError === null) void patchSpine(reading, { opened: true });
-    else spineReload += 1;
+    if (spineRead !== null && !spineLoading && spineError === null) {
+      for (const dir of reading) spineAskPending.add(dir);
+      void patchSpine(reading, { opened: true });
+    } else spineReload += 1;
   }
 
   // ---- the depth, which is the selected node's ---------------------------
@@ -1618,6 +1625,7 @@
     // directory the tree draws.
     spineChanges = new Set();
     readOpenedOnShow = false;
+    spineAskPending.clear();
     // The first spine is drawn as its levels land, at most every
     // SPINE_DRAW_MS after the root's. A later one replaces the drawn spine
     // once it is whole, so a reload shows no shrunken tree on the way.
@@ -1933,9 +1941,8 @@
   /// `touched` holds every directory the change named something in, which
   /// is where the symlinks the spine holds are checked against. An ask for
   /// opened directories (`opened`, from `loadOpenedChildren`) reads only the
-  /// levels the spine still lacks at its turn: a patch queued ahead of it may
-  /// have read one since, as when its parent's level forgot the ask and
-  /// another opening asked for it again.
+  /// levels the spine still lacks at its turn, since a patch queued ahead of
+  /// it may have read one since.
   function patchSpine(
     dirs: ReadonlySet<string>,
     { touched = dirs, opened = false }: { touched?: ReadonlySet<string>; opened?: boolean } = {},
@@ -1945,6 +1952,7 @@
     const run = async (): Promise<void> => {
       const read = spineRead;
       if (read === null || seq !== spineSeq) return;
+      if (opened) for (const dir of dirs) spineAskPending.delete(dir);
       const wanted = opened ? new Set([...dirs].filter((dir) => !read.held.has(dir))) : dirs;
       const near = opened ? wanted : touched;
       // A symlink's state is its target's: one whose target is in a
@@ -1987,9 +1995,21 @@
           // The asks of its children were answered against the level the
           // spine held before: one it holds no level of now, and that this
           // patch does not read, is asked again once it is opened and drawn.
+          // Two are still owed and stay asked: one whose patch is queued
+          // behind this one (`spineAskPending`), since its own read is still
+          // to come, and one whose read failed and that this level still
+          // lists, while that failure stands.
           if (level !== null) {
             for (const asked of spineAsked) {
-              if (parentDir(asked) === dir && !reading.has(asked) && !read.held.has(asked)) spineAsked.delete(asked);
+              if (
+                parentDir(asked) === dir &&
+                !reading.has(asked) &&
+                !read.held.has(asked) &&
+                !spineAskPending.has(asked) &&
+                !spineFailures.has(asked)
+              ) {
+                spineAsked.delete(asked);
+              }
             }
           }
         }
