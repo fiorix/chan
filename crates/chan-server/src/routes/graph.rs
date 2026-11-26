@@ -806,6 +806,50 @@ pub(crate) mod tree_walks {
     }
 }
 
+/// What graph loads have read per path, per workspace root and kind of
+/// read, so a test can read what one load paid for each path.
+#[cfg(test)]
+pub(crate) mod path_reads {
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    /// A kind of per-path read.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) enum Read {
+        /// A node's class, read by `path_class_for_graph`.
+        Class,
+        /// A link target, or a directory above one, looked up on disk by
+        /// `link_targets_on_disk`.
+        Lookup,
+    }
+
+    type Taken = HashMap<(PathBuf, Read), BTreeMap<String, usize>>;
+
+    static TAKEN: LazyLock<Mutex<Taken>> = LazyLock::new(Default::default);
+
+    pub(super) fn record(root: &Path, read: Read, path: &str) {
+        *TAKEN
+            .lock()
+            .unwrap()
+            .entry((root.to_path_buf(), read))
+            .or_default()
+            .entry(path.to_string())
+            .or_default() += 1;
+    }
+
+    /// How many reads of kind `read` the graph loads of the workspace at
+    /// `root` have made of each path.
+    pub(crate) fn taken(root: &Path, read: Read) -> BTreeMap<String, usize> {
+        TAKEN
+            .lock()
+            .unwrap()
+            .get(&(root.to_path_buf(), read))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// The link targets in `edges` that are on disk, as `(files,
 /// directories)`, for a graph whose whole-tree listing is over the cap
 /// and lists no file. A target is looked up as the resolver's first
@@ -860,6 +904,8 @@ fn link_targets_on_disk(
         if let Some(&descends) = ancestors.get(dir) {
             return descends;
         }
+        #[cfg(test)]
+        path_reads::record(workspace.root(), path_reads::Read::Lookup, dir);
         let real_dir = matches!(
             workspace.classify_workspace_path(dir),
             Ok(WorkspacePath::Directory(_))
@@ -898,6 +944,8 @@ fn link_targets_on_disk(
             dirs.insert(target.to_string());
             continue;
         }
+        #[cfg(test)]
+        path_reads::record(workspace.root(), path_reads::Read::Lookup, target);
         match workspace.classify_workspace_path(target) {
             Ok(WorkspacePath::Regular(_)) if policy.includes(target, false) => {
                 files.insert(target.to_string());
@@ -1174,6 +1222,8 @@ fn graph_scope_path(p: &GraphParams) -> &str {
 }
 
 fn path_class_for_graph(workspace: &chan_workspace::Workspace, path: &str) -> Option<PathClass> {
+    #[cfg(test)]
+    path_reads::record(workspace.root(), path_reads::Read::Class, path);
     chan_workspace::fs_ops::classify_path(workspace.root(), path).ok()
 }
 
@@ -4036,6 +4086,55 @@ mod tests {
             }
             drop(limit);
         }
+    }
+
+    // Over the listing cap one graph load reads each node's class at most
+    // once, and looks up on disk only the link targets the walks cannot
+    // answer for. The tree layer merges every walked folder and joins each
+    // file the graph holds to its folder: a merge that finds a file's node,
+    // or a folder joined to its parent, classifies nothing, and no folder
+    // the directories-only walk lists is looked up, as a target or above
+    // one. The note's image link is the one target no walk lists.
+    #[tokio::test]
+    async fn over_the_listing_cap_a_graph_load_reads_each_path_once() {
+        use super::path_reads::{taken, Read};
+
+        let app = folder_layer_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let root = workspace.root().to_path_buf();
+        // The reads of kind `read` made since `before` was taken, per path.
+        let since = |read: Read, before: &std::collections::BTreeMap<String, usize>| {
+            let mut reads = taken(&root, read);
+            for (path, count) in &mut reads {
+                *count -= before.get(path).copied().unwrap_or(0);
+            }
+            reads.retain(|_, count| *count > 0);
+            reads
+        };
+        let limit = over_the_listing_cap(&workspace);
+        let (classes_before, lookups_before) =
+            (taken(&root, Read::Class), taken(&root, Read::Lookup));
+        graph_route_body(&app, "/api/graph").await;
+        drop(limit);
+        let classes = since(Read::Class, &classes_before);
+        let lookups = since(Read::Lookup, &lookups_before);
+        assert!(
+            classes.contains_key(DEEP) && classes.contains_key(&format!("{DEEP}/leaf.md")),
+            "fixture: the load classifies the deepest folder and the held note: {classes:?}"
+        );
+        let again: std::collections::BTreeMap<_, _> =
+            classes.iter().filter(|(_, reads)| **reads > 1).collect();
+        assert_eq!(
+            again,
+            std::collections::BTreeMap::new(),
+            "paths whose class the load read more than once"
+        );
+        assert_eq!(
+            lookups,
+            std::collections::BTreeMap::from([(format!("{DEEP}/pic.png"), 1)]),
+            "the paths the load looked up on disk"
+        );
     }
 
     // Over the listing cap the shared graph holds the root and every folder
