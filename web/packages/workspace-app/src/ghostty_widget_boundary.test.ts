@@ -25,38 +25,47 @@
 //    value or one cast from it (through variables a cast or an annotation
 //    widened, up to the first that is a widget), `in`, `vi.spyOn`,
 //    `Reflect.get`, `Reflect.has`, `getOwnPropertyDescriptor`,
-//    `Object.hasOwn` or `hasOwnProperty`, with the key a literal, one under
-//    parentheses or a cast, or a value whose type is a string literal. A
-//    member that only an app module declares on a widget class, by a
-//    module augmentation or a type intersected with the class, is not
-//    public to this rule;
-// 4. patch: a write to a member of a widget object, `Object.assign` and its
-//    kin on one, and any reach of a widget's prototype: a widget class's
-//    `prototype`, or a widget value's `constructor`, `Object.getPrototypeOf`
-//    or `Reflect.getPrototypeOf` (tests may reach one to read and spy on
-//    its public members);
+//    `Object.hasOwn`, `hasOwnProperty` or `propertyIsEnumerable`, with the
+//    key a literal, one under parentheses or a cast, or a value whose type
+//    is a string literal. A member that only an app module declares on a
+//    widget class, by a module augmentation or a type intersected with the
+//    class, is not public to this rule;
+// 4. patch: a write to a member of a widget object; `Object.assign`,
+//    `defineProperty`, `defineProperties`, `setPrototypeOf`, `freeze`,
+//    `seal` or `preventExtensions`, or `Reflect.set`, `defineProperty`,
+//    `deleteProperty` or `setPrototypeOf`, on one; and any reach of a
+//    widget's prototype: a widget class's `prototype`, or a widget value's
+//    `constructor`, `Object.getPrototypeOf` or `Reflect.getPrototypeOf`
+//    (tests may reach one to read and spy on its public members);
 // 5. name: the name of one of the widget's implementation members, which
 //    catches what has no widget type to check, such as a duck-typed
 //    parameter;
 // 6. escape: a widget class instance where the program expects a type that
 //    names none of its members (`any`, `unknown`, `object`, `{}`, with or
 //    without `null`): an argument, an initializer, a property value, a
-//    return, an assigned value, an array element, or a callback's
-//    parameter so declared that its caller hands a widget; past it no
-//    other rule can follow the value. An Error subclass is exempt, since
-//    errors travel as `unknown` by design and are read after `instanceof`;
+//    return, a yielded value, an assigned value, an array element, or a
+//    callback's parameter so declared that its caller hands a widget, and
+//    one handed to `Object.getOwnPropertyDescriptors`, which keys each own
+//    property; past it no other rule can follow the value. An Error
+//    subclass is exempt, since errors travel as `unknown` by design and are
+//    read after `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
 //    names a member the class keeps private, lacks, or holds as one of its
 //    implementation members, which reads `undefined` once that member is
 //    `#private`; a type with a widget part (a union with another type) is
 //    read through the widget's own declarations, which rules 3 and 5 see.
 //
-// Shipped modules are held to all seven rules, tests to 1, 3 and 4. A dot
-// read of a private member on a widget-typed value is a type error, but
+// A widget value is one of a type the package declares, of a class that
+// extends one of its classes (`this` in a subclass included), of a type
+// parameter constrained to one, or of a type with one as a part. Shipped
+// modules are held to all seven rules, tests to 1, 3 and 4. A dot read of
+// a private member on a widget-typed value is a type error, but
 // `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
 // so rule 3 reads dots as well. Markup is read as the body of a function
 // in the instance script's scope, so a script variable has its declared
-// type there, as markup sees it after the script assigns it.
+// type there, as markup sees it after the script assigns it, and a `use:`,
+// `transition:`, `in:`, `out:` or `animate:` directive's value as the
+// argument its function takes.
 //
 // It does not see:
 // - in tests, a widget value laundered through `any` or `unknown`, which
@@ -71,7 +80,8 @@
 // - a spread copy of a widget (`{ ...term }`) read through a cast;
 // - a duck type reached through a type parameter's constraint, and the
 //   other parts of a type with a widget part (a union with a duck type, a
-//   generic holder with the widget as its type argument);
+//   generic holder with the widget as its type argument, an intersection
+//   whose widget part is no class, planted as `picked`);
 // - a duck type the widget satisfies once a member is `#private`, which is
 //   no property of its type, declared by a callback's parameter or by a
 //   function assigned to a function type that takes a widget
@@ -83,12 +93,25 @@
 // - a widget widened with its container (`[term]` held as `readonly
 //   unknown[]`, `{ v: vt }` as `{ readonly v: unknown }`,
 //   `Promise.resolve(term)` as `Promise<unknown>`, or a container cast so),
-//   a widget joined with an `unknown` by `??` or `? :`, whose type is then
-//   `unknown`, and a widget thrown and caught;
+//   a widget joined with an `unknown` by `??`, `||`, `&&` or `? :`, whose
+//   type is then `unknown` (planted as `either` and `both`), a widget in a
+//   tagged template whose tag takes its values as `unknown` (`viaTag`), and
+//   a widget thrown and caught;
 // - `Reflect` and `Object` functions called other than as a property
 //   access (`const { get } = Reflect`, `(Reflect.get)(...)`,
 //   `Reflect["get"](...)`, `const { assign, defineProperty } = Object`),
 //   whose target the checker types as the widget itself;
+// - a widget handed to an overload whose implementation takes `any` and
+//   returns it as an app type (`overloaded`);
+// - a value typed by one of the package's interfaces whose class keeps its
+//   state `#private` (`term.buffer.active`), into `unknown` or an app duck
+//   type: rules 6 and 7 take widget class instances only (`bufferEscape`,
+//   `bufferDuck`);
+// - Terminal's `renderer`, `textarea` and `viewportY` outside its modules,
+//   on a receiver not named like a terminal (`offView`, `offText` and
+//   `offOffset` in `src/state/`): TypeScript lists them as public, so only
+//   rule 5 reads them, by that name heuristic, until the package seals
+//   them;
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
 //   `({ rows: term.rows } = rows)`) or a Svelte `bind:` directive
 //   (`bind:this={live.element}`, `bind:value={live.cols}`), which rule 4
@@ -99,9 +122,10 @@
 //   satisfies unknown as { selectionManager: unknown }`), where rule 3
 //   stops following the casts;
 // - in markup, a name declared in a component's `<script module>` beside
-//   an instance script, or a `$store` read, which has no type there, and a
+//   an instance script, or a `$store` read, which has no type there, a
 //   value markup passes to a component's props, which has no contextual
-//   type.
+//   type, and a value typed by a component's `generics` parameters, which
+//   the module this check reads does not declare (`BoundaryGeneric.svelte`).
 // Rule 6 also reports a widget kept in a `WeakMap<object>` or a
 // `Set<object>` and never read back as anything else; the app has none.
 // The `scripts/e2e` instruments (the browser checks, the pixel harness)
@@ -377,6 +401,19 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
         walk(node.nodes);
         put("}\n");
         return;
+      // A directive's value is the argument its function takes after the
+      // element (an action's, a transition's), or after the element and
+      // its move (an animation's).
+      case "UseDirective":
+      case "TransitionDirective":
+      case "AnimateDirective":
+        if (isTemplateNode(node.expression)) {
+          put(`${node.name as string}(null as unknown as HTMLElement, `);
+          if (node.type === "AnimateDirective") put("null as unknown as { from: DOMRect; to: DOMRect }, ");
+          copy(node.expression);
+          put(");\n");
+        }
+        return;
       case "ConstTag":
         copy(node.declaration as Range);
         put(";\n");
@@ -525,6 +562,14 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     if (depth > 4) return false;
     if (type.isUnionOrIntersection()) return type.types.some((t) => isWidget(t, depth + 1));
     if (declaredInWidget(type.aliasSymbol) || declaredInWidget(type.getSymbol())) return true;
+    // A type parameter constrained to a widget, `this` in a subclass
+    // included, and a class that extends one.
+    if (type.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(type);
+      if (constraint && constraint !== type && isWidget(constraint, depth + 1)) return true;
+    }
+    const declared = (type as ts.TypeReference).target ?? type;
+    if (declared.isClass() && (checker.getBaseTypes(declared) ?? []).some((base) => isWidget(base, depth + 1))) return true;
     const reference = (type as ts.TypeReference).target ? checker.getTypeArguments(type as ts.TypeReference) : [];
     return [...(type.aliasTypeArguments ?? []), ...reference].some((t) => isWidget(t, depth + 1));
   }
@@ -589,6 +634,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     if (ts.isShorthandPropertyAssignment(at) && at.name === node) return true;
     if (ts.isReturnStatement(at) || ts.isArrayLiteralExpression(at)) return true;
     if (ts.isArrowFunction(at) && at.body === node) return true;
+    if (ts.isYieldExpression(at) && at.expression === node) return true;
     return ts.isBinaryExpression(at) && at.operatorToken.kind === ts.SyntaxKind.EqualsToken && at.right === node;
   };
   /// The type the program gives a flowing expression. A shorthand
@@ -671,7 +717,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
 
   const MOCKS = new Set(["mock", "doMock", "unmock", "doUnmock", "importActual", "importMock"]);
   const DEFINERS: Record<string, ReadonlySet<string>> = {
-    Object: new Set(["assign", "defineProperty", "defineProperties", "setPrototypeOf"]),
+    Object: new Set(["assign", "defineProperty", "defineProperties", "setPrototypeOf", "freeze", "seal", "preventExtensions"]),
     Reflect: new Set(["set", "defineProperty", "deleteProperty", "setPrototypeOf"]),
   };
   const READERS = new Set([
@@ -682,6 +728,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     "Object.getOwnPropertyDescriptor",
     "Object.hasOwn",
     "Object.prototype.hasOwnProperty.call",
+    "Object.prototype.propertyIsEnumerable.call",
   ]);
   const PROTOTYPE_READERS = new Set(["Object.getPrototypeOf", "Reflect.getPrototypeOf"]);
 
@@ -834,7 +881,11 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length >= 2) {
         if (READERS.has(node.expression.getText(sf))) for (const key of keysOf(node.arguments[1])) read(node.arguments[0], key, node);
       }
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "hasOwnProperty") {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        (node.expression.name.text === "hasOwnProperty" || node.expression.name.text === "propertyIsEnumerable")
+      ) {
         if (node.arguments.length === 1) for (const key of keysOf(node.arguments[0])) read(node.expression.expression, key, node);
       }
       if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
@@ -906,6 +957,18 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
             }
           }
         }
+      }
+
+      // 6, at a reflection that keys every own property of its argument.
+      if (
+        source.kind === "shipped" &&
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.getText(sf) === "Object.getOwnPropertyDescriptors" &&
+        node.arguments.length > 0
+      ) {
+        const type = checker.getTypeAtLocation(node.arguments[0]);
+        if (isClassInstance(type)) report("escape", node.arguments[0], `${nameOf(type)} into Object.getOwnPropertyDescriptors`);
       }
 
       // 6, at a callback: a widget the caller hands to a parameter the
@@ -1049,6 +1112,38 @@ const PLANTS = new Map<string, string>([
       "  return term.isOpen;",
       "};",
       "export const intersected = (t: Terminal & { isOpen?: boolean }) => t.isOpen;",
+      "export class Kin extends Terminal {",
+      "  peek(): boolean {",
+      "    // @ts-expect-error a private member",
+      "    return this.isOpen;",
+      "  }",
+      "  poke(): void {",
+      "    // @ts-expect-error a private member",
+      "    this.isOpen = true;",
+      "  }",
+      "}",
+      "export const kin = (k: Kin) => (k as unknown as Raw).isOpen;",
+      "export const constrained = <T extends Terminal>(t: T) => (t as unknown as Raw).isOpen;",
+      "export const descriptors = (term: Terminal) => Object.getOwnPropertyDescriptors(term).isOpen?.value as boolean | undefined;",
+      'export const enumerable = (term: Terminal) => [term.propertyIsEnumerable("isOpen"), Object.prototype.propertyIsEnumerable.call(term, "isOpen")];',
+      "export const frozen = (term: Terminal) => [Object.freeze(term), Object.seal(term), Object.preventExtensions(term)];",
+      "function* yielded(term: Terminal): Generator<unknown> {",
+      "  yield term;",
+      "}",
+      "export const fromYield = (term: Terminal) => (yielded(term).next().value as Raw).isOpen;",
+      "export function overloaded(t: Terminal): Raw;",
+      "export function overloaded(t: any): Raw {",
+      "  return t;",
+      "}",
+      "export const viaOverload = (term: Terminal) => overloaded(term).isOpen;",
+      'export const picked = (t: Pick<Terminal, "cols"> & { isOpen?: boolean }) => t.isOpen;',
+      "export const either = (term: Terminal, other: unknown) => ((other || term) as Raw).isOpen;",
+      "export const both = (term: Terminal, flag: unknown) => ((flag && term) as Raw).isOpen;",
+      "const tagged = (_s: TemplateStringsArray, ...values: unknown[]) => (values[0] as Raw).isOpen;",
+      "export const viaTag = (term: Terminal) => tagged`${term}`;",
+      "const peekBuffer = (b: unknown) => b;",
+      "export const bufferEscape = (term: Terminal) => [peekBuffer(term.buffer), peekBuffer(term.buffer.active)];",
+      "export const bufferDuck = (term: Terminal) => ((b: { type: string; terminal?: Terminal }) => b.terminal)(term.buffer.active);",
     ].join("\n"),
   ],
   [
@@ -1059,6 +1154,10 @@ const PLANTS = new Map<string, string>([
       "export type Holder = { wasmTerm?: { plainText(): string | null } };",
       'export const heldText = (holder: Holder) => holder.wasmTerm?.plainText() ?? "";',
       "export const flagged = (holder: { sealedSoon?: boolean }) => holder.sealedSoon;",
+      'import type { Terminal } from "@chan/ghostty-web-ng";',
+      "export const offView = (t: Terminal) => t.renderer;",
+      "export const offText = (x: Terminal) => x.textarea;",
+      "export const offOffset = (x: Terminal) => x.viewportY;",
     ].join("\n"),
   ],
   [
@@ -1136,6 +1235,41 @@ const PLANTS = new Map<string, string>([
       'import { widgetInternals as linkedFriend } from "../../../../node_modules/@chan/ghostty-web-ng/lib/internal";',
       'import type { Terminal as Linked } from "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal";',
       "export const linked = (term: Linked) => [linkedFriend(term).isOpen, (term as unknown as Raw).isOpen];",
+      "export class KinFixture extends Terminal {",
+      "  peek(): boolean {",
+      "    return (this as unknown as Raw).isOpen;",
+      "  }",
+      "  poke(): void {",
+      "    (this as unknown as Raw).isOpen = true;",
+      "  }",
+      "}",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/BoundaryAction.svelte",
+    [
+      '<script lang="ts">',
+      '  import type { Terminal } from "@chan/ghostty-web-ng";',
+      "  let { term }: { term: Terminal } = $props();",
+      "  const peek = (node: HTMLElement, t: unknown) => void node.append(String(t));",
+      "  const swap = (node: Element, t: unknown) => ({ duration: Number(t !== node) });",
+      "  const shift = (node: Element, _move: { from: DOMRect; to: DOMRect }, t: unknown) => ({ duration: Number(t !== node) });",
+      "</script>",
+      "",
+      "<div use:peek={term} transition:swap={term}></div>",
+      "{#each [term] as one (one)}<i animate:shift={term}></i>{/each}",
+    ].join("\n"),
+  ],
+  [
+    "src/terminal/BoundaryGeneric.svelte",
+    [
+      '<script lang="ts" generics="T extends Terminal">',
+      '  import type { Terminal } from "@chan/ghostty-web-ng";',
+      "  let { term }: { term: T } = $props();",
+      "  const open = (term as unknown as { isOpen: boolean }).isOpen;",
+      "</script>",
+      "",
+      "<p>{open}</p>",
     ].join("\n"),
   ],
 ]);
@@ -1208,6 +1342,22 @@ const PLANTED: readonly Site[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 93, key: "Terminal & Raw.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 99, key: "Terminal & Raw.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 101, key: "Terminal & { isOpen?: boolean | undefined; }.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 105, key: "Kin.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 109, key: "Kin.isOpen" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 112, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 112, key: "Kin.isOpen" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 113, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 113, key: "T.isOpen" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 114, key: "Terminal into Object.getOwnPropertyDescriptors" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 115, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 115, key: "Terminal.isOpen" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 116, key: "Object.freeze Terminal" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 116, key: "Object.seal Terminal" },
+  { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 116, key: "Object.preventExtensions Terminal" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 118, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 9, key: "Terminal into unknown" },
+  { rule: "escape", file: "src/terminal/BoundaryAction.svelte", line: 10, key: "Terminal into unknown" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
@@ -1243,6 +1393,8 @@ const PLANTED: readonly Site[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 35, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/internal" },
   { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 36, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/terminal" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 37, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 40, key: "KinFixture.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 43, key: "KinFixture.isOpen" },
 ];
 
 /// Entries over the planted reads that pin a reader too few, a reader too
