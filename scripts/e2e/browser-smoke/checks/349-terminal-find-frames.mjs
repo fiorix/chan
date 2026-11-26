@@ -59,13 +59,21 @@
 //               after the active match in the buffer as it is then, and a
 //               second later a press "older" on the "e" before the active
 //               match then. The slow stream's frames are their own leg.
-//   REFLOW   -- with no output, a fresh find steps to a match of a line's
+//   REFLOW   -- first the leg writes its own history straight to the
+//               terminal: lines of the same shape whose filler spreads more
+//               "e", as dense as makes about 700,000 matches of the rows the
+//               history holds, and enough of them that no older line stays.
+//               The history's bound sets its rows (a byte budget keeps
+//               about half the rows a row cap does), so the leg sets the
+//               matches, and a rescan has that many to place. Then, with no
+//               output, a fresh find steps to a match of a line's
 //               second segment at least 90 percent of the way up from the
 //               newest match, so each rescan places it late. The page
 //               narrows and widens back twice. The leg reads find only when
 //               its instrument holds: the count and the history's rows
 //               after each resize equal those before (the reflow pruned
-//               nothing and no line changed its rows), the narrow
+//               nothing and no line changed its rows), the dense lines
+//               fill the history to its oldest row, the narrow
 //               width moves the active match to its line's second row, and
 //               1.5 s after the first narrowing the match is kept with its
 //               index unplaced (the reading is past the one-second press
@@ -112,6 +120,10 @@ const STREAM = 100_000;
 // hundred rows at this width) and then the screen.
 const WRAP_LINES = 1_000;
 const FILL = 60_000;
+// Matches the REFLOW leg's history holds: at a row cap 327,000 left the
+// active match unplaced 1.5 s after each resize, and at the byte budget's
+// 184,000 placement had reached it by then, so about twice the former.
+const REFLOW_MATCHES = 700_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default {
@@ -451,20 +463,39 @@ export default {
       }
 
       // REFLOW
+      // The leg's own history: the tail's shape, an "e" every `every` cells
+      // of its filler, so the rows the history holds carry REFLOW_MATCHES.
+      const reflowRows = await term.evaluate((t) => t.getScrollbackLength() + t.rows);
+      const segmentE = [...SEGMENT].filter((c) => c === "e").length;
+      const every = Math.max(2, Math.floor((gap + end) / Math.max(1, Math.round((2 * REFLOW_MATCHES) / reflowRows) - 2 * segmentE)));
+      const spread = (n) => Array.from({ length: n }, (_, i) => ((i + 1) % every === 0 ? "e" : "x")).join("");
+      const denseTail = `${SEGMENT} ${spread(gap)} ${SEGMENT} ${spread(end)}`;
+      const perLine = 2 * segmentE + Math.floor(gap / every) + Math.floor(end / every);
+      details.reflowFill = await term.evaluate((t, [line, lines]) => {
+        t.search.close();
+        for (let from = 0; from < lines; from += 1000) {
+          let chunk = "";
+          for (let i = from + 1; i <= Math.min(lines, from + 1000); i++) chunk += `\r\n8:${String(i).padStart(6, "0")} ${line}`;
+          t.write(chunk);
+        }
+        const oldest = t.core.plainText({ startRow: 0, startCol: 0, endRow: 0, endCol: t.cols - 1 }) ?? "";
+        return { oldest: oldest.split(" ")[0], history: t.getScrollbackLength() };
+      }, [denseTail, FILL]);
+      Object.assign(details.reflowFill, { rows: reflowRows, every, perLine, lines: FILL, planned: Math.round((perLine * reflowRows) / 2) });
       await term.evaluate((t) => { t.search.close(); t.search.find("e"); });
       await complete("a complete count for the reflow");
-      details.reflowStart = await term.evaluate((t, [second, length]) => {
+      details.reflowStart = await term.evaluate((t, [second, length, perLine]) => {
         // Newer from the newest wraps to the oldest; a tenth of the way down
         // from there is 90 percent up from the newest, in fewer steps. Then
-        // on, newer, to a match of the line's second segment, at most 12
-        // steps, which the count leaves room for.
-        const steps = Math.max(1, Math.floor(t.search.state.total * 0.1) - 12);
+        // on, newer, to a match of the line's second segment, at most a
+        // line's matches of steps, which the count leaves room for.
+        const steps = Math.max(1, Math.floor(t.search.state.total * 0.1) - perLine);
         for (let i = 0; i < steps; i++) t.search.step("e", "newer");
         const onSecond = (id) => id !== null && id.offset >= second && id.offset < second + length;
-        for (let i = 0; i < 12 && !onSecond(window.__find349.identity()); i++) t.search.step("e", "newer");
+        for (let i = 0; i < perLine && !onSecond(window.__find349.identity()); i++) t.search.step("e", "newer");
         const identity = window.__find349.identity();
         return { steps, state: t.search.state, identity, onSecond: onSecond(identity), history: t.getScrollbackLength(), cols: t.cols };
-      }, [second, SEGMENT.length]);
+      }, [second, SEGMENT.length, perLine]);
       const start = details.reflowStart;
       // The match on its line and offset, read where that offset falls at
       // the reading's width: a highlight left on its old cell keeps the
@@ -490,6 +521,7 @@ export default {
       // The instrument: what the leg needs of the buffer and of the timing
       // before its readings say anything about find.
       const instrument = [];
+      if (!/^8:\d{6}$/.test(details.reflowFill.oldest)) instrument.push(`the history's oldest row opens "${details.reflowFill.oldest}", not one of the leg's dense lines`);
       if (!start.identity) instrument.push("no active match before the reflow");
       else {
         if (!start.onSecond) instrument.push(`the active match ${at(start.identity)} is not on a line's second segment`);
