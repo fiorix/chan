@@ -1024,6 +1024,27 @@
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
+  /// Find's colours: a background and an ink for every match and for the
+  /// active one. Each carries its own ink, since a cell's inherited ink on
+  /// a match background can fall near 1:1 and the dark theme and a
+  /// see-through window take no contrast floor to lift it; every pair
+  /// reads at 4.5:1 or more.
+  function terminalSearchColors() {
+    return effectiveTerminalTheme() === "light"
+      ? {
+          searchMatchBackground: "#f6dc7f",
+          searchMatchForeground: "#000000",
+          searchActiveMatchBackground: "#f0961e",
+          searchActiveMatchForeground: "#000000",
+        }
+      : {
+          searchMatchBackground: "#806d36",
+          searchMatchForeground: "#ffffff",
+          searchActiveMatchBackground: "#ffb454",
+          searchActiveMatchForeground: "#000000",
+        };
+  }
+
   /// The widget's theme: the colours plus the contrast floor, which it
   /// takes only there. The widget measures a cell on the default background
   /// against the background it paints. In a window built transparent that
@@ -1033,6 +1054,7 @@
   function ghosttyTerminalTheme() {
     return {
       ...terminalTheme(),
+      ...terminalSearchColors(),
       minimumContrastRatio: terminalMinimumContrastRatio(),
       contrastBackdrop: transparentWindow
         ? terminalBackground(getComputedStyle(host ?? document.documentElement))
