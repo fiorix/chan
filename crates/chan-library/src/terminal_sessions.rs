@@ -3367,7 +3367,10 @@ impl Registry {
             // while the socket was down survives on it. A client that is not
             // resuming echoes NO generation -- its `since` (the SPA's
             // `Some(0)`) is honored as sent so a ring overflow still surfaces
-            // via `missed_bytes`.
+            // via `missed_bytes`. The session frame does not say which arm
+            // was taken: the workspace app's `TerminalTab.svelte` reads this
+            // rule again to know whether a session frame continues its view
+            // (`continued`), so a change here changes that reading too.
             let resume = |session: &Session| match client_generation {
                 Some(g) if session.generation() == g => match since {
                     Some(cursor) if cursor > 0 => Resume::Live(cursor),
