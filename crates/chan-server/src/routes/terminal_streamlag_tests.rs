@@ -1406,6 +1406,64 @@ async fn a_redial_past_a_lost_mode_reset_gets_the_live_recovery_suffix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_past_a_lost_alternate_screen_exit_shows_the_retained_tail() {
+    const RING: usize = 4096;
+    let _gate = pty_test_lock();
+    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
+    // While the socket is down the program resets its mode, leaves its
+    // alternate screen, writes past the ring and exits, and the shell
+    // prints its prompt. The ring moves past the switch, so the replay
+    // holds normal-screen output only.
+    let lost = b"\x1b[?1000l\x1b[?1049l";
+    rig.output(lost);
+    let filler = b"filler\r\n".repeat(RING / 4 / 8);
+    for _ in 0..4 {
+        rig.output(&filler);
+    }
+    let tail = b"probe exited\r\n$ ";
+    rig.output(tail);
+    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
+    assert_eq!(
+        number(&session, "generation"),
+        generation,
+        "fixture: the same PTY life"
+    );
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        (lost.len() + filler.len()) as u64,
+        "fixture: the ring moved past the switch to the normal screen"
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert_eq!(
+        String::from_utf8_lossy(&after[..replay]),
+        String::from_utf8_lossy(&[filler.repeat(3), tail.to_vec()].concat()),
+        "fixture: the replay is the retained normal-screen output"
+    );
+    let received = [&before[..], &after[..]].concat();
+    let screens = drawn_screens(&[&shown[..], &received].concat());
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(tail),
+        "the retained output, the program's last line and the prompt, is drawn on the \
+         normal screen the view ends on, not on the alternate screen the view still showed: \
+         the normal screen ends {:?}",
+        String::from_utf8_lossy(&screens.normal[screens.normal.len().saturating_sub(32)..])
+    );
+    assert_redial_holds_the_program_state(
+        shown,
+        &received,
+        false,
+        &[],
+        "a redial past an alternate-screen exit",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redial_across_a_restart_gets_the_restart_reset() {
     let _gate = pty_test_lock();
     let rig = Rig::new(64 * 1024, "while IFS= read -r line; do :; done").await;
@@ -1641,6 +1699,96 @@ fn parsed_modes_reads_switches_cut_sequences_queries_and_resets() {
     assert_eq!(
         parsed_modes(b"\x1b[?1049h\x1b[?1000h\x1bc"),
         (false, BTreeSet::new())
+    );
+}
+
+/// The text a terminal draws on each of its screens as it parses a stream,
+/// in the order it lands there, and the screen it shows at the end.
+#[derive(Debug, Default)]
+struct DrawnScreens {
+    normal: Vec<u8>,
+    alternate: Vec<u8>,
+    alternate_shown: bool,
+}
+
+/// Follow the screen switches in `bytes` (47, 1047 and 1049) and put every
+/// printed byte, CR and LF included, on the screen shown when it arrives.
+/// Escapes print nothing, CAN or an escape cuts a partial CSI short, and
+/// RIS clears both screens and shows the normal one. Cursor motion and
+/// erases are not followed: the redial tests read where output lands, not
+/// the grid it makes.
+fn drawn_screens(bytes: &[u8]) -> DrawnScreens {
+    let mut screens = DrawnScreens::default();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            0x1b if bytes.get(at + 1) == Some(&b'[') => {
+                let start = at + 2;
+                let end = start
+                    + bytes[start..]
+                        .iter()
+                        .take_while(|byte| (0x20..=0x3f).contains(*byte))
+                        .count();
+                at = end;
+                let Some(&last) = bytes.get(end).filter(|byte| (0x40..=0x7e).contains(*byte))
+                else {
+                    continue;
+                };
+                at = end + 1;
+                let Some(params) = bytes[start..end].strip_prefix(b"?") else {
+                    continue;
+                };
+                if !matches!(last, b'h' | b'l') {
+                    continue;
+                }
+                let switches = params
+                    .split(|byte| *byte == b';')
+                    .any(|param| matches!(param, b"47" | b"1047" | b"1049"));
+                if switches {
+                    screens.alternate_shown = last == b'h';
+                }
+            }
+            0x1b if bytes.get(at + 1) == Some(&b'c') => {
+                screens = DrawnScreens::default();
+                at += 2;
+            }
+            0x1b => at += 2,
+            byte if byte >= 0x20 || matches!(byte, b'\r' | b'\n') => {
+                if screens.alternate_shown {
+                    screens.alternate.push(byte);
+                } else {
+                    screens.normal.push(byte);
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    screens
+}
+
+#[test]
+fn drawn_screens_puts_text_on_the_screen_shown_when_it_arrives() {
+    let screens = drawn_screens(
+        b"$ top\r\n\x1b[?1049;1000hframe\x1b[?1000;1049l\x1b7\x18exited\r\n\x1b[?1047hagain",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&screens.normal),
+        "$ top\r\nexited\r\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&screens.alternate), "frameagain");
+    assert!(screens.alternate_shown);
+    let screens = drawn_screens(b"\x1b[?1049h\x1b[?104\x18\x1b[?1049$pon\x1b[2Jit");
+    assert_eq!(
+        String::from_utf8_lossy(&screens.alternate),
+        "onit",
+        "a cut CSI, a query and an erase switch nothing"
+    );
+    let screens = drawn_screens(b"\x1b[?47hframe\x1bcplain");
+    assert_eq!(
+        (screens.normal, screens.alternate, screens.alternate_shown),
+        (b"plain".to_vec(), Vec::new(), false),
+        "RIS clears both screens and shows the normal one"
     );
 }
 
