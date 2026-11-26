@@ -848,6 +848,16 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_defaults_to_fifty_megabytes() {
+        assert_eq!(TerminalConfig::default().scrollback_mb, 50);
+        let empty: TerminalConfig = toml::from_str("").expect("an empty terminal table loads");
+        assert_eq!(
+            empty.scrollback_mb, 50,
+            "a table without the key takes the default"
+        );
+    }
+
+    #[test]
     fn secret_mask_suffixes_clamp_and_warn_once() {
         let suffixes = (0..=TERMINAL_SECRET_MASK_SUFFIX_MAX)
             .map(|index| format!("TOKEN_{index}"))
