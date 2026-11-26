@@ -22,6 +22,7 @@ import Pane from "./Pane.svelte";
 import graphPanelSource from "./GraphPanel.svelte?raw";
 import {
   canvas,
+  type CanvasProps,
   fsg,
   g,
   GRAPH_PANE,
@@ -31,7 +32,7 @@ import {
   resetGraphServer,
   settle,
 } from "../__tests__/graphPanel";
-import { invalidateGraph, noteGraphChanged } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { graphReloadSignal } from "../state/store.svelte";
@@ -85,6 +86,82 @@ async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement
   mounted.push(mount(Pane, { target, props: { pane } }) as Record<string, unknown>);
   await settle();
   return { pane, panels: () => [...target.querySelectorAll<HTMLElement>(".graph-tab")] };
+}
+
+/// A pane with graph tabs one and two, two active with `expanded` open.
+async function renderPaneOnTwo(expanded: Record<string, boolean> = { "": true }): Promise<LeafNode> {
+  layout.nodes = {
+    [GRAPH_PANE]: {
+      kind: "leaf",
+      id: GRAPH_PANE,
+      tabs: [graphTab({ id: "one" }), graphTab({ id: "two", expanded })],
+      activeTabId: "two",
+    },
+  };
+  layout.rootId = GRAPH_PANE;
+  layout.activePaneId = GRAPH_PANE;
+  const pane = layout.nodes[GRAPH_PANE] as LeafNode;
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane } }) as Record<string, unknown>);
+  await settle();
+  return pane;
+}
+
+const levelReads = (path: string): number => graphServer.fsGraphCalls.filter((call) => call.path === path).length;
+
+/// A change that names no path, which fetches a shown tab's spine whole.
+async function changeNamingNoPath(): Promise<void> {
+  graphReloadSignal.paths = [];
+  graphReloadSignal.nonce += 1;
+  await new Promise((r) => setTimeout(r, 400));
+  await settle();
+}
+
+/// `a` holds `a/x.md` and the empty `a/b`, in an answer of the whole tree
+/// and on disk.
+function serveWholeTree(): void {
+  graphServer.view = {
+    nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.file("a/x.md")],
+    edges: [
+      g.edge("", "directory:a", "contains"),
+      g.edge("directory:a", "directory:a/b", "contains"),
+      g.edge("directory:a", "a/x.md", "contains"),
+    ],
+  };
+  graphServer.fs = {
+    nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.file("a/x.md")],
+    edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md")],
+  };
+}
+
+/// With tab two's whole spine fetch held in flight, `a` is opened there
+/// over the answer of the whole tree and an answer over the listing cap is
+/// taken. Resolves to the fetch's release.
+async function openDuringWholeFetchOverCap(two: CanvasProps, tab: GraphTab): Promise<() => void> {
+  let release!: () => void;
+  graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+  const releaseSpine = (): void => {
+    graphServer.fsGate = null;
+    release();
+  };
+  await changeNamingNoPath();
+  expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+  two.onSelect("directory:a");
+  await settle(2);
+  two.onSetAsScope();
+  await settle();
+  expect(tab.expanded.a).toBe(true);
+  graphServer.view = {
+    nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+    edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+  };
+  graphServer.tree = "folders";
+  await refreshGraph();
+  await settle();
+  expect(graphData.tree).toBe("folders");
+  expect(levelReads("a"), "taken while the fetch is in flight").toBe(0);
+  return releaseSpine;
 }
 
 describe("graph tabs in a pane", () => {
@@ -377,6 +454,146 @@ describe("graph tabs in a pane", () => {
     await settle();
     expect(reads("a")).toBe(1);
     expect([...two!.visibleNodeIds]).toContain("a/x.md");
+  });
+
+  test("a whole spine fetch that lands while its tab is hidden reads a folder opened during it once the tab is shown, not before", async () => {
+    // An answer of the whole tree: `a` holds `a/x.md` and the empty `a/b`.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.file("a/x.md")],
+      edges: [
+        g.edge("", "directory:a", "contains"),
+        g.edge("directory:a", "directory:a/b", "contains"),
+        g.edge("directory:a", "a/x.md", "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("a/b"), fsg.file("a/x.md")],
+      edges: [fsg.contains("", "a"), fsg.contains("a", "a/b"), fsg.contains("a", "a/x.md")],
+    };
+    const pane = await renderPaneOnTwo();
+    const [, two] = canvas.all;
+    const tab = pane.tabs[1] as GraphTab;
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      // A change that names no path fetches the spine whole, held at the
+      // root, its list of levels taken before `a` opens.
+      graphReloadSignal.paths = [];
+      graphReloadSignal.nonce += 1;
+      await new Promise((r) => setTimeout(r, 400));
+      await settle();
+      expect(levelReads(""), "the whole fetch is in flight").toBe(2);
+      two!.onSelect("directory:a");
+      await settle(2);
+      two!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.a).toBe(true);
+      expect(levelReads("a"), "the whole tree holds the level").toBe(0);
+
+      graphServer.view = {
+        nodes: [g.dir(""), g.dir("a"), g.dir("a/b")],
+        edges: [g.edge("", "directory:a", "contains"), g.edge("directory:a", "directory:a/b", "contains")],
+      };
+      graphServer.tree = "folders";
+      await refreshGraph();
+      await settle();
+      expect(graphData.tree).toBe("folders");
+      expect(levelReads("a"), "taken while the fetch is in flight").toBe(0);
+
+      pane.activeTabId = "one";
+      await settle();
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    const hidden = levelReads("a");
+
+    pane.activeTabId = "two";
+    await settle(20);
+    expect({ hidden, shown: levelReads("a"), drawsFile: [...two!.visibleNodeIds].includes("a/x.md") }).toEqual({
+      hidden: 0,
+      shown: 1,
+      drawsFile: true,
+    });
+  });
+
+  test("a tab shown again with a whole fetch to take reads the folders a hidden landing left once, in that fetch", async () => {
+    serveWholeTree();
+    const pane = await renderPaneOnTwo();
+    const [, two] = canvas.all;
+    const releaseSpine = await openDuringWholeFetchOverCap(two!, pane.tabs[1] as GraphTab);
+    pane.activeTabId = "one";
+    await settle();
+    releaseSpine();
+    await settle(20);
+    expect(levelReads("a"), "nothing read while hidden").toBe(0);
+
+    // A change that names no path while hidden: shown, the tab fetches its
+    // spine whole, which reads `a`.
+    await changeNamingNoPath();
+    pane.activeTabId = "two";
+    await settle(20);
+    expect(levelReads("a"), "read once, by that fetch").toBe(1);
+    expect([...two!.visibleNodeIds]).toContain("a/x.md");
+  });
+
+  test("a tab shown again after a hidden landing leaves a folder whose read failed to its retry", async () => {
+    // Over the listing cap: the folders, and none of their files.
+    graphServer.view = { nodes: [g.dir(""), g.dir("bad")], edges: [g.edge("", "directory:bad", "contains")] };
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.dir("bad"), fsg.file("bad/z.md")], edges: [fsg.contains("", "bad"), fsg.contains("bad", "bad/z.md")] };
+    graphServer.tree = "folders";
+    graphServer.fsFail = (path) => (path === "bad" ? new TypeError("Failed to fetch") : null);
+    const pane = await renderPaneOnTwo({ "": true, bad: true });
+    await settle(20);
+    expect(levelReads("bad"), "its read and one retry").toBe(2);
+
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      await changeNamingNoPath();
+      pane.activeTabId = "one";
+      await settle();
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    expect(levelReads("bad"), "the whole fetch's read, which fails while hidden").toBe(3);
+
+    pane.activeTabId = "two";
+    await settle(20);
+    expect(levelReads("bad"), "shown, only its retry reads it").toBe(4);
+  });
+
+  test("a whole fetch that lands in a tab shown over its kept part reads a folder opened during it by that part's mark", async () => {
+    serveWholeTree();
+    const pane = await renderPaneOnTwo();
+    const [, two] = canvas.all;
+    const releaseSpine = await openDuringWholeFetchOverCap(two!, pane.tabs[1] as GraphTab);
+    let releaseStream!: () => void;
+    try {
+      // Hidden, then the window's graph is dropped and fetched again by the
+      // shown tab, held before its first event: tab two keeps its part.
+      pane.activeTabId = "one";
+      await settle();
+      graphServer.streamGate = new Promise<void>((resolve) => (releaseStream = resolve));
+      invalidateGraph();
+      await settle();
+      pane.activeTabId = "two";
+      await settle();
+      expect(graphData.partial, "the window's graph is still being fetched").toBe(true);
+
+      releaseSpine();
+      await settle(20);
+      expect(levelReads("a"), "the kept part's mark decides").toBe(1);
+    } finally {
+      releaseSpine();
+      releaseStream?.();
+    }
+    await settle(20);
+    expect(levelReads("a")).toBe(1);
+    expect([...two!.visibleNodeIds], "drawn once the window's graph is taken").toContain("a/x.md");
   });
 
   test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {

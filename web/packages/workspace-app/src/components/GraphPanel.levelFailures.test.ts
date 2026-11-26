@@ -29,7 +29,7 @@ import {
 } from "../__tests__/graphPanel";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { directoryNodeId } from "../graph/canvasNodes";
-import { invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
+import { graphData, invalidateGraph, noteGraphChanged, refreshGraph } from "../state/graphData.svelte";
 import { graphReloadSignal, indexStatus } from "../state/store.svelte";
 import { layout } from "../state/tabs.svelte";
 
@@ -184,6 +184,49 @@ describe("a failed nonroot filesystem level", () => {
     expect.soft(target.querySelector(".cy.dim")).toBeNull();
   });
 
+  test("a whole spine fetch that lands under an answer over the listing cap leaves a failed folder to its retry", async () => {
+    coverNotes();
+    graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
+    graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
+    graphServer.tree = "folders";
+    failLevel("notes");
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    releaseStreams.push(release);
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
+    expect({ partial: graphData.partial, tree: graphData.tree }, "the answer is taken before the spine lands").toEqual({ partial: false, tree: "folders" });
+
+    release();
+    await settle();
+    expect(reads("notes"), "its read and one retry").toBe(2);
+    expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+  });
+
+  test("a folder whose read failed twice under an answer over the listing cap is read again when a double-click opens it", async () => {
+    const release = holdSharedGraph();
+    coverNotes();
+    graphServer.view.nodes = graphServer.view.nodes.filter((node) => node.id !== "notes/a.md");
+    graphServer.view.edges = graphServer.view.edges.filter((edge) => edge.target !== "notes/a.md");
+    graphServer.tree = "folders";
+    failLevel("notes", 2);
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
+    release();
+    await settle();
+    expect(reads("notes"), "the first read and its retry").toBe(2);
+    expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+
+    for (const open of [false, true]) {
+      canvas.props!.onSelect(directoryNodeId("notes"));
+      await settle(2);
+      canvas.props!.onSetAsScope();
+      await settle();
+      expect(tab.expanded.notes === true, "the double-click closes notes, then opens it").toBe(open);
+    }
+    expect(reads("notes"), "the opening reads it again").toBe(3);
+    expect(visibleIds()).toContain("notes/a.md");
+    expect(target.querySelector(".spine-warning")).toBeNull();
+  });
+
   test.each([
     ["timeout", timeout, "request timed out after 10000 ms"],
     ["dropped connection", () => new TypeError("Failed to fetch"), "Failed to fetch"],
@@ -277,6 +320,28 @@ describe("root failures remain fatal", () => {
     expect(target.querySelector(".placeholder.error")?.textContent).toBe(words);
     expect(canvas.props!.nodes).toHaveLength(0);
     expect(reads(path)).toBe(1);
+  });
+
+  test("a double-click on a folder no read covers after a root failure fetches the spine again", async () => {
+    // Over the listing cap: the folders, and none of their files.
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("notes")],
+      edges: [g.edge(directoryNodeId(""), directoryNodeId("notes"), "contains")],
+    };
+    graphServer.tree = "folders";
+    failLevel("", 1);
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    expect(target.querySelector(".placeholder.error")?.textContent).toBe(timeout("").message);
+    expect(reads("")).toBe(1);
+
+    canvas.props!.onSelect(directoryNodeId("notes"));
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle(20);
+    expect(tab.expanded.notes).toBe(true);
+    expect({ root: reads(""), notes: reads("notes") }).toEqual({ root: 2, notes: 1 });
+    expect(visibleIds()).toContain("notes/a.md");
+    expect(target.querySelector(".placeholder.error")).toBeNull();
   });
 });
 
