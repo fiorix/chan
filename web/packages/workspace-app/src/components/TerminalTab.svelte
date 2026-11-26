@@ -653,10 +653,9 @@
   // open.
   let ghosttyKeyParity: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
-  // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
-  // reconciliation plus the calibrated macOS pixel-scroll path) and the one
-  // path chan writes to the terminal through (PTY output and writeChanLine),
-  // non-null while a terminal is open and disposed with it.
+  // Owns the calibrated macOS pixel-scroll path and hands PTY output and
+  // writeChanLine to the terminal's write unchanged. Non-null while a
+  // terminal is open and disposed with it.
   let ghosttyViewport: GhosttyViewportController | null = null;
   // The find bar's count following the terminal's search, subscribed when
   // the bar first opens (see terminalSearch) and ended with the terminal.
@@ -2283,9 +2282,9 @@
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
-  /// ending, an error. It takes the viewport controller's write, as output
-  /// does, so an open find bar counts it and a scrolled-back viewport keeps
-  /// its place.
+  /// ending, an error. It is written to the terminal as output is, so the
+  /// widget counts it in an open find bar's search and keeps a scrolled-back
+  /// viewport where it is.
   function writeChanLine(line: string): void {
     ghosttyViewport?.write(`${line}\r\n`);
   }
