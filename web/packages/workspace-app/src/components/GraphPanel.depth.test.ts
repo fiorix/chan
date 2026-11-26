@@ -1235,6 +1235,26 @@ describe("the workspace tree", () => {
     expect(filesOfA()).toEqual(["a/x.md"]);
   });
 
+  test("a raise a new selection ends while it reads still reads the folder above that its first pass opened, over an answer over the listing cap", async () => {
+    serveLinkBelowClosedFolder("folders");
+    const { tab, slider } = await selectBelowClosedParent({});
+    expect(slider.value, "a/b is closed").toBe("0");
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      await slideTo(slider, 1);
+      expect(tab.expanded.a, "the raise's first pass opens the folder above").toBe(true);
+      canvas.props!.onSelect("notes/n.md");
+      await settle();
+    } finally {
+      graphServer.fsGate = null;
+      release();
+    }
+    await settle(20);
+    expect(tab.expanded.a, "the folder above stays open").toBe(true);
+    expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ a: 1, drawsX: true });
+  });
+
   test("a depth change leaves a folder whose read failed to its retry", async () => {
     graphServer.view = {
       nodes: [g.dir(""), g.dir("a"), g.dir("a/b"), g.dir("bad")],
