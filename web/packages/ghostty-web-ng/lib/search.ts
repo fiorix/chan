@@ -360,8 +360,9 @@ export class SearchOwner {
   // listed page can be the page above, which lies above the screen and
   // soft-wraps into it: a match wrapped across the boundary below it is in
   // neither page's entries, and the core lists it first in its history. A
-  // match wrapped across a boundary on the screen is not listed while it
-  // is there, so where the first listed page's newest match ends on the
+  // match wrapped across a boundary on the screen is not listed after them
+  // while it is there (vt/ghosttySearch.test.ts holds the vendored core to
+  // that), so where the first listed page's newest match ends on the
   // screen, which puts that page on it, its entries suffice. An entry the
   // core cannot place reads as a page ahead of the page above, which only
   // makes a press wait.
