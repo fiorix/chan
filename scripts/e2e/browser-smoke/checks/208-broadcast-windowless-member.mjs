@@ -163,13 +163,13 @@ export default {
       env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
       timeout: 30_000,
     });
-    const details = { engine: "ghostty" };
+    const details = {};
     const opened = [];
     let away = null;
     try {
       // A member in a window no page holds.
       away = await openWindow(ctx, AWAY_WINDOW);
-      await openAttachedTerminal(ctx, away, csIn(AWAY_WINDOW), AWAY_WINDOW, AWAY, "ghostty", ["--tab-group", GROUP]);
+      await openAttachedTerminal(ctx, away, csIn(AWAY_WINDOW), AWAY_WINDOW, AWAY, ["--tab-group", GROUP]);
       opened.push(AWAY);
       await waitSavedTerminal(page, token, AWAY_WINDOW, AWAY);
       await away.close();
@@ -181,7 +181,7 @@ export default {
       );
 
       // A member in the main window, the one the toggles run from.
-      await openAttachedTerminal(ctx, page, csIn(homeWindow), homeWindow, HOME, "ghostty", ["--tab-group", GROUP]);
+      await openAttachedTerminal(ctx, page, csIn(homeWindow), homeWindow, HOME, ["--tab-group", GROUP]);
       opened.push(HOME);
       await poll("the group lists both members", () => groupMembers(page, token),
         (members) => members[HOME]?.window === homeWindow && members[AWAY]?.window === AWAY_WINDOW);

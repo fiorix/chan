@@ -33,12 +33,6 @@ import {
   terminalTab,
 } from "../__tests__/terminalTab";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
@@ -606,7 +600,7 @@ describe("the find stepping chords in the find input", () => {
   });
 });
 
-describe("terminal find on the ghostty backend", () => {
+describe("terminal find in a mounted tab", () => {
   test("the menu's Find row opens the bar, as app.find.open does", async () => {
     await renderGhostty(NEEDLES);
     document
@@ -1044,16 +1038,16 @@ describe("terminal find on the ghostty backend", () => {
     return { calls, unread: mentions - calls.length };
   }
 
-  test("every write the tab makes reaches a ghostty terminal through the viewport controller", () => {
+  test("every write the tab makes reaches the terminal through the viewport controller", () => {
     // The controller tells find of each write, and a write around it leaves
-    // the count and the highlight behind. On ghostty the PTY writer handed
-    // to ptyWrites is the controller's write, chan's own lines take it in
-    // writeChanLine, and that helper's xterm arm is the one writeln.
+    // the count and the highlight behind. The PTY writer handed to
+    // ptyWrites is the controller's write, and chan's own lines take it in
+    // writeChanLine.
     const { calls, unread } = writeCalls(terminalTabSource);
-    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "term.writeln", "viewport.write"]);
+    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "viewport.write"]);
     expect(unread, "no write method is reached another way").toBe(0);
     const helper = terminalTabSource.slice(terminalTabSource.indexOf("function writeChanLine("));
-    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("else term?.writeln(line);");
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("ghosttyViewport?.write(");
   });
 
   test("the write scan reads a call through an assertion, a cast or an optional chain, and counts what it cannot name", () => {

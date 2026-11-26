@@ -90,21 +90,12 @@ type Finding = { rule: Rule; file: string; line: number; key: string };
 /// list only shrinks.
 type Pending = { rule: Rule; file: string; key?: string; until: string };
 
-const ONE_TERMINAL = "the terminal tab and its helpers hold the widget's terminal alone";
 const METRICS = "the terminal tab reads cell metrics through getMetrics()";
 const REFRESH = "refreshTerminalRows needs refresh() and drops its renderer path";
 const FIND = "the find bar runs on the widget's term.search";
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
 
 const PENDING: readonly Pending[] = [
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "GhosttyTerminal", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "GhosttyTerminal | null", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "Terminal", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/components/TerminalTab.svelte", key: "Terminal | null", until: ONE_TERMINAL },
-  { rule: "name", file: "src/components/TerminalTab.svelte", key: "viewportY", until: ONE_TERMINAL },
-  { rule: "cast", file: "src/terminal/primarySelection.ts", until: ONE_TERMINAL },
-  { rule: "member", file: "src/terminal/primarySelection.ts", until: ONE_TERMINAL },
-  { rule: "name", file: "src/terminal/secretMaskingXterm.ts", until: ONE_TERMINAL },
   { rule: "name", file: "src/components/TerminalTab.svelte", key: "renderer", until: METRICS },
   { rule: "name", file: "src/terminal/renderer.ts", key: "renderer", until: REFRESH },
   { rule: "name", file: "src/terminal/renderer.ts", key: "wasmTerm", until: REFRESH },

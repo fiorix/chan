@@ -162,6 +162,19 @@ export function bufferKey(key: string): string {
   return root ? `${prefix}${root}:${part}` : `${prefix}${part}`;
 }
 
+/// Report an error without throwing it here: through the page's
+/// `reportError` where it has one, else by throwing it again in a
+/// microtask, so it reaches the page as an uncaught error either way.
+function reportLater(error: unknown): void {
+  if (typeof globalThis.reportError === "function") {
+    globalThis.reportError(error);
+    return;
+  }
+  queueMicrotask(() => {
+    throw error;
+  });
+}
+
 export function writeEditorBuffer(
   key: string,
   content: string,
@@ -179,8 +192,14 @@ export function writeEditorBuffer(
   } catch (e) {
     // Quota exceeded or other storage error. Prune-then-retry once;
     // throwing in the editor mutation path is worse than losing the
-    // buffer, so give up silently if the retry also fails.
-    pruneEditorBuffers();
+    // buffer, so give up silently if the retry also fails. A prune that
+    // throws has met a bug: it is reported, not thrown, and the retry
+    // still runs, so the unload flush still writes every entry.
+    try {
+      pruneEditorBuffers();
+    } catch (error) {
+      reportLater(error);
+    }
     try {
       localStorage.setItem(bufferKey(key), JSON.stringify(entry));
     } catch {
@@ -235,24 +254,39 @@ export function pruneEditorBuffers(): number {
   if (!isStorageAvailable(STORAGE_PROBE_KEY)) return 0;
   const now = Date.now();
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (
-      !key ||
-      !(key.startsWith(BUFFER_KEY_PREFIX) || key.startsWith(BUFFER_DRAFT_PREFIX))
-    ) {
-      continue;
+  // A store that refuses a read must not end the caller's work, the app's
+  // load among them: an entry it will not hand over is left for a later
+  // prune, and a walk it cuts short prunes what it collected. The store
+  // refuses with a DOMException; anything else thrown from the walk is a
+  // bug and stays loud.
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (
+        !key ||
+        !(key.startsWith(BUFFER_KEY_PREFIX) || key.startsWith(BUFFER_DRAFT_PREFIX))
+      ) {
+        continue;
+      }
+      let raw: string | null;
+      try {
+        raw = localStorage.getItem(key);
+      } catch {
+        continue;
+      }
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as Partial<EditorBuffer>;
+        if (typeof parsed?.updatedAt !== "number") continue;
+        entries.push({ key, updatedAt: parsed.updatedAt, bytes: raw.length });
+      } catch {
+        // Corrupt entry counts as immediately-evictable.
+        entries.push({ key, updatedAt: 0, bytes: raw.length });
+      }
     }
-    const raw = localStorage.getItem(key);
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw) as Partial<EditorBuffer>;
-      if (typeof parsed?.updatedAt !== "number") continue;
-      entries.push({ key, updatedAt: parsed.updatedAt, bytes: raw.length });
-    } catch {
-      // Corrupt entry counts as immediately-evictable.
-      entries.push({ key, updatedAt: 0, bytes: raw.length });
-    }
+  } catch (error) {
+    if (!(error instanceof DOMException)) throw error;
+    // Prune what the walk collected.
   }
   let evicted = 0;
   // Pass 1: TTL.

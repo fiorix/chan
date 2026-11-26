@@ -64,7 +64,7 @@ function loadedFontSet(): FontFaceSetLike & { load: ReturnType<typeof vi.fn> } {
 
 describe("terminal font readiness", () => {
   test.each(CASES)(
-    "$os $preference selects a chain with an xterm-safe loading contract",
+    "$os $preference selects a chain that is ready before the terminal starts",
     async ({ os, preference, requiresWebFont, systemFamily }) => {
       const selection = selectTerminalFont(os, preference);
       const fonts = loadedFontSet();

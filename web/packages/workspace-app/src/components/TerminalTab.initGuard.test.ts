@@ -18,19 +18,11 @@
 import { mount, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-
 import TerminalTab from "./TerminalTab.svelte";
 import { failOnTerminalInitFailures } from "../../vitest.setup";
 import { mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
-import { installTerminalDom, resetTerminals, seatTerminals, TERMINAL_PANE, terminalTab } from "../__tests__/terminalTab";
-import { xterm } from "../__tests__/xterm";
+import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, TERMINAL_PANE, terminalTab } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 installTerminalDom();
@@ -87,9 +79,9 @@ test("the expected failure above ran its body to the end, so the guard's hook fa
 
 test("a terminal opened without the shared widget fixture fails its test under a silenced console", async () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
-  await mountFailingTerminal();
+  const target = await mountFailingTerminal();
 
-  expect(xterm.terminals, "no stand-in opened in its place").toHaveLength(0);
+  expect(target.querySelector(".terminal-host")!.children, "nothing opened in its place").toHaveLength(0);
   expect(() => failOnTerminalInitFailures()).toThrowError(
     /failed to initialize: .*In .*TerminalTab\.initGuard\.test\.ts\. 1 showed the terminal load error$/,
   );
@@ -98,5 +90,11 @@ test("a terminal opened without the shared widget fixture fails its test under a
 test("the widget's checked mount refuses a file that did not declare the fixture", async () => {
   const [tab] = seatTerminals([terminalTab()]);
   await expect(mountGhosttyTerminal(TerminalTab, tab!)).rejects.toThrow(/needs the shared fixture/);
+  expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
+});
+
+test("the shared mount refuses a file that did not declare the fixture", async () => {
+  const [tab] = seatTerminals([terminalTab()]);
+  await expect(mountTerminal(TerminalTab, tab!)).rejects.toThrow(/mountTerminal needs the shared fixture/);
   expect(document.querySelector(".terminal-tab"), "nothing was mounted").toBeNull();
 });

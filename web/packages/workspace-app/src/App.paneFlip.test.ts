@@ -8,13 +8,7 @@
 // reveal it silently turned.
 
 import { flushSync } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout } from "./__tests__/tabs";

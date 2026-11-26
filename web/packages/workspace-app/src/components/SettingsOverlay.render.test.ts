@@ -556,13 +556,11 @@ describe("settings surface render", () => {
     });
   });
 
-  test("secret masking PATCHes terminal.secret_masking with both backends stated", async () => {
+  test("secret masking PATCHes terminal.secret_masking", async () => {
     const target = openSurface();
     await flush();
     clickTab(target, "Terminal");
     await flush();
-    // The row states that masking applies on both backends.
-    expect(target.textContent).toContain("xterm.js and ghostty backends alike");
     const pill = [
       ...target.querySelectorAll('[role="radiogroup"][aria-label="Secret masking"] label.pill'),
     ].find((e) => e.textContent?.trim() === "On") as HTMLLabelElement;

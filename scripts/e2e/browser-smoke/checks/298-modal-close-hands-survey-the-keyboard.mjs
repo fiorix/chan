@@ -60,16 +60,15 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const directory = mkdtempSync(join(ctx.workspaceDir, ".modalclose-298-"));
     const failures = [];
     try {
-      const name = `Modal298-${backend}`;
-      const recorder = join(directory, `${backend}.bytes`);
-      const result = { backend, passed: false, cleanupErrors: [] };
+      const name = "Modal298";
+      const recorder = join(directory, "recorder.bytes");
+      const result = { passed: false, cleanupErrors: [] };
       const calls = [];
       try {
-        const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty",
+        const row = await openAttachedTerminal(ctx, page, cs, windowId, name,
           ["--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`]);
         const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
         const card = `${terminal} .rich-prompt`;
@@ -91,27 +90,27 @@ export default {
           (at) => at === "path-prompt");
 
         const survey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
-          "--title", `Keyboard owners: 298-${backend}`,
+          "--title", "Keyboard owners: 298",
           "--option", "Alpha", "--option", "Beta",
           "A survey arrives over the terminal while the path prompt is open."]);
         calls.push(survey);
         await waitForCard(page, terminalCard(row.tab), survey, "the survey arrives under the dialog");
         await settle(page);
         result.underDialog = await keyboardAt(page);
-        await ctx.shot(`298-${backend}-survey-under-dialog`);
+        await ctx.shot("298-survey-under-dialog");
         assert.equal(result.underDialog, "path-prompt", "the open dialog keeps the keyboard while the survey arrives");
 
         await page.keyboard.press("Escape");
         await until("the path prompt closes", () => page.$(PATH_DIALOG), (dialog) => dialog === null);
         await settle(page);
         result.afterClose = await keyboardAt(page);
-        await ctx.shot(`298-${backend}-dialog-closed`);
+        await ctx.shot("298-dialog-closed");
         await page.keyboard.press("1");
         result.outcome = await surveyOutcome(survey, 5000);
         await sleep(500);
         result.composerText = await composerText(page, card);
         result.bytes = bytesOf(recorder, offset);
-        await ctx.shot(`298-${backend}-after-1`);
+        await ctx.shot("298-after-1");
         assert.equal(result.outcome?.stdout, "Alpha",
           `1 answers the survey once the dialog closes: the survey reads ${JSON.stringify(result.outcome)}; ` +
           `after the close the keyboard was at ${result.afterClose}, and the composer reads ${JSON.stringify(result.composerText)}`);
@@ -120,8 +119,8 @@ export default {
         result.passed = true;
       } catch (error) {
         result.failure = String(error.message ?? error);
-        failures.push(`${backend}: ${result.failure}`);
-        await ctx.shot(`298-${backend}-failure`).catch(() => {});
+        failures.push(result.failure);
+        await ctx.shot("298-failure").catch(() => {});
       } finally {
         try {
           if (await page.$(PATH_DIALOG)) await page.keyboard.press("Escape");
@@ -129,10 +128,10 @@ export default {
           result.cleanupErrors.push(`dialog: ${error.message}`);
         }
         await answerOpenSurveys(page, calls).catch((error) => result.cleanupErrors.push(`surveys: ${error.message}`));
-        await closeEveryTerminal(page, `${backend} cleanup`, token)
+        await closeEveryTerminal(page, "cleanup", token)
           .catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
-        for (const error of result.cleanupErrors) failures.push(`${backend}: cleanup: ${error}`);
-        writeFileSync(join(ctx.outDir, `298-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+        for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
+        writeFileSync(join(ctx.outDir, "298-result.json"), `${JSON.stringify(result, null, 2)}\n`);
       }
     } finally {
       try { rmSync(directory, { recursive: true, force: true }); } catch { /* The workspace teardown removes it. */ }

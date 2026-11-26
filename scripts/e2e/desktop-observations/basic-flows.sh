@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Do the basic flows work on chan-desktop's own engine? This asks it of an
 # image pasted and dropped into the editor and into the Rich Prompt, of the
-# terminal's input, output and text paste on both backends, of typing and
-# saving in the editor, of opening a file, a search hit and the panes, and of
+# terminal's input, output and text paste, of typing and saving in the
+# editor, of opening a file, a search hit and the panes, and of
 # a pane focus move from a terminal to a file browser.
 #
 # This drives a real chan-desktop on WebKitGTK under Xvfb, with a window
@@ -60,9 +60,8 @@
 #            the page sees the drop). Last, a real drop on the tab strip,
 #            which no drop zone owns, must leave the window on its page and
 #            upload nothing.
-#   terminal on each backend (the preference written through the API and
-#            the window reloaded, the backend read from the mounted
-#            terminal): `echo M$((6*7))` typed by X input must put M42 in
+#   terminal a new terminal, once its canvas has mounted after a reload:
+#            `echo M$((6*7))` typed by X input must put M42 in
 #            the PTY's scrollback; then, into cat -v under bracketed paste
 #            with echo off, a text with a space and a newline on the X
 #            clipboard pasted by Ctrl+Shift+V and by the terminal menu's
@@ -84,16 +83,16 @@
 #            must make it active, a drag by X input must move a tab to the
 #            other pane's strip, and Ctrl+Shift+W must close that pane's tabs
 #            and then the pane; read through `cs pane list --json`.
-#   focus    on each backend, a terminal over a file browser in a split of
-#            its own: a press into the terminal by X input (the right button
-#            through its menu, closed with Escape, which on ghostty leaves
-#            the hidden textarea holding the keyboard; then the left one),
+#   focus    a terminal over a file browser in a split of its own: a press
+#            into the terminal by X input (the right button through its
+#            menu, closed with Escape, which leaves the hidden textarea
+#            holding the keyboard; then the left one),
 #            then Alt+] or a click on the browser pane's strip, then Down.
 #            The browser must hold the keyboard and move its selection, and
 #            the terminal's shell, a recorder of every byte its PTY gets,
 #            must get none; a typed x back in the terminal is the control.
 # Optional group, selected explicitly in BASIC_FLOWS_ARMS:
-#   reload-focus  on each backend, a trusted click on the file browser's
+#   reload-focus  a trusted click on the file browser's
 #            status text moves focus from the terminal, then location.reload
 #            runs after the click's event and microtasks. Browser hash, focus
 #            and keyboard must survive. A control waits at least 350 ms;

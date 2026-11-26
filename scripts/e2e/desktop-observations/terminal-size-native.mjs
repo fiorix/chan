@@ -6,9 +6,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 import { installSizeObserver } from "./terminal-size-page.mjs";
-import { checkpointAfter, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
+import { captureGhosttyTerminals } from "../browser-smoke/lib/ghostty-capture.mjs";
+import { checkpointAfter, FRAME_CAPTURE_KEY, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
 
 const exec = promisify(execFile);
 const now = () => Number(process.hrtime.bigint()) / 1e6;
@@ -17,13 +18,11 @@ const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({ options: {
   inspector: { type: "string" }, xid: { type: "string" }, output: { type: "string" },
-  backend: { type: "string", default: "ghostty" },
   cycles: { type: "string", default: "3" }, "full-screen": { type: "boolean", default: false },
   verbose: { type: "boolean", short: "v", default: false },
 } });
-if (!values.inspector || !values.xid || !values.output || !/^[1-9]$/.test(values.cycles) ||
-    values.backend !== "ghostty") {
-  throw new Error("usage: terminal-size-native.mjs --inspector HOST:PORT --xid XID --output DIRECTORY [--backend ghostty] [--cycles 1..9] [--full-screen] [-v]");
+if (!values.inspector || !values.xid || !values.output || !/^[1-9]$/.test(values.cycles)) {
+  throw new Error("usage: terminal-size-native.mjs --inspector HOST:PORT --xid XID --output DIRECTORY [--cycles 1..9] [--full-screen] [-v]");
 }
 const out = resolve(values.output);
 if (!existsSync(join(out, "window-before.png"))) throw new Error("the native window has no screenshot proof");
@@ -111,7 +110,7 @@ async function until(read, predicate, label, bound = 20_000) {
 }
 
 save("reader-preflight.json", preflight());
-const run = { completed: false, backend: null, requestedBackend: values.backend,
+const run = { completed: false,
   cycles: Number(values.cycles), coView: false,
   observer: true, fullScreen: values["full-screen"], native: true, pageClockStepMs: 1, name: "size-probe",
   engine: readFileSync(join(out, "engine-package.txt"), "utf8").trim(), tabMoveInput: "DOM DragEvent",
@@ -151,7 +150,7 @@ async function observe(label) {
   let previous = null, stableSince = now();
   await until(views, (rows) => {
     const signature = geometry(rows);
-    if (rows.length !== 1 || !rows[0].backend) { stableSince = now(); return false; }
+    if (rows.length !== 1 || !rows[0].canvas) { stableSince = now(); return false; }
     if (signature !== previous) { previous = signature; stableSince = now(); }
     return now() - stableSince >= 750;
   }, `${label} geometry settlement`);
@@ -169,7 +168,7 @@ async function observe(label) {
   const checkpoint = await until(async () => checkpointAfter(probe(), last.sequence), Boolean, "probe checkpoint");
   const checkpointAfterMs = now();
   const frameSurfaces = run.fullScreen ? [{ page: evidence.name,
-    ...(await page.evaluate(readFrameSurface, evidence.probeTab)) }] : [];
+    ...(await page.evaluate(readFrameSurface, evidence.probeTab, FRAME_CAPTURE_KEY)) }] : [];
   run.steps.push({ label, settledMs, endMs: now(), geometryChanged, views: finalViews,
     checkpoint, checkpointBeforeMs, checkpointAfterMs, ...(run.fullScreen ? { frameSurfaces } : {}) });
   await flush();
@@ -230,7 +229,15 @@ try {
   await delay(500);
   page = await WebKitPage.open(values.inspector);
   await until(() => page.evaluate(() => document.readyState), (state) => state === "complete", "reloaded workspace page", 30_000);
-  await page.evaluate(installSizeObserver, TERMINAL_SURFACES);
+  await page.evaluate(installSizeObserver, TERMINAL_SURFACE);
+  if (run.fullScreen) {
+    // The inspector does not await a promise, so the capture's install is
+    // read back from the page before the probe terminal opens; a page it
+    // cannot install on leaves the frame reading unavailable.
+    await captureGhosttyTerminals(page, FRAME_CAPTURE_KEY).catch(() => null);
+    run.frameCapture = await until(() => page.evaluate((key) => Boolean(window[key]), FRAME_CAPTURE_KEY),
+      Boolean, "frame capture installed", 10_000).catch(() => false);
+  }
   await calibrate();
   const initial = await layout();
   const left = initial.activePaneId;
@@ -249,8 +256,7 @@ try {
   await observe("initial");
   const reference = run.steps[0].views.find((row) => row.visible && row.grid);
   if (!reference) throw new Error("missing visible reference cells");
-  if (reference.backend !== "ghostty") throw new Error(`expected Ghostty native renderer, got ${reference.backend}`);
-  run.backend = reference.backend;
+  if (reference.canvas !== true) throw new Error("the native renderer's canvas is missing");
   run.cellPitch = { cellWidth: reference.screenBox.width / reference.grid.cols,
     cellHeight: reference.screenBox.height / reference.grid.rows };
   async function act(label, action) {
@@ -301,7 +307,7 @@ try {
   catch (error) { result = { verdict: "inconclusive", error: safe(error.message), driverErrors: run.errors }; }
   save("summary.json", result);
 }
-console.log(JSON.stringify({ verdict: result.verdict, backend: run.backend, findings: result.findings?.length ?? null,
+console.log(JSON.stringify({ verdict: result.verdict, frameCapture: run.frameCapture ?? null, findings: result.findings?.length ?? null,
   steps: run.steps.length, probeEvents: run.probe.length, output: out, errors: run.errors,
   redraws: result.redrawCount ?? null,
   frameSurfaces: result.steps?.flatMap((step) => step.frameSurfaces.map((surface) =>

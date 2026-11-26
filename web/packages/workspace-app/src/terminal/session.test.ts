@@ -20,8 +20,8 @@ describe("terminalWsPath", () => {
   });
 
   test("reattach always requests the full ring (since=0)", () => {
-    // `since` is the CONSTANT 0, not a byte cursor: a reattach always
-    // feeds a fresh empty xterm, and explicit 0 (vs absent) makes the
+    // `since` is the CONSTANT 0, not a byte cursor: a reattach with no
+    // cursor feeds an empty terminal, and explicit 0 (vs absent) makes the
     // server report ring-overflow loss via missed_bytes.
     expect(
       terminalWsPath({
@@ -35,10 +35,10 @@ describe("terminalWsPath", () => {
     );
   });
 
-  test("resumes from a cached byte cursor + generation when provided", () => {
-    // A valid scrollback-snapshot cache hit sends its cursor + generation; the
-    // server replays only the delta past it, and honors it only on a matching
-    // generation.
+  test("resumes from a byte cursor + generation when provided", () => {
+    // A redial of a terminal that still shows the screen sends its live
+    // cursor + generation; the server replays only the delta past it, and
+    // honors it only on a matching generation.
     expect(
       terminalWsPath({
         cols: 80,

@@ -209,7 +209,7 @@ export async function runPointerCheck(ctx, number, body) {
     const args = ["--command", "stty -opost -echo && " + fixture.command,
       ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
     let row;
-    try { row = await openAttachedTerminal(ctx, page, cs, windowId, tab, "ghostty", args); }
+    try { row = await openAttachedTerminal(ctx, page, cs, windowId, tab, args); }
     catch (error) { throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]")); }
     resource.row = row;
     resource.query = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"]`;

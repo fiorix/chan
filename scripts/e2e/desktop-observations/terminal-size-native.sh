@@ -9,28 +9,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 output=$1
 shift
-backend_args=()
-driver_args=()
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --backend)
-            [ "$#" -ge 2 ] || obs_inconclusive "--backend needs xterm or ghostty"
-            backend_args=(--backend "$2")
-            shift 2
-            ;;
-        --backend=*)
-            backend_args=(--backend "${1#*=}")
-            shift
-            ;;
-        *)
-            driver_args+=("$1")
-            shift
-            ;;
-    esac
-done
-if [ "${#backend_args[@]}" -gt 0 ]; then
-    case "${backend_args[1]}" in xterm|ghostty) ;; *) obs_inconclusive "--backend needs xterm or ghostty" ;; esac
-fi
+driver_args=("$@")
 : "${DISPLAY:?run under xvfb-run}"
 obs_setup terminal-size-native
 obs_need node xvfb-run sha256sum
@@ -74,7 +53,7 @@ ldd "$CHAN_DESKTOP_BIN" > "$output/desktop-ldd.txt"
 "$CHAN_DESKTOP_BIN" --version > "$output/desktop-version.txt"
 obs_log "window $xid is visible on $DISPLAY; engine $(cat "$output/engine-package.txt")"
 set +e
-node "$HERE/terminal-size-native.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output" "${backend_args[@]}" "${driver_args[@]}"
+node "$HERE/terminal-size-native.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output" "${driver_args[@]}"
 verdict=$?
 set -e
 obs_verdict

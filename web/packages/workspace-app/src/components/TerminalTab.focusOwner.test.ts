@@ -23,12 +23,6 @@ const clipboard = vi.hoisted(() => ({
   written: null as (() => void) | null,
 }));
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 // A file link opens at once; the wait a test holds is the shell's directory.

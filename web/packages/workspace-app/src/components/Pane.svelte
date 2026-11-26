@@ -2119,7 +2119,7 @@
         <!--
           This pane's terminals are drawn by Terminals.svelte, above the pane
           tree, and docked into this layer, so a split that rebuilds this pane
-          or a move to another pane keeps each terminal's xterm.js renderer,
+          or a move to another pane keeps each terminal's widget,
           its scrollback and its socket. They stay mounted across
           Hybrid Nav (pane mode) and side flips too: the active terminal is
           hidden by `class:active` flipping to false during pane mode or
@@ -2359,10 +2359,9 @@
   /* Single-shot wobble fires on the newly focused pane when the
      active pane CHANGES (keyboard/click pane-switch via
      setActivePane, plus split / close / pane-move which all land
-     on a focused pane). Outer halo pulse via box-shadow only - no
-     transform on `.pane` so xterm's WebGL glyph atlas is
-     unaffected during focus changes. Same easeOutBack curve as the
-     tab-pill / right-click-menu pop. The halo expands to ~6px
+     on a focused pane). Outer halo pulse via box-shadow only. Same
+     easeOutBack curve as the tab-pill / right-click-menu pop. The
+     halo expands to ~6px
      into the inter-pane margin then dissipates back to no halo;
      the steady-state focus ring (the border) stays put underneath
      throughout, so the visual reads as "the focus ring just

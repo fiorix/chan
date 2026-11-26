@@ -173,7 +173,7 @@
   import { tmuxPaneModeRequests, type TmuxCall } from "./state/tmuxResize";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
-  import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
+  import { sweepTerminalSnapshots } from "./terminal/snapshotCache";
   import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
@@ -1544,7 +1544,7 @@
       }
       return;
     }
-    // Terminal: leave the event alone so xterm forwards Ctrl+D
+    // Terminal: leave the event alone so the terminal sends Ctrl+D
     // (EOF) to the shell. The shell exit collapses the tab through
     // the existing terminal-session lifecycle.
     if (active.kind === "terminal") return;
@@ -1808,12 +1808,15 @@
   onMount(() => window.addEventListener("chan:command", onChanCommand));
   onDestroy(() => window.removeEventListener("chan:command", onChanCommand));
 
-  // Prune stale or over-cap editor-buffer entries from localStorage at app
-  // load. editorBuffer self-prunes on quota-exceeded too, but an up-front
-  // sweep keeps storage tidy for long-lived sessions.
+  // Tidy localStorage at app load. The terminal snapshots older builds kept
+  // there go whole, and go first: nothing else removes them, and the prune
+  // after them does not catch an error from a removal. Then stale or over-cap
+  // editor-buffer entries are pruned; editorBuffer self-prunes on
+  // quota-exceeded too, but an up-front sweep keeps storage tidy for
+  // long-lived sessions.
   onMount(() => {
+    sweepTerminalSnapshots();
     pruneEditorBuffers();
-    pruneTerminalSnapshots();
   });
 
   // Synchronously put every tab's unsaved input in its recovery buffer before

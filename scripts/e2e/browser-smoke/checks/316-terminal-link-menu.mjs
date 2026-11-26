@@ -57,7 +57,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { capturePointerTerminals, pointerTerminal, seedPointerClipboard } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -230,23 +230,22 @@ export default {
 
     async function runGhostty() {
       const name = "SmokeLink316G";
-      const at = (leg) => `ghostty.${leg}`;
       await writeTerminalPrefs(page, authToken, { mouse_capture: true });
       await assertTerminalPrefs(ctx, { mouse_capture: true });
       await capturePointerTerminals(page);
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
       tabs.push(name);
       terminal = await pointerTerminal(page, `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] .terminal-host`);
-      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
-      const sizeFile = join(dir, `size316-ghostty`);
+      const surfaceQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACE}`;
+      const sizeFile = join(dir, "size316");
       rmSync(sizeFile, { force: true });
 
       const format = String.raw`\033[H\033[2Jhttp%s\n\033]8;;%s\033\\NOTES-REL\033]8;;\033\\\n\033]8;;%s\033\\NOTES-ABS\033]8;;\033\\\n\033]8;;%s\033\\MISSING\033]8;;\033\\\n\033]8;;%s\033\\FOREIGN\033]8;;\033\\\n\033]8;;%s\033\\HOME\033]8;;\033\\\nL316_%s\n`;
-      const homeRecord = join(dir, `home316-ghostty`);
-      const print = `cd ${DIR} && stty size > size316-ghostty && printf '%s' "$HOME" > home316-ghostty && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
+      const homeRecord = join(dir, "home316");
+      const print = `cd ${DIR} && stty size > size316 && printf '%s' "$HOME" > home316 && printf 'LINK316 HOME BODY\\n' > "$HOME/${HOME_FILE}" && printf '${format}' '${URL_ARG}' './${NOTES}' "file://$(uname -n)$PWD/${NOTES}" "file://$PWD/missing316.md" '${FOREIGN}' '~/${HOME_FILE}' READY\n`;
       await cs(["write", "--tab-name", name, print]);
       await waitScrollback(name, "L316_READY");
-      if (!existsSync(sizeFile)) throw new Error(`ghostty: the shell wrote no ${sizeFile}`);
+      if (!existsSync(sizeFile)) throw new Error(`the shell wrote no ${sizeFile}`);
       const [rows, cols] = readFileSync(sizeFile, "utf8").trim().split(/\s+/).map(Number);
       assert.ok(Number.isInteger(rows) && rows >= 10 && Number.isInteger(cols) && cols > URL_316.length,
         "the PTY grid fits the link fixtures without wrapping");
@@ -279,7 +278,7 @@ export default {
         await button.click();
       };
 
-      await leg(at("url-menu"), async () => {
+      await leg("url-menu", async () => {
         const before = (await opened()).length;
         await clickRow(ROW.url);
         const menu = await waitMenu("url click with the keyboard on its entry", (m) => m.focused);
@@ -294,7 +293,7 @@ export default {
         return { target: menu.target, host: menu.host, focused: menu.focused, opened: now.at(-1) };
       });
 
-      await leg(at("foreign"), async () => {
+      await leg("foreign", async () => {
         await clickRow(ROW.foreign);
         const menu = await waitMenu("foreign click");
         const edit = menu.rows.find((r) => r.action === "open-editor");
@@ -305,7 +304,7 @@ export default {
         return { reason: menu.reason };
       });
 
-      await leg(at("missing"), async () => {
+      await leg("missing", async () => {
         await clickRow(ROW.missing);
         const menu = await waitMenu("missing click");
         if (!menu.target?.endsWith(`/${DIR}/missing316.md`)) throw new Error(`menu shows ${JSON.stringify(menu)}`);
@@ -317,7 +316,7 @@ export default {
         return { reason: after.reason };
       });
 
-      await leg(at("escape-typing"), async () => {
+      await leg("escape-typing", async () => {
         await clickRow(ROW.url);
         await waitMenu("url click");
         await page.keyboard.press("Escape");
@@ -327,7 +326,7 @@ export default {
         await waitScrollback(name, "typed316_42", 10_000);
       });
 
-      await leg(at("ctrl-click"), async () => {
+      await leg("ctrl-click", async () => {
         const before = (await opened()).length;
         const p = await cell(2, ROW.url);
         await approach(p);
@@ -339,7 +338,7 @@ export default {
         if (now.length !== before + 1 || now.at(-1) !== URL_316) throw new Error(`the opener got ${JSON.stringify(now.slice(before))}`);
       });
 
-      await leg(at("double-click"), async () => {
+      await leg("double-click", async () => {
         const before = (await opened()).length;
         const p = await cell(4, ROW.url);
         await approach(p);
@@ -349,7 +348,7 @@ export default {
         if (now.length !== before) throw new Error(`the opener got ${JSON.stringify(now.slice(before))}`);
       });
 
-      await leg(at("out-and-back"), async () => {
+      await leg("out-and-back", async () => {
         const before = (await opened()).length;
         const p = await cell(4, ROW.url);
         await approach(p);
@@ -366,7 +365,7 @@ export default {
         return { travel: p.w, threshold: p.w / 2, copied };
       });
 
-      await leg(at("rel-editor"), async () => {
+      await leg("rel-editor", async () => {
         await clickRow(ROW.rel);
         const menu = await waitMenu("relative click");
         if (menu.target !== `./${NOTES}` || !menu.rows.some((r) => r.action === "open-editor" && !r.disabled)) {
@@ -377,7 +376,7 @@ export default {
         await activateTab(name);
         await sleep(500);
       });
-      await leg(at("home-editor"), async () => {
+      await leg("home-editor", async () => {
         if (!home) throw new Error("the shell wrote no $HOME");
         await clickRow(ROW.home);
         const menu = await waitMenu("home click");
@@ -405,7 +404,7 @@ export default {
         }
       });
 
-      await leg(at("abs-editor"), async () => {
+      await leg("abs-editor", async () => {
         await clickRow(ROW.abs);
         const menu = await waitMenu("file: click");
         // The shell's $PWD may name the folder by another spelling than the
@@ -420,7 +419,7 @@ export default {
         await sleep(500);
       });
 
-      await leg(at("output-closes"), async () => {
+      await leg("output-closes", async () => {
         await clickRow(ROW.url);
         await waitMenu("url click");
         await cs(["write", "--tab-name", name, "clear\n"]);
@@ -429,7 +428,7 @@ export default {
         });
       });
 
-      await leg(at("padding-release"), async () => {
+      await leg("padding-release", async () => {
         // Fill history with links so a negative click row cannot silently
         // pass merely because the wrongly mapped history row is empty.
         await cs(["write", "--tab-name", name,
@@ -469,7 +468,7 @@ export default {
 
       // ghostty looks a link up at the click, so one printed into the row
       // under a resting pointer is clickable with no move off the row.
-      await leg(at("resting-click"), async () => {
+      await leg("resting-click", async () => {
         const p = await cell(2, 0);
         await page.mouse.move(p.x, p.y);
         await cs(["write", "--tab-name", name, `printf '\\033[H\\033[2Jhttp%s\\nR316_%s\\n' '${REST_URL.slice(4)}' READY\n`]);
@@ -483,7 +482,7 @@ export default {
 
       // The shell prints a URL, turns on mouse tracking and becomes a raw
       // recorder of what the PTY receives.
-      const record = join(ctx.outDir, `pty316-ghostty`);
+      const record = join(ctx.outDir, "pty316");
       rmSync(record, { force: true });
       const trackFormat = String.raw`\033[H\033[2Jhttp%s\n\033[?1000h\033[?1006hT316_%s\n`;
       await cs(["write", "--tab-name", name,
@@ -491,11 +490,11 @@ export default {
       await waitScrollback(name, "T316_READY");
       const deadline = Date.now() + 15_000;
       while (!existsSync(record) && Date.now() < deadline) await sleep(100);
-      if (!existsSync(record)) throw new Error(`ghostty: the recorder never started`);
+      if (!existsSync(record)) throw new Error("the recorder never started");
       await sleep(500);
       const recorded = () => readFileSync(record).toString("latin1");
 
-      await leg(at("tracked-click"), async () => {
+      await leg("tracked-click", async () => {
         const before = recorded().length;
         const openedBefore = (await opened()).length;
         await clickRow(0);
@@ -509,7 +508,7 @@ export default {
         return { pty: got };
       });
 
-      await leg(at("shift-click"), async () => {
+      await leg("shift-click", async () => {
         const before = recorded().length;
         const p = await cell(2, 0);
         await approach(p);
@@ -525,7 +524,7 @@ export default {
         if (got !== "") throw new Error(`the PTY read ${JSON.stringify(got)}`);
       });
 
-      await leg(at("shift-drag"), async () => {
+      await leg("shift-drag", async () => {
         // Keep the edge gesture, but refuse leftover history before a timer
         // can scroll it into the selection and make the result timing-dependent.
         assert.equal(await terminal.evaluate((t) => t.getScrollbackLength()), 0,
@@ -566,8 +565,7 @@ export default {
       }
       const required = ["url-menu", "foreign", "missing", "escape-typing", "ctrl-click", "double-click",
         "out-and-back", "rel-editor", "home-editor", "abs-editor", "output-closes", "padding-release",
-        "resting-click", "tracked-click", "shift-click", "shift-drag"]
-        .map((leg) => `ghostty.${leg}`);
+        "resting-click", "tracked-click", "shift-click", "shift-drag"];
       assert.deepEqual(Object.keys(results).sort(), required.sort(), "all 16 Ghostty link-menu legs ran");
       return results;
     } catch (error) {

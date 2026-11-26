@@ -1,21 +1,12 @@
 // @vitest-environment jsdom
 //
-// The cursor a reattach resumes from, and the scrollback snapshots a control
-// terminal clears: its output carries the devserver token the desktop
-// re-scrapes, so no snapshot of it may stay in localStorage. A TerminalTab
-// is mounted on the real widget over a stand-in socket; the assertions read
-// the snapshot cache, the URL each dial asks for and what the terminal shows.
+// The cursor a reattach resumes from. A TerminalTab is mounted on the real
+// widget over a stand-in socket; the assertions read the URL each dial asks
+// for and what the terminal shows.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
@@ -23,8 +14,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
 import { ghosttyFixture, ghosttyLineText, mountGhosttyTerminal } from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
-import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
-import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
 import {
   attach,
   installTerminalDom,
@@ -39,7 +29,6 @@ import {
 installTerminalDom();
 
 const SESSION = "sess-1";
-const startControl = ui.terminalControl;
 
 // Every case runs on the fake clock: uninstalling it after teardown has
 // put the file's frames back deletes requestAnimationFrame, which a case
@@ -53,23 +42,8 @@ afterEach(() => {
   resetTerminals();
   vi.useRealTimers();
   __testSetStandalonePreferences(null);
-  ui.terminalControl = startControl;
   localStorage.clear();
 });
-
-async function attached() {
-  const [tab] = seatTerminals([terminalTab()]);
-  const mounted = await mountGhosttyTerminal(TerminalTab, tab!);
-  const socket = TerminalSocket.all.at(-1)!;
-  await attach(socket, { id: SESSION, generation: 3, seq: 42 });
-  // The server ends every attach's replay with `ready`.
-  await receive(socket, { type: "ready", cols: 80, rows: 24 });
-  return mounted;
-}
-
-function leftover(): void {
-  writeTerminalSnapshot(SESSION, { ansi: "old", generation: 1, lastSeq: 1, cols: 80, rows: 24, updatedAt: 1 });
-}
 
 function dialed(socket: TerminalSocket): { since: string | null; generation: string | null } {
   const query = new URL(socket.url, "http://chan.test").searchParams;
@@ -80,38 +54,21 @@ function screen(term: Terminal): string[] {
   return Array.from({ length: term.rows }, (_, row) => ghosttyLineText(term, row) ?? "");
 }
 
-describe("a control terminal", () => {
-  test("clears a snapshot left for its session when it attaches, and again when it goes", async () => {
-    ui.terminalControl = true;
-    leftover();
-    const { component } = await attached();
-    expect(readTerminalSnapshot(SESSION), "cleared on attach").toBeNull();
-
-    leftover();
-    unmount(component);
-    expect(readTerminalSnapshot(SESSION), "cleared on teardown").toBeNull();
-  });
-
-  test("an ordinary terminal keeps its snapshot", async () => {
-    ui.terminalControl = false;
-    leftover();
-    await attached();
-    expect(readTerminalSnapshot(SESSION)).not.toBeNull();
-  });
-});
-
 describe("resuming a reattach", () => {
-  test("without a snapshot, asks for the whole ring", async () => {
+  test("with no live cursor, asks for the whole ring", async () => {
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     await mountGhosttyTerminal(TerminalTab, tab!);
     expect(dialed(TerminalSocket.all.at(-1)!)).toEqual({ since: "0", generation: null });
   });
 
-  // The ring's replay restores the screen, so a snapshot the cache still
-  // holds for the session is neither dialed from nor painted.
-  test("a snapshot cached at the live size does not prime the terminal", async () => {
-    ui.terminalControl = false;
-    writeTerminalSnapshot(SESSION, { ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: 1 });
+  // The ring's replay restores the screen, so a scrollback snapshot an
+  // older build left in localStorage for the session, at the live size, is
+  // neither dialed from nor painted.
+  test("a snapshot an older build stored does not prime the terminal", async () => {
+    localStorage.setItem(
+      `chan:term-snapshot:${SESSION}`,
+      JSON.stringify({ ansi: "SNAPSHOT SCREEN", generation: 3, lastSeq: 42, cols: 80, rows: 24, updatedAt: Date.now() }),
+    );
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     expect({ cols: term.cols, rows: term.rows }, "the snapshot's size is the terminal's").toEqual({ cols: 80, rows: 24 });

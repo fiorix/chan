@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 162 provide the browser backing named below.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 162 provide the browser backing named below.
 
 Run one check with its exact filename prefix, for example `XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. These checks require the server's program-status frames and list field.
 
@@ -96,7 +96,7 @@ Run one check with its exact filename prefix, for example `XDG_RUNTIME_DIR="$(mk
 
 ### PS-25 - the whole-feature switch
 
-**Expectation.** Program status defaults on; the browser helper still sets `preferences.terminal.program_status` on through `/api/config` for each engine before these checks, so they do not lean on the default. PS-25 first verifies that the flag is on, then confirms a report marks a background tab. The Terminal settings switch `Program status (OSC 7501)` saves the flag through `/api/config`. Switching it off clears the mark and records, makes the list cell `-`, ignores a later PTY report, refuses a control-route `cs terminal status` with `program status is disabled by configuration`, and gives no reply to a raw PTY query within two seconds. Switching it on again accepts a new report. **Backing.** `162-program-switch.mjs` drives both terminal engines, reads the config file and API after each UI toggle, and observes the strip, list and socket publication. **Mutation.** Ignore the flag on PTY report ingress; the off-state report then changes the record set.
+**Expectation.** Program status defaults on; the browser helper still sets `preferences.terminal.program_status` on through `/api/config` before these checks, so they do not lean on the default. PS-25 first verifies that the flag is on, then confirms a report marks a background tab. The Terminal settings switch `Program status (OSC 7501)` saves the flag through `/api/config`. Switching it off clears the mark and records, makes the list cell `-`, ignores a later PTY report, refuses a control-route `cs terminal status` with `program status is disabled by configuration`, and gives no reply to a raw PTY query within two seconds. Switching it on again accepts a new report. **Backing.** `162-program-switch.mjs` drives the terminal, reads the config file and API after each UI toggle, and observes the strip, list and socket publication. **Mutation.** Ignore the flag on PTY report ingress; the off-state report then changes the record set.
 
 ## Outside the browser
 

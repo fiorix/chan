@@ -20,7 +20,7 @@
 // simulated memory pressure, so the discard is applied by the check rather
 // than waited for; the property proved is the page's half, the repaint.
 
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const TAB = "SmokeOffscreen204";
 const MARK = "OFF204_";
@@ -68,10 +68,10 @@ export default {
       }
     }
 
-    const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+    const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB);
     const canvas =
       `.pane[data-pane-id="${row.pane}"] ` +
-      `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
+      `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACE}`;
 
     /// Pixels that differ from the canvas's most common color (its
     /// background), read straight from the 2D context.

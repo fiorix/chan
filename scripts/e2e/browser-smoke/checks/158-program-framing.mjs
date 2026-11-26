@@ -37,7 +37,7 @@ export default {
   async run(ctx) {
     await withProgramStatusTabs(ctx, "158", async (tab) => {
       const before = await tab.read();
-      const output = join(ctx.workspaceDir, `status-framing-${tab.backend}.bin`);
+      const output = join(ctx.workspaceDir, "status-framing.bin");
       const program = runPtyPython(ctx, tab, "framing", partialProgram);
       void program.catch(() => {});
       let completed;

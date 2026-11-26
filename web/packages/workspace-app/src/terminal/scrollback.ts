@@ -1,11 +1,10 @@
 // Terminal scrollback sizing helpers.
 //
-// xterm.js measures `scrollback` in lines, not bytes. The Settings UI
-// exposes a per-terminal MB budget; the spawn site needs lines. Both
-// the conversion and the slider clamps live here so a future change
-// to the constants (or to xterm.js's per-cell footprint) lands in one
-// place, and the unit tests cover the conversion without needing a
-// running PTY.
+// The terminal's `scrollback` option counts lines, not bytes. The
+// Settings UI exposes a per-terminal MB budget; the spawn site needs
+// lines. Both the conversion and the slider clamps live here so a
+// change to the constants lands in one place, and the unit tests cover
+// the conversion without needing a running PTY.
 
 /// Settings slider bounds. Kept in lockstep with the Rust constants in
 /// `crates/chan-library/src/config.rs` (`TERMINAL_SCROLLBACK_MB_MIN` /
@@ -18,18 +17,18 @@ export const SCROLLBACK_MB_MAX = 50;
 /// the baseline 80-col width.
 export const SCROLLBACK_MB_DEFAULT = 10;
 
-/// Baseline column width used for the MB -> lines conversion. xterm.js
-/// allocates scrollback per visible row regardless of how wide the
-/// terminal happens to be at a given moment; budgeting against 80 cols
-/// matches the conservative case (wider terminals consume more bytes
-/// per line, so the effective MB cap is closer to the configured
-/// budget for power users running wide windows).
+/// Baseline column width used for the MB -> lines conversion. The
+/// spawn site converts once, at 80 columns, whatever width the
+/// terminal later takes, so the line cap does not depend on the
+/// window's size.
 export const SCROLLBACK_BASELINE_COLS = 80;
 
-/// Empirical xterm.js per-cell footprint on modern V8. Each cell is
-/// ~12 bytes: 1-2 character bytes + colour / attr packing + width
-/// flags. Tracked here so the conversion has a single source of truth
-/// the tests can pin.
+/// Bytes the MB -> lines conversion counts per cell: ~12, for 1-2
+/// character bytes, colour / attr packing and width flags. It is not a
+/// measurement of the terminal's core, which keeps its history in its
+/// own pages, so the line cap approximates the MB budget rather than
+/// bounding the core's memory. Tracked here so the conversion has a
+/// single source of truth the tests can pin.
 export const SCROLLBACK_BYTES_PER_CELL = 12;
 
 /// Round-trip a raw MB value from `Preferences.terminal.scrollback_mb`
@@ -48,11 +47,10 @@ export function clampScrollbackMb(raw: number | null | undefined): number {
   return rounded;
 }
 
-/// MB budget -> xterm.js scrollback line cap. Caller passes the
+/// MB budget -> the terminal's scrollback line cap. Caller passes the
 /// already-clamped MB value (use `clampScrollbackMb` upstream) and an
 /// optional column override; the result is the number of scrollback
-/// lines xterm.js should keep. Floored to an integer because xterm
-/// rejects fractional caps.
+/// lines the terminal keeps, floored to a whole line.
 export function scrollbackLinesFromMb(
   mb: number,
   cols: number = SCROLLBACK_BASELINE_COLS,

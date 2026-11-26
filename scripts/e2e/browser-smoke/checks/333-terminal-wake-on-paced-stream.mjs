@@ -1,5 +1,5 @@
 // Two ways a page under a fast paced stream reads as a machine sleep without
-// being one, in headless Chrome on ghostty. In both the socket is healthy, so
+// being one, in headless Chrome. In both the socket is healthy, so
 // it must be kept and the stream must arrive whole and in order.
 //
 //   late:     a 4.8 s stall, inside the server's 5 s bound, that starts 1.9 s
@@ -56,7 +56,7 @@ export default {
       const command = ["stty -echo", ...LEGS.flatMap(({ begin, end, count }) => [
         "IFS= read -r _", `printf '${begin}\\n'`, `seq -f %.0f 1 ${count}`, `printf '${end}'`,
       ]), "exec sleep 600"].join("; ");
-      await openAttachedTerminal(ctx, page, cs, windowId, NAME, "ghostty", ["--command", command]);
+      await openAttachedTerminal(ctx, page, cs, windowId, NAME, ["--command", command]);
       const read = () => page.evaluate((name) => __streamProbe.read(name), NAME);
       await until("the terminal socket is ready", read, (state) => state?.ready);
       assert.equal(await page.evaluate(() => __streamProbe.wakeProbeCount()), 1,

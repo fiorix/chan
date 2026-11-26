@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
-const TERMINAL_SURFACE = `.terminal-tab.active ${TERMINAL_SURFACES.ghostty}`;
+const ACTIVE_SURFACE = `.terminal-tab.active ${TERMINAL_SURFACE}`;
 const DETAILS = '.terminal-main aside.inspector.right.floating.reserve-space[aria-label="Details"]';
 
 export default {
@@ -21,7 +21,7 @@ export default {
           const box = document.querySelector(surface)?.getBoundingClientRect();
           return box?.width > 0 && box.height > 0 && window.__detailsState?.id &&
             window.__detailsState.ready && window.__detailsSocket?.readyState === WebSocket.OPEN;
-        }, { timeout: 30_000 }, TERMINAL_SURFACE);
+        }, { timeout: 30_000 }, ACTIVE_SURFACE);
       } catch (cause) {
         const error = new Error(`terminal Details setup did not reach routed-window and Ghostty session readiness: ${cause.message}`, { cause });
         error.smokeEnvironment = true;

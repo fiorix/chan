@@ -10,7 +10,7 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const DIR = `reloadfocus-262-${RUN}`;
@@ -79,11 +79,11 @@ function centreOf(page, selector) {
   });
 }
 
-async function openTerminal(page, engine) {
+async function openTerminal(page) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await sleep(1_000);
 }
 
@@ -159,8 +159,8 @@ async function markerSince(page, file, offset, label) {
   return ptySince(label, file, offset);
 }
 
-async function moveArm(page, file, engine, press, move) {
-  const arm = `${engine}-${press}-${move}`;
+async function moveArm(page, file, press, move) {
+  const arm = `${press}-${move}`;
   const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const before = await browserState(page);
@@ -186,8 +186,7 @@ async function selectionSettled(page, from, timeout = 3_000) {
 }
 
 /// The keyboard holder a press leaves in the terminal: the host after a left
-/// press on ghostty, the textarea after a right one (the case the blur has to
-/// reach).
+/// press, the textarea after a right one (the case the blur has to reach).
 function expectedHolder(press) {
   return press === "left" ? "terminal" : "terminal-textarea";
 }
@@ -204,8 +203,8 @@ function checkMove(result, failures) {
   if (JSON.stringify(pty) !== JSON.stringify([TYPED])) failures.push(`${arm}: the PTY did not read only the marker`);
 }
 
-async function stayArm(page, file, engine, press) {
-  const arm = `${engine}-${press}-hybrid-stay`;
+async function stayArm(page, file, press) {
+  const arm = `${press}-hybrid-stay`;
   const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const committed = await hybridNav(page, []);
@@ -217,7 +216,7 @@ async function stayArm(page, file, engine, press) {
 
 /// A press on the browser's own chrome, at a point whose element has no
 /// focusable ancestor inside the browser.
-async function browserChromePoint(page, engine) {
+async function browserChromePoint(page) {
   await pressTerminal(page, "left");
   const point = await page.evaluate(() => {
     const browser = document.querySelector(".pane .browser");
@@ -232,12 +231,12 @@ async function browserChromePoint(page, engine) {
     }
     return null;
   });
-  if (!point) throw new Error(`${engine}-chrome: no point on the browser's chrome without a focusable ancestor`);
+  if (!point) throw new Error(`chrome: no point on the browser's chrome without a focusable ancestor`);
   return point;
 }
 
-async function actionSequence(page, file, engine, report) {
-  const control = { arm: `${engine}-recorder-control`, offset: statSync(file).size };
+async function actionSequence(page, file, report) {
+  const control = { arm: "recorder-control", offset: statSync(file).size };
   control.focus = await pressTerminal(page, "left");
   await page.keyboard.type("x");
   control.pty = await recordedSince(control.arm, file, control.offset, TYPED);
@@ -247,11 +246,11 @@ async function actionSequence(page, file, engine, report) {
   }
   for (const press of ["left", "right"]) {
     for (const move of Object.keys(MOVES)) {
-      const result = await moveArm(page, file, engine, press, move);
+      const result = await moveArm(page, file, press, move);
       report.arms.push(result);
       checkMove(result, report.sequenceFailures);
     }
-    const stay = await stayArm(page, file, engine, press);
+    const stay = await stayArm(page, file, press);
     report.arms.push(stay);
     if (stay.holder !== stay.expected || !stay.committed || !stay.focus.startsWith("terminal") || JSON.stringify(stay.pty) !== JSON.stringify([TYPED])) {
       report.sequenceFailures.push(`${stay.arm}: keyboard/commit/recorder disagreement`);
@@ -321,13 +320,13 @@ async function cleanSession(ctx, windowId) {
   throw new Error("terminal cleanup left sessions behind");
 }
 
-async function reloadAtFocusClick(ctx, page, engine, delay, report) {
-  const point = await browserChromePoint(page, engine);
+async function reloadAtFocusClick(ctx, page, delay, report) {
+  const point = await browserChromePoint(page);
   report.before = await page.evaluate(() => window.__reloadfocusCheck.state());
   assert.equal(report.before.focused, "terminal", "terminal pane setup did not hold focus");
   assert.ok(report.before.keyboard.startsWith("terminal"), "terminal setup did not hold keyboard");
   assert.equal(report.before.hashFocus, "terminal", "terminal setup hash was not settled");
-  const key = `chan.smoke.reloadfocus.${RUN}.${engine}.${delay}`;
+  const key = `chan.smoke.reloadfocus.${RUN}.${delay}`;
   await page.evaluate(({ key, delay }) => {
     const read = window.__reloadfocusCheck.state;
     const trace = { pointer: null, click: null, outgoing: null, unload: null };
@@ -370,7 +369,7 @@ async function reloadAtFocusClick(ctx, page, engine, delay, report) {
     performance.timeOrigin !== previous && document.readyState === "complete",
   { timeout: 30_000 }, report.before.document);
   report.step = "readback";
-  await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await page.waitForSelector(".pane .browser", { visible: true, timeout: 15_000 });
   await page.waitForFunction((selector) => document.querySelectorAll(selector).length > 0, { timeout: 15_000 }, FILE_ROW);
   report.incoming = await page.evaluate(() => window.__reloadfocusCheck.incoming);
@@ -382,7 +381,7 @@ async function reloadAtFocusClick(ctx, page, engine, delay, report) {
     sessionStorage.removeItem(key);
     return trace;
   }, key);
-  report.screenshot = basename(await ctx.shot(`reloadfocus-${engine}-${report.mode}`, page));
+  report.screenshot = basename(await ctx.shot(`reloadfocus-${report.mode}`, page));
   const trace = report.trace;
   assert.ok(trace?.pointer?.trusted && trace?.click?.trusted, "trusted focus click was not recorded");
   assert.equal(trace.outgoing?.focused, "browser", "focus click did not focus the browser");
@@ -402,9 +401,9 @@ async function reloadAtFocusClick(ctx, page, engine, delay, report) {
   }
 }
 
-async function trial(ctx, directory, engine, mode) {
-  const windowId = `reloadfocus-262-${engine}-${mode}-${RUN}`;
-  const report = { engine, mode, step: "setup", arms: [], sequenceFailures: [], failures: [], cleanupFailures: [], pageErrors: [], observed: false };
+async function trial(ctx, directory, mode) {
+  const windowId = `reloadfocus-262-${mode}-${RUN}`;
+  const report = { mode, step: "setup", arms: [], sequenceFailures: [], failures: [], cleanupFailures: [], pageErrors: [], observed: false };
   const page = await ctx.browser.newPage();
   page.on("pageerror", (error) => report.pageErrors.push(safeError(error)));
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
@@ -422,8 +421,8 @@ async function trial(ctx, directory, engine, mode) {
     await ctx.waitWindowLive(windowId);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
-    await openTerminal(page, engine);
-    const file = join(directory, `${engine}-${mode}.bytes`);
+    await openTerminal(page);
+    const file = join(directory, `${mode}.bytes`);
     await startRecorder(page, file);
     await dispatchCommand(page, "app.pane.splitDown");
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
@@ -437,14 +436,14 @@ async function trial(ctx, directory, engine, mode) {
     await sleep(300);
     if (mode === "sequence") {
       report.step = "keyboard-sequence";
-      await actionSequence(page, file, engine, report);
+      await actionSequence(page, file, report);
       assert.equal(report.sequenceFailures.length, 0, "keyboard action sequence failed");
     } else {
       await pressTerminal(page, "left");
       await sleep(350);
     }
     report.step = "reload";
-    await reloadAtFocusClick(ctx, page, engine, mode === "control" ? 400 : 0, report);
+    await reloadAtFocusClick(ctx, page, mode === "control" ? 400 : 0, report);
   } catch (error) {
     report.error = { ...safeError(error), step: report.step };
   } finally {
@@ -476,7 +475,7 @@ async function trial(ctx, directory, engine, mode) {
     report.arms = report.arms.map(({ pty, ...arm }) => ({
       ...arm, ptyMarkerOnly: JSON.stringify(pty) === JSON.stringify([TYPED]), ptyBytes: pty?.length ?? 0,
     }));
-    writeFileSync(join(ctx.outDir, `262-${engine}-${mode}.json`), JSON.stringify(report, null, 2) + "\n");
+    writeFileSync(join(ctx.outDir, `262-${mode}.json`), JSON.stringify(report, null, 2) + "\n");
   }
   return report;
 }
@@ -489,16 +488,16 @@ export default {
     const reports = [];
     try {
       for (const mode of ["control", "sequence"]) {
-        const report = await trial(ctx, directory, "ghostty", mode);
+        const report = await trial(ctx, directory, mode);
         reports.push(report);
         if (report.cleanupFailures.length) throw new Error("reload focus cleanup failed; later trials refused");
       }
-      assert.deepEqual(reports.map(({ engine, mode }) => `${engine}/${mode}`),
-        ["ghostty/control", "ghostty/sequence"], "every Ghostty trial ran exactly once");
+      assert.deepEqual(reports.map(({ mode }) => mode),
+        ["control", "sequence"], "every trial ran exactly once");
       const incomplete = reports.filter((report) => !report.observed || report.error || report.sequenceFailures.length);
       assert.equal(incomplete.length, 0, "reload focus incomplete: inspect 262 artifacts for timing/setup failures");
       const failures = reports.filter((report) => report.failures.length);
-      assert.equal(failures.length, 0, "reload focus contract failed: " + failures.map((report) => `${report.engine}/${report.mode}`).join(", "));
+      assert.equal(failures.length, 0, "reload focus contract failed: " + failures.map((report) => report.mode).join(", "));
       return { results: reports };
     } catch (error) {
       error.smokeDetails = { results: reports };

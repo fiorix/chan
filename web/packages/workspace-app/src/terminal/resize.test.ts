@@ -73,8 +73,8 @@ describe("terminal resize helpers", () => {
   });
 
   test("says the grid was not measured when a detached or hidden host proposes no finite grid", () => {
-    // xterm's fitter reads the host's computed size, which a detached or
-    // display:none host does not have, and proposes NaN.
+    // The terminal's fitter proposes nothing for such a host, whose box is
+    // zero; a fitter that proposes NaN instead reads the same.
     const proposeDimensions = () => ({ cols: Number.NaN, rows: Number.NaN });
     expect(runTerminalFit({ fit: vi.fn(), proposeDimensions }, { cols: 80, rows: 24 }, () => {})).toBe(false);
   });

@@ -166,7 +166,8 @@ export default {
       await dispatchCommand(page, "app.terminal.toggle");
       terminalOpened = true;
       await waitPaneStrip(page, "a lone terminal on A", (s) => s.side === "A" && s.terminals === 1 && stripHidden(s));
-      // The terminal's renderer, whichever engine draws it, is up.
+      // The active terminal's host holds an element, which only the widget's
+      // open puts there: the terminal has opened.
       await page.waitForSelector(".pane .terminal-tab.active .terminal-host > *", { timeout: 30_000 });
       const paneId = await page.$eval(".pane", (pane) => pane.getAttribute("data-pane-id"));
       const toB = await armFlip(page, paneFlip(paneId));

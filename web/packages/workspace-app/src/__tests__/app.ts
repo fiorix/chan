@@ -2,9 +2,9 @@
 // the user and the desktop host do: key chords on the document and
 // `chan:command` events on the window.
 //
-// A test file still declares its own `vi.mock` calls (the xterm packages
-// from `./xterm`, the canvas runners from `./canvas`): vitest hoists a mock
-// only in the file that writes it.
+// A test file still declares its own `vi.mock` calls (the terminal loader
+// from `./ghosttyTab`, the canvas runners from `./canvas`): vitest hoists a
+// mock only in the file that writes it.
 
 import { mount, tick } from "svelte";
 import { vi } from "vitest";

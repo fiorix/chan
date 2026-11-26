@@ -164,7 +164,7 @@ export default {
         state.frames.some((frame) => frame.type === "program-status" && frame.id === tab.subjectRow.session_id &&
           isDeepStrictEqual(frame.program_status?.records, state.row.program_status.records)));
       const expected = first.row.program_status.records;
-      const saved = await waitSavedTabs(ctx, tab.page, tab.windowId, [tab.subject, `Status150${tab.backend}F`]);
+      const saved = await waitSavedTabs(ctx, tab.page, tab.windowId, [tab.subject, tab.front]);
       ctx.mark("program150:saved-layout", { status: saved.status, bytes: saved.layout.length });
       const sameUrl = new URL(ctx.serverUrl);
       sameUrl.searchParams.set("w", tab.windowId);
@@ -174,11 +174,11 @@ export default {
         second = await openWindow(ctx, sameUrl);
         const attached = await waitAttach(second, tab.subject, tab.subjectRow.session_id, expected);
         assert.deepEqual(attached.frames.find((frame) => frame.type === "session" && frame.id === tab.subjectRow.session_id).program_status.records, expected);
-        await ctx.shot(`${tab.backend}-second-page`, second);
+        await ctx.shot("second-page", second);
         await second.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
         const reloaded = await waitAttach(second, tab.subject, tab.subjectRow.session_id, expected);
         assert.ok(reloaded.mark, "same session is visible after page reload");
-        await ctx.shot(`${tab.backend}-reloaded`, second);
+        await ctx.shot("reloaded", second);
 
         // Make the co-viewer save a changed layout, then wait for the source's
         // sync read and for the saved terminal sessions to match its live tabs.
@@ -209,36 +209,36 @@ export default {
           await second.close();
           second = null;
           const settled = await waitCoViewSettled(ctx, tab, sourceGets);
-          ctx.mark("program150:co-view-settled", { backend: tab.backend, coViewSelection, ...settled });
+          ctx.mark("program150:co-view-settled", { coViewSelection, ...settled });
         } finally {
           tab.page.off("response", onSourceResponse);
         }
 
         const movedUrl = new URL(ctx.serverUrl);
-        movedUrl.searchParams.set("w", `status150-${tab.backend}`);
-        ctx.mark("program150:open-move-target", { backend: tab.backend });
+        movedUrl.searchParams.set("w", "status150");
+        ctx.mark("program150:open-move-target");
         target = await openWindow(ctx, movedUrl);
         await tab.page.bringToFront();
-        ctx.mark("program150:focus-subject-for-move", { backend: tab.backend });
+        ctx.mark("program150:focus-subject-for-move");
         await tab.focusSubject();
-        ctx.mark("program150:drag-subject", { backend: tab.backend });
+        ctx.mark("program150:drag-subject");
         const payload = await dragActive(tab.page);
         assert.ok(payload[CROSS_TAB_MIME], "real dragstart offered a cross-window tab payload");
         const moved = JSON.parse(payload[CROSS_TAB_MIME]);
         assert.equal(moved.kind, "terminal");
-        ctx.mark("program150:drop-subject", { backend: tab.backend });
+        ctx.mark("program150:drop-subject");
         assert.equal(await drop(target, payload), true, "target accepted the real tab payload");
         await finishDrag(tab.page, tab.subject);
         const newAttach = await waitAttach(target, tab.subject, tab.subjectRow.session_id, expected);
         assert.ok(newAttach.mark, "moved tab is visible after its attach");
-        await ctx.shot(`${tab.backend}-moved`, target);
+        await ctx.shot("moved", target);
 
         await tab.cs(["restart", "--tab-name", tab.subject]);
         await target.waitForFunction((id) => window.__programStatusTrace.frames.some((frame) => frame.type === "session" && frame.id === id && frame.program_status?.records?.length === 0), { timeout: 20_000, polling: 100 }, tab.subjectRow.session_id);
         const rows = Object.values(JSON.parse((await tab.cs(["list", "--json"])).stdout).groups ?? {}).flat();
         const row = rows.find((entry) => entry.session_id === tab.subjectRow.session_id);
         assert.deepEqual(row?.program_status?.records, [], "restart starts an empty record set");
-        await ctx.shot(`${tab.backend}-restarted`, target);
+        await ctx.shot("restarted", target);
       } finally {
         if (second && !second.isClosed()) await second.close();
         if (target && !target.isClosed()) await target.close();

@@ -14,12 +14,6 @@ const observed = vi.hoisted(() => ({
   instances: [] as GhosttyVt[],
 }));
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) => {
   const fixture = await (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal);
   return { ...fixture, loadGhosttyKit: vi.fn(async () => {
@@ -71,7 +65,6 @@ import {
   terminalTab,
   TERMINAL_PANE,
   TerminalSocket,
-  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -176,7 +169,7 @@ const MASKING_ROW = "Secret masking (this terminal)";
 async function spawned(target: HTMLElement): Promise<{ engine: string; masking: boolean; kitLoads: number }> {
   await openBodyMenu(target);
   return {
-    engine: ghosttyFixture.terminals.length > 0 ? "ghostty" : xterm.terminals.length > 0 ? "xterm" : "",
+    engine: ghosttyFixture.terminals.length > 0 ? "ghostty" : "",
     masking: menuRow(MASKING_ROW).getAttribute("aria-checked") === "true",
     kitLoads: vi.mocked(loadGhosttyKit).mock.calls.length,
   };
@@ -186,7 +179,7 @@ describe("a control terminal whose masking starts on", () => {
   test.each([
     ["unset", {}],
     ["on", { secret_masking: true }],
-  ] as const)("with the preference %s it spawns on ghostty, masked", async (_name, masking) => {
+  ] as const)("with the preference %s it spawns masked", async (_name, masking) => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, ...masking }));
     const { target } = await mountGhostty();
@@ -194,7 +187,7 @@ describe("a control terminal whose masking starts on", () => {
     expect(ghosttyFixture.terminals, "one ghostty terminal built").toHaveLength(1);
   });
 
-  test("its own toggle turns masking off and leaves it on ghostty", async () => {
+  test("its own toggle turns masking off", async () => {
     ui.terminalControl = true;
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
@@ -203,24 +196,23 @@ describe("a control terminal whose masking starts on", () => {
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
-  test("with the preference off it starts unmasked on ghostty", async () => {
+  test("with the preference off it starts unmasked", async () => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
-  test("a terminal of any other window masks on ghostty with the preference on", async () => {
+  test("a terminal of any other window masks with the preference on", async () => {
     __testSetStandalonePreferences(terminalPreferences({ font_size: 15, secret_masking: true }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
   });
 });
 
-describe("choosing the backend", () => {
-  test("a terminal spawns on ghostty with chan's options", async () => {
+describe("the terminal's options", () => {
+  test("a terminal spawns with chan's options", async () => {
     const { term } = await mountGhostty();
-    expect(xterm.terminals, "no xterm built").toHaveLength(0);
     expect(term.options).toMatchObject({ fontSize: 15, smoothScrollDuration: 0, cursorBlink: false, cursorStyle: "block" });
   });
 
@@ -235,14 +227,9 @@ describe("choosing the backend", () => {
     }));
     await vi.waitFor(() => expect(target.querySelector(".terminal-main [role=alert]"), "the load error").not.toBeNull());
     expect(ghosttyFixture.terminals, "no widget").toHaveLength(0);
-    expect(xterm.terminals, "no xterm built").toHaveLength(0);
+    expect(target.querySelector(".terminal-host")!.children, "nothing opened in the terminal's area").toHaveLength(0);
     expect(TerminalSocket.all, "no PTY dialed").toHaveLength(0);
     expect(takeShownLoadFailures(), "the error the case made").toBe(1);
-  });
-
-  test("the xterm-only pieces stay off ghostty", async () => {
-    await mountGhostty();
-    expect(xterm.webgl).toHaveLength(0);
   });
 
   test("the component reaches ghostty-web only through the lazy kit loader", async () => {

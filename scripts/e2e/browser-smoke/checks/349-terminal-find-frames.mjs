@@ -158,7 +158,7 @@ export default {
         return { file, loaf, ua: navigator.userAgent };
       }, chunk);
       await writeTerminalPrefs(page, token, { scrollback_mb: 50 });
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB);
       const hostQuery = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"] .terminal-host`;
       const term = await page.evaluateHandle((q) => window.__ghostty349.term(q), hostQuery);
       // Readers the page keeps for every leg, on the widget's public API.

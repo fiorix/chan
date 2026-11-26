@@ -7,11 +7,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchWindows, goto, killChild, openRow, poll, spawnDevserver, wait } from "../lib/launcher-devserver.mjs";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const SOCKET = "chan-smoke-195";
 const SESSION = "smoke195";
-const TERMINAL_SCREEN = Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", ");
+const TERMINAL_SCREEN = `.terminal-tab.active ${TERMINAL_SURFACE}`;
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -135,7 +135,7 @@ const attachedTabs = (page) =>
       const screen = tab.querySelector(selector);
       const box = screen?.getBoundingClientRect();
       return { id: tab.getAttribute("data-terminal-tab-id"), attached: !!box && box.width > 0 && box.height > 0, active: tab.classList.contains("active") };
-    }), "attached tabs", Object.values(TERMINAL_SURFACES).join(", "));
+    }), "attached tabs", TERMINAL_SURFACE);
 
 async function waitAttachedTabs(page, count, label) {
   return poll(`${label}: ${count} attached terminal tab(s)`, async () => {

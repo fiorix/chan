@@ -1,13 +1,74 @@
 import { beforeAll, describe, expect, test } from "vitest";
+import type { Terminal } from "@xterm/xterm";
 import {
+  applyKeyboardProtocolCsi,
   createTerminalKeyboardProtocolState,
-  installKeyboardProtocolHandlers,
+  resetTerminalKeyboardProtocolState,
   type TerminalKeyboardProtocolState,
 } from "./keymap";
 import { KeyboardProtocolObserver } from "./keyboardProtocolStream";
 
+type CsiParam = number | number[];
+type FunctionIdentifier = {
+  prefix?: string;
+  intermediates?: string;
+  final: string;
+};
+type ParserLike = {
+  registerCsiHandler?: (
+    id: FunctionIdentifier,
+    callback: (params: CsiParam[]) => boolean | Promise<boolean>,
+  ) => { dispose(): void };
+  registerEscHandler?: (
+    id: FunctionIdentifier,
+    callback: () => boolean | Promise<boolean>,
+  ) => { dispose(): void };
+};
+
+/// The CSI sequences the keyboard protocol state follows. `consume` is the
+/// xterm.js handler's answer: true for the ones xterm.js itself does not
+/// implement, false where its own handler must run too.
+const KEYBOARD_PROTOCOL_CSI: Array<{ id: FunctionIdentifier; consume: boolean }> = [
+  { id: { prefix: ">", final: "m" }, consume: true },
+  { id: { prefix: ">", final: "n" }, consume: true },
+  { id: { prefix: "?", final: "m" }, consume: true },
+  { id: { prefix: ">", final: "u" }, consume: true },
+  { id: { prefix: "<", final: "u" }, consume: true },
+  { id: { prefix: "=", final: "u" }, consume: true },
+  { id: { prefix: "?", final: "u" }, consume: true },
+  { id: { prefix: "?", final: "h" }, consume: false },
+  { id: { prefix: "?", final: "l" }, consume: false },
+  { id: { intermediates: "!", final: "p" }, consume: false },
+];
+
+export function installKeyboardProtocolHandlers(
+  term: Terminal,
+  protocol: TerminalKeyboardProtocolState,
+  sendGeneratedInput: (data: string) => void,
+): void {
+  const parser = (term as Terminal & { parser?: ParserLike }).parser;
+  if (!parser?.registerCsiHandler) return;
+
+  for (const { id, consume } of KEYBOARD_PROTOCOL_CSI) {
+    parser.registerCsiHandler(id, (params) => {
+      const reply = applyKeyboardProtocolCsi(protocol, {
+        prefix: id.prefix ?? "",
+        intermediates: id.intermediates ?? "",
+        final: id.final,
+        params,
+      });
+      if (reply) sendGeneratedInput(reply);
+      return consume;
+    });
+  }
+  parser.registerEscHandler?.({ final: "c" }, () => {
+    resetTerminalKeyboardProtocolState(protocol);
+    return false;
+  });
+}
+
 // xterm.js's own parser, from the TypeScript source its package ships
-// (vite.config.ts aliases its imports), runs chan's xterm.js handlers as the
+// (vite.config.ts aliases its imports), runs chan's protocol handlers as the
 // reference. The specifier is a variable so svelte-check does not try to
 // type xterm.js's source.
 type Params = { toArray(): Array<number | number[]> };
@@ -26,9 +87,9 @@ beforeAll(async () => {
 
 type Run = { protocol: TerminalKeyboardProtocolState; replies: string[] };
 
-/// chan's xterm.js terminal: its handlers on xterm.js's parser, which hands
-/// them params through the public API's toArray().
-function xterm(stream: string): Run {
+/// chan's protocol handlers on the parser above, which hands them params
+/// through its public API's toArray().
+function reference(stream: string): Run {
   const parser = new Parser();
   const protocol = createTerminalKeyboardProtocolState();
   const replies: string[] = [];
@@ -105,12 +166,12 @@ const CORPUS: Array<[string, string]> = [
 ];
 
 function same(stream: string, cuts?: number[]) {
-  const want = xterm(stream);
+  const want = reference(stream);
   const got = observer(stream, cuts);
   expect(got).toEqual(want);
 }
 
-describe("the observer follows the stream as chan's xterm.js handlers do", () => {
+describe("the observer follows the stream as chan's protocol handlers do", () => {
   test.each(CORPUS)("%s", (_name, stream) => {
     same(stream);
   });
@@ -134,7 +195,7 @@ describe("the observer follows the stream as chan's xterm.js handlers do", () =>
       const length = 1 + Math.floor(next() * 40);
       let stream = "";
       for (let i = 0; i < length; i++) stream += alphabet[Math.floor(next() * alphabet.length)];
-      const want = xterm(stream);
+      const want = reference(stream);
       const got = observer(stream, [Math.floor(next() * new TextEncoder().encode(stream).length)]);
       expect(got, JSON.stringify(stream)).toEqual(want);
     }

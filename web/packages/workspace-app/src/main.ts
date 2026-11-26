@@ -5,7 +5,7 @@ import App from "./App.svelte";
 import { installUnhandledRejectionNotice } from "./state/unhandledRejection.svelte";
 // Source Code Pro Regular @font-face declaration for the in-app terminal.
 // Importing it here registers the face before terminal/font.ts explicitly
-// loads it and allows either canvas renderer to start.
+// loads it and lets the terminal's canvas renderer start.
 import "./fonts.css";
 // Editor themes. base.css declares every `--chan-editor-*` variable
 // with a neutral default; per-theme files override under

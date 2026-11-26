@@ -937,7 +937,7 @@
      the React root with no portal, position:fixed, or visibility override)
      through an ancestor's visibility:hidden, so an inactive board keeps
      painting its footer over the active tab. Canvas tabs hold no CodeMirror
-     or xterm, so the keep-alive contract's pre-layout reason does not apply
+     or terminal, so the keep-alive contract's pre-layout reason does not apply
      here; display:none is safe and Excalidraw re-measures on unhide. Do not
      generalize this to editor/terminal tabs. */
   .excalidraw-shell.offscreen {

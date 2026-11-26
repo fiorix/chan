@@ -8,8 +8,9 @@
 // never prefixes Alt with ESC (Alt+B sends "b"), passes no text to the encoder
 // for a macOS Option character (Option+B sends nothing), drops Shift from
 // Home, End, Delete and the function keys, and encodes Ctrl+[ as CSI 91;5u.
-// chan's xterm.js path also maps Alt+Left/Right and Alt+Delete to the
-// readline word motions and treats Option as Meta on macOS.
+// chan's own key handling (keymap.ts) also maps Alt+Left/Right and
+// Alt+Delete to the readline word motions, and its encoding treats Option
+// as Meta on macOS.
 //
 // A capture-phase keydown listener on the terminal's host decides each key
 // before ghostty-web's bubble-phase listener sees it:
@@ -71,8 +72,8 @@ export type GhosttyKeyContext = {
   platform: KeyPlatform;
   applicationCursorMode: boolean;
   rows: number;
-  /// What chan's xterm.js key handler sends for this event ahead of xterm.js,
-  /// or null.
+  /// What chan's own key handling sends for this event ahead of the encoding
+  /// (keymap.ts), or null.
   chanBytes: string | null;
 };
 
@@ -92,7 +93,7 @@ export function ghosttyKeydownAction(
   // own Alt+Arrow bytes.
   if (ctx.platform.isWindows && isAltCodeDigit(ev)) return { kind: "cancel" };
   if (ctx.chanBytes !== null) return { kind: "send", data: ctx.chanBytes };
-  // Option is Meta on macOS, as chan runs xterm.js, except where a layout
+  // Option is Meta on macOS in chan's encoding, except where a layout
   // puts a printable ASCII character on Option (@, [ and | on a German or a
   // French layout): that character types itself, as ghostty-web typed it.
   // A US layout keeps Meta: its Option characters are outside ASCII but for
@@ -159,7 +160,7 @@ export function ghosttyKeydownAction(
   }
 }
 
-/// What chan's xterm.js path sends for the key behind a delete input:
+/// What chan sends for the key behind a delete input:
 /// Backspace, Delete, and their word chords (Option on macOS, where chan
 /// treats Option as Meta, and Ctrl elsewhere). Null for any other input.
 export function ghosttyDeleteInputBytes(inputType: string, platform: KeyPlatform): string | null {
@@ -193,7 +194,7 @@ export type GhosttyKeyDeps = {
   /// terminal, closing an exited tab). Its handling stays in the custom key
   /// handler ghostty-web calls.
   claimed(e: KeyboardEvent): boolean;
-  /// chan's own key handling ahead of xterm.js (see GhosttyKeyContext).
+  /// chan's own key handling ahead of the encoding (see GhosttyKeyContext).
   chanBytes(e: KeyboardEvent): string | null;
   /// Send keyboard input to the PTY.
   send(data: string): void;

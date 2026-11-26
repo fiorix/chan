@@ -1,11 +1,10 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import {
   applyKittyKeyboardProtocol,
   applyXtermModifierKeys,
   controlSlashBytes,
   createTerminalKeyboardProtocolState,
   disableXtermModifierKeys,
-  handleTerminalMetaKey,
   isTerminalInterruptKey,
   queryXtermModifierKeys,
   resetTerminalKeyboardProtocolState,
@@ -32,7 +31,7 @@ describe("terminal meta key mapping", () => {
     expect(terminalMetaKeyBytes(keyEvent({ key, altKey: true }))).toBe(bytes);
   });
 
-  test("leaves non-target keys and modified chords to xterm", () => {
+  test("leaves non-target keys and modified chords to the terminal", () => {
     expect(terminalMetaKeyBytes(keyEvent({ key: "d", altKey: true }))).toBeNull();
     expect(terminalMetaKeyBytes(keyEvent({ key: "ArrowLeft", altKey: true, ctrlKey: true }))).toBeNull();
     expect(terminalMetaKeyBytes(keyEvent({ key: "ArrowLeft", altKey: true, metaKey: true }))).toBeNull();
@@ -44,7 +43,7 @@ describe("terminal meta key mapping", () => {
     // The "agent already running, never observed negotiating" case:
     // nothing negotiated, nothing restored. Shift+Enter must insert a
     // newline (a bare LF: newline in an agent draft, harmless submit in a
-    // plain shell), NOT fall through to xterm's submit `\r`. Cmd/Ctrl+Enter
+    // plain shell), NOT fall through to the terminal's submit `\r`. Cmd/Ctrl+Enter
     // keep falling through so their submit semantics are preserved.
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", shiftKey: true }))).toBe("\n");
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", ctrlKey: true }))).toBeNull();
@@ -93,42 +92,6 @@ describe("terminal meta key mapping", () => {
     // Disambiguate-only (flag 1, not REPORT_ALL_KEYS 8) must not emit the
     // CSI-u report-all sequence; it falls to the Shift+Enter LF fallback.
     expect(terminalMetaKeyBytes(keyEvent({ key: "Enter", shiftKey: true }), protocol)).toBe("\n");
-  });
-
-  test("sends matched bytes and suppresses xterm default handling", () => {
-    const sendInput = vi.fn();
-    const ev = keyEvent({ key: "Backspace", altKey: true });
-
-    expect(handleTerminalMetaKey(ev, sendInput)).toBe(false);
-    expect(sendInput).toHaveBeenCalledWith("\x1b\x7f");
-    expect(ev.defaultPrevented).toBe(true);
-  });
-
-  test("returns true without sending for keys xterm should handle", () => {
-    const sendInput = vi.fn();
-    const ev = keyEvent({ key: "d", altKey: true });
-
-    expect(handleTerminalMetaKey(ev, sendInput)).toBe(true);
-    expect(sendInput).not.toHaveBeenCalled();
-    expect(ev.defaultPrevented).toBe(false);
-  });
-
-  test("Shift+Enter sends the LF fallback and suppresses xterm submit", () => {
-    const sendInput = vi.fn();
-    const ev = keyEvent({ key: "Enter", shiftKey: true });
-
-    expect(handleTerminalMetaKey(ev, sendInput)).toBe(false);
-    expect(sendInput).toHaveBeenCalledWith("\n");
-    expect(ev.defaultPrevented).toBe(true);
-  });
-
-  test("passes Cmd/Ctrl+Enter through to xterm when no foreground app requested it", () => {
-    const sendInput = vi.fn();
-    const ev = keyEvent({ key: "Enter", ctrlKey: true });
-
-    expect(handleTerminalMetaKey(ev, sendInput)).toBe(true);
-    expect(sendInput).not.toHaveBeenCalled();
-    expect(ev.defaultPrevented).toBe(false);
   });
 
   test("xterm modifyOtherKeys supports query and disable", () => {

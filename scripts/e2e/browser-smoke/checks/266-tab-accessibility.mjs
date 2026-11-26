@@ -162,7 +162,7 @@ async function snapshot(fixture) {
 
 async function fixture(ctx, index, report) {
   const suffix = `${Date.now().toString(36)}-${index}`;
-  const result = { backend: "ghostty", windowId: `tab266-${suffix}`, token: new URL(ctx.serverUrl).searchParams.get("t"), files: [], page: null,
+  const result = { windowId: `tab266-${suffix}`, token: new URL(ctx.serverUrl).searchParams.get("t"), files: [], page: null,
     labels: { control: `axc-control-${suffix}.md`, file: `axc-file-${suffix}.md`, live: `axc-live-${suffix}`, ended: `axc-ended-${suffix}` } };
   result.cs = async (args) => {
     try {
@@ -199,7 +199,7 @@ async function fixture(ctx, index, report) {
   for (const label of [result.labels.control, result.labels.file]) await result.cs(["open", label, "--window", result.windowId]);
   await poll("both clean file tabs", async () => (await state(page)).tabs.filter((tab) => tab.label?.endsWith(".md")).length === 2);
   for (const kind of ["live", "ended"]) {
-    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], "ghostty");
+    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind]);
     result[`${kind}Session`] = row.session_id;
     result[`${kind}TabId`] = row.tab;
     result[`${kind}PaneId`] = row.pane;
@@ -285,7 +285,7 @@ async function paddingPoint(page, label) {
 }
 
 async function activation(ctx, f, kind, mode) {
-  const arm = { backend: f.backend, kind, mode, synthetic: mode === "synthetic-webkit", status: "incomplete" };
+  const arm = { kind, mode, synthetic: mode === "synthetic-webkit", status: "incomplete" };
   const label = f.labels[kind];
   if (mode === "padding-right") arm.expectedFocus = { tabId: f[`${kind}TabId`], paneId: f[`${kind}PaneId`] };
   try {
@@ -294,7 +294,7 @@ async function activation(ctx, f, kind, mode) {
     arm.before = await snapshot(f);
     assert.deepEqual(names(arm.before), Object.values(f.labels).sort(), "instrument: complete fixture before activation");
     assert.ok(!arm.before.tabs.find((tab) => tab.label === label)?.selected && arm.before.dialogs.length === 0, "instrument: inactive subject and no dialog");
-    arm.beforeShot = await ctx.shot(`${f.backend}-${kind}-${mode}-before`, f.page);
+    arm.beforeShot = await ctx.shot(`${kind}-${mode}-before`, f.page);
     const eventStart = arm.before.events.length;
     if (mode === "Enter" || mode === "Space") {
       const role = await element(f.page, label, "role");
@@ -339,7 +339,7 @@ async function activation(ctx, f, kind, mode) {
               event.trusted && event.defaultPrevented && event.label === control);
         }, { target, control: f.labels.control, eventStart, padding }));
         arm.drag.hover = await state(f.page);
-        arm.hoverShot = await ctx.shot(`${f.backend}-${kind}-${mode}-hover`, f.page);
+        arm.hoverShot = await ctx.shot(`${kind}-${mode}-hover`, f.page);
         await f.page.mouse.drop(target, data);
       } finally {
         try { await f.page.mouse.up(); }
@@ -401,7 +401,7 @@ async function activation(ctx, f, kind, mode) {
             await sleep(Math.min(50, until - at));
           }
         }
-        if (padding) arm.heldShot = await ctx.shot(`${f.backend}-${kind}-${mode}-held`, f.page);
+        if (padding) arm.heldShot = await ctx.shot(`${kind}-${mode}-held`, f.page);
       } finally {
         arm.releaseStartedAt = Date.now();
         await f.page.mouse.up({ button });
@@ -449,14 +449,14 @@ async function activation(ctx, f, kind, mode) {
     arm.error = mask(error.message);
     arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
   } finally {
-    arm.afterShot = await ctx.shot(`${f.backend}-${kind}-${mode}-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
+    arm.afterShot = await ctx.shot(`${kind}-${mode}-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
     await f.page.keyboard.press("Escape").catch(() => {});
   }
   return arm;
 }
 
 async function keyboardFocusStyles(ctx, f) {
-  const arm = { backend: f.backend, kind: "live", mode: "keyboard-focus-styles", status: "incomplete" };
+  const arm = { kind: "live", mode: "keyboard-focus-styles", status: "incomplete" };
   const label = f.labels.live;
   try {
     await click(f.page, f.labels.control);
@@ -480,7 +480,7 @@ async function keyboardFocusStyles(ctx, f) {
     const focusedLabel = arm.label.tabs.find((tab) => tab.label === label);
     requireProduct(focusedLabel?.labelFocused && focusedLabel.labelFocusVisible, "Shift+Tab did not visibly focus the inactive label");
     requireProduct(!focusedLabel.selected && !focusedLabel.hovered, "label focus selected or hovered the subject");
-    arm.labelShot = await ctx.shot(`${f.backend}-live-label-keyboard-focus`, f.page);
+    arm.labelShot = await ctx.shot("live-label-keyboard-focus", f.page);
     await f.page.keyboard.press("Tab");
     const deadline = Date.now() + 2_000;
     arm.closeFocusSamples = [];
@@ -511,7 +511,7 @@ async function keyboardFocusStyles(ctx, f) {
     arm.error = mask(error.message);
     arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
   } finally {
-    arm.afterShot = await ctx.shot(`${f.backend}-live-close-keyboard-focus`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
+    arm.afterShot = await ctx.shot("live-close-keyboard-focus", f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
   }
   return arm;
 }
@@ -524,19 +524,19 @@ async function dialogButton(page, label) {
 }
 
 async function closeControl(ctx, f, kind) {
-  const arm = { backend: f.backend, kind, mode: "close-control", status: "incomplete" };
+  const arm = { kind, mode: "close-control", status: "incomplete" };
   const label = f.labels[kind];
   try {
     await click(f.page, f.labels.control);
     arm.before = await snapshot(f);
-    arm.beforeShot = await ctx.shot(`${f.backend}-${kind}-close-before`, f.page);
+    arm.beforeShot = await ctx.shot(`${kind}-close-before`, f.page);
     await click(f.page, label, "close");
     if (kind === "live") {
       await poll("live close prompt", async () => (await state(f.page)).dialogs.find((dialog) => dialog.name === "Close tab?"));
       arm.prompt = await snapshot(f);
       requireProduct(JSON.stringify(names(arm.prompt)) === JSON.stringify(names(arm.before)), "live prompt removed a tab before confirmation");
       preserveSessions(arm.before, arm.prompt, "live prompt");
-      arm.promptShot = await ctx.shot(`${f.backend}-live-close-prompt`, f.page);
+      arm.promptShot = await ctx.shot("live-close-prompt", f.page);
       await dialogButton(f.page, "Cancel");
       await poll("close prompt cancelled", async () => (await state(f.page)).dialogs.length === 0);
       arm.cancelled = await snapshot(f);
@@ -569,7 +569,7 @@ async function closeControl(ctx, f, kind) {
     arm.error = mask(error.message);
     arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
   } finally {
-    arm.afterShot = await ctx.shot(`${f.backend}-${kind}-close-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
+    arm.afterShot = await ctx.shot(`${kind}-close-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
   }
   return arm;
 }
@@ -577,20 +577,19 @@ async function closeControl(ctx, f, kind) {
 export default {
   name: "tab-accessibility",
   async run(ctx) {
-    const backend = "ghostty";
-    const evidence = { engine: "Chrome", backends: ["ghostty"], nativeAccessibility: "not exercised",
+    const evidence = { engine: "Chrome", nativeAccessibility: "not exercised",
       fixtures: [], arms: [], supplementalArms: [], status: "incomplete" };
     try {
       assert.ok(ctx.controlSocket, "instrument: real control socket is available");
       for (const kind of ["live", "file", "ended"]) for (const closing of [false, true]) {
-        const report = { backend, kind, closing, commands: [] };
+        const report = { kind, closing, commands: [] };
         evidence.fixtures.push(report);
         try {
           const f = await fixture(ctx, evidence.fixtures.length, report);
           if (kind === "live" && !closing) {
-            report.initialShot = await ctx.shot(`${backend}-strip-1600-before`, f.page);
+            report.initialShot = await ctx.shot("strip-1600-before", f.page);
             await f.page.setViewport({ width: 640, height: 1000 });
-            report.overflowShot = await ctx.shot(`${backend}-strip-640-overflow`, f.page);
+            report.overflowShot = await ctx.shot("strip-640-overflow", f.page);
             report.overflow = await state(f.page);
             await f.page.setViewport({ width: 1600, height: 1000 });
           }
@@ -615,28 +614,28 @@ export default {
               events: window.__tab266.focusEvents, dropped: window.__tab266.focusEventsDropped,
             })).catch((error) => ({ error: mask(error.message) }));
           }
-          console.log(`[smoke]   tab266 ${backend} ${kind} closing=${closing}: focus trace ${report.focusTrace?.count ?? "unavailable"}/512, dropped=${report.focusTrace?.dropped ?? "unavailable"}`);
+          console.log(`[smoke]   tab266 ${kind} closing=${closing}: focus trace ${report.focusTrace?.count ?? "unavailable"}/512, dropped=${report.focusTrace?.dropped ?? "unavailable"}`);
           await cleanup(report.fixture, report);
           delete report.fixture;
         }
       }
-      evidence.backendResults = [{ backend,
-        arms: evidence.arms.filter((arm) => arm.backend === backend).length,
-        supplementalArms: evidence.supplementalArms.filter((arm) => arm.backend === backend).length,
-        passed: evidence.arms.filter((arm) => arm.backend === backend && arm.status === "passed").length,
-        supplementalPassed: evidence.supplementalArms.filter((arm) => arm.backend === backend && arm.status === "passed").length,
-      }];
-      evidence.status = evidence.backendResults.every((result) => result.arms === 18 && result.supplementalArms === 4) &&
-        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.backend === "ghostty" && arm.status === "passed") && evidence.fixtures.every((report) =>
+      evidence.counts = {
+        arms: evidence.arms.length,
+        supplementalArms: evidence.supplementalArms.length,
+        passed: evidence.arms.filter((arm) => arm.status === "passed").length,
+        supplementalPassed: evidence.supplementalArms.filter((arm) => arm.status === "passed").length,
+      };
+      evidence.status = evidence.counts.arms === 18 && evidence.counts.supplementalArms === 4 &&
+        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.status === "passed") && evidence.fixtures.every((report) =>
           !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length && report.focusTrace &&
           !report.focusTrace.error && report.focusTrace.dropped === 0) ? "passed" : "failed";
     } catch (error) { evidence.error = mask(error.message); }
     finally { writeFileSync(join(ctx.outDir, "tab266-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`); }
     assert.equal(evidence.status, "passed", `tab-accessibility: ${JSON.stringify({
-      error: evidence.error, backendResults: evidence.backendResults,
-      arms: [...evidence.arms, ...evidence.supplementalArms].filter((arm) => arm.status !== "passed").map(({ backend, kind, mode, status, error }) => ({ backend, kind, mode, status, error })),
-      fixtures: evidence.fixtures.map(({ backend, kind, closing, setupError, cleanupErrors, pageErrors, focusTrace }) => ({
-        backend, kind, closing, setupError, cleanupErrors, pageErrors,
+      error: evidence.error, counts: evidence.counts,
+      arms: [...evidence.arms, ...evidence.supplementalArms].filter((arm) => arm.status !== "passed").map(({ kind, mode, status, error }) => ({ kind, mode, status, error })),
+      fixtures: evidence.fixtures.map(({ kind, closing, setupError, cleanupErrors, pageErrors, focusTrace }) => ({
+        kind, closing, setupError, cleanupErrors, pageErrors,
         focusTraceCount: focusTrace?.count, focusTraceLimit: focusTrace?.limit, focusTraceError: focusTrace?.error, focusTraceDropped: focusTrace?.dropped })),
     })}`);
     return evidence;

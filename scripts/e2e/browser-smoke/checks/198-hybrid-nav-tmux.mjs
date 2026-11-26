@@ -23,11 +23,11 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchWindows, goto, killChild, openRow, poll, spawnDevserver, wait } from "../lib/launcher-devserver.mjs";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const SOCKET = "chan-smoke-198";
 const SESSION = "smoke198";
-const TERMINAL_SCREEN = Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", ");
+const TERMINAL_SCREEN = `.terminal-tab.active ${TERMINAL_SURFACE}`;
 /// Long enough for a request, tmux's answer and the page's apply.
 const SETTLE_MS = 2_000;
 

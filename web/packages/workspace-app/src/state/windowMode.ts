@@ -76,19 +76,6 @@ export function windowModeAllowsCommand(
   return true;
 }
 
-/// Whether a terminal in the given window mode may persist a scrollback
-/// snapshot to localStorage. A control terminal never may: its scrollback
-/// carries the `CHAN_DEVSERVER_TOKEN=` marker the desktop re-scrapes, and a
-/// persisted copy would keep that credential on disk for days. Losing the
-/// snapshot costs the control window only a full replay from the server
-/// ring (single-shot local runner, one PTY). TerminalTab's captureSnapshot
-/// consults this; a pure rule so it is testable without mounting.
-export function windowModeAllowsSnapshot(mode: {
-  terminalControl: boolean;
-}): boolean {
-  return !mode.terminalControl;
-}
-
 /// A configured masking preference wins; an unset one follows the window
 /// kind. `null` is a choice this page cleared and has not read back yet, and
 /// counts as unset.

@@ -284,11 +284,12 @@ describe("a reorder keeps every field it was not told to drop", () => {
   });
 
   test("the keyboard protocol travels by reference", () => {
-    // The xterm handlers capture this object at mount and the running
-    // program's negotiation is written into it, while the meta-key path and
-    // the Rich Prompt read `tab.keyboardProtocol` from the tab the layout
-    // holds. A by-value copy would put the writer and the readers on
-    // different objects, so both references here are read from the layout.
+    // The terminal's protocol observer captures this object when the
+    // terminal opens and writes the running program's negotiation into it,
+    // while the meta-key path and the Rich Prompt read `tab.keyboardProtocol`
+    // from the tab the layout holds. A by-value copy would put the writer and
+    // the readers on different objects, so both references here are read
+    // from the layout.
     const source = loadedTerminalTab();
     resetLayout([source, { ...loadedFileTab(), id: "file-neighbour" }]);
     const before = (paneTabs().find((t) => t.id === source.id) as TerminalTab)

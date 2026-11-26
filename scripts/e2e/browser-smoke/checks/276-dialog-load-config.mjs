@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
 const DIR_INPUT = '.team-dialog input[list="team-dir-suggestions"]';
@@ -109,7 +109,7 @@ async function settleLead(page, api, windowId, before, watcher) {
     if (!box || box.width <= 0 || box.height <= 0) return false;
     const tab = node.getAttribute("data-terminal-tab-id");
     return tab ? { tab, renderer: renderer.tagName, width: box.width, height: box.height } : false;
-  }, { timeout: remaining() }, before.tabs, TERMINAL_SURFACES.ghostty);
+  }, { timeout: remaining() }, before.tabs, TERMINAL_SURFACE);
   const renderer = await handle.jsonValue();
   await handle.dispose();
   const socket = await watcher.wait(renderer.tab, before.sessions, remaining());

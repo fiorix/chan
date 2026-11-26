@@ -8,12 +8,6 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
@@ -80,7 +74,7 @@ describe("a width change with secret masking on", () => {
   });
 
   test("requests a final rescan once the width stops changing, not at each change", async () => {
-    // scanViewport delegates to scanAll on Ghostty; count the app's final
+    // The masker's scanViewport delegates to scanAll; count the app's final
     // request separately from that delegation.
     let inViewport = false;
     const finalScan = vi.fn();

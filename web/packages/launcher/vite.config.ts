@@ -11,7 +11,7 @@
 // serves /api/library/* and the /api/library/windows/watch socket; everything
 // else is this SPA, so base is "./" to keep asset URLs relative. The launcher is
 // a pure HTTP client, so it carries none of the workspace-app's editor
-// (CodeMirror), terminal (xterm), or graph (cytoscape) weight.
+// (CodeMirror), terminal (@chan/ghostty-web-ng), or graph (cytoscape) weight.
 
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { readFileSync, readdirSync } from "node:fs";
@@ -40,7 +40,7 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 
 // Hard ceiling on the launcher's gzipped JS. The launcher is the minimal
 // HTTP-client SPA (its only runtime dep is @lucide/svelte); this budget FAILS the
-// build if an accidental heavy import lands -- a CodeMirror/xterm/cytoscape pull,
+// build if an accidental heavy import lands -- a CodeMirror/terminal/cytoscape pull,
 // or a non-tree-shaken import from @chan/web-shared, would multiply the bundle,
 // so the gate catches it here instead of at release. The bundle (the
 // client-side window manager, per-tenant leadership derivation, window URL
@@ -76,7 +76,7 @@ function launcherSizeBudget(): Plugin {
         throw new Error(
           `@chan/launcher gzipped JS ${kib} KiB exceeds the ${budgetKib} KiB budget ` +
             `(${parts.join(", ")}). The launcher must stay minimal: check for an ` +
-            `accidental CodeMirror/xterm/cytoscape import or a non-tree-shaken ` +
+            `accidental CodeMirror, @chan/ghostty-web-ng or cytoscape import or a non-tree-shaken ` +
             `@chan/web-shared pull.`,
         );
       }

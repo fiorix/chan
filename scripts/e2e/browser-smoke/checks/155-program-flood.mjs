@@ -42,7 +42,7 @@ export default {
       assert.ok(receipt, "flood completion carries its measured start, end and last state");
       const [, start, end, attempts, last] = receipt;
       const durationMs = Number(end) - Number(start);
-      console.log(`[smoke:155] ${tab.backend}: flood ran ${attempts} iterations in ${durationMs} ms, last=${last}`);
+      console.log(`[smoke:155] flood ran ${attempts} iterations in ${durationMs} ms, last=${last}`);
       assert.ok(Number(attempts) > 16, `the loop ran ${attempts} times; it alternates reports beside more than one ordinary output line`);
       assert.ok(durationMs >= 2500 && durationMs <= 5000, `flood measured ${durationMs} ms`);
       assert.match(scrollback, /FLOOD155_LINE_[1-9]\d*/, "plain output kept arriving in terminal scrollback");

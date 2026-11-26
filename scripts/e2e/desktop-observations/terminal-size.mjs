@@ -9,10 +9,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { defaultChrome, findControlSocket, launchServer, seedWorkspace, teardownServer } from "../browser-smoke/lib/server.mjs";
+import { captureGhosttyTerminals } from "../browser-smoke/lib/ghostty-capture.mjs";
 import { writeTerminalPrefs } from "../browser-smoke/lib/terminal-prefs.mjs";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 import { installSizeObserver, unobservedViews } from "./terminal-size-page.mjs";
-import { checkpointAfter, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
+import { checkpointAfter, FRAME_CAPTURE_KEY, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
 
 const exec = promisify(execFile);
 const now = () => Number(process.hrtime.bigint()) / 1e6;
@@ -21,12 +22,12 @@ const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(new URL("../browser-smoke/package.json", import.meta.url));
 const { values } = parseArgs({ options: {
-  backend: { type: "string", default: "ghostty" }, output: { type: "string" }, cycles: { type: "string", default: "3" },
+  output: { type: "string" }, cycles: { type: "string", default: "3" },
   "co-view": { type: "boolean", default: false }, verbose: { type: "boolean", short: "v", default: false },
   "without-observer": { type: "boolean", default: false }, "full-screen": { type: "boolean", default: false },
 } });
-if (values.backend !== "ghostty" || !values.output || !/^[1-9]$/.test(values.cycles)) {
-  throw new Error("usage: terminal-size.mjs [--backend ghostty] --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [--full-screen] [-v]");
+if (!values.output || !/^[1-9]$/.test(values.cycles)) {
+  throw new Error("usage: terminal-size.mjs --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [--full-screen] [-v]");
 }
 if (values["co-view"] && values.cycles !== "1") throw new Error("co-view requires --cycles 1 to bound resize storms");
 if (values["without-observer"] && !values["co-view"]) throw new Error("without-observer requires co-view");
@@ -43,7 +44,7 @@ const bin = resolve(process.env.CHAN_BIN ?? "target/debug/chan");
 const chrome = process.env.CHROME_BIN ?? defaultChrome();
 if (!existsSync(bin) || !chrome) { console.error("missing chan or Chrome; provision the guest first"); process.exit(2); }
 save("reader-preflight.json", preflight());
-const run = { completed: false, backend: values.backend, cycles: Number(values.cycles), coView: values["co-view"],
+const run = { completed: false, cycles: Number(values.cycles), coView: values["co-view"],
   observer: !values["without-observer"], fullScreen: values["full-screen"],
   name: "size-probe", pages: [], steps: [], actions: [], probe: [], errors: [] };
 const workspace = seedWorkspace();
@@ -78,13 +79,13 @@ async function flush(page, evidence) {
 async function views() {
   return (await Promise.all(pages.map(async ({ page, evidence }) => {
     const rows = run.observer ? await page.evaluate(() => window.__terminalSizeObserver.snapshot())
-      : await page.evaluate(unobservedViews, { name: run.name, tabId: evidence.probeTab, surfaces: TERMINAL_SURFACES });
+      : await page.evaluate(unobservedViews, { name: run.name, tabId: evidence.probeTab, surface: TERMINAL_SURFACE });
     return rows.filter((r) => r.name === run.name && r.connected).map((r) => ({ ...r, page: evidence.name }));
   }))).flat();
 }
 async function frameSurfaces() {
   return Promise.all(pages.map(async ({ page, evidence }) => ({ page: evidence.name,
-    ...(await page.evaluate(readFrameSurface, evidence.probeTab)),
+    ...(await page.evaluate(readFrameSurface, evidence.probeTab, FRAME_CAPTURE_KEY)),
   })));
 }
 const geometry = (rows) => JSON.stringify(rows.map((r) => ({ page: r.page, pane: r.pane, visible: r.visible,
@@ -93,7 +94,7 @@ async function observe(label) {
   let previous = null, stableSince = now();
   await until(views, (rows) => {
     const signature = geometry(rows);
-    if (rows.length !== pages.length || rows.some((r) => !r.backend)) { stableSince = now(); return false; }
+    if (rows.length !== pages.length || rows.some((r) => !r.canvas)) { stableSince = now(); return false; }
     if (signature !== previous) { previous = signature; stableSince = now(); }
     return now() - stableSince >= 750;
   }, `${label} geometry settlement`);
@@ -141,9 +142,12 @@ try {
     const evidence = { name, calibrations: [], records: [], overflow: false };
     run.pages.push(evidence); pages.push({ page, evidence });
     await page.setViewport({ width, height });
-    if (run.observer) await page.evaluateOnNewDocument(installSizeObserver, TERMINAL_SURFACES);
+    if (run.observer) await page.evaluateOnNewDocument(installSizeObserver, TERMINAL_SURFACE);
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
+    // The frame reading reads the probe's rows from the widget's buffer, so
+    // the capture goes in before any terminal opens on this page.
+    if (run.fullScreen) run.frameCapture = await captureGhosttyTerminals(page, FRAME_CAPTURE_KEY);
     await calibrate(page, evidence);
     return page;
   }
@@ -238,11 +242,11 @@ try {
     run.coViewReadiness.restoredAtMs = now();
     if (run.observer) await until(views, (rows) => rows.length === 2, "co-view connected probes");
     else await until(async () => second.evaluate((selector) => [...document.querySelectorAll("[data-terminal-tab-id]")]
-      .filter((tab) => tab.querySelector(selector)).length, Object.values(TERMINAL_SURFACES).join(", ")),
+      .filter((tab) => tab.querySelector(selector)).length, TERMINAL_SURFACE),
     (drawn) => drawn >= required.length, "co-view drawn terminals");
     await identifyProbe(pages[1]);
     for (const entry of pages) await selectTab(entry.page, "size-cover");
-    await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.backend === run.backend), "probe hidden on both pages");
+    await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.canvas), "probe hidden on both pages");
     const finalViews = await views();
     if (run.observer && (new Set(finalViews.map((v) => v.session)).size !== 1 || !finalViews[0].session)) {
       throw new Error("co-view PTY identities disagree");
