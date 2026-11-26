@@ -296,6 +296,19 @@ describe('content changes', () => {
     ]);
   });
 
+  test("a resize paints in full once and leaves the loop's paint to its next frame", async () => {
+    const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    term.onChange(() => { throw new Error('change listener failed'); });
+    renderer.render.mockImplementation((_core: unknown, forceAll: boolean) => {
+      throw new Error(forceAll ? 'full paint failed' : 'loop paint failed');
+    });
+    expect(() => term.resize(30, 8), 'no paint inside the resize throws').not.toThrow();
+    expect(renderer.render.mock.calls.map((call) => call[1]), 'the full paint alone').toEqual([true]);
+    expect(reported).toEqual([new Error('change listener failed'), new Error('full paint failed')]);
+  });
+
   test.each([
     ['a change listener throws', (term: Terminal) => {
       term.onChange(() => { throw new Error('change listener failed'); });

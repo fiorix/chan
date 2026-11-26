@@ -583,7 +583,7 @@ export class Terminal {
       this.#renderer.render(this.#wasmTerm, true, this.#viewportY, this.#paintScrollbarOpacity());
 
       // Start render loop
-      this.#startRenderLoop();
+      this.#startRenderLoop('now');
 
       // No focus here, as xterm.js's open() takes none: a terminal can open
       // where it is not the one being typed into, and taking the keyboard
@@ -812,7 +812,7 @@ export class Terminal {
       // Restart the render loop. Nothing adds to the write queue, so the
       // flush finds it empty.
       this.#flushWriteQueue();
-      this.#startRenderLoop();
+      this.#startRenderLoop('next frame');
     }
   }
 
@@ -1244,13 +1244,15 @@ export class Terminal {
   }
 
   /**
-   * Start the render loop
+   * Start the render loop. Open paints the loop's first frame at once; a
+   * resize has just painted in full, so its loop starts at the next frame,
+   * where a paint that fails is the frame's error rather than the resize's.
    */
-  #startRenderLoop(): void {
+  #startRenderLoop(first: 'now' | 'next frame'): void {
     if (this.#animationFrameId) return; // already running
-    // Search work belongs to animation frames, not to the open or resize
-    // call that starts the loop with a paint of its own.
-    let inFrame = false;
+    // Search work belongs to animation frames, not to the open call that
+    // starts the loop with a paint of its own.
+    let inFrame = first === 'next frame';
     const loop = () => {
       if (!this.#isDisposed && this.#isOpen) {
         // Render using the core's own dirty tracking
@@ -1269,7 +1271,8 @@ export class Terminal {
         }
       }
     };
-    loop();
+    if (first === 'now') loop();
+    else if (!this.#isDisposed && this.#isOpen) this.#animationFrameId = requestAnimationFrame(loop);
   }
 
   /**
