@@ -374,11 +374,14 @@
       return;
     }
     // A lowered depth always applies, since it draws less. It opens the
-    // directories above `depthDir`, which no read may have reached.
+    // directories above `depthDir`, which no read may have reached, and
+    // reads them now. With a whole fetch in flight it leaves them to that
+    // fetch's landing (`loadSpine`), since asking now would start the fetch
+    // again.
     depthRaise = null;
     const before = new Set(visibleNodeIds);
     graphState.expanded = openBelow(nodes, expandedDirs, depthDir, value);
-    loadOpenedChildren(true);
+    if (!spineLoading) loadOpenedChildren(true);
     void requestExpansionFitAfterUpdate(depthDir, before);
   }
   /// The depth is the selected node's, so a new selection starts it over:
