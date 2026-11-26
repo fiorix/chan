@@ -705,9 +705,13 @@
   // graph missed a watcher edit, so it fetches its spine exactly once
   // when next shown. `lastLoadedKey` lets the visible-load decision
   // tell a real change of the load key from an idempotent re-fire.
+  // `readOpenedOnShow` records that a whole fetch landed while the tab was
+  // hidden, under an answer over the listing cap, so the directories opened
+  // during it are read once it is shown.
   let hasLoadedOnce = false;
   let graphDirty = false;
   let lastLoadedKey: string | null = null;
+  let readOpenedOnShow = false;
   /// The paths of the changes the spine has not taken yet, or null when one
   /// of them named no path and only a whole fetch takes it.
   let spineChanges: Set<string> | null = new Set();
@@ -1601,8 +1605,10 @@
     spineLoading = true;
     spineError = null;
     spineFailures = new Map();
-    // A whole fetch reads every change made before it.
+    // A whole fetch reads every change made before it, and every opened
+    // directory the tree draws.
     spineChanges = new Set();
+    readOpenedOnShow = false;
     // The first spine is drawn as its levels land, at most every
     // SPINE_DRAW_MS after the root's. A later one replaces the drawn spine
     // once it is whole, so a reload shows no shrunken tree on the way.
@@ -1663,8 +1669,12 @@
       else graphDirty = true;
     }
     // Its list of directories was taken when it began, and an answer over
-    // the listing cap taken since read none: one opened since is read now.
-    if (landed && seq === spineSeq && (kept ?? taken)?.tree != null) loadOpenedChildren(true);
+    // the listing cap taken since read none: one opened since is read now,
+    // or, since a hidden tab fetches nothing, once the tab is shown again.
+    if (landed && seq === spineSeq && (kept ?? taken)?.tree != null) {
+      if (visible) loadOpenedChildren(true);
+      else readOpenedOnShow = true;
+    }
   }
 
   /// The root and every opened directory whose own directories are opened
@@ -2226,10 +2236,12 @@
   ///   - HIDDEN: never fetch (the whole point -- no background load).
   ///     If the load key changed while hidden, mark dirty so the next
   ///     activation refetches once. (A hidden watcher edit also sets
-  ///     graphDirty, in the watcher effect below.)
+  ///     graphDirty, in the watcher effect below, and a whole fetch that
+  ///     lands while hidden sets readOpenedOnShow, in `loadSpine`.)
   ///   - VISIBLE: fetch only on the first activation (lazy, not mount),
   ///     on a change of the key, or when dirty. Then latch
-  ///     hasLoadedOnce, record the key, and clear dirty.
+  ///     hasLoadedOnce, record the key, and clear dirty. Then read the
+  ///     opened directories a landing while hidden left unread.
   /// `loadSpine()` runs untracked so its internal reads don't register as
   /// triggers; only `visible` + `loadKey` do. The shared graph has its own
   /// two effects above: asked for when shown, taken while shown.
@@ -2255,6 +2267,12 @@
     } else if (graphDirty) {
       // Shown again after changes it missed: take them.
       untrack(takeSpineChanges);
+    }
+    // A whole fetch begun above clears this, since it reads every opened
+    // directory the tree draws.
+    if (readOpenedOnShow) {
+      readOpenedOnShow = false;
+      untrack(() => loadOpenedChildren(true));
     }
   });
 
