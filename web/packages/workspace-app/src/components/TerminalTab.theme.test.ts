@@ -191,6 +191,15 @@ const SEARCH_KEYS = [
   "searchMatchBackground", "searchMatchForeground", "searchActiveMatchBackground", "searchActiveMatchForeground",
 ] as const;
 
+/// How far apart, as a WCAG contrast ratio, the active match's background
+/// stands from every match's. It is held in luminance and not in hue alone,
+/// so the active match still stands out to a reader who cannot tell the two
+/// hues apart. The floor sits just under the closer of today's two pairs
+/// (light 1.70:1, dark 2.86:1), so a change that brings either pair closer
+/// fails; WCAG's 3:1 for a component's state is more than the light pair
+/// has.
+const ACTIVE_SEPARATION = 1.5;
+
 /// Find paints every match and the active one in these theme keys. Each
 /// carries its own ink: a cell's inherited ink on a match background can
 /// fall near 1:1, and the dark theme and a see-through window take no
@@ -208,7 +217,8 @@ describe("find's colours", () => {
       .toBeGreaterThanOrEqual(4.5);
     expect(contrast(colors.searchActiveMatchBackground!, colors.searchActiveMatchForeground!), `${label}: the active match`)
       .toBeGreaterThanOrEqual(4.5);
-    expect(colors.searchActiveMatchBackground, `${label}: the active match stands apart`).not.toBe(colors.searchMatchBackground);
+    expect(contrast(colors.searchActiveMatchBackground!, colors.searchMatchBackground!), `${label}: the active match stands apart`)
+      .toBeGreaterThanOrEqual(ACTIVE_SEPARATION);
   }
 
   test("set a background and an ink at 4.5:1 for a match and the active one, and follow a switch of theme", async () => {
