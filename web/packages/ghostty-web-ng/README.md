@@ -7,7 +7,7 @@ chan's terminal widget is derived from [ghostty-web](https://github.com/coder/gh
 - Widget source: `coder/ghostty-web` at `1858a5947767a3e1c9e98dbf53b2ff87fedb2aab` (2026-06-28, "ci: fix release please notes setup (#183)"), whose manifest version is `0.4.0`. Upstream changes are taken by hand, if at all.
 - npm source: `ghostty-web@0.4.0-next.20.g1858a59`, tarball `https://registry.npmjs.org/ghostty-web/-/ghostty-web-0.4.0-next.20.g1858a59.tgz`, integrity `sha512-NXA9H3IJlx+DGJukXbOPQWFkigYdAatTqkoIvM8tvhfbaYoDf3gGKxXLLyXtLYOBt5qzGdEZa294TU36gULjVg==`.
 - Differential oracle: `vt/__tests__/differential-oracle.json` records the upstream binding's corpus, modes, replies and key encodings at `bd0141278`. Its header identifies the recording command and the upstream wasm by SHA-256 `794191ccd9f469ed0d49ebcb3e6b326d64279b91752b71ad80a3d89ff1f26416` (423,939 bytes). That upstream build derives from the Ghostty snapshot `5714ed07a1012573261b7b7e3ed2add9c1504496`; the package carries the recording, not that binary or its build tooling.
-- Runtime core: `vendor/ghostty-vt/` contains Ghostty's signed release build of libghostty-vt 1.0.2. Its [README](vendor/ghostty-vt/README.md) records the source, hash, signature verification and update procedure. It is the package's only wasm.
+- Runtime core: `vendor/ghostty-vt/` contains Ghostty's signed release build of libghostty-vt. Its [README](vendor/ghostty-vt/README.md) records the version, source, hash, signature verification and update procedure. It is the package's only wasm.
 - [LICENSE](LICENSE) is the widget's unchanged upstream MIT notice. The runtime core carries its own notice in `vendor/ghostty-vt/LICENSE`.
 
 ## Sources and consumers

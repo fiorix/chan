@@ -64,9 +64,9 @@ const KINDS = [
   "link", "button", "input", "select", "textarea", "summary", "details", "area",
   "svg-xlink", "svg-href", "mathml-link", "audio", "video", "scroller", "scroller-x", "tabindex", "iframe",
 ];
-/// A body with an element jsdom computes no style for: its
-/// `getComputedStyle` throws on a MathML element.
-const FORMULA = { ...SURVEY, bodyMarkdown: "Sum <math><mi>x</mi></math> first." };
+/// A body with an element whose style the engine cannot compute: the case
+/// makes `getComputedStyle` throw for it, as jsdom 29 does for MathML.
+const UNCOMPUTABLE = { ...SURVEY, bodyMarkdown: 'Sum <span data-uncomputable="">x</span> first.' };
 
 beforeEach(async () => {
   await mountApp(demoData([]));
@@ -222,6 +222,12 @@ describe("a survey over a terminal whose pane is not focused", () => {
   test("every kind of focusable its body keeps leaves the Tab order, and each returns with its pane", async () => {
     const card = await surveyOverUnfocusedPane(EVERY_KIND);
     expect(Object.keys(kindTabIndexes(card)), "the body renders one element of each kind").toEqual(KINDS);
+    // Browsers reflect a MathML element's tabIndex property into its
+    // attribute; jsdom has no such property, which is what lets this kind
+    // tell a hold written as the attribute from one written as the property.
+    // A fresh element reads the engine, not what the hold wrote.
+    const mathml = document.createElementNS("http://www.w3.org/1998/Math/MathML", "mi");
+    expect("tabIndex" in mathml, "jsdom gives a MathML element no tabIndex property").toBe(false);
     const editable = card.querySelector(".survey-body [data-editable]");
     expect(editable?.textContent, "the body renders the element written as contenteditable").toBe("edit");
     expect(editable?.hasAttribute("contenteditable"), "the sanitizer strips contenteditable, which the rule has no term for")
@@ -241,8 +247,18 @@ describe("a survey over a terminal whose pane is not focused", () => {
   });
 
   test("a body element whose style cannot be computed leaves its terminal tab drawn and its card up", async () => {
-    const card = await surveyOverUnfocusedPane(FORMULA);
-    expect(card.querySelector(".survey-body math mi")?.textContent, "the body renders its formula").toBe("x");
+    const computed = window.getComputedStyle.bind(window);
+    const refused: Element[] = [];
+    const style = vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+      if (!el.matches("[data-uncomputable]")) return computed(el, pseudo);
+      refused.push(el);
+      throw new TypeError("no computed style for this element");
+    });
+    const card = await surveyOverUnfocusedPane(UNCOMPUTABLE);
+    const uncomputable = card.querySelector(".survey-body [data-uncomputable]");
+    expect(uncomputable?.textContent, "the body renders the element").toBe("x");
+    expect(style, "the spy stands in for the engine's getComputedStyle").toHaveBeenCalled();
+    expect(refused, "the hold asked for the element's style and met the throw").toContain(uncomputable);
     expect(tabFailure(TOP), "the terminal tab is drawn under the survey").toBeNull();
     expect(buttons(card).map((b) => b.tabIndex), "out of the Tab order while the other pane is focused")
       .toEqual([-1, -1, -1, -1]);

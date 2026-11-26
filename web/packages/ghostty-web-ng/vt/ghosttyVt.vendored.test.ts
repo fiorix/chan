@@ -12,6 +12,12 @@ const WASM = "vendor/ghostty-vt/ghostty-vt.wasm";
 const MINISIG = "vendor/ghostty-vt/ghostty-vt.wasm.minisig";
 const README = "vendor/ghostty-vt/README.md";
 
+/// Ghostty's minisign public key, as Ghostty's `PACKAGING.md` lists it. The
+/// README names it for a reader's own check; the test holds it apart, so a
+/// README key swapped together with a core and a signature made by that key
+/// fails here unless this constant changes too.
+const GHOSTTY_KEY = "RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV";
+
 /// The DER prefix of an Ed25519 public key's SubjectPublicKeyInfo; the 32
 /// key bytes follow it.
 const ED25519_SPKI = Uint8Array.of(0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00);
@@ -162,10 +168,10 @@ describe("the vendored core is the release its README records", () => {
     expect(row("Build")).toBe(name);
   });
 
-  test("its signature verifies with the README's key, and fails over a changed byte", () => {
+  test("its signature verifies with Ghostty's key, the one the README names, and fails over a changed byte", () => {
     const keys = new Set(readme.match(/\bRW[A-Za-z0-9+/]{54}(?![A-Za-z0-9+/=])/g));
-    expect(keys.size, "the README names one minisign key").toBe(1);
-    const pk = base64([...keys][0]);
+    expect([...keys], "the README names Ghostty's minisign key and no other").toEqual([GHOSTTY_KEY]);
+    const pk = base64(GHOSTTY_KEY);
     expect(latin1(pk.subarray(0, 2)), "an Ed25519 minisign key").toBe("Ed");
     expect(sig.algorithm, "a signature over the file's BLAKE2b-512").toBe("ED");
     expect(hex(sig.keyId), "signed by that key").toBe(hex(pk.subarray(2, 10)));
