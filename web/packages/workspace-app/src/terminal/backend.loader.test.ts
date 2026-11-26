@@ -275,4 +275,19 @@ describe("the widget's import on an engine that keeps a failed module import", (
     expect(engine.asked.length, "the widget was asked for").toBeGreaterThan(0);
     expect(engine.asked.filter((name) => name !== "chunk"), "only at the chunk's own URL").toEqual([]);
   });
+
+  test("a widget that loaded at a retry URL is asked for there when the core's fetch fails", async () => {
+    const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
+    fetch.mockRejectedValueOnce(new Error("connection lost"));
+    vi.stubGlobal("fetch", fetch);
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const engine = await widgetEngine();
+    const { loadGhosttyKit } = await import("./backend");
+    engine.serving = false;
+    await expect(loadGhosttyKit(), "the widget's chunk failed").rejects.toThrow();
+    engine.serving = true;
+    await expect(loadGhosttyKit(), "the widget loaded, the core's fetch failed").rejects.toThrow("connection lost");
+    await expect(loadGhosttyKit()).resolves.toHaveProperty("instantiate");
+    expect(engine.asked).toEqual(["chunk", "chunk?retry=1"]);
+  });
 });
