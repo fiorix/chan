@@ -452,6 +452,82 @@ fn a_reader_with_nothing_to_read_waits_for_output_before_it_waits_for_a_view() {
     );
 }
 
+#[test]
+fn events_published_once_a_reader_found_no_hold_do_not_hold_an_idle_program() {
+    #[derive(Debug)]
+    enum Step {
+        Asked,
+        Waiting,
+    }
+    struct Quiet {
+        steps: std::sync::mpsc::Sender<Step>,
+        bytes: std::sync::mpsc::Receiver<u8>,
+    }
+    impl Read for Quiet {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.steps.send(Step::Asked);
+            match self.bytes.recv() {
+                Ok(byte) => {
+                    buf[0] = byte;
+                    Ok(1)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+    let mut session = test_session_with_ring(1024);
+    Arc::get_mut(&mut session).expect("one owner").id = "pacing-events-after-no-hold".into();
+    let attached = attach_acked(&session, None);
+    let progress = attached.output_progress().expect("lease");
+    // The view has room when the reader looks, and uses its event credit
+    // before the reader reads.
+    let publisher = session.clone();
+    arm_attach_seam(&session.id, AttachSeam::ReaderFoundNoHold, move || {
+        for _ in 0..EVENT_CREDIT {
+            publisher.broadcast(SessionEvent::QueueDepth(0));
+        }
+    });
+    let (steps_tx, steps_rx) = std::sync::mpsc::channel();
+    let waiting = steps_tx.clone();
+    arm_attach_seam(
+        &session.id,
+        AttachSeam::ReaderWaitingForProgress,
+        move || {
+            let _ = waiting.send(Step::Waiting);
+        },
+    );
+    let (bytes_tx, bytes_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let mut reader = Quiet {
+                steps: steps_tx,
+                bytes: bytes_rx,
+            };
+            let mut buf = vec![0u8; PTY_READ_BYTES];
+            session.paced_read(&mut reader, &mut buf, false)
+        })
+    };
+    let first = steps_rx.recv_timeout(Duration::from_secs(2));
+    let held = session.pacing.credit_wait_ended_at().is_none();
+    let clock = progress
+        .with_view(|view| view.blocked_since.is_some())
+        .expect("live view");
+    // Release a reader that waits, then end its read.
+    session.pacing.bypass();
+    drop(bytes_tx);
+    worker.join().expect("reader thread").expect("read");
+    assert!(
+        matches!(first, Ok(Step::Asked)),
+        "the reader reads before it waits: {first:?}"
+    );
+    assert!(!held, "a program with nothing pending is not held");
+    assert!(
+        !clock,
+        "the view's clock does not run while the program is quiet"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn reader_stop_wakes_a_pacing_wait_before_sealing_the_ring() {

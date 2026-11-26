@@ -1561,6 +1561,9 @@ pub enum AttachSeam {
     /// In a PTY reader thread, when its wait for output returns with nothing
     /// to read and no stop request to act on.
     ReaderIdleWake,
+    /// In a PTY reader thread that cannot poll, once it has found that no
+    /// view holds its next read and before it reads.
+    ReaderFoundNoHold,
     /// The exit owner is about to wait for the reader's last admitted read.
     ExitBeforeReaderDrain,
     /// The reader is running and the exit owner is about to release the wait lock.
@@ -6062,6 +6065,10 @@ impl Session {
                 self.pacing.credit(read, on_wait);
             }
             return Ok(read);
+        }
+        #[cfg(any(test, feature = "test-util"))]
+        if !polled {
+            fire_attach_seam(&self.id, AttachSeam::ReaderFoundNoHold);
         }
         let credit = self.pacing.credit(buf.len(), on_wait);
         reader.read(&mut buf[..credit])
