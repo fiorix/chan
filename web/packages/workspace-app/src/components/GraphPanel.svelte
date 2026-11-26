@@ -367,7 +367,12 @@
     if (next !== selectedId) {
       graphState.depth = 1;
       depthDraft = null;
-      depthRaise = null;
+      // A raise under way reads the directories its first pass opened above
+      // its own only once it finishes; one ended here reads them now.
+      if (depthRaise !== null) {
+        depthRaise = null;
+        loadOpenedChildren(true);
+      }
       depthNote = null;
     }
   }
