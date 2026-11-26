@@ -1,13 +1,14 @@
-// A 2D context for tests that compare what two renderer instances left on
-// their canvases cell by cell. Each cell's picture is the list of calls that
-// painted it since anything last covered it: a clear, or an opaque fill over
-// the whole cell, replaces the picture, and every other call is added to the
-// pictures of the cells it lands in. A canvas painted by a run of frames that
-// each repaint only some rows then reads as the same pictures as one frame
-// that repaints everything over the same terminal, unless a frame left a row
-// unrepainted that had changed. Glyph rasterization is not modelled: a text
-// belongs to the cell its origin is in and a path to the cell its middle is
-// in, so ink a glyph spills into a neighbouring row is not part of either.
+// A 2D context for tests that compare what a renderer left on its canvas with
+// what one full frame leaves there, cell by cell. Each cell's picture is the
+// list of calls that painted it since anything last covered it: a clear, or
+// an opaque fill over the whole cell, replaces the picture, and every other
+// call is added to the pictures of the cells it lands in. A canvas painted by
+// a run of frames that each repaint only some rows then reads as the same
+// pictures as one frame that repaints everything over the same terminal,
+// unless a frame left a row unrepainted that had changed. Glyph rasterization
+// is not modelled: a text belongs to the cell its origin is in and a path to
+// the cell its middle is in, so ink a glyph spills into a neighbouring row is
+// not part of either.
 
 /// What a canvas showed, by row and column: each cell's calls, in order.
 export type CellPictures = string[][][];

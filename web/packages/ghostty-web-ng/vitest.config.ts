@@ -20,6 +20,8 @@ export default defineConfig({
       "lib/terminal.links.test.ts",
       "lib/terminal.pointer.test.ts",
       "lib/terminal.viewport.test.ts",
+      "lib/renderer.test.ts",
+      "lib/renderer.redraw.test.ts",
     ],
     environment: "jsdom",
     testTimeout: 30_000,

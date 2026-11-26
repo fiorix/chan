@@ -1,18 +1,71 @@
-// The ghostty widget's renderer over chan's binding on the vendored core,
-// wired the way Terminal.open() wires them, over a software canvas that keeps
-// the text the renderer hands it and the colour it fills that text in. The
-// test writes the bytes and issues the frames.
+// The widget's renderer in an opened terminal over chan's binding on the
+// vendored core, over a software canvas that keeps the text the renderer
+// hands it and the colour it fills that text in. The test writes the bytes
+// and runs the frames.
 
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/ghostty-web-ng";
-import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
-import { transparentColor } from "./backgroundOpacity";
+import { GhosttyVt, VtCells } from "../vt/ghosttyVt";
+import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "./__tests__/softwareCanvas";
+import type { ITerminalOptions, ITheme, TerminalCore } from "./interfaces";
+import { Terminal } from "./terminal";
 
-const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
 const ROWS = 3;
+
+let vendored: WebAssembly.Module;
+const opened: Terminal[] = [];
+let frames: FrameRequestCallback[] = [];
+
+beforeAll(async () => {
+  vendored = await WebAssembly.compile(readFileSync(VENDORED));
+});
+
+afterEach(() => {
+  for (const term of opened.splice(0)) term.dispose();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+/// A terminal opened over the vendored core on an instance of its own,
+/// keeping a hundred rows of history, its one canvas drawing into the
+/// context `make` builds for it. The animation frames its render loop asks
+/// for run when the test calls `tick`, and the scrollbar is held out of the
+/// picture.
+async function open<C>(make: (canvas: HTMLCanvasElement) => C, options: Omit<ITerminalOptions, "ghostty">) {
+  const contexts = new WeakMap<HTMLCanvasElement, C>();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    function (this: HTMLCanvasElement) {
+      let context = contexts.get(this);
+      if (!context) contexts.set(this, (context = make(this)));
+      return context as unknown as CanvasRenderingContext2D;
+    } as unknown as typeof HTMLCanvasElement.prototype.getContext,
+  );
+  frames = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", () => {});
+  const ghostty = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+  const term = new Terminal({
+    ghostty,
+    scrollback: 100,
+    cursorBlink: false,
+    smoothScrollDuration: 0,
+    testHooks: { scrollbarOpacity: 0 },
+    ...options,
+  });
+  opened.push(term);
+  const host = document.createElement("div");
+  document.body.append(host);
+  term.open(host);
+  return { term, context: contexts.get(host.querySelector("canvas")!)!, metrics: term.getMetrics()! };
+}
+
+/// One animation frame: the callbacks queued so far, once.
+function tick(): void {
+  for (const callback of frames.splice(0)) callback(performance.now());
+}
 
 /// A software context that also keeps each text it is asked to fill, at
 /// the point the renderer draws it from, with the fill and the alpha it is
@@ -100,7 +153,7 @@ const PARTIAL_SCREEN = [
 
 /// The whole cluster the core holds at column `col` of screen row `y`, or
 /// of history row `y` with `history`.
-function clusterAt(core: VtTerminal, y: number, col: number, history = false): string | null {
+function clusterAt(core: TerminalCore, y: number, col: number, history = false): string | null {
   const cells = new VtCells();
   if (!(history ? core.readHistoryRow(y, cells) : core.readRow(y, cells))) return null;
   return cells.at(col)?.cluster ?? null;
@@ -112,48 +165,21 @@ function clusters(cells: [number, string][]): [number, string][] {
 }
 
 describe("the ghostty renderer scrolled back", () => {
-  let vendored: WebAssembly.Module;
-
-  beforeAll(async () => {
-    vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   /// A `rows`-row terminal that has been written `lines`, one per row.
   async function scrolledBack(rows: number, lines: { bytes: string }[]) {
-    const contexts = new WeakMap<HTMLCanvasElement, TextRecordingContext>();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      function (this: HTMLCanvasElement) {
-        const existing = contexts.get(this);
-        if (existing) return existing as unknown as CanvasRenderingContext2D;
-        const created = new TextRecordingContext(this);
-        contexts.set(this, created);
-        return created as unknown as CanvasRenderingContext2D;
-      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
-    );
-    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ ghostty: vt, cols: COLS, rows });
-    term.wasmTerm = vt.createTerminal(COLS, rows, { scrollbackLimit: 100 });
-    const canvas = document.createElement("canvas");
-    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 });
-    renderer.resize(COLS, rows);
-    term.renderer = renderer;
-    const context = contexts.get(canvas)!;
-    term.wasmTerm.write("\x1b[?25l" + lines.map((r) => r.bytes).join("\r\n"));
+    const { term, context, metrics } = await open((canvas) => new TextRecordingContext(canvas), { cols: COLS, rows });
+    term.write("\x1b[?25l" + lines.map((r) => r.bytes).join("\r\n"));
     return {
       term,
-      /// One frame as the widget's render loop issues it.
+      /// One frame of the widget's render loop.
       frame() {
         context.texts.length = 0;
-        renderer.render(term.wasmTerm!, false, term.getViewportY(), 0);
+        tick();
       },
       /// What the last frame painted on view row `y`: each cell's text by
       /// its column.
       painted(y: number): [number, string][] {
-        const { width, height, baseline } = renderer.getMetrics();
+        const { width, height, baseline } = metrics;
         return context.texts
           .filter((t) => t.y === y * height + baseline)
           .map((t): [number, string] => [t.x / width, t.text])
@@ -170,7 +196,7 @@ describe("the ghostty renderer scrolled back", () => {
     for (const [offset, { cells }] of HISTORY.entries()) {
       for (const [col, text] of cells) {
         if ([...text].length > 1) {
-          expect(clusterAt(screen.term.wasmTerm!, offset, col, true), `history ${offset}, column ${col}`).toBe(text);
+          expect(clusterAt(screen.term.core!, offset, col, true), `history ${offset}, column ${col}`).toBe(text);
         }
       }
     }
@@ -192,7 +218,7 @@ describe("the ghostty renderer scrolled back", () => {
 
   test("a partly scrolled view paints every row's own grapheme clusters", async () => {
     const screen = await scrolledBack(PARTIAL_ROWS, [...PARTIAL_HISTORY, ...PARTIAL_SCREEN]);
-    const core = screen.term.wasmTerm!;
+    const core = screen.term.core!;
     expect(screen.term.getScrollbackLength()).toBe(PARTIAL_HISTORY.length);
     // The core holds each cluster in the row it was written to.
     for (const [offset, { cells }] of PARTIAL_HISTORY.entries()) {
@@ -256,58 +282,21 @@ describe("the ghostty renderer's selected text", () => {
   const UNDERLINED = [16, 17];
   const WRITTEN = [...RED, ...DEFAULT, ...INVERSE, ...FAINT, ...UNDERLINED];
 
-  let vendored: WebAssembly.Module;
-
-  beforeAll(async () => {
-    vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    document.body.innerHTML = "";
-  });
-
-  /// A terminal whose first two rows hold the same cells, with ghostty-web's
-  /// own selection over the whole of the first, its core and its renderer
-  /// built from `theme` as open() builds them.
+  /// A terminal opened in `theme` whose first two rows hold the same
+  /// cells, with its own selection over the whole of the first.
   async function selected(theme: ITheme, bytes = "") {
-    const contexts = new WeakMap<HTMLCanvasElement, TextRecordingContext>();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      function (this: HTMLCanvasElement) {
-        const existing = contexts.get(this);
-        if (existing) return existing as unknown as CanvasRenderingContext2D;
-        const created = new TextRecordingContext(this);
-        contexts.set(this, created);
-        return created as unknown as CanvasRenderingContext2D;
-      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
-    );
-    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ ghostty: vt, cols, rows, theme });
-    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
-    term.wasmTerm = vt.createTerminal(cols, rows, config);
-    const canvas = document.createElement("canvas");
-    const host = document.createElement("div");
-    host.append(canvas);
-    document.body.append(host);
-    (term as unknown as { element: HTMLElement }).element = host;
-    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme });
-    renderer.resize(cols, rows);
-    term.renderer = renderer;
-    const manager = new SelectionManager(term, renderer, term.wasmTerm, document.createElement("textarea"));
-    (term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
-    renderer.setSelectionManager(manager);
-    term.wasmTerm.write("\x1b[?25l" + ROW + "\r\n" + ROW + bytes);
+    const { term, context, metrics } = await open((canvas) => new TextRecordingContext(canvas), { cols, rows, theme });
+    term.write("\x1b[?25l" + ROW + "\r\n" + ROW + bytes);
     term.select(0, 0, cols);
-    const context = contexts.get(canvas)!;
-    const { width, height, baseline } = renderer.getMetrics();
+    const { width, height, baseline } = metrics;
     return {
-      renderer,
+      term,
       context,
-      /// One full frame as the widget's render loop issues it.
+      /// One full frame.
       frame() {
         context.texts.length = 0;
         context.strokes.length = 0;
-        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+        term.refresh();
       },
       /// The colour and alpha each written cell of view row `y` drew its
       /// glyph in, by column, from the row's own pass.
@@ -374,7 +363,7 @@ describe("the ghostty renderer's selected text", () => {
 
     // A theme switch that drops it puts the selected cells back in their
     // own colours.
-    screen.renderer.setTheme(THEME);
+    screen.term.setTheme(THEME);
     screen.frame();
     for (const col of RED) expect.soft(screen.glyphs(0).get(col)?.fill, `after the switch, column ${col}`).toBe(channels(THEME.red!));
   });
@@ -408,15 +397,15 @@ describe("the ghostty renderer's cell backgrounds", () => {
   const rows = 3;
 
   /// TerminalTab's terminalTheme() at its fallbacks, each with its palette's
-  /// black, opaque and as a see-through window builds it: the background at
-  /// alpha 0, which the widget hands the core as black.
+  /// black, opaque and as a see-through window builds it: the background's
+  /// colour at alpha 0, which the widget hands the core as black.
   const DARK: ITheme = { background: "#1c1c1e", foreground: "#ebebf0", cursor: "#58a6ff", black: "#0c0c0d" };
   const LIGHT: ITheme = { background: "#ffffff", foreground: "#1c1c1e", cursor: "#0969da", black: "#24292f" };
   const THEMES: [string, ITheme][] = [
     ["dark", DARK],
     ["light", LIGHT],
-    ["dark, see-through", { ...DARK, background: transparentColor(DARK.background!) }],
-    ["light, see-through", { ...LIGHT, background: transparentColor(LIGHT.background!) }],
+    ["dark, see-through", { ...DARK, background: "rgba(28, 28, 30, 0)" }],
+    ["light, see-through", { ...LIGHT, background: "rgba(255, 255, 255, 0)" }],
   ];
 
   // By column: default cells; pure black named as RGB, from the 256-colour
@@ -434,45 +423,16 @@ describe("the ghostty renderer's cell backgrounds", () => {
     (x) => !BLACK.includes(x) && !PALETTE_BLACK.includes(x) && !INVERSE.includes(x),
   );
 
-  let vendored: WebAssembly.Module;
-
-  beforeAll(async () => {
-    vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  /// A terminal built from `theme` as open() builds it, its core and its
-  /// renderer, written `bytes` with the cursor hidden.
+  /// A terminal opened in `theme`, written `bytes` with the cursor hidden.
   async function painted(theme: ITheme, bytes: string) {
-    const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      function (this: HTMLCanvasElement) {
-        const existing = contexts.get(this);
-        if (existing) return existing as unknown as CanvasRenderingContext2D;
-        const created = new SoftwareCanvasContext(this);
-        contexts.set(this, created);
-        return created as unknown as CanvasRenderingContext2D;
-      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
-    );
-    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ ghostty: vt, cols, rows, theme });
-    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
-    term.wasmTerm = vt.createTerminal(cols, rows, config);
-    const canvas = document.createElement("canvas");
-    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme });
-    renderer.resize(cols, rows);
-    term.renderer = renderer;
-    term.wasmTerm.write("\x1b[?25l" + bytes);
-    const context = contexts.get(canvas)!;
-    const { width, height } = renderer.getMetrics();
+    const { term, context, metrics } = await open((canvas) => new SoftwareCanvasContext(canvas), { cols, rows, theme });
+    term.write("\x1b[?25l" + bytes);
+    const { width, height } = metrics;
     return {
       term,
-      /// One full frame as the widget's render loop issues it.
+      /// One full frame.
       frame() {
-        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+        term.refresh();
       },
       /// The pixel at the middle of the cell at column `x` of view row `y`.
       /// The software canvas paints no glyphs, so it is the cell's
@@ -719,32 +679,11 @@ describe("the ghostty renderer's underline styles and overline", () => {
     }
   }
 
-  let vendored: WebAssembly.Module;
-
-  beforeAll(async () => {
-    vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-  });
-
-  /// A terminal built from THEME as open() builds it, its core and its
-  /// renderer, written `bytes` with the cursor hidden. The font measures
-  /// `fontWidth` pixels a character; `fontBoxHeight` supplies the measured
-  /// font box for checking decorations in a shorter cell.
+  /// A terminal opened in THEME, written `bytes` with the cursor hidden.
+  /// The font measures `fontWidth` pixels a character; `fontBoxHeight`
+  /// supplies the measured font box for checking decorations in a shorter
+  /// cell.
   async function painted(bytes: string, { fontWidth = 8, fontBoxHeight }: { fontWidth?: number; fontBoxHeight?: number } = {}) {
-    const contexts = new WeakMap<HTMLCanvasElement, PathRecordingContext>();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      function (this: HTMLCanvasElement) {
-        const existing = contexts.get(this);
-        if (existing) return existing as unknown as CanvasRenderingContext2D;
-        const created = new PathRecordingContext(this, fontWidth);
-        contexts.set(this, created);
-        return created as unknown as CanvasRenderingContext2D;
-      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
-    );
     if (fontBoxHeight !== undefined) {
       vi.stubGlobal("OffscreenCanvas", class {
         getContext() {
@@ -754,26 +693,29 @@ describe("the ghostty renderer's underline styles and overline", () => {
         }
       });
     }
-    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ ghostty: vt, cols, rows, theme: THEME });
-    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
-    term.wasmTerm = vt.createTerminal(cols, rows, config);
-    const canvas = document.createElement("canvas");
-    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme: THEME });
-    renderer.resize(cols, rows);
-    term.renderer = renderer;
-    term.wasmTerm.write("\x1b[?25l" + bytes);
-    const context = contexts.get(canvas)!;
-    const metrics = renderer.getMetrics();
+    const { term, context, metrics } = await open((canvas) => new PathRecordingContext(canvas, fontWidth), {
+      cols,
+      rows,
+      theme: THEME,
+    });
+    term.write("\x1b[?25l" + bytes);
     return {
       term,
-      renderer,
       metrics,
-      /// One full frame as the widget's render loop issues it.
+      /// One full frame.
       frame() {
         context.texts.length = 0;
         context.strokes.length = 0;
-        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+        term.refresh();
+      },
+      /// The pointer over the cell at `col` of view row `y`, and the link
+      /// lookup it starts settled.
+      async hover(y: number, col: number) {
+        const at = { clientX: (col + 0.5) * metrics.width, clientY: (y + 0.5) * metrics.height };
+        term.element!.querySelector("canvas")!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at }));
+        // Hover moves are throttled to one per 16 ms and the lookup resolves
+        // asynchronously; this waits out both.
+        await new Promise((resolve) => setTimeout(resolve, 20));
       },
       /// What the strokes of the last frame ink over the cell at `col` of
       /// view row `y` that takes `width` columns, each stroke's ink cut to
@@ -927,7 +869,8 @@ describe("the ghostty renderer's underline styles and overline", () => {
   });
 
   test("strikethrough, a hovered link and a cell with no decoration draw as before", async () => {
-    const screen = await painted(ROW);
+    const URL = "https://example.com/a";
+    const screen = await painted(ROW + "\r\n" + URL);
     const { width, height, baseline } = screen.metrics;
     screen.frame();
     // Strikethrough stays a line across the middle in the glyph's colour,
@@ -941,15 +884,18 @@ describe("the ghostty renderer's underline styles and overline", () => {
     for (let col = COLUMN.plain; col < COLUMN.plain + 5; col++) {
       expect.soft(screen.strokes(0, col), `plain, column ${col}`).toEqual([]);
     }
-    // A hovered link's underline is one straight line in the hover colour.
-    screen.renderer.setHoveredLinkRange({ startX: COLUMN.plain, startY: 0, endX: COLUMN.plain + 4, endY: 0 });
+    // A hovered link's underline is one straight line in the hover colour,
+    // under each of its cells and none past them.
+    for (let col = 0; col <= URL.length; col++) expect.soft(screen.strokes(1, col), `not hovered, column ${col}`).toEqual([]);
+    await screen.hover(1, 3);
     screen.frame();
-    for (let col = COLUMN.plain; col < COLUMN.plain + 5; col++) {
-      const marks = screen.strokes(0, col);
+    for (let col = 0; col < URL.length; col++) {
+      const marks = screen.strokes(1, col);
       expect.soft(marks.map((m) => [m.style, m.runs]), `hovered, column ${col}`).toEqual([
-        [channels("#4a90e2"), [{ from: col * width, to: (col + 1) * width, y: baseline + 2 }]],
+        [channels("#4a90e2"), [{ from: col * width, to: (col + 1) * width, y: height + baseline + 2 }]],
       ]);
     }
+    expect.soft(screen.strokes(1, URL.length), "past the link").toEqual([]);
   });
 
   test.each([8, 9])("adjacent dotted cells keep one rhythm of dots, %i pixels a cell", async (fontWidth) => {
