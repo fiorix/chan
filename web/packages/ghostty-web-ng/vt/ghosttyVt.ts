@@ -18,7 +18,7 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
-import { registerSearchInternals, registerTerminalInternals } from "./internal";
+import { registerBindingInternals, registerSearchInternals, registerTerminalInternals } from "./internal";
 
 /// Enum values of the pinned build, by upstream C type.
 export const ABI = {
@@ -563,6 +563,11 @@ type VtTerminalOwner = {
 
 /// The core ghostty-web's `Terminal` takes as its `ghostty` option.
 export class GhosttyVt {
+  // The package's white-box tests read this through ./internal.
+  static {
+    registerBindingInternals((vt) => ({ replySinks: vt.#replySinks }));
+  }
+
   readonly #wasm: VtWasm;
   readonly #replySinks = new Map<number, (ptr: number, len: number) => void>();
   readonly #writePtyCallback: number;

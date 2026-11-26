@@ -9,7 +9,7 @@ import {
   type FixtureKeyEvent,
   type OracleFixture,
 } from "./__tests__/oracleFixture";
-import { terminalInternals } from "./internal";
+import { bindingInternals, terminalInternals } from "./internal";
 import {
   ABI,
   CELL_BITS,
@@ -665,6 +665,22 @@ describe("upstream's terminal through the binding", () => {
     a.free();
     b.write("\x1b[6n");
     expect(b.readResponse()).toBe("\x1b[4;5R");
+  });
+
+  test("a freed terminal leaves no reply sink, and a terminal made on its handle answers its queries alone", async () => {
+    const vt = await upstream();
+    const { replySinks } = bindingInternals(vt);
+    const freed = vt.createTerminal(20, 5);
+    const handle = terminalInternals(freed).handle;
+    expect([...replySinks.keys()]).toEqual([handle]);
+    freed.free();
+    expect(replySinks.size, "the freed terminal's sink goes with it").toBe(0);
+    const reused = vt.createTerminal(20, 5);
+    expect(terminalInternals(reused).handle, "the core reuses the freed handle").toBe(handle);
+    reused.write("\x1b[2;3H\x1b[6n");
+    expect(reused.readResponse()).toBe("\x1b[2;3R");
+    expect(freed.readResponse()).toBeNull();
+    reused.free();
   });
 });
 
