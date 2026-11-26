@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { showCarouselCard } from "../lib/carousel.mjs";
 import { fetchWindows, goto, killChild, mask, poll, spawnDevserver, wait } from "../lib/launcher-devserver.mjs";
-import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const SOCKET = "chan-smoke-219";
 const SESSION = "smoke219";
@@ -152,7 +152,7 @@ async function copyScrollback(page) {
   }
 }
 
-const TERMINAL_SCREEN = Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", ");
+const TERMINAL_SCREEN = `.terminal-tab.active ${TERMINAL_SURFACE}`;
 
 async function waitTerminal(page, label) {
   await poll(`${label}: an attached terminal`, () => page.evaluate((selector) => {

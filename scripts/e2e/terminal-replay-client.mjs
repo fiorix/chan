@@ -18,10 +18,9 @@
 //               that actual reason in the event log for the caller to judge.
 // --mode fresh  dials once with since=0 and no generation and exits at the
 //               ready frame: the attach of a brand-new view, which is what a
-//               window the SPA reloads after a restart makes when it has no
-//               cached snapshot for the terminal (always on the ghostty
-//               backend). Its screen is the replay alone and its state carries
-//               missed_bytes.
+//               window the SPA reloads after a restart makes, since the app
+//               keeps no snapshot of a terminal. Its screen is the replay
+//               alone and its state carries missed_bytes.
 //
 // Usage: terminal-replay-client.mjs --base URL --chan-home DIR --out DIR
 //          --mode keep|fresh --term NAME:SESSION:WINDOW:FOCUSED [--term ...]

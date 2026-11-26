@@ -255,9 +255,9 @@ describe("a search over the binding's terminal", () => {
   // no entry after the active-area entries where the first listed page's
   // newest match ends on the screen, because the core lists no match
   // wrapped across a page boundary that is on the screen after those
-  // entries. At this size it lists none at all; at some sizes it lists one
-  // among them, as a range whose end precedes its start. A core that listed
-  // one after them would let a press step over it.
+  // entries. Here it lists none at all; where many lines wrap, at some
+  // sizes it lists one among them, as a range whose end precedes its start.
+  // A core that listed one after them would let a press step over it.
   test("a needle wrapped across a page boundary on the screen is listed only once the boundary is above it", async () => {
     // Lines of 300 cells take two rows at 200 columns, and the core's pages
     // hold 231 rows there; line 200 takes one row, so line 231 lies on rows
@@ -289,6 +289,53 @@ describe("a search over the binding's terminal", () => {
       { history: 461, across: false, inside: true },
       { history: 463, across: true, inside: true },
     ]);
+  });
+
+  // The geometry the rule's arm depends on, which the case above does not
+  // reach: there the first listed page is the page above, so the rule waits
+  // for the entry after them whatever the core lists. Lines of one row at 80
+  // columns fill pages of 573 rows, so no page lies above the screen, and
+  // while the first listed page's newest match, row 571, ends on it the rule
+  // waits for the active-area entries alone; once the screen's first row
+  // passes that row it waits for the entry after them too. The page's last
+  // row, 572, wraps a needle from column 77 into row 573. While that boundary
+  // is on the screen no entry, of any shape, starts where the needle does;
+  // once its first row is in history it is listed, as itself, after the
+  // active-area entries.
+  test("with no page above the screen, a needle wrapped across the page boundary on it is listed only once the boundary is above it", async () => {
+    const t = await terminal(80, 24, 10_000_000);
+    lines(t, 572, (i) => `needle ${i}`);
+    t.write("plain ".padEnd(77, "y") + "needle" + "z".repeat(7));
+    const across = range(572, 77, 573, 2);
+    const seen: number[] = [];
+    const arms: string[] = [];
+    for (let history = t.getScrollbackLength(); history <= 574; history = t.getScrollbackLength()) {
+      const s = t.createSearch();
+      s.setNeedle("needle");
+      s.feed();
+      const head = s.state().total;
+      scan(s);
+      const all: MatchRange[] = [];
+      for (let next = 0; next < s.state().total;) {
+        const batch = s.readMatches(next, Number.MAX_SAFE_INTEGER);
+        all.push(...batch.ranges);
+        if (batch.next <= next) throw new Error(`the listing stopped at ${next}`);
+        next = batch.next;
+      }
+      s.free();
+      const fromStart = all.flatMap((m, at) => (m.startRow === across.startRow && m.startCol === across.startCol ? [{ m, at }] : []));
+      if (history <= across.startRow) {
+        arms.push(all[0].endRow >= history ? "the entries" : "the entry after them");
+        expect(fromStart, `history ${history}: nothing listed from the needle's start while the boundary is on the screen`).toEqual([]);
+      } else {
+        expect(fromStart.map(({ m }) => m), `history ${history}: listed once, as itself`).toEqual([across]);
+        expect(fromStart[0].at, `history ${history}: after the active-area entries`).toBeGreaterThanOrEqual(head);
+      }
+      seen.push(history);
+      t.write("\r\nneedle more");
+    }
+    expect(seen, "from the first history with the boundary on the screen to two rows past it").toEqual(Array.from({ length: 25 }, (_, i) => 550 + i));
+    expect(arms, "what the rule waits for while the boundary is on the screen").toEqual([...Array(22).fill("the entries"), "the entry after them"]);
   });
 
   test("columns count a wide character as two cells", async () => {

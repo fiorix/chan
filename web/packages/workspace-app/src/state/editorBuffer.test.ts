@@ -160,6 +160,72 @@ describe("editorBuffer TTL eviction in pruneEditorBuffers", () => {
     pruneEditorBuffers();
     expect(localStorage.getItem("unrelated-key")).toBe("value");
   });
+
+  test("an entry the store will not hand over is skipped, and the entries walked on either side of it are still pruned", () => {
+    const eightDaysAgo = Date.now() - 8 * MS_PER_DAY;
+    for (const name of ["first", "second", "third"]) writeForeignBuffer(name, "old", `${name}.md`, eightDaysAgo);
+    // The store refuses the entry it walks second, so a stale entry is walked
+    // on each side of it whatever order the store keeps its keys in, and a
+    // refusal that ended the walk would leave the one after it unpruned.
+    const refused = localStorage.key(1)!;
+    const others = [localStorage.key(0)!, localStorage.key(2)!];
+    // The store's own method when it is a Storage, else the stand-in's.
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const getItem = store.getItem;
+    const spy = vi.spyOn(store, "getItem").mockImplementation(function (this: Storage, key: string) {
+      if (key === refused) throw new DOMException("storage read refused", "SecurityError");
+      return getItem.call(this, key);
+    });
+    let evicted = -1;
+    try {
+      expect(() => {
+        evicted = pruneEditorBuffers();
+      }, "a read the store refuses stays inside the prune").not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(evicted, "the stale entries on either side of it are evicted").toBe(2);
+    expect(others.filter((key) => localStorage.getItem(key) !== null), "no stale entry beside it is left").toEqual([]);
+    expect(localStorage.getItem(refused), "the entry it could not read is left alone").not.toBeNull();
+  });
+
+  test("a walk the store cuts short still prunes what it read", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    writeForeignBuffer("later", "new", "y.md");
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const key = store.key;
+    const spy = vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw new DOMException("storage walk refused", "SecurityError");
+      return key.call(this, index);
+    });
+    let evicted = -1;
+    try {
+      expect(() => {
+        evicted = pruneEditorBuffers();
+      }, "a walk the store refuses stays inside the prune").not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(evicted, "the entry read before the walk stopped is pruned").toBe(1);
+    expect(readEditorBuffer("stale")).toBeNull();
+    expect(readEditorBuffer("later"), "the entry after it is left for a later prune").not.toBeNull();
+  });
+
+  test("an error in the walk that is not the store's refusal is thrown", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    writeForeignBuffer("later", "new", "y.md");
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const key = store.key;
+    const spy = vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw new TypeError("a bug in the walk");
+      return key.call(this, index);
+    });
+    try {
+      expect(() => pruneEditorBuffers(), "a bug stays loud").toThrow(TypeError);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("divergentBufferOrNull recovery decision", () => {
@@ -245,6 +311,91 @@ describe("editorBuffer queued-write debounce + flush", () => {
     queueBufferWrite("notes/a.md", "draft", "notes/a.md");
     expect(flushPendingBufferWrites()).toBe(1);
     expect(flushPendingBufferWrites()).toBe(0);
+  });
+});
+
+describe("writeEditorBuffer's quota retry", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // The store refuses the first write under `key` with a quota error, and,
+  // given `walkError`, every walk past its first key throws that.
+  function refuseOnce(key: string, walkError: Error | null = null): void {
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const setItem = store.setItem;
+    let refused = false;
+    vi.spyOn(store, "setItem").mockImplementation(function (this: Storage, k: string, v: string) {
+      if (k === key && !refused) {
+        refused = true;
+        throw new DOMException("quota", "QuotaExceededError");
+      }
+      return setItem.call(this, k, v);
+    });
+    if (!walkError) return;
+    const keyAt = store.key;
+    vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw walkError;
+      return keyAt.call(this, index);
+    });
+  }
+
+  // Two entries, so the prune's walk reaches the key a broken walk throws at.
+  function twoOthers(): void {
+    writeForeignBuffer("other-1", "o", "o1.md");
+    writeForeignBuffer("other-2", "o", "o2.md");
+  }
+
+  test("a write the store refuses is written after a prune", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    refuseOnce(bufferKey("a"));
+    writeEditorBuffer("a", "body", "a.md");
+    expect(localStorage.getItem(bufferKey("stale")), "the prune ran").toBeNull();
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+  });
+
+  test("a prune that meets a bug still lets the write through, and reports the bug", () => {
+    twoOthers();
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const reported: unknown[] = [];
+    vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
+    expect(() => writeEditorBuffer("a", "body", "a.md"), "the editor's write throws nothing").not.toThrow();
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+    expect(reported.map(String), "the bug is reported").toEqual(["TypeError: a bug in the walk"]);
+  });
+
+  test("without reportError the bug is thrown again in a microtask", () => {
+    twoOthers();
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const queued: Array<() => void> = [];
+    vi.stubGlobal("reportError", undefined);
+    vi.stubGlobal("queueMicrotask", (callback: () => void) => void queued.push(callback));
+    try {
+      expect(() => writeEditorBuffer("a", "body", "a.md"), "the editor's write throws nothing").not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+    expect(queued, "one microtask queued").toHaveLength(1);
+    expect(() => queued[0](), "the microtask throws the bug").toThrow("a bug in the walk");
+  });
+
+  test("the unload flush writes every entry when one write's prune meets a bug", () => {
+    twoOthers();
+    queueBufferWrite("a", "first", "a.md");
+    queueBufferWrite("b", "second", "b.md");
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const reported: unknown[] = [];
+    vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
+    let flushed = -1;
+    expect(() => {
+      flushed = flushPendingBufferWrites();
+    }, "the flush throws nothing").not.toThrow();
+    expect(flushed, "both entries flushed").toBe(2);
+    expect(readEditorBuffer("a")?.content, "the refused entry was written on its retry").toBe("first");
+    expect(readEditorBuffer("b")?.content, "the entry after it was written").toBe("second");
+    expect(reported.map(String), "the bug is reported").toEqual(["TypeError: a bug in the walk"]);
   });
 });
 

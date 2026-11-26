@@ -80,8 +80,8 @@ export type Shortcut = {
   note?: string;
   /// When true, `handleTerminalKeyEvent` in `TerminalTab.svelte`
   /// returns `false` for this chord so the event bubbles out of
-  /// xterm to the App-level keymap. Default false (xterm consumes
-  /// the keystroke as a shell input). Set true on App-group chords
+  /// the terminal to the App-level keymap. Default false (the terminal
+  /// consumes the keystroke as a shell input). Set true on App-group chords
   /// (Settings, TeamWork, Reload, FB toggle, Graph, NewDraft,
   /// Hybrid Nav, etc.) that must reach App.svelte regardless of
   /// terminal focus.
@@ -487,9 +487,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   // Terminal-local find (the terminal's own find bar). Dispatched by the
   // terminal's own root handler, not the App keymap, and flagged to escape
-  // xterm so it reaches that handler from a focused renderer too. Off macOS
-  // the chord carries Shift (see `osChord`), because a bare Ctrl+F belongs to
-  // the shell.
+  // the terminal so it reaches that handler from a focused terminal too. Off
+  // macOS the chord carries Shift (see `osChord`), because a bare Ctrl+F
+  // belongs to the shell.
   {
     id: "terminal.find",
     label: "Find",
@@ -671,11 +671,12 @@ export function registerOverrideResolver(fn: OverrideResolver | null): void {
 /// Runtime hook the override layer installs so a focused terminal escapes a
 /// user-assigned chord. A de-defaulted command has no `escapeTerminal`
 /// registry entry to match, so without this its assigned chord would be
-/// swallowed by xterm instead of bubbling to the App keymap. Given a captured
-/// chord in registry grammar, returns true when it maps to a user override on
-/// the current client. Injected like the resolver so `shortcuts.ts` stays free
-/// of the reactive store and the standalone table generator compiles it in
-/// isolation; with no matcher registered the override-escape path is inert.
+/// swallowed by the terminal instead of bubbling to the App keymap. Given a
+/// captured chord in registry grammar, returns true when it maps to a user
+/// override on the current client. Injected like the resolver so
+/// `shortcuts.ts` stays free of the reactive store and the standalone table
+/// generator compiles it in isolation; with no matcher registered the
+/// override-escape path is inert.
 export type OverrideEscapeMatcher = (chord: Chord) => boolean;
 
 let overrideEscapeMatcher: OverrideEscapeMatcher | null = null;
@@ -812,8 +813,8 @@ export function eventChordCandidates(e: KeyboardEvent): Chord[] {
 
 /// Whether `e` carries the platform-resolved chord for `id`, user remaps
 /// included. The terminal's root handler reads this so the chord it acts on
-/// and the chord the escape registry lets out of xterm are one resolution
-/// rather than two spellings that can drift apart.
+/// and the chord the escape registry lets out of the terminal are one
+/// resolution rather than two spellings that can drift apart.
 export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
   const chord = resolveEventChord(e);
   if (!chord) return false;
@@ -897,7 +898,7 @@ function registryCommandId(chord: Chord, escapingOnly: boolean): string | null {
 /// Normalise a chord string into a Set-shape comparable across
 /// physical modifier aliases. On Mac, `Mod` and `Cmd` are the same
 /// key. Off Mac, `Mod` and `Ctrl` are the same key; this lets literal
-/// Ctrl+Alt web fallbacks escape xterm even though raw events first
+/// Ctrl+Alt web fallbacks escape the terminal even though raw events first
 /// normalise platform Ctrl as `Mod`.
 function canonicalChordTokens(chord: string): Set<string> {
   const tokens = new Set(chord.split("+"));

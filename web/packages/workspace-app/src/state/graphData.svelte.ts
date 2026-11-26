@@ -26,9 +26,9 @@ class GraphState {
   /// and the next load streams afresh instead of refreshing it as complete.
   partial = $state(false);
   /// What the answer `view` came from holds of the tree: null when it holds
-  /// all of it, or the mark of an answer over the listing cap, which holds
-  /// every folder but not every file. A reader that takes the view takes
-  /// this with it.
+  /// all of it, or the mark of an answer over the listing cap, which can
+  /// hold a folder without all of its files (`GraphTreeCoverage`). A reader
+  /// that takes the view takes this with it.
   tree = $state<GraphTreeCoverage | null>(null);
 }
 

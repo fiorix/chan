@@ -328,7 +328,7 @@ describe("a machine preference, with the overlay closed", () => {
         "terminal.fontSize",
         "terminal.backgroundOpacity",
       ].map((id) => settingEntry(id).read()),
-    ).toEqual(["Theme", "80%", "50 MB", "xterm-256color", "14 px", "100% (off)"]);
+    ).toEqual(["Theme", "80%", "30 MB", "xterm-256color", "14 px", "100% (off)"]);
   });
 
   test("nothing reads before the window has been served its preferences", () => {

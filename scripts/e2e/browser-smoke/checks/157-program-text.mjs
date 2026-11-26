@@ -37,7 +37,7 @@ export default {
       assert.equal(dom.ranTitle, false, "title HTML handler never runs");
       assert.equal(dom.ranMessage, false, "message HTML handler never runs");
       assert.ok(!dom.title.includes("\u202e") && !dom.title.includes("\u200b"), "inspector contains no bidi override or zero-width code point");
-      await ctx.shot(`${tab.backend}-hostile-program-text`, tab.page);
+      await ctx.shot("hostile-program-text", tab.page);
 
       await tab.focusFront();
       const surveyPid = await startSubjectSurvey(ctx, tab, "157-survey", hostileSurvey);
@@ -71,7 +71,7 @@ export default {
         assert.ok(!surveyInspector.record.includes("\u202e") && !surveyInspector.record.includes("\u200b"), "inspector contains no survey formatting code point");
         assert.equal(surveyInspector.injected, false, "survey title creates no inspector element");
         assert.equal(surveyInspector.ran, false, "survey title handler never runs");
-        await ctx.shot(`${tab.backend}-hostile-survey-title`, tab.page);
+        await ctx.shot("hostile-survey-title", tab.page);
         await tab.focusFront();
         await tab.page.click(".survey-overlay .survey-option");
         answered = true;

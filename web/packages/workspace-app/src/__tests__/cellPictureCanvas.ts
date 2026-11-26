@@ -1,4 +1,4 @@
-// A 2D context for tests that compare what two terminal renderers left on
+// A 2D context for tests that compare what two renderer instances left on
 // their canvases cell by cell. Each cell's picture is the list of calls that
 // painted it since anything last covered it: a clear, or an opaque fill over
 // the whole cell, replaces the picture, and every other call is added to the

@@ -68,7 +68,7 @@ export type OpacityRoot = {
 
 /// Mark the document root for the CSS that paints terminal backgrounds.
 ///
-/// `data-transparent-window` is fixed for the page: the renderers paint a
+/// `data-transparent-window` is fixed for the page: the terminal paints a
 /// transparent default background and `.terminal-tab` paints the tint at
 /// `--terminal-opacity`, which also covers 100%, so a change to or from 100
 /// applies live. `data-terminal-see-through` is set only below 100 and is
@@ -94,10 +94,11 @@ export function markTerminalOpacityRoot(
   }
 }
 
-/// `color` with its alpha set to zero, for a renderer's default background in
-/// a transparent window. The RGB is kept because both xterm.js renderers use
-/// the background's opaque RGB as the text colour of inverse-video cells. A
-/// colour this cannot read becomes transparent black.
+/// `color` with its alpha set to zero, for the terminal's default background
+/// in a transparent window. The RGB is kept because the terminal hands the
+/// core the background's RGB without its alpha, and an inverse-video cell's
+/// text takes that colour. A colour this cannot read becomes transparent
+/// black.
 export function transparentColor(color: string): string {
   const value = color.trim();
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);

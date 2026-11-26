@@ -14,9 +14,9 @@ import { createKeydownState } from "../terminal/keyEncoding";
 // Reload, Hybrid Nav, Close window, Rich Prompt) carry `escapeTerminal: true`, and a
 // user-assigned override chord escapes too (covered by the override-escape
 // test in keymapOverrides.svelte.test.ts). The `handleTerminalKeyEvent`
-// xterm-`customKeyEventHandler` callback consults the registry: matched
-// events return false so no bytes reach the PTY; TerminalTab.test.ts drives
-// that handler with a flagged chord.
+// custom key handler consults the registry: matched events return false so
+// no bytes reach the PTY; TerminalTab.test.ts drives that handler with a
+// flagged chord.
 
 describe("chord-escape registry shape", () => {
   test("global chords flagged escapeTerminal=true", () => {
@@ -45,7 +45,7 @@ describe("chord-escape registry shape", () => {
     }
   });
 
-  test("non-flagged chords default to undefined (xterm consumes)", () => {
+  test("non-flagged chords default to undefined (the terminal consumes)", () => {
     // app.tab.close (Ctrl+D) is intentionally not listed: it goes
     // through a different dispatch path and must still reach shells
     // as EOF when a terminal is focused.
@@ -291,15 +291,13 @@ describe.each([
 
 describe("terminal find's escape flag decides who owns Cmd+F", () => {
   // What the flag on `terminal.find` actually does, as opposed to what a
-  // renderer fixture can show. On the xterm backend it is inert: a chord the
-  // key handler declines still bubbles to the component root and opens find,
-  // so removing the flag changes no byte and no bar.
+  // renderer fixture can show.
   //
-  // Its consumer is the ghostty backend's key listener (ghosttyKeys.ts), which
-  // leaves a chord chan claims to chan's key handler and hands an unclaimed
-  // macOS Command chord to the browser and so to AppKit. These cases measure
-  // the claim and the listener's decision for the rest; the listener's
-  // wiring is TerminalTab.ghosttyBackend.test.ts's.
+  // Its consumer is the terminal's capture-phase key listener
+  // (ghosttyKeys.ts), which leaves a chord chan claims to chan's key handler
+  // and hands an unclaimed macOS Command chord to the browser and so to
+  // AppKit. These cases measure the claim and the listener's decision for the
+  // rest; the listener's wiring is TerminalTab.ghosttyBackend.test.ts's.
   beforeEach(() => {
     vi.stubGlobal("navigator", { userAgent: "Mac OS X" });
   });

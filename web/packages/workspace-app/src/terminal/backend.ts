@@ -1,4 +1,4 @@
-/// The Ghostty lazy loader. Every terminal opens on Ghostty.
+/// The terminal widget's lazy loader.
 ///
 /// A ghostty terminal is ghostty-web's `Terminal` (renderer, input,
 /// selection) over Ghostty's own release build of libghostty-vt, vendored
@@ -37,10 +37,6 @@
 
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
-
-/// The engine TerminalTab's code paths branch on. Every terminal opens on
-/// Ghostty; no terminal reaches the "xterm" paths.
-export type TerminalBackend = "xterm" | "ghostty";
 
 /// Everything TerminalTab needs to construct a ghostty terminal without
 /// holding a static (bundle-eager) import of the library.

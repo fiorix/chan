@@ -28,7 +28,7 @@ export default {
       const initial = await tab.wait("before-cut", (state) =>
         state.mark?.attention === "question" && state.row.program_status?.records?.some((record) =>
           record.id === "phase" && record.state === "blocked"));
-      await waitSavedTabs(ctx, tab.page, tab.windowId, [tab.subject, `Status160${tab.backend}F`]);
+      await waitSavedTabs(ctx, tab.page, tab.windowId, [tab.subject, tab.front]);
       const proxy = await startTerminalCutProxy({
         targetUrl: `${new URL(ctx.serverUrl).origin}/`,
         path: "/api/terminal/ws",
@@ -62,9 +62,9 @@ export default {
         await second.waitForSelector(".pane", { timeout: 30_000 });
         await second.waitForFunction((name) => [...document.querySelectorAll('div[role="tab"]')].some(
           (node) => node.querySelector(".path")?.textContent?.trim() === name),
-        { timeout: 20_000, polling: 100 }, `Status160${tab.backend}F`);
+        { timeout: 20_000, polling: 100 }, tab.front);
         await second.evaluate((name) => [...document.querySelectorAll('div[role="tab"]')].find(
-          (node) => node.querySelector(".path")?.textContent?.trim() === name)?.click(), `Status160${tab.backend}F`);
+          (node) => node.querySelector(".path")?.textContent?.trim() === name)?.click(), tab.front);
         const forwarded = await proxy.waitForRecord((record) => record.event === "frame" && record.connection === 1 &&
           record.direction === "forwarded" && record.type === "session");
         await second.waitForFunction((name, id, revision) => {
@@ -106,10 +106,10 @@ export default {
             trace.subject = name;
             return { mark: trace.readMark(), frames: trace.frames.filter((frame) => frame.type === "session"), tabs: [...document.querySelectorAll('div[role="tab"]')].map((node) => ({ name: node.querySelector(".path")?.textContent?.trim(), selected: node.getAttribute("aria-selected") })) };
           }, tab.subject);
-          throw new Error(`${tab.backend} redial frame did not reach the background tab: ${JSON.stringify(observed)}`, { cause: error });
+          throw new Error(`redial frame did not reach the background tab: ${JSON.stringify(observed)}`, { cause: error });
         }
         assert.equal(proxy.records.filter((record) => record.event === "redial-released").length, 1);
-        await ctx.shot(`${tab.backend}-redial-current-status`, second);
+        await ctx.shot("redial-current-status", second);
       } finally {
         if (second && !second.isClosed()) await second.close();
         await proxy.close();

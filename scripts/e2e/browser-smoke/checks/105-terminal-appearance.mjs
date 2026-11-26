@@ -5,7 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { assertTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
@@ -188,7 +188,7 @@ export default {
 
     async function openTerminal() {
       const frameStart = resizeFrames.length;
-      terminalSession = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
+      terminalSession = await openAttachedTerminal(ctx, page, cs, windowId, TAB);
       terminalSelector = `.pane[data-pane-id="${terminalSession.pane}"] .terminal-tab.active[data-terminal-tab-id="${terminalSession.tab}"]`;
       await waitSaved(ctx, page, windowId, TAB);
       return frameStart;
@@ -279,7 +279,7 @@ export default {
         const bodyBackground = pixel(canvas.width / 2, canvas.height / 2);
         const trackBackground = pixel(canvas.width - 8 * canvas.width / canvasRect.width, canvas.height / 2);
         return {
-          backend: "ghostty", label,
+          label,
           grid,
           cellWidth: canvasRect.width / grid.cols,
           cellHeight: canvasRect.height / grid.rows,
@@ -302,7 +302,7 @@ export default {
             cursor: tabStyle.getPropertyValue("--link").trim(),
           },
         };
-      }, { label, grid, selector: terminalSelector, surface: TERMINAL_SURFACES.ghostty });
+      }, { label, grid, selector: terminalSelector, surface: TERMINAL_SURFACE });
       return dom;
     }
 
@@ -327,11 +327,11 @@ export default {
           if (pixels[i] === 37 && pixels[i + 1] === 181 && pixels[i + 2] === 123 && pixels[i + 3] === 255) markerPixels++;
         }
         return markerPixels >= 10;
-      }, { timeout: 20_000 }, `${terminalSelector} ${TERMINAL_SURFACES.ghostty}`);
+      }, { timeout: 20_000 }, `${terminalSelector} ${TERMINAL_SURFACE}`);
     }
 
     async function renderedCustomColorCounts() {
-      await page.click(`${terminalSelector} ${TERMINAL_SURFACES.ghostty}`);
+      await page.click(`${terminalSelector} ${TERMINAL_SURFACE}`);
       await sleep(250);
       const host = await page.$(`${terminalSelector} .terminal-host`);
       if (!host) throw new Error("terminal host missing for colour screenshot");
@@ -365,7 +365,7 @@ export default {
       await page.waitForSelector(".pane", { timeout: 30_000 });
       // Settings writes update terminal colours through this page's watcher.
       await ctx.waitWindowLive(windowId);
-      const restored = await waitRestoredTerminal(page, cs, windowId, terminalSession, "ghostty");
+      const restored = await waitRestoredTerminal(page, cs, windowId, terminalSession);
       terminalSelector = restored.selector;
       if ((await session())?.session_id !== terminalSession.session_id) {
         throw new Error(`${label}: reload replaced the PTY`);
@@ -617,7 +617,7 @@ export default {
       return (await response.json()).preferences;
     }, authToken);
     let opened = false;
-    const details = { backend: "ghostty" };
+    const details = {};
     let runError = null;
     try {
       await ctx.waitWindowLive(windowId);

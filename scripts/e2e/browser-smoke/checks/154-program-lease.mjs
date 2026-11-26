@@ -31,15 +31,15 @@ export default {
           ownSurveys(state).length === 0 && state.mark?.attention !== "question" &&
           state.programCell === "-", 30_000);
         await tab.page.waitForFunction(() => !document.querySelector(".survey-overlay"), { timeout: 30_000 });
-        await ctx.shot(`${tab.backend}-killed-survey-cleared`, tab.page);
+        await ctx.shot("killed-survey-cleared", tab.page);
       } finally {
         if (!killed) {
           try { process.kill(pid, "SIGKILL"); } catch { /* Survey already ended. */ }
         }
       }
 
-      const output = join(ctx.workspaceDir, `status-154-${tab.backend}-timeout.out`);
-      const result = join(ctx.workspaceDir, `status-154-${tab.backend}-timeout.rc`);
+      const output = join(ctx.workspaceDir, "status-154-timeout.out");
+      const result = join(ctx.workspaceDir, "status-154-timeout.rc");
       const argv = [ctx.chanBin, "shell", "terminal", "survey", "--tab-name", tab.front,
         "--title", "Timeout this survey", "--option", "Yes", "--timeout", "1", "Question?"];
       await tab.cs(["write", "--tab-name", tab.subject,
@@ -49,7 +49,7 @@ export default {
         ownSurveys(state).length === 0 && state.mark?.attention !== "question" &&
         state.programCell === "-", 30_000);
       await tab.page.waitForFunction(() => !document.querySelector(".survey-overlay"), { timeout: 30_000 });
-      await ctx.shot(`${tab.backend}-timed-out-survey-cleared`, tab.page);
+      await ctx.shot("timed-out-survey-cleared", tab.page);
     });
   },
 };

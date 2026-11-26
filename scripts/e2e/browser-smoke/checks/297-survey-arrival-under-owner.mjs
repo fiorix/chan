@@ -54,13 +54,12 @@ export default {
       timeout: 90_000,
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-    const backend = "ghostty";
     const failures = [];
-    const name = `Owner297-${backend}`;
-    const result = { backend, legs: {}, cleanupErrors: [] };
+    const name = "Owner297";
+    const result = { legs: {}, cleanupErrors: [] };
     const calls = [];
     try {
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty");
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, name);
       const terminal = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
 
       // Leg 1: Search holds the keyboard when the survey arrives.
@@ -76,26 +75,26 @@ export default {
         search.before = await until("precondition: Search holds the keyboard", () => keyboardAt(page),
           (at) => at === "search");
         const survey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
-          "--title", `Keyboard owners: 297-${backend} under Search`,
+          "--title", "Keyboard owners: 297 under Search",
           "--option", "Alpha", "--option", "Beta",
           "A survey arrives over the active terminal while Search is open."]);
         calls.push(survey);
         await waitForCard(page, terminalCard(row.tab), survey, "the survey shows over the terminal", { visible: true });
         await settle(page);
         search.afterArrival = await keyboardAt(page);
-        await ctx.shot(`297-${backend}-search-survey-arrived`);
+        await ctx.shot("297-search-survey-arrived");
         await page.keyboard.type("kq");
         await sleep(300);
         search.query = await page.$eval(SEARCH_INPUT, (input) => input.value);
         search.surveyOutcome = survey.result;
-        await ctx.shot(`297-${backend}-search-typed`);
+        await ctx.shot("297-search-typed");
         assert.equal(search.query, "kq",
           `typed text lands in Search, not the arriving card: Search reads ${JSON.stringify(search.query)}; ` +
           `after the arrival the keyboard was at ${search.afterArrival}`);
         search.passed = true;
       } catch (error) {
         search.failure = String(error.message ?? error);
-        failures.push(`${backend} under Search: ${search.failure}`);
+        failures.push(`under Search: ${search.failure}`);
       } finally {
         try {
           // Search closes with its query cleared before the next leg
@@ -121,7 +120,7 @@ export default {
       try {
         await page.click(`${terminal} .terminal-host`);
         const windowSurvey = raiseSurvey(cs, ["--tab-group", "default", "--timeout", "60",
-          "--title", `Keyboard owners: 297-${backend} window-wide`,
+          "--title", "Keyboard owners: 297 window-wide",
           "--option", "WideOne", "--option", "WideTwo",
           "A window-wide survey is up when a survey over the terminal arrives."]);
         calls.push(windowSurvey);
@@ -129,19 +128,19 @@ export default {
         wide.before = await until("precondition: the window-wide survey holds the keyboard",
           () => keyboardAt(page), (at) => at === "window-survey");
         const terminalSurvey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
-          "--title", `Keyboard owners: 297-${backend} over the terminal`,
+          "--title", "Keyboard owners: 297 over the terminal",
           "--option", "TermOne", "--option", "TermTwo",
           "This survey arrives under a window-wide one."]);
         calls.push(terminalSurvey);
         await waitForCard(page, terminalCard(row.tab), terminalSurvey, "the terminal's survey arrives");
         await settle(page);
         wide.afterArrival = await keyboardAt(page);
-        await ctx.shot(`297-${backend}-window-wide-terminal-arrived`);
+        await ctx.shot("297-window-wide-terminal-arrived");
         await page.keyboard.press("1");
         wide.windowOutcome = await surveyOutcome(windowSurvey, 5000);
         await sleep(500);
         wide.terminalOutcome = terminalSurvey.result;
-        await ctx.shot(`297-${backend}-window-wide-answered`);
+        await ctx.shot("297-window-wide-answered");
         assert.ok(wide.windowOutcome?.stdout === "WideOne" && wide.terminalOutcome === null,
           `1 answers the window-wide survey: it reads ${JSON.stringify(wide.windowOutcome)}, ` +
           `the terminal's survey reads ${JSON.stringify(wide.terminalOutcome)}; ` +
@@ -149,7 +148,7 @@ export default {
         wide.passed = true;
       } catch (error) {
         wide.failure = String(error.message ?? error);
-        failures.push(`${backend} under a window-wide survey: ${wide.failure}`);
+        failures.push(`under a window-wide survey: ${wide.failure}`);
       } finally {
         try {
           await answerOpenSurveys(page, calls);
@@ -159,14 +158,14 @@ export default {
       }
     } catch (error) {
       result.failure = String(error.message ?? error);
-      failures.push(`${backend}: ${result.failure}`);
-      await ctx.shot(`297-${backend}-failure`).catch(() => {});
+      failures.push(result.failure);
+      await ctx.shot("297-failure").catch(() => {});
     } finally {
       await answerOpenSurveys(page, calls).catch((error) => result.cleanupErrors.push(`surveys: ${error.message}`));
-      await closeEveryTerminal(page, `${backend} cleanup`, token)
+      await closeEveryTerminal(page, "cleanup", token)
         .catch((error) => result.cleanupErrors.push(`terminals: ${error.message}`));
-      for (const error of result.cleanupErrors) failures.push(`${backend}: cleanup: ${error}`);
-      writeFileSync(join(ctx.outDir, `297-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+      for (const error of result.cleanupErrors) failures.push(`cleanup: ${error}`);
+      writeFileSync(join(ctx.outDir, "297-result.json"), `${JSON.stringify(result, null, 2)}\n`);
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },

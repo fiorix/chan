@@ -135,7 +135,7 @@ export default {
     const write = (identity, text) => cs(["write", "--tab-name", tabName(identity), text]);
 
     const engine = await ctx.browser.browser().version();
-    const readings = { engine, backend: "ghostty", terminals: {} };
+    const readings = { engine, terminals: {} };
     let second = null;
     const opened = [];
     const sessions = new Set();
@@ -143,7 +143,7 @@ export default {
       for (const identity of TERMINALS) {
         const name = tabName(identity);
         await closeTree(page);
-        const attached = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", ["--command", SHELL]);
+        const attached = await openAttachedTerminal(ctx, page, cs, windowId, name, ["--command", SHELL]);
         opened.push(name);
         if (!attached.session_id || sessions.has(attached.session_id)) throw new Error(`${name}: expected a distinct terminal session`);
         sessions.add(attached.session_id);

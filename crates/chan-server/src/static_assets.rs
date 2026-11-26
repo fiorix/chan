@@ -5,8 +5,8 @@
 //! `index.html` for any path that isn't a baked asset and isn't an
 //! `/api`/`/ws` route, so client-side routes work without server-side
 //! awareness of them. The SPA shell gets boot metadata injected for its URL
-//! prefix, settings and file capabilities, and the desktop's terminal renderer
-//! signal.
+//! prefix, settings, file and draft capabilities, and the desktop's WebKit
+//! renderer and GPU answers.
 
 use std::sync::Arc;
 

@@ -6,8 +6,8 @@ import { shellQuote, withProgramStatusTabs } from "../lib/program-status.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 
 async function detachedReport(ctx, tab, script, label, sessionId) {
-  const auditPath = join(ctx.workspaceDir, `status-161-${tab.backend}-${label}.json`);
-  const logPath = join(ctx.workspaceDir, `status-161-${tab.backend}-${label}.log`);
+  const auditPath = join(ctx.workspaceDir, `status-161-${label}.json`);
+  const logPath = join(ctx.workspaceDir, `status-161-${label}.log`);
   const log = openSync(logPath, "w");
   const child = spawn("setsid", ["python3", script, ctx.chanBin, auditPath], {
     cwd: ctx.workspaceDir,
@@ -58,7 +58,7 @@ audit.update({"statusExit": result.returncode, "stdout": result.stdout, "stderr"
 Path(audit_path).write_text(json.dumps(audit))
 `);
     await withProgramStatusTabs(ctx, "161", async (tab) => {
-      const envPath = join(ctx.workspaceDir, `status-161-${tab.backend}-session-id`);
+      const envPath = join(ctx.workspaceDir, "status-161-session-id");
       await tab.cs(["write", "--tab-name", tab.subject,
         `printf '%s\\n' "$CHAN_SESSION_ID" > ${shellQuote(envPath)}\n`]);
       const inheritedId = (await ctx.pollFile(envPath, 15_000)).toString().trim();
@@ -72,10 +72,10 @@ Path(audit_path).write_text(json.dumps(audit))
           record.title === "Detached reporter") &&
         state.mark?.activity === "spinner" && state.programCell === "working", 30_000);
       const snapshot = reported.row.program_status;
-      await ctx.shot(`${tab.backend}-headless-status-persists`, tab.page);
+      await ctx.shot("headless-status-persists", tab.page);
 
-      const deadName = `Status161${tab.backend}D`;
-      const dead = await openAttachedTerminal(ctx, tab.page, tab.cs, tab.windowId, deadName, tab.backend);
+      const deadName = "Status161D";
+      const dead = await openAttachedTerminal(ctx, tab.page, tab.cs, tab.windowId, deadName);
       assert.ok(dead.session_id, "closed-session probe has a real attached session id");
       await tab.cs(["close", "--tab-name", deadName]);
       const afterClose = Object.values(JSON.parse((await tab.cs(["list", "--json"])).stdout).groups ?? {}).flat();

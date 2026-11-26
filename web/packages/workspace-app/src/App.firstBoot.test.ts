@@ -7,12 +7,6 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
-
 import { demoData, mountApp, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { browserSidePanes } from "./state/store.svelte";
 import { layout } from "./state/tabs.svelte";

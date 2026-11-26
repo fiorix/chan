@@ -622,7 +622,7 @@ export default {
         await openFileTab(NOTE);
         await dispatchCommand(page, "app.tab.close");
         await settle(page);
-        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Chord336", "ghostty");
+        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Chord336");
         const host = `.pane[data-pane-id="${terminal.pane}"] .terminal-tab.active .terminal-host`;
         await page.click(host);
         await settle(page);
@@ -704,7 +704,7 @@ export default {
       });
 
       await leg("findAfterMove", async (r) => {
-        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Move336", "ghostty");
+        const terminal = await openAttachedTerminal(ctx, page, cs, windowId, "Move336");
         await page.click(`.pane[data-pane-id="${terminal.pane}"] .terminal-tab.active .terminal-host`);
         await dispatchCommand(page, "app.find.open");
         await page.waitForSelector(FIND, { visible: true, timeout: 10_000 });

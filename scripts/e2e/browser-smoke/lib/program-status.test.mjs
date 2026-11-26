@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseProgramCell, ringProgress, statusPrintf, statusPrintfBel, statusPrintfRaw, withProgramStatusBackend, withProgramStatusTabs } from "./program-status.mjs";
+import { parseProgramCell, ringProgress, statusPrintf, statusPrintfBel, statusPrintfRaw, withProgramStatusTabs } from "./program-status.mjs";
 
 const oldList = `## default\n\n| name | session | status | queue |\n| --- | --- | --- | --- |\n| other | s0 | alive | 0 |\n| subject | s1 | alive | 0 |\n`;
 const newList = `## default\n\n| name | session | status | program | queue |\n| --- | --- | --- | --- | --- |\n| other | s0 | alive | idle | 0 |\n| subject | s1 | alive | working 40% | 0 |\n`;
@@ -42,19 +42,7 @@ test("the ring reader uses the drawn stroke and not its label", () => {
   assert.equal(ringProgress({ activity: "ring", pathLength: "99", ring: "40 100" }), null);
 });
 
-for (const backend of ["xterm", "unknown", false, true, undefined, null, ["xterm", "ghostty"]]) {
-  test(`program-status refuses ${JSON.stringify(backend)} before reading its context`, () => {
-    const reads = [];
-    const ctx = { get controlSocket() { reads.push("controlSocket"); return null; } };
-    assert.throws(() => {
-      const result = withProgramStatusBackend(ctx, "test", backend, () => assert.fail("callback must not run"));
-      result?.catch(() => {});
-    }, /retired or unsupported terminal backend/);
-    assert.deepEqual(reads, [], "no page read, config write or terminal spawn can precede refusal");
-  });
-}
-
-test("the program-status facade opens exactly one Ghostty subject/front pair", async (t) => {
+test("the program-status facade opens exactly one subject and front pair", async (t) => {
   const chanHome = mkdtempSync(join(tmpdir(), "chan-status-helper-"));
   t.after(() => rmSync(chanHome, { recursive: true, force: true }));
   writeFileSync(join(chanHome, "server.toml"), "[terminal]\nprogram_status = true\nmouse_capture = true\n");
@@ -98,14 +86,13 @@ test("the program-status facade opens exactly one Ghostty subject/front pair", a
   let calls = 0;
   await withProgramStatusTabs(ctx, "test", async (tab) => {
     calls++;
-    assert.equal(tab.backend, "ghostty");
-    assert.equal(tab.subject, "StatustestghosttyS");
-    assert.equal(tab.front, "StatustestghosttyF");
+    assert.equal(tab.subject, "StatustestS");
+    assert.equal(tab.front, "StatustestF");
     assert.notEqual(tab.subjectRow.session_id, tab.frontRow.session_id);
   });
   assert.equal(calls, 1);
   assert.deepEqual(patches, [{ program_status: true }]);
   assert.deepEqual(commands.filter((argv) => argv[2] === "new").map((argv) => argv[4]),
-    ["StatustestghosttyS", "StatustestghosttyF"]);
+    ["StatustestS", "StatustestF"]);
   assert.equal(commands.filter((argv) => argv[2] === "close-tab").length, 2);
 });

@@ -4,7 +4,7 @@ import { waitSaved } from "../checks/290-rich-prompt-disconnected.mjs";
 
 const context = { serverUrl: "http://127.0.0.1:1234/?t=test-token" };
 const windowId = "saved window/290";
-const name = "Prompt290-ghostty";
+const name = "Prompt290";
 
 function pollingPage(t, responses) {
   const observed = [];

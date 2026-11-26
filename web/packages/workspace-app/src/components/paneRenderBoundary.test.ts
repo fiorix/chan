@@ -33,35 +33,6 @@ class TestResizeObserver {
   disconnect() {}
 }
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon() {}
-    open() {}
-    attachCustomKeyEventHandler() {}
-    onData() {}
-    onResize() {}
-    write() {}
-    writeln() {}
-    resize() {}
-    focus() {}
-    blur() {}
-    dispose() {}
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {} }));
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize() {
-      return "";
-    }
-  },
-}));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
-
 /// The tab body that throws. Dashboard is the cheapest kind to stand in for
 /// any of them: it renders whenever the pane holds one, so the throw lands on
 /// mount rather than waiting for an activation.

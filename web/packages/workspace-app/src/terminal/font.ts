@@ -51,11 +51,12 @@ function fontLoadError(message: string, cause?: unknown): Error {
 
 /// Resolve a font chain that is safe to hand to a terminal renderer.
 ///
-/// xterm and ghostty rasterize and cache glyphs synchronously. A webfont that
-/// swaps in after either renderer starts can therefore leave one atlas holding
-/// fallback and webfont metrics at the same time. System fonts need no wait;
-/// the bundled face must finish loading first. On failure, dropping it from
-/// the returned chain prevents a later load from changing a live renderer.
+/// The terminal measures its cell from the font when it starts and draws
+/// each glyph with whatever face is loaded when it paints. A webfont that
+/// swaps in after it starts can therefore draw in cells measured for the
+/// fallback. System fonts need no wait; the bundled face must finish loading
+/// first. On failure, dropping it from the returned chain prevents a later
+/// load from changing a live terminal.
 export async function resolveReadyTerminalFont(
   os: OS,
   preference: TerminalFontChoice,

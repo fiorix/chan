@@ -35,12 +35,22 @@ export function fittedGrid(view, pitch) {
     rows: Math.max(1, Math.floor(height / cellHeight + 1e-6)), cellWidth, cellHeight };
 }
 
-export function readFrameSurface(tabId, root = document, escape = CSS.escape) {
+// The page's name for the widget capture of lib/ghostty-capture.mjs, which a
+// full-screen run installs before the probe terminal opens.
+export const FRAME_CAPTURE_KEY = "__terminalSizeFrames";
+
+// The probe tab's visible rows, read from the widget's buffer through the
+// capture: the rows after the retained history, untrimmed, so a row's length
+// is the grid's width. A tab no captured terminal owns is unavailable.
+export function readFrameSurface(tabId, key, root = document, escape = CSS.escape, view = window) {
   const tab = root.querySelector(`[data-terminal-tab-id="${escape(tabId)}"]`);
-  const rows = [...(tab?.querySelectorAll(".xterm-rows > div") ?? [])].map((row) => row.textContent ?? "");
-  if (rows.some(Boolean)) return { kind: "xterm-dom", rowCount: rows.length,
-    first: rows[0] ?? "", last: rows.at(-1) ?? "" };
-  return { kind: tab?.querySelector("canvas") ? "canvas" : "unavailable" };
+  const host = tab?.querySelector(".terminal-host");
+  const term = host ? view[key]?.terminals.find((candidate) => candidate.element === host) : null;
+  if (!term) return { kind: "unavailable" };
+  const start = term.getScrollbackLength();
+  const rows = Array.from({ length: term.rows },
+    (_, row) => term.buffer.active.getLine(start + row)?.translateToString(false) ?? "");
+  return { kind: "buffer", rowCount: rows.length, first: rows[0] ?? "", last: rows.at(-1) ?? "" };
 }
 
 export function readSizeRun(run) {
@@ -75,6 +85,9 @@ export function readSizeRun(run) {
     return { ...page, clock, records: page.records.map((r) => ({ ...r, monoMs: r.pageMs + clock.offsetMs })) };
   });
   const findings = [];
+  // A shown full-screen checkpoint with no readable frame surface leaves its
+  // far corners unjudged, so the run cannot end as a clean search.
+  const unreadFrameSteps = [];
   const steps = run.steps.map((step) => {
     assert.ok(step.endMs - step.settledMs >= observationMs, "settled observation too short");
     assert.equal(step.geometryChanged, false, "geometry changed after settlement");
@@ -83,7 +96,7 @@ export function readSizeRun(run) {
     assert.ok(step.views.length > 0, "no final page grid");
     const fits = step.views.map((view) => {
       assert.ok(view.connected, "renderer disconnected");
-      assert.equal(view.backend, run.backend, "backend fell back");
+      assert.equal(view.canvas, true, "the renderer's canvas is missing");
       const geometry = { page: view.page, visible: view.visible, grid: view.grid,
         paneBox: view.paneBox, hostBox: view.hostBox, screenBox: view.screenBox };
       if (!observed || !view.visible) return geometry;
@@ -120,7 +133,7 @@ export function readSizeRun(run) {
     if (run.fullScreen) for (const surface of step.frameSurfaces ?? []) {
       const view = visible.find((v) => v.page === surface.page);
       if (!view) continue;
-      const readable = surface.kind === "xterm-dom" && surface.rowCount === view.grid?.rows &&
+      const readable = surface.kind === "buffer" && surface.rowCount === view.grid?.rows &&
         surface.first.length >= view.grid.cols && surface.last.length >= view.grid.cols;
       const farCorners = readable ? surface.first[view.grid.cols - 1] === "+" &&
         surface.last[view.grid.cols - 1] === "+" : null;
@@ -128,6 +141,7 @@ export function readSizeRun(run) {
         page: surface.page, surface });
       frameSurfaces.push({ page: surface.page, kind: surface.kind, readable, farCorners });
     }
+    if (run.fullScreen && visible.length && !frameSurfaces.some((s) => s.readable)) unreadFrameSteps.push(step.label);
     const late = run.probe.filter((r) => r.kind === "SIGWINCH" && r.monoMs > step.settledMs && r.monoMs <= step.endMs);
     const sizes = new Set(late.map((r) => `${r.cols}x${r.rows}`));
     if (late.length) findings.push({ step: step.label, kind: "resize-after-settlement", count: late.length });
@@ -183,22 +197,22 @@ export function readSizeRun(run) {
         after: after ? { monoMs: after.monoMs, views: after.views.filter((v) => v.name === run.name) } : null };
     }),
   }));
-  return { verdict: findings.length ? "fault-observed" : "bounded-search-no-fault", backend: run.backend,
+  return { verdict: findings.length ? "fault-observed" : unreadFrameSteps.length ? "inconclusive" : "bounded-search-no-fault",
     engine: run.engine, cycles: run.cycles, coView: run.coView, observer: observed, fullScreen: run.fullScreen === true,
     redrawCount: redraws.length, clocks: pages.map((p) => ({ page: p.name, ...p.clock })),
     unmeasuredHiddenDialQualifiers: pages.flatMap((p) => p.records.filter((r) => r.kind === "attach" &&
       !r.view.visible && validGrid(r.view.grid) && typeof r.view.sizeIfUnset !== "boolean")
       .map((r) => ({ page: p.name, tab: r.view.tab, monoMs: r.monoMs }))),
-    unjudgedHiddenDialWidths, findings, steps, resizes };
+    unjudgedHiddenDialWidths, unreadFrameSteps, findings, steps, resizes };
 }
 
 export function staleFullScreenRun() {
-  const view = { page: "primary", name: "probe", connected: true, visible: true, backend: "xterm",
+  const view = { page: "primary", name: "probe", connected: true, visible: true, canvas: true,
     pane: "pane-1", tab: "term-probe", socket: 1, sizeIfUnset: false,
     grid: { cols: 80, rows: 24 }, hostWidth: 800, hostHeight: 240,
     screenBox: { width: 800, height: 240 }, padding: { left: 0, right: 0, top: 0, bottom: 0 }, scrollbar: 0 };
   const checkpoint = { sequence: 5, kind: "checkpoint", monoMs: 4000, cols: 80, rows: 24 };
-  return { completed: true, backend: "xterm", name: "probe", cycles: 1, coView: false, observer: true, fullScreen: true,
+  return { completed: true, name: "probe", cycles: 1, coView: false, observer: true, fullScreen: true,
     cellPitch: { cellWidth: 10, cellHeight: 10 },
     probe: [{ sequence: 1, kind: "start", monoMs: 0, cols: 100, rows: 24 },
       { sequence: 2, kind: "redraw", monoMs: 1, cols: 100, rows: 24, redrawCount: 1, trigger: "start" },
@@ -208,16 +222,16 @@ export function staleFullScreenRun() {
       calibrations: Array.from({ length: 4 }, () => ({ beforeMs: 0, pageMs: 0, afterMs: 0.2 })),
       records: [{ kind: "sample", pageMs: 900, views: [view] }, { kind: "sample", pageMs: 1100, views: [view] }] }],
     steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
-      checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view], frameSurfaces: [{ page: "primary", kind: "canvas" }] }] };
+      checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view], frameSurfaces: [{ page: "primary", kind: "unavailable" }] }] };
 }
 
 export function preflight() {
-  const view = { page: "primary", name: "probe", connected: true, visible: true, backend: "xterm",
+  const view = { page: "primary", name: "probe", connected: true, visible: true, canvas: true,
     pane: "pane-1", tab: "term-probe", socket: 1, sizeIfUnset: false,
     grid: { cols: 80, rows: 24 }, hostWidth: 800, hostHeight: 240,
     screenBox: { width: 800, height: 240 }, padding: { left: 0, right: 0, top: 0, bottom: 0 }, scrollbar: 0 };
   const checkpoint = { sequence: 3, kind: "checkpoint", monoMs: 4000, cols: 80, rows: 24 };
-  const base = { completed: true, backend: "xterm", name: "probe", cycles: 1, coView: false,
+  const base = { completed: true, name: "probe", cycles: 1, coView: false,
     cellPitch: { cellWidth: 10, cellHeight: 10 },
     probe: [{ sequence: 1, kind: "start", monoMs: 0, cols: 100, rows: 24 },
       { sequence: 2, kind: "SIGWINCH", monoMs: 1000, cols: 80, rows: 24 }, checkpoint],
@@ -226,11 +240,23 @@ export function preflight() {
     steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
       checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view] }] };
   assert.equal(readSizeRun(base).verdict, "bounded-search-no-fault");
+  const border = `+${"-".repeat(78)}+`;
   const fullScreenStale = staleFullScreenRun();
-  assert.ok(readSizeRun(fullScreenStale).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+  const stale = readSizeRun(fullScreenStale);
+  assert.ok(stale.findings.some((f) => f.kind === "full-screen-stale-redraw"),
     "full-screen stale redraw at a shown checkpoint");
+  assert.equal(stale.verdict, "fault-observed", "a finding is a fault where the frame is unread too");
   fullScreenStale.probe[3].cols = 80;
-  assert.equal(readSizeRun(fullScreenStale).verdict, "bounded-search-no-fault", "matching full-screen redraw");
+  const unread = readSizeRun(fullScreenStale);
+  assert.equal(unread.verdict, "inconclusive", "a shown full-screen checkpoint with no readable surface");
+  assert.deepEqual(unread.unreadFrameSteps, ["split"], "the unread checkpoint is named");
+  const matching = structuredClone(fullScreenStale);
+  matching.steps[0].frameSurfaces[0] = { page: "primary", kind: "buffer", rowCount: 24, first: border, last: border };
+  assert.equal(readSizeRun(matching).verdict, "bounded-search-no-fault", "matching full-screen redraw");
+  const hiddenFullScreen = structuredClone(fullScreenStale);
+  hiddenFullScreen.steps[0].views[0].visible = false;
+  assert.equal(readSizeRun(hiddenFullScreen).verdict, "bounded-search-no-fault",
+    "a hidden full-screen checkpoint needs no readable surface");
   const laterCorrectRedraw = staleFullScreenRun();
   laterCorrectRedraw.probe.push({ sequence: 6, kind: "SIGWINCH", monoMs: 4100, cols: 80, rows: 24 },
     { sequence: 7, kind: "redraw", monoMs: 4101, cols: 80, rows: 24, redrawCount: 3, trigger: "SIGWINCH" });
@@ -260,49 +286,73 @@ export function preflight() {
   missingRedrawRecord.probe[3].redrawCount = 3;
   assert.throws(() => readSizeRun(missingRedrawRecord), /missing redraw record/,
     "full-screen missing redraw record is refused");
-  const border = `+${"-".repeat(78)}+`;
-  const domRows = Array.from({ length: 24 }, (_, i) => ({ textContent: i === 0 || i === 23 ? border : "" }));
-  const domTab = { querySelectorAll: (selector) => {
-    assert.equal(selector, ".xterm-rows > div", "xterm DOM row selector");
-    return domRows;
-  }, querySelector: () => null };
-  const domRoot = { querySelector: (selector) => {
-    assert.equal(selector, '[data-terminal-tab-id="term-probe"]', "xterm DOM tab identity");
-    return domTab;
+  const screenRows = Array.from({ length: 24 }, (_, i) => i === 0 || i === 23 ? border : "");
+  // A stand-in for the widget capture: another tab's terminal first, then the
+  // one on the probe tab's host, with retained history ahead of the screen,
+  // read only through the public buffer API the page reader calls.
+  const history = ["history row"];
+  const probeHost = {};
+  const probeTab = { querySelector: (selector) => {
+    assert.equal(selector, ".terminal-host", "the probe tab's host");
+    return probeHost;
   } };
-  const domCorners = structuredClone(fullScreenStale);
-  domCorners.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.equal(readSizeRun(domCorners).steps[0].frameSurfaces[0].farCorners, true,
-    "xterm DOM far corners are readable");
-  const [middleRow] = domRows.splice(1, 1);
-  const domShortRows = structuredClone(domCorners);
-  domShortRows.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.equal(readSizeRun(domShortRows).steps[0].frameSurfaces[0].readable, false,
-    "xterm DOM needs every grid row");
-  domRows.splice(1, 0, middleRow);
-  domRows[0].textContent = border.slice(0, -1);
-  const domShortFirst = structuredClone(domCorners);
-  domShortFirst.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.equal(readSizeRun(domShortFirst).steps[0].frameSurfaces[0].readable, false,
-    "xterm DOM needs the first row's full width");
-  domRows[0].textContent = border;
-  domRows[23].textContent = border.slice(0, -1);
-  const domShortLast = structuredClone(domCorners);
-  domShortLast.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.equal(readSizeRun(domShortLast).steps[0].frameSurfaces[0].readable, false,
-    "xterm DOM needs the last row's full width");
-  domRows[23].textContent = border;
-  domRows[0].textContent = `${border.slice(0, -1)} `;
-  const domMissingFirstCorner = structuredClone(domCorners);
-  domMissingFirstCorner.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.ok(readSizeRun(domMissingFirstCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
-    "xterm DOM missing first-row far corner");
-  domRows[0].textContent = border;
-  domRows[23].textContent = `${border.slice(0, -1)} `;
-  const domMissingCorner = structuredClone(domCorners);
-  domMissingCorner.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
-  assert.ok(readSizeRun(domMissingCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
-    "xterm DOM missing far corner");
+  const captureRoot = { querySelector: (selector) => {
+    assert.equal(selector, '[data-terminal-tab-id="term-probe"]', "the probe tab's identity");
+    return probeTab;
+  } };
+  const otherTerminal = { element: {}, rows: 24, getScrollbackLength: () => 0,
+    buffer: { active: { getLine: () => ({ translateToString: () => " ".repeat(80) }) } } };
+  const captured = { [FRAME_CAPTURE_KEY]: { terminals: [otherTerminal, { element: probeHost, rows: 24,
+    getScrollbackLength: () => history.length,
+    buffer: { active: { getLine: (y) => {
+      const text = y < history.length ? history[y] : screenRows[y - history.length];
+      return text === undefined ? undefined : { translateToString: (trimRight) => trimRight ? text.trimEnd() : text };
+    } } } }] } };
+  const frame = () => ({ page: "primary", ...readFrameSurface("term-probe", FRAME_CAPTURE_KEY, captureRoot, (s) => s, captured) });
+  const corners = structuredClone(fullScreenStale);
+  corners.steps[0].frameSurfaces[0] = frame();
+  assert.equal(readSizeRun(corners).steps[0].frameSurfaces[0].farCorners, true,
+    "the buffer's far corners are readable");
+  const uncaptured = structuredClone(fullScreenStale);
+  uncaptured.steps[0].frameSurfaces[0] = { page: "primary",
+    ...readFrameSurface("term-probe", FRAME_CAPTURE_KEY, captureRoot, (s) => s, {}) };
+  assert.equal(readSizeRun(uncaptured).steps[0].frameSurfaces[0].readable, false,
+    "a tab no captured terminal owns is unreadable");
+  const [, probeTerminal] = captured[FRAME_CAPTURE_KEY].terminals;
+  // The short buffer's last row is a full border, so only its row count can
+  // make it unreadable.
+  probeTerminal.rows = 23;
+  screenRows[22] = border;
+  const shortRows = structuredClone(corners);
+  shortRows.steps[0].frameSurfaces[0] = frame();
+  probeTerminal.rows = 24;
+  screenRows[22] = "";
+  assert.equal(readSizeRun(shortRows).steps[0].frameSurfaces[0].readable, false,
+    "the buffer needs every grid row");
+  screenRows[0] = border.slice(0, -1);
+  const shortFirst = structuredClone(corners);
+  shortFirst.steps[0].frameSurfaces[0] = frame();
+  assert.equal(readSizeRun(shortFirst).steps[0].frameSurfaces[0].readable, false,
+    "the buffer needs the first row's full width");
+  screenRows[0] = border;
+  screenRows[23] = border.slice(0, -1);
+  const shortLast = structuredClone(corners);
+  shortLast.steps[0].frameSurfaces[0] = frame();
+  assert.equal(readSizeRun(shortLast).steps[0].frameSurfaces[0].readable, false,
+    "the buffer needs the last row's full width");
+  screenRows[23] = border;
+  screenRows[0] = `${border.slice(0, -1)} `;
+  const missingFirstCorner = structuredClone(corners);
+  missingFirstCorner.steps[0].frameSurfaces[0] = frame();
+  assert.ok(readSizeRun(missingFirstCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
+    "the buffer's missing first-row far corner");
+  screenRows[0] = border;
+  screenRows[23] = `${border.slice(0, -1)} `;
+  const missingCorner = structuredClone(corners);
+  missingCorner.steps[0].frameSurfaces[0] = frame();
+  assert.ok(readSizeRun(missingCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
+    "the buffer's missing far corner");
+  screenRows[23] = border;
   const withScrollbar = structuredClone(base);
   withScrollbar.steps[0].views[0].hostWidth = 814;
   withScrollbar.steps[0].views[0].scrollbar = 14;
@@ -450,7 +500,7 @@ export function preflight() {
     (r) => { r.pages[0].calibrations[0].beforeMs = 100; },
     (r) => { r.steps[0].views[0].scrollbar = null; },
     (r) => { r.steps[0].endMs = r.steps[0].settledMs + observationMs - 1; },
-    (r) => { r.steps[0].views[0].backend = "ghostty"; },
+    (r) => { r.steps[0].views[0].canvas = false; },
     (r) => { r.probe[1].kind = "checkpoint"; },
     (r) => { r.pages[0].calibrations.forEach((c) => { c.afterMs = 21; }); },
     (r) => { r.probe[1].monoMs = -1; },
@@ -484,7 +534,7 @@ export function preflight() {
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
     equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 4, fullScreenReviewRows: 6,
-    domCornerRows: 8, refusalCases };
+    bufferCornerRows: 7, unreadFrameRows: 4, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -493,7 +543,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     try {
       const result = readSizeRun(JSON.parse(readFileSync(process.argv[2], "utf8")));
       console.log(JSON.stringify(result, null, 2));
-      process.exitCode = result.verdict === "fault-observed" ? 10 : 0;
+      process.exitCode = result.verdict === "fault-observed" ? 10 : result.verdict === "bounded-search-no-fault" ? 0 : 3;
     } catch (error) { console.error(error.message); process.exitCode = 3; }
   }
 }

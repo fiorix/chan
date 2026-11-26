@@ -1,21 +1,4 @@
-import type { Terminal } from "@xterm/xterm";
-
 type CsiParam = number | number[];
-type FunctionIdentifier = {
-  prefix?: string;
-  intermediates?: string;
-  final: string;
-};
-type ParserLike = {
-  registerCsiHandler?: (
-    id: FunctionIdentifier,
-    callback: (params: CsiParam[]) => boolean | Promise<boolean>,
-  ) => { dispose(): void };
-  registerEscHandler?: (
-    id: FunctionIdentifier,
-    callback: () => boolean | Promise<boolean>,
-  ) => { dispose(): void };
-};
 
 const KITTY_REPORT_ALL_KEYS = 8;
 const XTERM_MODIFY_OTHER_KEYS = 4;
@@ -60,15 +43,15 @@ export function terminalMetaKeyBytes(
       // Fallback for Shift+Enter when no enhanced keyboard protocol is
       // active. This is the "agent already running, never observed
       // negotiating" case: the agent enabled modifyOtherKeys/kitty before
-      // this tab attached, so the negotiation is neither in the reattach
-      // replay nor in the serialized snapshot, and the branches above see
-      // a pristine state. Without this, Shift+Enter falls through to
-      // xterm's plain `\r` and SUBMITS to the agent instead of inserting a
-      // newline. A bare LF is the safe default across both foreground
-      // programs: a plain shell's line discipline accepts `\n` exactly like
-      // Enter (it submits the line, no stray bytes on the prompt), while
-      // Claude Code reads `\n` as a newline inside its multi-line draft
-      // (live-probed; the inverse of the server-owned Claude submit chord).
+      // this tab attached, so the negotiation is not in the reattach
+      // replay, and the branches above see a pristine state. Without
+      // this, Shift+Enter falls through to the terminal's plain `\r` and
+      // SUBMITS to the agent instead of inserting a newline. A bare LF is
+      // the safe default across both foreground programs: a plain shell's
+      // line discipline accepts `\n` exactly like Enter (it submits the
+      // line, no stray bytes on the prompt), while Claude Code reads `\n`
+      // as a newline inside its multi-line draft (live-probed; the inverse
+      // of the server-owned Claude submit chord).
       // Scoped to Shift+Enter only: Cmd/Ctrl+Enter (modifiers 9/5) keep
       // falling through to `\r` so their submit semantics are preserved.
       if (modifier === 2) return "\n";
@@ -87,18 +70,6 @@ export function terminalMetaKeyBytes(
     default:
       return null;
   }
-}
-
-export function handleTerminalMetaKey(
-  ev: KeyboardEvent,
-  sendInput: (data: string) => void,
-  protocol?: TerminalKeyboardProtocolState,
-): boolean {
-  const bytes = terminalMetaKeyBytes(ev, protocol);
-  if (bytes === null) return true;
-  sendInput(bytes);
-  ev.preventDefault();
-  return false;
 }
 
 /// xterm.js leaves Ctrl+/ unencoded; chan sends the shell's Unit Separator.
@@ -150,22 +121,6 @@ export type KeyboardProtocolCsi = {
   params: CsiParam[];
 };
 
-/// The CSI sequences the keyboard protocol state follows. `consume` is the
-/// xterm.js handler's answer: true for the ones xterm.js itself does not
-/// implement, false where its own handler must run too.
-const KEYBOARD_PROTOCOL_CSI: Array<{ id: FunctionIdentifier; consume: boolean }> = [
-  { id: { prefix: ">", final: "m" }, consume: true },
-  { id: { prefix: ">", final: "n" }, consume: true },
-  { id: { prefix: "?", final: "m" }, consume: true },
-  { id: { prefix: ">", final: "u" }, consume: true },
-  { id: { prefix: "<", final: "u" }, consume: true },
-  { id: { prefix: "=", final: "u" }, consume: true },
-  { id: { prefix: "?", final: "u" }, consume: true },
-  { id: { prefix: "?", final: "h" }, consume: false },
-  { id: { prefix: "?", final: "l" }, consume: false },
-  { id: { intermediates: "!", final: "p" }, consume: false },
-];
-
 /// Apply one CSI sequence to `protocol`: xterm's modifyOtherKeys
 /// (XTMODKEYS, its reset and its query), the kitty keyboard flags (push, pop,
 /// set, query), the screen switches the kitty flags are kept per, and DECSTR.
@@ -207,32 +162,6 @@ export function applyKeyboardProtocolCsi(
     default:
       return null;
   }
-}
-
-export function installKeyboardProtocolHandlers(
-  term: Terminal,
-  protocol: TerminalKeyboardProtocolState,
-  sendGeneratedInput: (data: string) => void,
-): void {
-  const parser = (term as Terminal & { parser?: ParserLike }).parser;
-  if (!parser?.registerCsiHandler) return;
-
-  for (const { id, consume } of KEYBOARD_PROTOCOL_CSI) {
-    parser.registerCsiHandler(id, (params) => {
-      const reply = applyKeyboardProtocolCsi(protocol, {
-        prefix: id.prefix ?? "",
-        intermediates: id.intermediates ?? "",
-        final: id.final,
-        params,
-      });
-      if (reply) sendGeneratedInput(reply);
-      return consume;
-    });
-  }
-  parser.registerEscHandler?.({ final: "c" }, () => {
-    resetTerminalKeyboardProtocolState(protocol);
-    return false;
-  });
 }
 
 export function applyXtermModifierKeys(

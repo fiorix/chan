@@ -1,5 +1,5 @@
-// xterm.js's keyboard encoding, ported so a terminal on another engine sends
-// the bytes an xterm.js terminal sends for the same keydown. The evaluator is
+// chan's terminal keyboard encoding, ported: what the terminal sends for a
+// keydown that chan's own key handling leaves to it. The evaluator is
 // xterm.js 6.0.0's src/common/input/Keyboard.ts; `decideKeydown` is the part
 // of CoreBrowserTerminal._keyDown that decides what happens to its result.
 // keyEncoding.test.ts compares the evaluator with xterm.js's own over every
@@ -279,10 +279,10 @@ export function createKeydownState(): KeydownState {
 export type KeydownInput = KeyInput &
   Pick<KeyboardEvent, "isComposing" | "getModifierState">;
 
-/// The decisions CoreBrowserTerminal._keyDown makes around the evaluator, for
-/// xterm.js with `macOptionIsMeta` on and screen reader mode off, as chan
-/// runs it. The composition helper's test is reduced to the event's own
-/// composing marks.
+/// The decisions CoreBrowserTerminal._keyDown makes around the evaluator,
+/// with `macOptionIsMeta` on and screen reader mode off, the options chan's
+/// encoding fixes. The composition helper's test is reduced to the event's
+/// own composing marks.
 export function decideKeydown(
   ev: KeydownInput,
   opts: { applicationCursorMode: boolean; platform: KeyPlatform; rows: number },

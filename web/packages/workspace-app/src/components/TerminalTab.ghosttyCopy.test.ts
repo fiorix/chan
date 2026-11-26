@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Copying from and pasting into a ghostty terminal. Every copy path of a
-// mounted TerminalTab on the ghostty backend writes the same text through
+// mounted TerminalTab writes the same text through
 // chan's writer, `writeClipboardText`: the copy chord, the menu's Copy and Copy
 // Scrollback, and ghostty-web's own copies on mouse release, double and triple
 // click. A command longer than the terminal is wide copies as one line, and a
@@ -17,13 +17,6 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-
-vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
 import type { Terminal } from "@chan/ghostty-web-ng";
@@ -95,7 +88,7 @@ afterEach(() => {
 const PATH = `/var/log/${"deep/".repeat(16)}messages.log`;
 const PATH_COMMAND = `$ cat ${PATH}`;
 
-/// Mount a terminal that spawns on ghostty, attach its session and print
+/// Mount a terminal, attach its session and print
 /// the command and a prompt after it.
 async function renderGhostty(command = COMMAND) {
   const [tab] = seatTerminals([terminalTab()]);
@@ -354,7 +347,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     return event;
   }
 
-  test("a right click on ghostty opens chan's menu before ghostty-web selects its textarea", async () => {
+  test("a right click opens chan's menu before ghostty-web selects its textarea", async () => {
     const invoke = desktop();
     const { term } = await renderGhostty(PATH_COMMAND);
     drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });

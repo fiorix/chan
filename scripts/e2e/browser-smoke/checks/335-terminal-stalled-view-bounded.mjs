@@ -134,7 +134,7 @@ export default {
       assert.ok(await trackGhosttyTerminals(page), "the entry module names a ghostty-web chunk");
       await page.evaluate(installStreamProbe);
       const shell = `stty -echo; export PS1='${PROMPT} '; unset PROMPT_COMMAND; exec /bin/bash --noprofile --norc -i`;
-      await openAttachedTerminal(ctx, page, cs, windowId, NAME, "ghostty", ["--command", shell]);
+      await openAttachedTerminal(ctx, page, cs, windowId, NAME, ["--command", shell]);
       const read = () => page.evaluate((name) => __streamProbe.read(name), NAME);
       const attached = await until("the page's socket is ready", read, (state) => state?.ready);
       second = openSecondView(ctx, token, attached.sessions[0].id);

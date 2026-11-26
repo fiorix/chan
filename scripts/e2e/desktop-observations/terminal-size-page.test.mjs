@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../browser-smoke/lib/terminal-attach.mjs";
 import { installSizeObserver } from "./terminal-size-page.mjs";
 
 class FakeSocket {
@@ -13,7 +13,7 @@ globalThis.window = { WebSocket: FakeSocket };
 globalThis.document = { querySelector: () => null };
 globalThis.location = { href: "http://localhost/" };
 globalThis.CSS = { escape: (value) => value };
-installSizeObserver(TERMINAL_SURFACES);
+installSizeObserver(TERMINAL_SURFACE);
 try {
   new window.WebSocket("ws://localhost/api/terminal/ws?tab_name=root&tab_id=root-tab");
   new window.WebSocket("ws://localhost/workspace-one/api/terminal/ws?tab_name=native&tab_id=native-tab");

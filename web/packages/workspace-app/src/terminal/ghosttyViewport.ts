@@ -1,7 +1,7 @@
-import type { TerminalChange, TerminalViewport } from "@chan/ghostty-web-ng";
+import type { TerminalViewport } from "@chan/ghostty-web-ng";
 
-/// Chan-specific wheel calibration and the view queries used by find.
-/// The widget owns output following and publishes every parsed change.
+/// Chan-specific wheel calibration, and the write chan's output takes to
+/// the terminal. The widget owns output following.
 
 /// Compatibility constant, not a preference: macOS trackpads deliver pixel
 /// deltas that Ghostty converts to roughly twice xterm.js's travel on the
@@ -13,25 +13,10 @@ export const GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR = 0.5;
 // touches the WheelEvent global (absent in some test environments).
 const DOM_DELTA_PIXEL = 0;
 
-/// The whole history rows a view at viewport offset `offset` shows above the
-/// screen. A pixel scroll leaves the offset a fraction of a row back, and
-/// ghostty-web's renderer, hover and selection and chan's masker all read it
-/// through its floor, so a view less than a row back is the bottom view, its
-/// prompt and cursor included. Every decision here about where the view is
-/// reads the offset through this.
-export function ghosttyHistoryRows(offset: number): number {
-  return Math.max(0, Math.floor(offset));
-}
-
 export type GhosttyViewportTerminal = {
-  readonly rows: number;
-  readonly viewport: TerminalViewport;
-  getScrollbackLength(): number;
+  readonly viewport: Pick<TerminalViewport, "scrollBy">;
   write(data: string | Uint8Array): void;
-  onChange(listener: (change: TerminalChange) => void): { dispose(): void };
 };
-
-export type GhosttyChange = TerminalChange["kind"];
 
 export type GhosttyWheelEvent = Pick<WheelEvent, "deltaY" | "deltaMode">;
 
@@ -51,29 +36,8 @@ export class GhosttyViewportController {
     private readonly context: GhosttyViewportContext,
   ) {}
 
-  /// The widget delivers changes before painting, including writes made by
-  /// callers outside this adapter. The returned function ends the subscription.
-  observeChanges(observer: (change: GhosttyChange) => void): () => void {
-    const subscription = this.terminal.onChange(({ kind }) => observer(kind));
-    return () => subscription.dispose();
-  }
-
   write(data: string | Uint8Array): void {
     this.terminal.write(data);
-  }
-
-  reveal(row: number): void {
-    this.terminal.viewport.reveal(row, "center");
-  }
-
-  /// Whether absolute row `row`, numbered as `reveal` numbers it, is on the
-  /// screen. `rows` is the screen's height, the terminal's own unless given:
-  /// while a resize is under way ghostty-web has already set its new row
-  /// count, though the core still holds the old grid until the resize
-  /// reaches it, so a reader of the grid as it was passes the old count.
-  shows(row: number, rows = this.terminal.rows): boolean {
-    const onScreen = row - this.terminal.getScrollbackLength() + ghosttyHistoryRows(this.terminal.viewport.offset);
-    return onScreen >= 0 && onScreen < rows;
   }
 
   /// Claim only macOS pixel-mode primary-buffer wheel events with no mouse

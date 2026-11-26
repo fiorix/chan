@@ -83,16 +83,16 @@ function expectBackground(result, reading, label) {
   if (reading.keyboard !== "away") result.failures.push(`${label}: keyboard belongs to ${reading.keyboard}`);
 }
 
-async function runEngine(ctx, backend, directory, save) {
+async function runSurvey(ctx, directory, save) {
   const run = {
-    backend, setup: "pending", setupErrors: [], pageErrors: [], cleanupErrors: [], legs: [],
+    setup: "pending", setupErrors: [], pageErrors: [], cleanupErrors: [], legs: [],
   };
   save(run);
   const page = await ctx.browser.newPage();
   page.on("pageerror", (error) => run.pageErrors.push(describeError(error)));
-  const suffix = `${backend}-${Date.now().toString(36)}`;
+  const suffix = Date.now().toString(36);
   const names = { target: `Survey263Target-${suffix}`, away: `Survey263Away-${suffix}` };
-  const files = { target: join(directory, `${backend}-target.bytes`), away: join(directory, `${backend}-away.bytes`) };
+  const files = { target: join(directory, "target.bytes"), away: join(directory, "away.bytes") };
   const url = new URL(ctx.serverUrl);
   const token = url.searchParams.get("t") ?? "";
   const windowId = `surveykeys-263-${suffix}`;
@@ -167,11 +167,11 @@ async function runEngine(ctx, backend, directory, save) {
         if (JSON.stringify(result.awayBytes) !== JSON.stringify(["31"])) result.failures.push(`the other PTY read ${JSON.stringify(result.awayBytes)}, expected ["31"]`);
         if (result.targetBytes.length) result.failures.push(`survey PTY took unintended bytes ${JSON.stringify(result.targetBytes)}`);
         if (handle.result) result.failures.push(`typing in the other pane answered the survey: ${JSON.stringify(handle.result)}`);
-        result.screenshot = basename(await ctx.shot(`263-${backend}-${kind}`, page));
+        result.screenshot = basename(await ctx.shot(`263-${kind}`, page));
         result.observed = true;
       } else {
         result.beforeAnswer = await state(page, target.tab, away.tab);
-        result.screenshot = basename(await ctx.shot(`263-${backend}-${kind}`, page));
+        result.screenshot = basename(await ctx.shot(`263-${kind}`, page));
         if (kind === "return-keyboard") {
           await clickTab(page, names.target);
           await until("return to the survey gives its card the keyboard", async () => {
@@ -190,13 +190,13 @@ async function runEngine(ctx, backend, directory, save) {
         await until("resolved survey returns the keyboard", async () => (await state(page, target.tab, away.tab)).keyboard === "target");
         result.afterAnswer = await state(page, target.tab, away.tab);
         await page.keyboard.press("z");
-        result.restoredBytes = await recordedSince(`${backend}/${kind} restored keyboard`, files.target, targetOffset, "7a");
+        result.restoredBytes = await recordedSince(`${kind} restored keyboard`, files.target, targetOffset, "7a");
         if (JSON.stringify(result.restoredBytes) !== JSON.stringify(["7a"])) result.failures.push(`restored target PTY read ${JSON.stringify(result.restoredBytes)}, expected ["7a"]`);
         result.observed = true;
       }
     } catch (error) {
       result.interactionErrors.push(describeError(error));
-      result.screenshot = basename(await ctx.shot(`263-${backend}-${kind}-failure`, page).catch(() => "unavailable"));
+      result.screenshot = basename(await ctx.shot(`263-${kind}-failure`, page).catch(() => "unavailable"));
     } finally {
       try {
         const dismiss = await page.$(`${terminalSelector(target.tab)} .survey-dismiss`);
@@ -220,24 +220,24 @@ async function runEngine(ctx, backend, directory, save) {
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
     requested.push(names.target);
-    target = await openAttachedTerminal(ctx, page, cs, windowId, names.target, backend, [
+    target = await openAttachedTerminal(ctx, page, cs, windowId, names.target, [
       "--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(files.target)}`,
     ]);
     await until("target recorder starts", () => existsSync(files.target));
     await clickTerminal(page, target.tab);
     await page.keyboard.press("t");
-    run.targetControl = await recordedSince(`${backend} target control`, files.target, 0, "74");
+    run.targetControl = await recordedSince("target control", files.target, 0, "74");
     if (JSON.stringify(run.targetControl) !== JSON.stringify(["74"])) throw new Error(`target control bytes ${JSON.stringify(run.targetControl)}`);
     await dispatchCommand(page, "app.pane.splitDown");
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
     requested.push(names.away);
-    away = await openAttachedTerminal(ctx, page, cs, windowId, names.away, backend, [
+    away = await openAttachedTerminal(ctx, page, cs, windowId, names.away, [
       "--command", `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(files.away)}`,
     ]);
     await until("other recorder starts", () => existsSync(files.away));
     await clickTerminal(page, away.tab);
     await page.keyboard.press("a");
-    run.awayControl = await recordedSince(`${backend} other control`, files.away, 0, "61");
+    run.awayControl = await recordedSince("other control", files.away, 0, "61");
     if (JSON.stringify(run.awayControl) !== JSON.stringify(["61"])) throw new Error(`other control bytes ${JSON.stringify(run.awayControl)}`);
     run.initial = await state(page, target.tab, away.tab);
     if (!run.initial.targetPane || !run.initial.awayPane || run.initial.targetPane === run.initial.awayPane) throw new Error(`terminals are not in two panes: ${JSON.stringify(run.initial)}`);
@@ -246,7 +246,7 @@ async function runEngine(ctx, backend, directory, save) {
   } catch (error) {
     run.setupErrors.push(describeError(error));
     run.setup = "incomplete";
-    await ctx.shot(`263-${backend}-setup-failure`, page).catch(() => {});
+    await ctx.shot("263-setup-failure", page).catch(() => {});
   } finally {
     for (const name of requested.reverse()) {
       try { await cs(["close", "--tab-name", name]); }
@@ -271,23 +271,24 @@ export default {
   name: "surveykeys",
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
-    const report = { engines: [], cleanupErrors: [] };
-    const save = (engine) => {
-      if (engine) report.engines.push(engine);
+    const report = { run: null, cleanupErrors: [] };
+    const save = (run) => {
+      if (run) report.run = run;
       writeFileSync(join(ctx.outDir, "263-surveykeys.json"), JSON.stringify(report, null, 2) + "\n");
     };
     const directory = mkdtempSync(join(ctx.workspaceDir, ".surveykeys-263-"));
     try {
-      await runEngine(ctx, "ghostty", directory, save);
+      await runSurvey(ctx, directory, save);
     } finally {
       try { rmSync(directory, { recursive: true, force: true }); }
       catch (error) { report.cleanupErrors.push(describeError(error)); }
       save();
     }
-    const failed = report.engines.filter((engine) => engine.setup !== "observed" || engine.setupErrors.length || engine.pageErrors.length || engine.cleanupErrors.length || engine.legs.length !== 3 ||
-      engine.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length));
-    if (failed.length || JSON.stringify(report.engines.map((engine) => engine.backend)) !== JSON.stringify(["ghostty"]) || report.cleanupErrors.length) {
-      throw Object.assign(new Error(`survey keyboard contract failed: ${failed.map((engine) => engine.backend).join(", ") || "incomplete run or cleanup"}`), { smokeDetails: report });
+    const { run } = report;
+    const failed = !run || run.setup !== "observed" || run.setupErrors.length || run.pageErrors.length || run.cleanupErrors.length || run.legs.length !== 3 ||
+      run.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length);
+    if (failed || report.cleanupErrors.length) {
+      throw Object.assign(new Error(`survey keyboard contract failed: ${failed ? "incomplete or failed run" : "cleanup"}`), { smokeDetails: report });
     }
     return report;
   },

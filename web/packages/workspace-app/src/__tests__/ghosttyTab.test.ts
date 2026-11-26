@@ -6,12 +6,6 @@
 import { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, expect, test, vi } from "vitest";
 
-vi.mock("@xterm/xterm", async () => (await import("./terminalTab")).xtermModule());
-vi.mock("@xterm/addon-fit", async () => (await import("./terminalTab")).fitAddonModule());
-vi.mock("@xterm/addon-search", async () => (await import("./terminalTab")).searchAddonModule());
-vi.mock("@xterm/addon-serialize", async () => (await import("./terminalTab")).serializeAddonModule());
-vi.mock("@xterm/addon-web-links", async () => (await import("./terminalTab")).webLinksAddonModule());
-vi.mock("@xterm/addon-webgl", async () => (await import("./terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("./ghosttyTab")).ghosttyBackendModule(importOriginal));
 
@@ -34,7 +28,6 @@ import {
   sentFrames,
   TerminalSocket,
   terminalTab,
-  xterm,
 } from "./terminalTab";
 
 installTerminalDom();
@@ -55,12 +48,11 @@ async function opened() {
 const inputs = (socket: TerminalSocket) =>
   sentFrames(socket).filter((frame) => frame.type === "input").map((frame) => frame.data);
 
-test("the checked mount returns the fixture's widget, open in the tab, and no stand-in", async () => {
+test("the checked mount returns the fixture's widget, open in the tab", async () => {
   const { target, term } = await opened();
   expect(term).toBeInstanceOf(Terminal);
   expect(term.element && target.contains(term.element)).toBe(true);
   expect(ghosttyFixture.terminals).toEqual([term]);
-  expect(xterm.terminals).toHaveLength(0);
 });
 
 // The widget dials once it has loaded and opened, so the mount waits for the
@@ -85,14 +77,6 @@ test("a reset lets go of a hold its case never released", async () => {
   resetTerminals();
   const { term } = await opened();
   expect(ghosttyFixture.terminals).toEqual([term]);
-});
-
-test("mountTerminal under the fixture refuses to hand the widget out as the stand-in", async () => {
-  const [tab] = seatTerminals([terminalTab()]);
-  const mounted = await mountTerminal(TerminalTab, tab!);
-  expect(() => mounted.term).toThrow(/mountGhosttyTerminal/);
-  expect({ ...mounted }, "a spread reads nothing").not.toHaveProperty("term");
-  expect(ghosttyFixture.terminals).toHaveLength(1);
 });
 
 test("typed input reaches the PTY", async () => {

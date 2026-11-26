@@ -35,35 +35,6 @@ vi.mock("../wakeGap", async (importOriginal) => {
   };
 });
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon() {}
-    open() {}
-    attachCustomKeyEventHandler() {}
-    onData() {}
-    onResize() {}
-    write() {}
-    writeln() {}
-    resize() {}
-    focus() {}
-    blur() {}
-    dispose() {}
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {} }));
-vi.mock("@xterm/addon-serialize", () => ({
-  SerializeAddon: class {
-    serialize() {
-      return "";
-    }
-  },
-}));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
-
 import App from "../App.svelte";
 import { setFetchImpl } from "../api/transport";
 import type { MockWorkspaceData } from "../demo/data";

@@ -88,14 +88,14 @@ export default {
       if (!read.cover) throw new Error(`${label}: the cover went when the prompt showed: ${JSON.stringify(read)}`);
       return read;
     };
-    const result = { backend: "ghostty", legs: {}, cleanupErrors: [] };
+    const result = { legs: {}, cleanupErrors: [] };
     const failures = [];
     const check = (name, ok, detail) => {
       result.legs[name] = { ok, detail };
       if (!ok) failures.push(`${name}: ${JSON.stringify(detail)}`);
     };
     try {
-      await openAttachedTerminal(ctx, page, cs, windowId, "Close303", "ghostty");
+      await openAttachedTerminal(ctx, page, cs, windowId, "Close303");
       await frame("window_hidden");
       await page.waitForSelector(COVER, { visible: true, timeout: 10_000 });
       result.coverUp = await until("precondition: the cover's button holds the keyboard", focusOn,

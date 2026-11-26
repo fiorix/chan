@@ -1,15 +1,12 @@
 /// Osc52Bridge -- a stateful OSC 52 clipboard observer for the PTY ->
-/// terminal output path, backing the ghostty-web terminal backend.
+/// terminal output path.
 ///
-/// WHY a byte observer: the ghostty backend's VT core (Ghostty's
-/// libghostty-vt) parses OSC 52 itself and hands a copy only to a
-/// clipboard callback its embedder installs. ghostty-web's `Terminal`
-/// offers no way to install one and no registerOscHandler equivalent
-/// (the xterm path's hook in xtermReports.ts reaches xterm-internal
-/// parser state that does not exist here), so the sequence is dropped.
+/// WHY a byte observer: the terminal's VT core (Ghostty's libghostty-vt)
+/// parses OSC 52 itself and hands a copy only to a clipboard callback its
+/// embedder installs. The widget's `Terminal` offers no way to install one
+/// and no hook on the parser's OSC sequences, so the sequence is dropped.
 /// The only non-fork mechanism is to watch the bytes before they reach
-/// write(); the xterm backend keeps its parser hook, the ghostty backend
-/// runs this observer.
+/// write().
 ///
 /// Observe-ONLY by design: push() returns nothing and never withholds
 /// or rewrites bytes. ghostty's parser already swallows OSC 52, so
@@ -18,14 +15,13 @@
 /// philosophy as MouseModeFilter).
 ///
 /// Grammar observed: `ESC ] 52 ; Pc ; Pd (BEL | ESC \)`. The full
-/// candidate text (`Pc ; Pd`) is handed to handleOsc52Clipboard, so
-/// selection-param handling, the never-answered `?` query form, base64
-/// decoding, and malformed-payload warnings stay byte-identical to the
-/// xterm path -- one source of truth for OSC 52 semantics. C1 ST
+/// candidate text (`Pc ; Pd`) is handed to handleOsc52Clipboard, which
+/// owns selection-param handling, the never-answered `?` query form,
+/// base64 decoding and malformed-payload warnings. C1 ST
 /// (0x9c) is NOT treated as a terminator: it collides with UTF-8
 /// continuation bytes and no real clipboard program emits it (BEL and
 /// ESC \ are the forms in the wild); CAN/SUB and other C0 controls
-/// abort the candidate like xterm's parser does.
+/// abort the candidate.
 ///
 /// Statefulness: a chunk ending mid-candidate holds the partial tail
 /// and prepends it to the next push. The hold is capped at MAX_HOLD
@@ -36,17 +32,15 @@
 import { writeClipboardText } from "../api/desktop";
 
 /// Honour an OSC 52 copy sequence: decode its base64 payload and write it to
-/// the system clipboard. `@xterm/xterm` v6 has no built-in OSC 52 path, so
-/// without this the embedded agent's copy sequences are silently dropped. The
-/// read/query form (`?`) is consumed but never echoed -- replying would leak the
-/// clipboard back into the PTY. Returns `true` synchronously to mark the
-/// sequence handled; the actual write is fire-and-forget because returning the
-/// Promise would stall xterm's parser until the clipboard settles.
-export function handleOsc52Clipboard(data: string): boolean {
+/// the system clipboard. The read/query form (`?`) is consumed but never
+/// echoed -- replying would leak the clipboard back into the PTY. A body with
+/// no `;` after its selection param is ignored; the clipboard write is
+/// fire-and-forget.
+export function handleOsc52Clipboard(data: string): void {
   const sep = data.indexOf(";");
-  if (sep < 0) return false; // not an OSC 52 we understand
+  if (sep < 0) return; // not an OSC 52 we understand
   const payload = data.slice(sep + 1); // selection param before ';' ignored
-  if (payload === "?") return true; // read/query form: consume, never echo
+  if (payload === "?") return; // read/query form: consume, never echo
   try {
     const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
     const text = new TextDecoder().decode(bytes);
@@ -56,7 +50,6 @@ export function handleOsc52Clipboard(data: string): boolean {
   } catch (err) {
     console.warn("OSC 52 malformed base64", err);
   }
-  return true;
 }
 
 /// Hold cap for a candidate spanning chunk boundaries. 1MB of base64
@@ -151,8 +144,8 @@ export class Osc52Bridge {
         continue;
       }
       // Candidate bytes are ASCII by grammar (C0s abort; UTF-8 high
-      // bytes ride along leniently and make atob throw downstream,
-      // exactly like the xterm path's handler).
+      // bytes ride along leniently and make atob throw downstream, where
+      // handleOsc52Clipboard warns of a malformed payload).
       let data = "";
       for (let k = m.dataStart; k < m.dataEnd; k++) {
         data += String.fromCharCode(buf[k]);

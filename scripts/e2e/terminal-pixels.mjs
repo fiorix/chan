@@ -786,7 +786,6 @@ class Scenario {
 
   url(port) {
     const config = {
-      backend: "ghostty",
       font: this.font,
       fontFamily: windowsFontChain(this.font),
       fontSize: FONT_SIZE,

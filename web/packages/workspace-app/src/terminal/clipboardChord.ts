@@ -1,5 +1,3 @@
-import type { TerminalBackend } from "./backend";
-
 export type TerminalClipboardChordOptions = {
   os: string;
   copySelection: () => void;
@@ -42,14 +40,11 @@ export function handleTerminalClipboardChord(
 }
 
 /// Convert a matched clipboard chord into the chan-level key-handler result
-/// before TerminalTab applies Ghostty's inverted custom-handler contract.
-/// Copy stays claimed on both backends. Native paste returns true only here so
-/// Ghostty's inversion yields false and its own KeyV early-return runs without
-/// calling preventDefault, matching xterm's native paste path.
-export function terminalClipboardKeyHandlerResult(
-  e: KeyboardEvent,
-  os: string,
-  backend: TerminalBackend,
-): boolean {
-  return backend === "ghostty" && isTerminalPasteChord(e, os);
+/// before TerminalTab applies the widget's inverted custom-handler contract.
+/// Copy stays claimed. Native paste returns true so the inversion yields
+/// false and the widget's own KeyV early-return runs without calling
+/// preventDefault, which leaves the browser's paste event to the tab's
+/// capture listener.
+export function terminalClipboardKeyHandlerResult(e: KeyboardEvent, os: string): boolean {
+  return isTerminalPasteChord(e, os);
 }

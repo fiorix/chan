@@ -70,7 +70,7 @@ export default {
             ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
           let row;
           try {
-            row = await openAttachedTerminal(ctx, page, cs, windowId, name, "ghostty", spawnArgs);
+            row = await openAttachedTerminal(ctx, page, cs, windowId, name, spawnArgs);
             opened = true;
           } catch (error) {
             throw new Error(String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]"));

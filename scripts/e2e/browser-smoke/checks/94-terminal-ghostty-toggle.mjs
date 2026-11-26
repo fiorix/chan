@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { capturePointerTerminals, copyPointerChord, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
 import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -87,16 +87,14 @@ export default {
     const setMouseCapture = (on) => writeTerminalPrefs(page, authToken, { mouse_capture: on });
     const assertTomlMouseCapture = (on) => assertTerminalPrefs(ctx, { mouse_capture: on });
 
-    async function assertOnlyGhostty() {
+    async function assertOneTerminal() {
       const tabs = await page.$$(".terminal-tab");
       assert.equal(tabs.length, 1, "exactly one terminal tab makes the input probes unambiguous");
-      assert.equal(await page.evaluate(() => !!document.querySelector(".terminal-tab .terminal.xterm")),
-        false, "Ghostty must not fall back to xterm DOM");
     }
 
     async function openTerminal(newArgs = []) {
-      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, "ghostty", newArgs);
-      await assertOnlyGhostty();
+      const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB_G, newArgs);
+      await assertOneTerminal();
       return row;
     }
 
@@ -143,7 +141,6 @@ export default {
         }
         const style = window.getComputedStyle(host);
         return {
-          backend: "ghostty",
           hostWidth: host.clientWidth,
           hostHeight: host.clientHeight,
           padding: {
@@ -154,7 +151,7 @@ export default {
           },
           canvasWidth: canvas?.getBoundingClientRect().width ?? null,
         };
-      }, TERMINAL_SURFACES.ghostty);
+      }, TERMINAL_SURFACE);
       const socketUrl = terminalSocketUrls
         .slice(socketStart)
         .find(
@@ -211,10 +208,10 @@ export default {
     /// the canvas (SelectionManager listens there), so a drag starting
     /// at host+5 silently selects nothing.
     async function screenBox() {
-      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
-      if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
+      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACE}`);
+      if (!canvas) throw new Error(`${TERMINAL_SURFACE} missing`);
       const box = await canvas.boundingBox();
-      if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
+      if (!box) throw new Error(`${TERMINAL_SURFACE} has no bounding box`);
       return box;
     }
 
@@ -277,7 +274,7 @@ export default {
     /// would otherwise eat the 0x16 byte as lnext. A paste event with an
     /// empty DataTransfer stands in for an image-only clipboard; both
     /// ghostty-web's listener and chan's capture listener handle it as a
-    /// user's. The control byte comes from a real keydown on ghostty's
+    /// user's. The control byte comes from a real keydown on the terminal's
     /// textarea. Each probe ends in Enter so cooked cat echoes its line.
     async function probePasteParity(tab) {
       const ready = `G98_PASTE_${Date.now().toString(36)}`;
@@ -583,9 +580,9 @@ export default {
       for (const ghostty of [true, false]) {
         await compatibilityArm(`api-${ghostty}`, async () => {
           const row = await openLegacyConfiguredTerminal(ctx, page, cs, windowId, TAB_G, ghostty);
-          await assertOnlyGhostty();
+          await assertOneTerminal();
           await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: true });
-          return { ghostty, canonicalKeyAbsent: true, backend: "ghostty", session: row.session_id };
+          return { ghostty, canonicalKeyAbsent: true, session: row.session_id };
         });
       }
 
@@ -621,9 +618,9 @@ export default {
         await waitSaved(ctx, page, windowId, TAB_G);
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
         await ctx.waitWindowLive(windowId);
-        const after = await waitRestoredTerminal(page, cs, windowId, before, "ghostty");
-        assert.equal(after.session_id, before.session_id, "reload keeps the same PTY on Ghostty");
-        await assertOnlyGhostty();
+        const after = await waitRestoredTerminal(page, cs, windowId, before);
+        assert.equal(after.session_id, before.session_id, "reload keeps the same PTY");
+        await assertOneTerminal();
         await cs(["write", "--tab-name", TAB_G, `printf '${MARK_PREFIX}RELOAD_%s\\n' ${MARK_ARG}\n`]);
         await waitScrollback(TAB_G, `${MARK_PREFIX}RELOAD_${MARK_ARG}`);
         assert.equal(readFileSync(path, "utf8"), seeded, "loading and reloading do not rewrite server.toml");
@@ -634,7 +631,7 @@ export default {
         assert.equal(readFileSync(path, "utf8"), seeded.replace("ghostty = false\n", ""),
           "normal save drops only the retired key and preserves unrelated settings");
         await ctx.shot("ghostty-stored-false-reloaded");
-        return { backend: "ghostty", before: before.session_id, after: after.session_id,
+        return { before: before.session_id, after: after.session_id,
           watcherConsumedFile: true, loadDidNotRewrite: true, saveDroppedOnlyLegacyKey: true };
       });
 
@@ -647,9 +644,9 @@ export default {
       const ghosttySocketStart = terminalSocketUrls.length;
       await compatibilityArm("api-absent", async () => {
         const row = await openLegacyConfiguredTerminal(ctx, page, cs, windowId, TAB_G, undefined);
-        await assertOnlyGhostty();
+        await assertOneTerminal();
         await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: true });
-        return { canonicalKeyAbsent: true, backend: "ghostty", session: row.session_id };
+        return { canonicalKeyAbsent: true, session: row.session_id };
       }, { keepOpen: true });
       assert.deepEqual(details.mouse1000Leg.failures, [], "all press-only gesture legs passed");
       if (compatibilityErrors.length) {
@@ -660,10 +657,10 @@ export default {
         () => performance.getEntriesByType("resource").some((entry) => entry.name.includes("ghostty-vt") && new URL(entry.name).pathname.endsWith(".wasm")),
         { timeout: 60_000 },
       );
-      await ctx.shot("ghostty-backend-loaded");
-      details.loadLeg = { wasmFetched: true, xtermDomAbsent: true };
+      await ctx.shot("ghostty-core-loaded");
+      details.loadLeg = { wasmFetched: true };
       const ghosttyFit = await terminalFitSnapshot(TAB_G, ghosttyResizeStart, ghosttySocketStart);
-      details.fitLeg = { ghostty: ghosttyFit };
+      details.fitLeg = ghosttyFit;
       if (ghosttyFit.canvasWidth === null || ghosttyFit.cols < 1) {
         throw new Error(
           `fit leg: ghostty canvas width or columns are not measurable: ` +
@@ -693,7 +690,7 @@ export default {
             `reserved=${reservedWidthCols} snapshot=${JSON.stringify(ghosttyFit)}`,
         );
       }
-      details.fitLeg.ghosttyCellWidth = ghosttyCellWidth;
+      details.fitLeg.cellWidth = ghosttyCellWidth;
       details.fitLeg.fullWidthCols = fullWidthCols;
       details.fitLeg.reservedWidthCols = reservedWidthCols;
       details.fitLeg.strictlyBeatsReservedWidth = true;
@@ -730,7 +727,7 @@ export default {
           if (clip === OSC52_TEXT) break;
           if (Date.now() > deadline) {
             throw new Error(
-              `OSC 52 never reached the clipboard under ghostty; ` +
+              "OSC 52 never reached the clipboard; " +
                 `clipboard=${JSON.stringify(clip.slice(0, 120))} -- ` +
                 `the byte-level Osc52Bridge is not observing the write path`,
             );
@@ -784,7 +781,7 @@ export default {
       details.mouseOnLeg.selection = "";
       await closeTerminal(TAB_G);
 
-      // ---- Leg 5b: mouse_capture OFF -- the DECSET strip works under ghostty ----
+      // ---- Leg 5b: mouse_capture OFF -- the DECSET strip works ----
       await setMouseCapture(false);
       await assertTomlMouseCapture(false);
       await openTerminal();
@@ -803,8 +800,7 @@ export default {
       if (offSelection === "") {
         throw new Error(
           "mouse-off leg: mouse_capture=false yet the drag selected NOTHING " +
-            "-- the DECSET strip did not keep the ghostty backend out of " +
-            "mouse mode",
+            "-- the DECSET strip did not keep the terminal out of mouse mode",
         );
       }
       details.mouseOffLeg = { selection: offSelection.slice(0, 120) };
@@ -826,7 +822,7 @@ export default {
           throw new Error(
             "mouse-off leg: an SGR mouse report reached the PTY despite " +
               "mouse_capture=false -- the DECSET strip did not keep the " +
-              "ghostty backend out of mouse mode",
+              "terminal out of mouse mode",
           );
         }
       }

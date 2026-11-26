@@ -1,8 +1,8 @@
 export type FitLike = {
   fit(): void;
   /// The grid the host would hold. Nothing while the host cannot be measured,
-  /// or NaN from a detached or `display: none` host, which has no computed
-  /// size.
+  /// as a detached or `display: none` host, which has no box, cannot. A grid
+  /// that is not finite reads the same.
   proposeDimensions(): { cols: number; rows: number } | null | undefined;
 };
 

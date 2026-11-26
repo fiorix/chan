@@ -23,7 +23,7 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
-import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
+import { TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const DIR = `pane-focus-226-${RUN}`;
@@ -116,7 +116,7 @@ async function openTerminal(page) {
   const before = await page.$$eval(".terminal-tab", (tabs) => tabs.length);
   await dispatchCommand(page, "app.terminal.toggle");
   await page.waitForFunction((n) => document.querySelectorAll(".terminal-tab").length > n, { timeout: 30_000 }, before);
-  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await sleep(1_000);
 }
 
@@ -192,8 +192,8 @@ async function markerSince(page, file, offset, label) {
   return ptySince(label, file, offset);
 }
 
-async function moveArm(page, file, engine, press, move) {
-  const arm = `${engine}-${press}-${move}`;
+async function moveArm(page, file, press, move) {
+  const arm = `${press}-${move}`;
   const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const before = await browserState(page);
@@ -219,8 +219,7 @@ async function selectionSettled(page, from, timeout = 3_000) {
 }
 
 /// The keyboard holder a press leaves in the terminal: the host after a left
-/// press on ghostty, the textarea after a right one (the case the blur has to
-/// reach).
+/// press, the textarea after a right one (the case the blur has to reach).
 function expectedHolder(press) {
   return press === "left" ? "terminal" : "terminal-textarea";
 }
@@ -237,8 +236,8 @@ function checkMove(result, failures) {
   if (JSON.stringify(pty) !== JSON.stringify([TYPED])) failures.push(`${arm}: the PTY read ${JSON.stringify(pty)}, not only the marker`);
 }
 
-async function stayArm(page, file, engine, press) {
-  const arm = `${engine}-${press}-hybrid-stay`;
+async function stayArm(page, file, press) {
+  const arm = `${press}-hybrid-stay`;
   const holder = await pressTerminal(page, press, expectedHolder(press));
   const offset = statSync(file).size;
   const committed = await hybridNav(page, []);
@@ -250,7 +249,7 @@ async function stayArm(page, file, engine, press) {
 
 /// A press on the browser's own chrome, at a point whose element has no
 /// focusable ancestor inside the browser.
-async function chromeArm(page, engine) {
+async function chromeArm(page) {
   await pressTerminal(page, "left");
   const point = await page.evaluate(() => {
     const browser = document.querySelector(".pane .browser");
@@ -265,10 +264,10 @@ async function chromeArm(page, engine) {
     }
     return null;
   });
-  if (!point) throw new Error(`${engine}-chrome: no point on the browser's chrome without a focusable ancestor`);
+  if (!point) throw new Error(`chrome: no point on the browser's chrome without a focusable ancestor`);
   await page.mouse.click(point.x, point.y);
   const focus = await focusSettled(page, (held) => held.startsWith("browser-"));
-  return { arm: `${engine}-chrome`, target: point.target, focus };
+  return { arm: "chrome", target: point.target, focus };
 }
 
 /// The window's saved layout, read from the server.
@@ -287,8 +286,8 @@ async function savedLayout(ctx, windowId) {
 /// its id alone comes back from its session and the keyboard is the
 /// browser's, not the terminal's reattaching in the other pane. `adopt` takes
 /// the new page as soon as it opens, so cleanup and a failure's shot reach it.
-async function restoreArm(ctx, page, engine, adopt) {
-  const arm = `${engine}-restore`;
+async function restoreArm(ctx, page, adopt) {
+  const arm = "restore";
   await clickIn(page, ".pane:has(.browser) .browser-status");
   const windowId = new URL(page.url()).searchParams.get("w");
   const deadline = Date.now() + 10_000;
@@ -316,7 +315,7 @@ async function restoreArm(ctx, page, engine, adopt) {
   await page.setViewport({ width: 1280, height: 900 });
   await page.bringToFront();
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(`${TERMINAL} ${ENGINE.ghostty}`, { visible: true, timeout: 30_000 });
+  await page.waitForSelector(`${TERMINAL} ${TERMINAL_SURFACE}`, { visible: true, timeout: 30_000 });
   await page.waitForFunction((selector) => document.querySelectorAll(selector).length > 0, { timeout: 15_000 }, FILE_ROW);
   // Past the terminal's open and ghostty-web's zero-delay focus retry,
   // sampled so a reading shows what took the keyboard and when.
@@ -338,10 +337,9 @@ async function restoreArm(ctx, page, engine, adopt) {
   return result;
 }
 
-async function ghosttyWindow(ctx, dir, failures) {
-  const engine = "ghostty";
+async function terminalWindow(ctx, dir, failures) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-  let page = await suiteWindow(ctx, engine);
+  let page = await suiteWindow(ctx, "terminal");
   const results = [];
   let originalStrip = null;
   let primary = null;
@@ -349,7 +347,7 @@ async function ghosttyWindow(ctx, dir, failures) {
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
     await openTerminal(page);
-    const file = join(dir, `${engine}.bytes`);
+    const file = join(dir, "terminal.bytes");
     await startRecorder(page, file);
     await dispatchCommand(page, "app.pane.splitDown");
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
@@ -364,7 +362,7 @@ async function ghosttyWindow(ctx, dir, failures) {
     await visible[2].click();
     await sleep(300);
 
-    const control = { arm: `${engine}-control`, offset: statSync(file).size };
+    const control = { arm: "control", offset: statSync(file).size };
     control.focus = await pressTerminal(page, "left");
     await page.keyboard.type("x");
     control.pty = await recordedSince(control.arm, file, control.offset, TYPED);
@@ -375,29 +373,29 @@ async function ghosttyWindow(ctx, dir, failures) {
 
     for (const press of ["left", "right"]) {
       for (const move of Object.keys(MOVES)) {
-        const result = await moveArm(page, file, engine, press, move);
+        const result = await moveArm(page, file, press, move);
         results.push(result);
         checkMove(result, failures);
       }
-      const stay = await stayArm(page, file, engine, press);
+      const stay = await stayArm(page, file, press);
       results.push(stay);
       if (stay.holder !== stay.expected || !stay.committed || !stay.focus.startsWith("terminal") || JSON.stringify(stay.pty) !== JSON.stringify([TYPED])) {
         failures.push(`${stay.arm}: Hybrid Nav's commit on the terminal's pane read ${JSON.stringify(stay)}`);
       }
     }
-    const chrome = await chromeArm(page, engine);
+    const chrome = await chromeArm(page);
     results.push(chrome);
     if (!chrome.focus.startsWith("browser-")) failures.push(`${chrome.arm}: a press on ${chrome.target} left the keyboard on ${chrome.focus}`);
-    const restore = await restoreArm(ctx, page, engine, (reopened) => { page = reopened; });
+    const restore = await restoreArm(ctx, page, (reopened) => { page = reopened; });
     results.push(restore);
     if (restore.barrier !== "waitWindowLive passed") failures.push(`${restore.arm}: ${restore.barrier}`);
     if (!restore.focusedPane) failures.push(`${restore.arm}: the restored window focused another pane than the saved one`);
     if (!restore.focus.startsWith("browser-")) failures.push(`${restore.arm}: the restored window left the keyboard on ${restore.focus}`);
-    await ctx.shot(`226-${engine}`, page);
+    await ctx.shot("226-terminal", page);
     return results;
   } catch (error) {
     primary = error;
-    await ctx.shot(`226-${engine}-failure`, page).catch(() => {});
+    await ctx.shot("226-terminal-failure", page).catch(() => {});
     throw error;
   } finally {
     console.log(`[smoke]   pane focus ${JSON.stringify(results)}`);
@@ -433,7 +431,7 @@ export default {
     const failures = [];
     try {
       const details = {
-        ghostty: await ghosttyWindow(ctx, dir, failures),
+        terminal: await terminalWindow(ctx, dir, failures),
       };
       if (failures.length) throw new Error(`${failures.length} arm(s) failed:\n  ${failures.join("\n  ")}`);
       return details;

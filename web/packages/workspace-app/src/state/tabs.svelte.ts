@@ -1937,7 +1937,7 @@ export function openTerminalInPane(
 /// `reattachTerminalInPane`. All standalone terminal windows share one
 /// `/terminal` tenant (one PTY registry), so the target window can attach to
 /// this SAME live PTY by `terminalSessionId` instead of spawning a fresh
-/// shell. The target's fresh xterm is empty, so its attach always replays
+/// shell. The target's fresh terminal is empty, so its attach always replays
 /// the session's full ring (like a reload); only the echo-dedupe cursor
 /// travels with the move.
 export type TerminalMovePayload = {
@@ -2083,8 +2083,8 @@ function placeMovedTerminal(p: LeafNode, tab: TerminalTab, snapshot: SerTab | un
   if (snapshot?.rpt) setRichPromptToolbarOpen(tab.id, true);
   // Pull keyboard focus to the just-dropped terminal: making it the active
   // tab isn't enough on its own (the terminal's focus effect only grabs the
-  // xterm on a focus pulse), so fire the same pulse a chord-driven tab switch
-  // uses.
+  // terminal on a focus pulse), so fire the same pulse a chord-driven tab
+  // switch uses.
   bumpTabFocusPulse();
 }
 
@@ -2673,10 +2673,10 @@ export function setTerminalProgram(tab: TerminalTab, program: TerminalProgram | 
   tab.terminalProgram = program;
 }
 
-/// Set a terminal's own secret-masking choice as its renderer is built,
-/// and drop the mark an earlier masker left when it failed: the terminal
-/// builds a new masker with each renderer, and a failure is the masker's
-/// that had it.
+/// Set a terminal's own secret-masking choice as the tab starts its
+/// terminal, and drop the mark an earlier masker left when it failed: each
+/// start builds a new terminal with its own masker, and a failure is the
+/// masker's that had it.
 export function seedTerminalSecretMasking(tab: TerminalTab, enabled: boolean): void {
   tab.secretMasking = enabled;
   tab.secretMaskingFailed = undefined;
@@ -3834,7 +3834,7 @@ export async function openInPane(
   layout.activePaneId = paneId;
   // Pull keyboard focus to the just-opened editor: making it the active tab
   // isn't enough on its own (the editor's focus effect only grabs the live
-  // ref on a focus pulse, and the prior terminal's xterm keeps DOM focus).
+  // ref on a focus pulse, and the prior terminal keeps DOM focus).
   // This is the `cs open {path}` path too (handleWindowCommand -> openInPane).
   bumpTabFocusPulse();
   await loadTabContent(newTab.id, path);
@@ -8499,7 +8499,7 @@ export type ReconcileResult = "applied" | "diverged" | "deferred";
 
 /// Non-destructive sibling of `restoreLayout` for live co-view sync:
 /// apply a peer's persisted layout snapshot onto the LIVE tree without
-/// remounting matched tabs, so unsaved editors and running xterms
+/// remounting matched tabs, so unsaved editors and running terminals
 /// survive.
 ///
 /// Applied from remote: the pane tree (splits, directions, ratios), the

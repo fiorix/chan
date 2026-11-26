@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
-import { openAttachedTerminal, requireGhosttyBackend } from "./terminal-attach.mjs";
+import { openAttachedTerminal } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
 export async function startSubjectSurvey(ctx, tab, label, title, { timeout = 90 } = {}) {
   assert.match(label, /^[a-z0-9-]+$/, "fixed survey label");
-  const pidPath = join(ctx.workspaceDir, `status-${label}-${tab.backend}.pid`);
+  const pidPath = join(ctx.workspaceDir, `status-${label}.pid`);
   const argv = [ctx.chanBin, "shell", "terminal", "survey", "--tab-name", tab.front,
     "--title", title, "--option", "Yes", "--timeout", String(timeout), "Question?"];
   const command = `${argv.map(shellQuote).join(" ")} & printf '%s\\n' "$!" > ${shellQuote(pidPath)}\n`;
@@ -63,8 +63,8 @@ export function statusPrintfRaw(format) {
 export async function runPtyPython(ctx, tab, label, source) {
   assert.match(label, /^[a-z0-9-]+$/, "fixed PTY program label");
   assert.ok(!source.includes("\nPY_STATUS_END\n"), "PTY program cannot end its own heredoc");
-  const script = join(ctx.workspaceDir, `status-${label}-${tab.backend}.py`);
-  const output = join(ctx.workspaceDir, `status-${label}-${tab.backend}.bin`);
+  const script = join(ctx.workspaceDir, `status-${label}.py`);
+  const output = join(ctx.workspaceDir, `status-${label}.bin`);
   const command = `cat > ${shellQuote(script)} <<'PY_STATUS_END'\n${source.trim()}\nPY_STATUS_END\npython3 ${shellQuote(script)} ${shellQuote(output)}\n`;
   assert.ok(Buffer.byteLength(command) <= 4096, "PTY program fits one cs terminal write");
   await tab.cs(["write", "--tab-name", tab.subject, command]);
@@ -159,16 +159,7 @@ export function installProgramStatusRecord() {
   });
 }
 
-export function withProgramStatusTabs(ctx, slug, run, options) {
-  return withProgramStatusBackend(ctx, slug, "ghostty", run, options);
-}
-
-export function withProgramStatusBackend(ctx, slug, backend, run, options) {
-  requireGhosttyBackend(backend);
-  return runProgramStatusTabs(ctx, slug, backend, run, options);
-}
-
-async function runProgramStatusTabs(ctx, slug, backend, run, { subjectArgs = [] } = {}) {
+export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] } = {}) {
   if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
   const page = ctx.page;
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
@@ -215,25 +206,25 @@ async function runProgramStatusTabs(ctx, slug, backend, run, { subjectArgs = [] 
   };
   const failures = [];
   try {
-    const subject = `Status${slug}${backend}S`;
-    const front = `Status${slug}${backend}F`;
+    const subject = `Status${slug}S`;
+    const front = `Status${slug}F`;
     await writeTerminalPrefs(page, token, { program_status: true });
     let subjectRow;
     let frontRow;
     let openedSubject = false;
     let openedFront = false;
     try {
-      subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, backend, subjectArgs);
+      subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, subjectArgs);
       openedSubject = true;
       await page.evaluate((name) => {
         window.__programStatusTrace.subject = name;
         window.__programStatusTrace.marks.length = 0;
         window.__programStatusTrace.capture();
       }, subject);
-      frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
+      frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front);
       openedFront = true;
       const toolkit = {
-        backend, page, subject, front, subjectRow, frontRow, cs, windowId,
+        page, subject, front, subjectRow, frontRow, cs, windowId,
         async sendReport(body) {
           await cs(["write", "--tab-name", subject, statusPrintf(body)]);
         },
@@ -266,12 +257,12 @@ async function runProgramStatusTabs(ctx, slug, backend, run, { subjectArgs = [] 
           do {
             latest = await this.read();
             if (predicate(latest)) {
-              await ctx.shot(`${backend}-${label}`, page);
+              await ctx.shot(label, page);
               return latest;
             }
             await sleep(200);
           } while (Date.now() < deadline);
-          throw new Error(`${backend} ${label} absent; last=${JSON.stringify(latest)}`);
+          throw new Error(`${label} absent; last=${JSON.stringify(latest)}`);
         },
         async focus(name) {
           const tabs = await page.$$('.tab > [role="tab"]');
@@ -292,17 +283,17 @@ async function runProgramStatusTabs(ctx, slug, backend, run, { subjectArgs = [] 
       await toolkit.focusFront();
       await run(toolkit);
     } catch (error) {
-      failures.push(`${backend}: ${error.stack ?? error}`);
-      await ctx.shot(`${backend}-failure`, page).catch(() => {});
+      failures.push(String(error.stack ?? error));
+      await ctx.shot("status-failure", page).catch(() => {});
     } finally {
       // A busy page can answer after the pane command's five-second reply limit.
       if (openedFront) {
         try { await closeTab(frontRow, front); }
-        catch (error) { failures.push(`${backend} cleanup ${front}: ${error.stack ?? error}`); }
+        catch (error) { failures.push(`cleanup ${front}: ${error.stack ?? error}`); }
       }
       if (openedSubject) {
         try { await closeTab(subjectRow, subject); }
-        catch (error) { failures.push(`${backend} cleanup ${subject}: ${error.stack ?? error}`); }
+        catch (error) { failures.push(`cleanup ${subject}: ${error.stack ?? error}`); }
       }
     }
   } finally {

@@ -177,49 +177,14 @@ const pending = (
 ): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
 
 const TAB = "src/components/TerminalTab.svelte";
-const ONE_TERMINAL = "the terminal tab and its helpers hold the widget's terminal alone";
 const METRICS = "the terminal tab reads cell metrics through getMetrics()";
 const REFRESH = "refreshTerminalRows needs refresh() and drops its renderer path";
-const FIND = "the find bar runs on the widget's term.search";
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
 const THEME = "the theme test reads the core's colours off the canvas, or moves into the package";
 const KIT = "the kit test tells two instances apart by what their terminals show";
 const EMPTY_PASTE = "the empty paste emit, which no input event produces, goes";
 
 const PENDING: readonly Pending[] = [
-  ...pending("app terminal", ONE_TERMINAL, "cast", TAB, {
-    GhosttyTerminal: [
-      "t as GhosttyTerminal",
-      "t as GhosttyTerminal",
-      "term as GhosttyTerminal",
-      "term as GhosttyTerminal",
-      "term as GhosttyTerminal",
-    ],
-    "GhosttyTerminal | null": [
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-      "term as GhosttyTerminal | null",
-    ],
-    Terminal: ["t as Terminal", "term as Terminal", "term as Terminal"],
-    "Terminal | null": ["term as Terminal | null"],
-  }),
-  ...pending("app terminal", ONE_TERMINAL, "name", TAB, {
-    viewportY: ["(t as Terminal).buffer.active.viewportY"],
-  }),
-  ...pending("app terminal", ONE_TERMINAL, "cast", "src/terminal/primarySelection.ts", {
-    GhosttyTerminal: ["term as GhosttyTerminal"],
-    XtermTerminal: ["term as XtermTerminal", "term as XtermTerminal"],
-  }),
-  ...pending("app terminal", ONE_TERMINAL, "member", "src/terminal/primarySelection.ts", {
-    "Terminal.onSelectionChange": ["(term as XtermTerminal).onSelectionChange"],
-  }),
-  ...pending("app terminal", ONE_TERMINAL, "name", "src/terminal/secretMaskingXterm.ts", {
-    viewportY: ["buffer.viewportY", "buffer.viewportY", "buffer.viewportY"],
-  }),
   ...pending("app terminal", METRICS, "name", TAB, {
     renderer: [
       "(term as GhosttyTerminal | null)?.renderer",
@@ -239,20 +204,6 @@ const PENDING: readonly Pending[] = [
   ...pending("app terminal", REFRESH, "duck", TAB, {
     "Terminal.renderer": ["term"],
     "Terminal.wasmTerm": ["term"],
-  }),
-  ...pending("app terminal", FIND, "name", "src/terminal/ghosttyFind.ts", {
-    wasmTerm: ["term.wasmTerm"],
-  }),
-  ...pending("app terminal", FIND, "member", "src/terminal/ghosttyFind.test.ts", {
-    "VtTerminal.resizeListeners": [
-      "(core as unknown as { resizeListeners: Set<unknown> }).resizeListeners",
-      "(core as unknown as { resizeListeners: Set<unknown> }).resizeListeners",
-    ],
-    "VtTerminal.wasm": [
-      "(core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number>; view(): DataView } }).wasm",
-      "(f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm",
-      "(f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm",
-    ],
   }),
   ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
     "Terminal.buildWasmConfig": [

@@ -168,10 +168,9 @@ def drive(url: str) -> dict:
 
         WHY a JavaScript evaluation rather than the title: WebKitGTK truncates
         document.title near a kilobyte, and twelve arms of results are several.
-        Reading the title gave a string cut mid-token. Unlike the present-stall
-        probe -- where touching the engine would destroy the measurement --
-        this harness has already finished measuring by the time this runs, so
-        evaluating in the page costs nothing.
+        Reading the title gave a string cut mid-token. The harness has already
+        finished measuring by the time this runs, so evaluating in the page
+        costs nothing.
         """
         try:
             js = view.evaluate_javascript_finish(result)

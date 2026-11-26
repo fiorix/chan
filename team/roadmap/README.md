@@ -77,7 +77,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [a cs command takes its terminal's focus][csfocus] | not started | build |
 | [a YouTube embed plays under the lock][ytlock] | not started | build |
 | [a queued message behind a stopped view][queuehold] | built | owner |
-| [xterm.js as a second backend][noxterm] | partly built | build |
+| [xterm.js as a second backend][noxterm] | built | GA |
 | [the retired key is still accepted][rejectkey] | not started | later |
 | [a held macOS key opens accents][macrepeat] | not started | measure |
 | [a redial keeps dead modes][redialmodes] | partly built | build |

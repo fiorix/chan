@@ -343,7 +343,13 @@ export class SearchOwner {
     const head = this.#activeEntries();
     if (head === 0) return true;
     this.#orderedAt ??= this.#orderedFrom(head);
-    return this.#readCursor >= this.#orderedAt;
+    return this.#orderPassed();
+  }
+
+  // Whether placement has read as many listed entries as the ordering rule
+  // last asked for; a rule not read since the count was has not passed.
+  #orderPassed(): boolean {
+    return this.#orderedAt !== null && this.#readCursor >= this.#orderedAt;
   }
 
   // The count of the core's active-area entries, read where output made it
@@ -682,8 +688,7 @@ export class SearchOwner {
     // what placement has read alone: the write that takes it has already
     // changed the core's listing, and reading that would feed the core
     // inside the write.
-    const known = this.#complete ||
-      (this.#head !== null && (this.#head === 0 || (this.#orderedAt !== null && this.#readCursor >= this.#orderedAt)));
+    const known = this.#complete || this.#head === 0 || this.#orderPassed();
     const edges = known ? [] : [this.#pageAbove, this.#firstListed];
     for (const edge of edges) {
       const split = edge ? this.#indexOf(edge) : undefined;

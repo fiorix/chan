@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { showFiles } from "../lib/files.mjs";
-import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 
 const TAB = "SmokeThemeSwitch221";
 const DOC = "theme-switch-221.md";
@@ -128,7 +128,7 @@ export default {
       if (!left) throw new Error("the window lists no pane");
       const right = (await shell(["pane", "new", "right", "--window", windowId, "--pane", left])).stdout.trim();
       if (!right) throw new Error("pane new printed no pane id");
-      await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty", ["--pane", right]);
+      await openAttachedTerminal(ctx, page, cs, windowId, TAB, ["--pane", right]);
       terminalOpen = true;
 
       // The shell prints history and its pid, then becomes dd recording every
@@ -349,7 +349,7 @@ async function stableReading(page, surface, label) {
   const deadline = Date.now() + 30_000;
   let previous = null;
   for (;;) {
-    const reading = await page.evaluate(readSurface, surface, { doc: DOC, deck: DECK, board: BOARD }, TERMINAL_SURFACES);
+    const reading = await page.evaluate(readSurface, surface, { doc: DOC, deck: DECK, board: BOARD }, TERMINAL_SURFACE);
     if (reading.ready && previous?.ready && JSON.stringify(reading) === JSON.stringify(previous)) return reading.rows;
     if (Date.now() > deadline) throw new Error(`${label}: no stable reading in 30 s; the last: ${JSON.stringify(reading).slice(0, 600)}`);
     previous = reading;
@@ -361,7 +361,7 @@ async function stableReading(page, surface, label) {
 /// tag, classes (less scope hashes and focus state) and computed colours; for
 /// the terminal, the canvas pixels at fixed cells of the loop's line and of
 /// unstyled cells, and the tab's own colours.
-function readSurface(surface, files, terminalSurfaces) {
+function readSurface(surface, files, terminalSurface) {
   const visible = (el) => {
     const s = getComputedStyle(el);
     if (s.visibility !== "visible" || s.display === "none") return false;
@@ -386,7 +386,7 @@ function readSurface(surface, files, terminalSurfaces) {
   if (!left) return { ready: false, why: "no pane holds the document" };
   if (surface === "terminal") {
     const host = [...document.querySelectorAll(".terminal-tab.active .terminal-host")].find(visible);
-    const canvas = host?.querySelector(terminalSurfaces.ghostty);
+    const canvas = host?.querySelector(terminalSurface);
     if (!canvas || !canvas.width) return { ready: false, why: "no terminal canvas" };
     const tab = host.closest(".terminal-tab");
     // The loop's line fixes the cell geometry: the grid's first row starts

@@ -160,8 +160,8 @@ export type TerminalPreferences = {
   idle_timeout_secs: number;
   session_cap: number;
   ring_bytes: number;
-  /// Per-terminal scrollback budget in MB. Consumed at xterm.js
-  /// construction time; spawn-time only (existing terminals keep
+  /// Per-terminal scrollback budget in MB. Consumed when the tab builds
+  /// its terminal; spawn-time only (existing terminals keep
   /// their current scrollback until the session restarts). Server
   /// clamps to [10, 50]; default 10.
   scrollback_mb?: number;
@@ -207,7 +207,7 @@ export type TerminalPreferences = {
   /// not edit. Optional on the wire so older servers (no field) deserialize
   /// cleanly; the SPA treats an absent `enabled` as true.
   tmux?: { enabled?: boolean; trust?: string[] };
-  /// Whether xterm.js terminals visually obscure values whose assignment
+  /// Whether terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. When absent, control terminals
   /// seed masking on and other windows seed it off. Per-tab toggles do not
   /// persist this field. A read carries `true`, `false` or no key; `null`

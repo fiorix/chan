@@ -254,7 +254,7 @@ export default {
         result.terminals[label] = record;
         const goFile = join(dir, "go");
         rmSync(goFile, { force: true });
-        const term = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, tab, "ghostty", ["--command", `exec ${join(dir, script)}`]));
+        const term = await terminalOf(page, await openAttachedTerminal(ctx, page, cs, windowId, tab, ["--command", `exec ${join(dir, script)}`]));
         record.sizing = await sizeTo80(page, term, label);
 
         // The two readings the tab decides from, as the page received them.

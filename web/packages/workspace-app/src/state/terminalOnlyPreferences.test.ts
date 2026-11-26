@@ -90,7 +90,7 @@ describe("a standalone terminal loads its preferences at boot", () => {
 
     // Assert the values, not merely that a source exists: seeding an empty
     // or default Preferences object would satisfy a non-null check while
-    // still showing the user a 14px standard-colour xterm.
+    // still showing the user a 14px terminal in the standard colours.
     const prefs = store.currentPreferences();
     expect(prefs?.terminal.font_size).toBe(20);
     expect(prefs?.terminal_colors?.mode).toBe("custom");

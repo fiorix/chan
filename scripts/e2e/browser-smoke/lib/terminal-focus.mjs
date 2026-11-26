@@ -147,7 +147,7 @@ export async function runFocusCheck(ctx, number, body) {
       return resource;
     };
     const attach = async (resource, matches) => {
-      const { row } = await waitFocus("terminal attachment", () => readTerminalAttachment(page, cs, "ghostty", matches),
+      const { row } = await waitFocus("terminal attachment", () => readTerminalAttachment(page, cs, matches),
         (value) => value.attached && value.row.window === windowId);
       resource.row = row;
       resource.query = terminalQuery(row);
@@ -160,7 +160,7 @@ export async function runFocusCheck(ctx, number, body) {
       const resource = await create(label);
       const spawn = ["--command", "stty -opost -echo && " + resource.fixture.command,
         ...Object.entries(resource.fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`]), ...args];
-      resource.row = await openAttachedTerminal(ctx, page, cs, windowId, resource.name, "ghostty", spawn);
+      resource.row = await openAttachedTerminal(ctx, page, cs, windowId, resource.name, spawn);
       return attach(resource, (entry) => entry.session_id === resource.row.session_id);
     };
     const leg = async (name, action) => {

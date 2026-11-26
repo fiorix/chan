@@ -6,8 +6,7 @@
 // elsewhere in the meantime survives. The theme goes through the app's own
 // theme setter, so the chrome follows before the write lands. A size field
 // commits on Enter (on blur in SettingsOverlay.render.test.ts). Secret
-// masking offers its three choices, said to cover both backends, and shows
-// its suffixes read-only.
+// masking offers its three choices and shows its suffixes read-only.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -105,13 +104,12 @@ describe("a size field", () => {
 });
 
 describe("secret masking", () => {
-  test("offers On, Off and Default, said to cover both backends, and shows the suffixes read-only", async () => {
+  test("offers On, Off and Default, and shows the suffixes read-only", async () => {
     const { target } = await openSettings("Terminal");
     const field = [...target.querySelectorAll<HTMLElement>("h3")]
       .find((heading) => heading.textContent === "Secret masking")!
       .closest<HTMLElement>("section.field")!;
 
-    expect(field.textContent).toContain("xterm.js and ghostty backends alike");
     expect(
       [...field.querySelectorAll('[role="radiogroup"] label.pill')].map((pill) => pill.textContent?.trim()),
     ).toEqual(["On", "Off", "Default"]);

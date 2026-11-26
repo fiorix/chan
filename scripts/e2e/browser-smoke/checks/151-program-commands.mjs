@@ -10,8 +10,8 @@ const program = (state, id) => state.row.program_status?.records?.find((record) 
   record.source === "program" && record.id === id);
 
 async function checkStatusCommandStates(ctx, tab) {
-  const script = join(ctx.workspaceDir, `status-151-${tab.backend}-states.sh`);
-  const gate = join(ctx.workspaceDir, `status-151-${tab.backend}-states.fifo`);
+  const script = join(ctx.workspaceDir, "status-151-states.sh");
+  const gate = join(ctx.workspaceDir, "status-151-states.fifo");
   await ctx.exec("mkfifo", [gate]);
   const stages = [
     { state: "idle", args: [], cell: "idle" },
@@ -24,7 +24,7 @@ async function checkStatusCommandStates(ctx, tab) {
   const lines = ["#!/usr/bin/env bash", "set -e"];
   for (const [index, stage] of stages.entries()) {
     const argv = [ctx.chanBin, "shell", "terminal", "status", stage.state, "--id", "command", ...stage.args];
-    const marker = join(ctx.workspaceDir, `status-151-${tab.backend}-${stage.state}.ready`);
+    const marker = join(ctx.workspaceDir, `status-151-${stage.state}.ready`);
     lines.push(argv.map(shellQuote).join(" "));
     lines.push(`printf 'ready\\n' > ${shellQuote(marker)}`);
     if (index < stages.length - 1) lines.push(`IFS= read -r _ < ${shellQuote(gate)}`);
@@ -32,7 +32,7 @@ async function checkStatusCommandStates(ctx, tab) {
   writeFileSync(script, `${lines.join("\n")}\n`);
   await tab.cs(["write", "--tab-name", tab.subject, `bash ${shellQuote(script)}\n`]);
   for (const [index, stage] of stages.entries()) {
-    const marker = join(ctx.workspaceDir, `status-151-${tab.backend}-${stage.state}.ready`);
+    const marker = join(ctx.workspaceDir, `status-151-${stage.state}.ready`);
     await ctx.pollFile(marker, 20_000);
     const observed = await tab.wait(`cs-${stage.state}`, (value) =>
       value.programCell === stage.cell &&
@@ -59,9 +59,9 @@ async function checkExport(ctx, tab) {
   };
   tab.page.on("request", onRequest);
   await tab.page.setRequestInterception(true);
-  const outputName = `status-151-${tab.backend}.pdf`;
-  const pidPath = join(ctx.workspaceDir, `status-151-${tab.backend}-export.pid`);
-  const logPath = join(ctx.workspaceDir, `status-151-${tab.backend}-export.log`);
+  const outputName = "status-151.pdf";
+  const pidPath = join(ctx.workspaceDir, "status-151-export.pid");
+  const logPath = join(ctx.workspaceDir, "status-151-export.log");
   const argv = [ctx.chanBin, "shell", "export", "doc.md", "--out", outputName];
   let pid = null;
   try {
@@ -83,13 +83,13 @@ async function checkExport(ctx, tab) {
     assert.deepEqual(own(held, "export").map(({ state, app, title }) => ({ state, app, title })),
       [{ state: "working", app: "cs", title: "Export" }], "requester holds chan's export record during the page upload");
     assert.match(own(held, "export")[0].id, /^export\/[0-9a-f]{16}$/, "export has a bounded own id");
-    await ctx.shot(`${tab.backend}-export-held`, tab.page);
+    await ctx.shot("export-held", tab.page);
     await heldRequest.continue();
     released = true;
     await ctx.pollFile(join(ctx.workspaceDir, outputName), 60_000);
     await tab.wait("export-finished", (state) => own(state, "export").length === 0 &&
       state.mark?.activity !== "spinner" && state.programCell === "-", 30_000);
-    await ctx.shot(`${tab.backend}-export-cleared`, tab.page);
+    await ctx.shot("export-cleared", tab.page);
   } finally {
     if (heldRequest && !released) await heldRequest.continue().catch(() => {});
     tab.page.off("request", onRequest);
@@ -118,7 +118,7 @@ export default {
         assert.equal(rows.find((row) => row.name === tab.front)?.program_status?.records?.length ?? 0, 0,
           "the survey target carries no requester record");
         await tab.page.waitForSelector(".survey-overlay .survey-option");
-        await ctx.shot(`${tab.backend}-survey-held`, tab.page);
+        await ctx.shot("survey-held", tab.page);
         await tab.page.click(".survey-overlay .survey-option");
         answered = true;
         await tab.wait("survey-answered", (state) => own(state, "survey").length === 0 &&
@@ -135,8 +135,8 @@ export default {
       await tab.sendReport("state=done:id=preserve");
       const before = await tab.wait("before-refused-input", (state) =>
         program(state, "preserve")?.state === "done" && state.programCell === "done", 30_000);
-      const output = join(ctx.workspaceDir, `status-151-${tab.backend}-invalid.out`);
-      const result = join(ctx.workspaceDir, `status-151-${tab.backend}-invalid.rc`);
+      const output = join(ctx.workspaceDir, "status-151-invalid.out");
+      const result = join(ctx.workspaceDir, "status-151-invalid.rc");
       const argv = [ctx.chanBin, "shell", "terminal", "status", "working", "--id", "invalid", "--msg", "x".repeat(2049)];
       await tab.cs(["write", "--tab-name", tab.subject,
         `${argv.map(shellQuote).join(" ")} > ${shellQuote(output)} 2>&1; printf '%s\\n' "$?" > ${shellQuote(result)}\n`]);
@@ -144,7 +144,7 @@ export default {
       const after = await tab.read();
       assert.deepEqual(after.row.program_status, before.row.program_status, "refused input preserves the whole record set, revision and order");
       assert.equal(after.programCell, "done", "refused input leaves the tab's program cell unchanged");
-      await ctx.shot(`${tab.backend}-over-limit-refused`, tab.page);
+      await ctx.shot("over-limit-refused", tab.page);
     });
   },
 };

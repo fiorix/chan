@@ -546,7 +546,6 @@ class Scenario:
 
     def url(self, port: int) -> str:
         config = {
-            "backend": "ghostty",
             "font": self.font,
             "fontFamily": linux_font_chain(self.font),
             "fontSize": FONT_SIZE,
