@@ -1,4 +1,4 @@
-use super::super::tests::test_session_with_ring;
+use super::super::tests::{opts_with_command, test_config, test_session_with_ring};
 use super::super::*;
 use super::session_tests::attach_acked;
 
@@ -48,10 +48,170 @@ fn missed_live_tail_reconciles_every_mode_and_both_screen_targets() {
 }
 
 #[test]
+fn a_resume_past_a_lost_mode_reset_gets_the_live_recovery_suffix() {
+    // A redialed view keeps the screen and modes it had parsed up to its
+    // cursor. When the reset of those modes is evicted before the redial,
+    // only an authoritative suffix can take them away again.
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(b"\x1b[?1049l\x1b[?1000l");
+    session.record_output(b"$ the shell again\r\n");
+    let live = viewer.replay_from(cursor);
+    assert!(live.missed_bytes > 0, "fixture: the reset was evicted");
+    assert_eq!(
+        live.mode_reassert,
+        expected_suffix(false, &[]),
+        "fixture: a live socket's recovery from the cursor resets every mode"
+    );
+    let resumed = session.clone().attach(Some(cursor));
+    assert_eq!(resumed.missed_bytes, live.missed_bytes);
+    assert_eq!(
+        resumed.mode_reassert, live.mode_reassert,
+        "a resume that lost bytes gets the suffix a live recovery gets"
+    );
+}
+
+/// A registry holding `session` live, for a dial through
+/// [`Registry::get_or_create_for_ws`], which chooses the resume.
+fn registry_holding(session: &Arc<Session>) -> Registry {
+    let registry = Registry::new(test_config(1024, 4, 60));
+    registry
+        .sessions
+        .lock()
+        .expect("terminal registry poisoned")
+        .insert(session.id.clone(), session.clone());
+    registry
+}
+
+fn dial(
+    registry: &Registry,
+    session: &Session,
+    since: u64,
+    generation: Option<u64>,
+) -> AttachHandle {
+    registry
+        .get_or_create_for_ws(
+            Some(&session.id),
+            Some(since),
+            opts_with_command("true"),
+            TerminalPlacement::default(),
+            generation,
+            None,
+        )
+        .expect("the session is live")
+}
+
+#[test]
+fn a_redial_of_the_live_generation_resumes_as_the_live_recovery() {
+    // A redialed view kept the screen it parsed up to its cursor, the
+    // alternate one included, so it resumes as its live socket would: the
+    // raw delta, nothing added when nothing was lost, the authoritative
+    // suffix when the ring moved past a reset.
+    for (ring, lossy) in [(1024, false), (32, true)] {
+        let session = test_session_with_ring(ring);
+        let registry = registry_holding(&session);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h\x1b[?1000h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(b"\x1b[?1000l");
+        session.record_output(&[b'x'; 32]);
+        let live = viewer.replay_from(cursor);
+        assert_eq!(
+            live.missed_bytes > 0,
+            lossy,
+            "fixture: loss in a {ring}-byte ring"
+        );
+        assert_eq!(
+            live.mode_reassert,
+            if lossy {
+                expected_suffix(true, &[])
+            } else {
+                Vec::new()
+            },
+            "fixture: the live recovery in a {ring}-byte ring"
+        );
+        let redial = dial(&registry, &session, cursor, Some(session.generation));
+        assert_eq!(
+            (redial.replay.concat(), redial.missed_bytes),
+            (live.replay.concat(), live.missed_bytes),
+            "a redial of the live generation in a {ring}-byte ring replays the raw delta, \
+             alternate-screen bytes included, as the live recovery does"
+        );
+        assert_eq!(
+            redial.mode_reassert, live.mode_reassert,
+            "a redial of the live generation in a {ring}-byte ring gets the live recovery's \
+             mode bytes"
+        );
+        assert!(
+            redial.continues_view,
+            "a redial of the live generation in a {ring}-byte ring continues its view, so it \
+             gets no alternate-screen attach prelude"
+        );
+    }
+}
+
+#[test]
+fn a_dial_without_a_live_generation_cursor_keeps_its_resume() {
+    // Only a cursor proven by the live generation names a screen the dial
+    // continues. A fresh view, a cursor no generation proves and another
+    // life's cursor take the alternate screen's attach: no replay, and the
+    // modes the program has on.
+    let session = test_session_with_ring(1024);
+    let registry = registry_holding(&session);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(b"\x1b[?1000l\x1b[?1h");
+    let live = Some(session.generation);
+    for (since, generation, dialed) in [
+        (0, None, "a fresh view"),
+        (0, live, "a cursor at 0 in the live generation"),
+        (cursor, None, "a cursor with no generation"),
+        (
+            cursor,
+            Some(session.generation + 1),
+            "another life's cursor",
+        ),
+    ] {
+        let attached = dial(&registry, &session, since, generation);
+        assert!(attached.alt_screen, "fixture: the alternate screen");
+        assert!(attached.replay.is_empty(), "{dialed} replays nothing");
+        assert_eq!(attached.missed_bytes, 0, "{dialed} counts nothing missed");
+        assert_eq!(
+            String::from_utf8_lossy(&attached.mode_reassert),
+            "\x1b[?1h",
+            "{dialed} gets the enables-only prelude"
+        );
+        assert!(
+            !attached.continues_view,
+            "{dialed} continues no view, so it gets the alternate-screen attach prelude"
+        );
+    }
+}
+
+#[test]
 fn fresh_attach_keeps_the_enables_only_prelude() {
     let session = test_session_with_ring(1024);
     session.record_output(b"\x1b[?1049;1000h");
     assert_eq!(session.attach(None).mode_reassert, b"\x1b[?1000h");
+}
+
+#[test]
+fn a_fresh_view_past_an_overflowed_ring_keeps_the_enables_only_prelude() {
+    // A fresh view dials at 0, so an overflowed ring gives it a missed
+    // count. It never parsed the lost span, so it has no screen whose
+    // modes that span could have reset.
+    let session = test_session_with_ring(32);
+    session.record_output(b"\x1b[?2004h");
+    session.record_output(b"more shell output than the ring can hold, twice over");
+    let fresh = session.attach(Some(0));
+    assert!(fresh.missed_bytes > 0, "fixture: the ring overflowed");
+    assert_eq!(
+        String::from_utf8_lossy(&fresh.mode_reassert),
+        "\x1b[?2004h",
+        "a fresh view past an overflowed ring gets the enables-only prelude"
+    );
 }
 
 fn assert_lossless_live_sequence(prefix: &[u8], continuation: &[u8]) {

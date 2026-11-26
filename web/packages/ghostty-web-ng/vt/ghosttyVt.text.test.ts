@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
 import { SCREEN_STREAMS, TEXT_STREAMS } from "./__tests__/ghosttyStreams";
-import { GhosttyVt, ghosttyScrollbackText, VtCells, VtTerminal, type VtCell } from "./ghosttyVt";
+import { GhosttyVt, VtCells, VtTerminal, type VtCell } from "./ghosttyVt";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -256,57 +256,6 @@ describe("a range of rows in one core call", () => {
     expect(t.plainText({ startCol: 0, startRow: 1, endCol: 19, endRow: 99 })).toBe("b\nc");
     expect(t.plainText({ startCol: 0, startRow: 50, endCol: 19, endRow: 99 })).toBe("");
     expect(t.plainText({ startCol: 19, startRow: 99, endCol: 0, endRow: 1 })).toBe("b\nc");
-  });
-});
-
-describe("Copy scrollback's text", () => {
-  type Source = Parameters<typeof ghosttyScrollbackText>[0];
-
-  test("reads the binding's terminal in one call and no row of the buffer", async () => {
-    const t = await terminal(40, 4);
-    write(t, "one\r\ntwo  \r\n\r\nthree\r\n");
-    const term: Source = {
-      wasmTerm: t,
-      buffer: {
-        active: {
-          length: 4,
-          getLine: () => {
-            throw new Error("read a buffer row");
-          },
-        },
-      },
-    };
-    expect(ghosttyScrollbackText(term)).toBe("one\ntwo\n\nthree");
-  });
-
-  test("joins a wrapped command and leaves out what the screen does not draw", async () => {
-    const t = await terminal(10, 4);
-    write(t, "$ ab\x7fcdefghijkl\r\nnext");
-    const term: Source = { wasmTerm: t, buffer: { active: { length: 0, getLine: () => undefined } } };
-    expect(ghosttyScrollbackText(term)).toBe("$ abcdefghijkl\nnext");
-  });
-
-  test("reads the buffer row by row from a terminal the binding does not drive", () => {
-    const rows = ["first  ", "", "last", "", ""];
-    const term: Source = {
-      wasmTerm: undefined,
-      buffer: {
-        active: {
-          length: rows.length,
-          getLine: (y) => ({ translateToString: (trim) => (trim ? rows[y].trimEnd() : rows[y]) }),
-        },
-      },
-    };
-    expect(ghosttyScrollbackText(term)).toBe("first\n\nlast");
-  });
-
-  test("leaves out what the screen does not draw from a buffer read too", () => {
-    const rows = ["fir\x7fst", "\u200blast"];
-    const term: Source = {
-      wasmTerm: undefined,
-      buffer: { active: { length: rows.length, getLine: (y) => ({ translateToString: () => rows[y] }) } },
-    };
-    expect(ghosttyScrollbackText(term)).toBe("first\nlast");
   });
 });
 

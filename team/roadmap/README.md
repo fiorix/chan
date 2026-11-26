@@ -76,11 +76,11 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [the wake fix unread on macOS][wakemac] | not started | measure |
 | [a cs command takes its terminal's focus][csfocus] | not started | build |
 | [a YouTube embed plays under the lock][ytlock] | not started | build |
-| [a queued message behind a stopped view][queuehold] | not started | build |
+| [a queued message behind a stopped view][queuehold] | built | owner |
 | [xterm.js as a second backend][noxterm] | partly built | build |
 | [the retired key is still accepted][rejectkey] | not started | later |
 | [a held macOS key opens accents][macrepeat] | not started | measure |
-| [a redial keeps dead modes][redialmodes] | not started | build |
+| [a redial keeps dead modes][redialmodes] | partly built | build |
 
 
 ## Completed

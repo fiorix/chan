@@ -822,8 +822,8 @@ impl TmuxConnection {
             }
             PtyCommand::Redraw => {
                 // The ring replays what the pane showed; a program on the
-                // alternate screen is asked for its screen again, since that
-                // replay is empty by design.
+                // alternate screen is asked for its screen again, since a
+                // fresh view's replay is empty there by design.
                 let alt = self
                     .panes
                     .get(&pane)
