@@ -1643,8 +1643,8 @@ impl Stall {
 }
 
 /// Give the PTY the size the client declared before the attach prelude, so
-/// the redraw nudge that ends the prelude repaints at that size, not at the
-/// size an earlier client left. The SPA also sends a Resize frame when its
+/// a redraw the prelude asks for repaints at that size, not at the size an
+/// earlier client left. The SPA also sends a Resize frame when its
 /// socket opens; the prelude pumps that frame while sending, with the declared
 /// grid already applied before its first byte.
 ///
