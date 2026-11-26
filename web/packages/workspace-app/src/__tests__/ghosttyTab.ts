@@ -137,6 +137,16 @@ export function ghosttyCellMetrics(term: Terminal) {
   return metrics;
 }
 
+/// The widget's repaints from now on, seen through an ordinary paint layer:
+/// one entry per paint that repainted rows, `full` when it repainted every
+/// viewport row. Registering the layer invalidates the next frame, so a
+/// caller that needs a quiet start runs that frame and clears the list.
+export function observeGhosttyPaints(term: Terminal): Array<{ full: boolean }> {
+  const paints: Array<{ full: boolean }> = [];
+  term.addPaintLayer({ order: 0, paint: ({ full }) => { paints.push({ full }); } });
+  return paints;
+}
+
 export function ghosttyLineText(term: Terminal, row: number): string | undefined {
   return term.buffer.active.getLine(row)?.translateToString(true);
 }

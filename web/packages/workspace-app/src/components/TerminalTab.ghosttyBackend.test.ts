@@ -39,7 +39,9 @@ import { loadGhosttyKit } from "../terminal/backend";
 import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
 import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { Osc52Bridge } from "../terminal/osc52Bridge";
-import { ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, pressInGhostty } from "../__tests__/ghosttyTab";
+import {
+  ghosttyFixture, installSoftwareCanvas, mountGhosttyTerminal, observeGhosttyPaints, pressInGhostty,
+} from "../__tests__/ghosttyTab";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
@@ -488,17 +490,19 @@ describe("focus recovery after a host resume", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
 
-  // ghostty-web has no refresh() and its frame loop repaints dirty rows
-  // only, so pixels the host dropped while the window sat off-screen come
-  // back only through a forced full pass of its renderer; the resume must
-  // ask for one even though the grid is unchanged and the fit is a no-op.
+  // The widget's frame loop repaints dirty rows only, so pixels the host
+  // dropped while the window sat off-screen come back only through a full
+  // repaint; the resume must ask for one even though the grid is unchanged
+  // and the fit is a no-op.
   test("the resume forces a full render pass of the ghostty renderer", async () => {
     const { term } = await mountGhostty();
+    const paints = observeGhosttyPaints(term);
     canvas.frame();
-    const rendered = vi.spyOn(term.renderer!, "render");
+    expect(paints.length, "the layer sees the frame its registration invalidated").toBeGreaterThan(0);
+    paints.splice(0);
     const resized = vi.spyOn(term, "resize");
     await resume();
-    expect(rendered.mock.calls.some((call) => call[1] === true), "a forced pass").toBe(true);
+    expect(paints.some(({ full }) => full), "a full repaint").toBe(true);
     expect(resized, "the repaint is not a resize").not.toHaveBeenCalled();
   });
 

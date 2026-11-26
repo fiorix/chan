@@ -108,6 +108,15 @@ function observePaintedViewports({ term }: OpenTerminal): number[] {
   return viewports;
 }
 
+/// The viewport offset of each widget paint that repaints rows, read through
+/// an ordinary paint layer. Registering the layer invalidates the next frame,
+/// so the first paint after it repaints every row.
+function observeLayerPaints({ term }: OpenTerminal): number[] {
+  const offsets: number[] = [];
+  term.addPaintLayer({ order: 0, paint: ({ viewportOffset }) => { offsets.push(viewportOffset); } });
+  return offsets;
+}
+
 const INPUTS: Array<{ name: string; send(state: OpenTerminal): void; bytes: string }> = [
   { name: "a letter through the widget's input handler", send: typeLetter, bytes: "a" },
   { name: "a composition commit", send: commitComposition, bytes: "\u00e9" },
@@ -246,18 +255,18 @@ describe("the ghostty widget's input scroll", () => {
     const state = await openTerminal();
     state.viewport.write("\x1b[?1000h" + mode);
     scheduler.advance();
-    const render = vi.spyOn(state.term.renderer!, "render");
+    const layered = observeLayerPaints(state);
     const painted = observePaintedViewports(state);
     mousePointer(state.canvas, "pointerdown", { clientX: 1, clientY: 1 });
     expect(state.sent).toEqual([{ data: bytes, viewport: HISTORY_OFFSET }]);
     state.viewport.write("\x1b[42mresponse\x1b[0m");
     expect(state.term.getViewportY(), "the controller has restored history").toBe(HISTORY_OFFSET);
     expect(painted, "no bottom frame may paint inside the write before that restore").toEqual([]);
-    expect(render).not.toHaveBeenCalled();
+    expect(layered, "nothing paints inside the write").toEqual([]);
     scheduler.advance();
     // The render loop and scrollbar fade can both paint in one frame.
-    expect(render).toHaveBeenCalled();
-    expect(render.mock.calls.every((args) => args[2] === HISTORY_OFFSET)).toBe(true);
+    expect(layered.length, "the queued frame paints").toBeGreaterThan(0);
+    expect(new Set(layered), "every paint shows history").toEqual(new Set([HISTORY_OFFSET]));
     expect(painted.length, "the queued renderer still paints").toBeGreaterThan(0);
     expect(new Set(painted)).toEqual(new Set([HISTORY_OFFSET]));
   });
@@ -273,10 +282,10 @@ describe("the ghostty widget's input scroll", () => {
       { data: "a", viewport: 0 },
       { data: "\x1b[<0;1;1M", viewport: 0 },
     ]);
-    const render = vi.spyOn(state.term.renderer!, "render");
+    const layered = observeLayerPaints(state);
     const painted = observePaintedViewports(state);
     state.viewport.write("a");
-    expect(render, "the user's echo paints before a queued frame runs").toHaveBeenCalledOnce();
+    expect(layered, "the user's echo paints once, at the bottom, before a queued frame runs").toEqual([0]);
     expect(painted.length).toBeGreaterThan(0);
     expect(new Set(painted)).toEqual(new Set([0]));
   });
