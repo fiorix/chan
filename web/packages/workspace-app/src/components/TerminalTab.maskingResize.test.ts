@@ -88,11 +88,15 @@ describe("a width change with secret masking on", () => {
     const wrapped = [[{ x: 10, width: 70 }], [{ x: 0, width: 20 }]];
     expect(rows(), "wrapped over two rows at 80 columns").toEqual(wrapped);
 
-    term.resize(120, 24);
+    // The height is held: a height change alone rescans the masks, so the
+    // steps would pass without the width triggers they test.
+    const fitted = term.rows;
+    expect([term.cols, fitted], "the grid the host fits").toEqual([80, 20]);
+    term.resize(120, fitted);
     expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe(`API_TOKEN=${"abcdefghij".repeat(9)}`);
     expect(rows(), "on one row at 120 columns").toEqual([[{ x: 10, width: 90 }], []]);
 
-    term.resize(80, 24);
+    term.resize(80, fitted);
     expect(rows(), "on two rows again at 80 columns").toEqual(wrapped);
   });
 });
