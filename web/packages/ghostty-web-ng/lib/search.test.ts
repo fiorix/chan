@@ -2299,3 +2299,168 @@ describe('press deadlines and reveals', () => {
     expect(active(term)).toEqual([range(150, 0, 150, 9)]);
   });
 });
+
+describe('the cost model', () => {
+  // The owner's frame target and its costs assumed before any is measured
+  // (`FRAME_BUDGET_MS`, `SCAN_BUDGET_MS`, `COST_PRIORS` in search.ts), per
+  // cell read and per match times cell checked or completed.
+  const FRAME_MS = 12;
+  const SCAN_MS = 4;
+  const PRIOR = { read: 4e-6, check: 2e-11, complete: 3e-11 };
+  const COLS = 200;
+  // At 200 columns and next to nothing held to check, a backlog of this
+  // many rows predicts exactly the frame's budget at the assumed read.
+  const LIMIT = FRAME_MS / (COLS * PRIOR.read);
+
+  // A 200x10 terminal holding `lines`, with room for `scrollback` history
+  // rows, its search for "needle" complete.
+  async function settled(lines: string, scrollback = 60_000) {
+    const { term } = await create(lines, COLS, 10, scrollback);
+    const search = searchOf(term);
+    search.find('needle');
+    for (let i = 0; search.state.partial; i++) {
+      if (i > 100_000) throw new Error('search did not complete');
+      frame();
+    }
+    return { term, search };
+  }
+  const matching = (n: number) => Array.from({ length: n }, (_, i) => `needle ${i}`).join('\r\n');
+  // A frame after `rows` filler rows are written; true when the owner
+  // restarted its search instead of feeding it.
+  function frameAfter(term: Terminal, rows: number): boolean {
+    const restart = vi.spyOn(VtSearch.prototype, 'restart');
+    restart.mockClear();
+    term.write('filler\r\n'.repeat(rows));
+    frame();
+    return restart.mock.calls.length > 0;
+  }
+  // Each feed takes `cost.ms(rows)` on the test's clock, `rows` the history
+  // rows added since the feed before it; the case changes `cost.ms`.
+  function costly(term: Terminal, ms: (rows: number) => number) {
+    if (vi.isMockFunction(VtSearch.prototype.feed)) vi.mocked(VtSearch.prototype.feed).mockRestore();
+    const feed = VtSearch.prototype.feed;
+    const cost = { ms };
+    let history = term.getScrollbackLength();
+    vi.spyOn(VtSearch.prototype, 'feed').mockImplementation(function (this: VtSearch) {
+      now += cost.ms(term.getScrollbackLength() - history);
+      history = term.getScrollbackLength();
+      feed.call(this);
+    });
+    return cost;
+  }
+  // The budget the first scan step of the rescan is given after `rows`
+  // filler rows restart a complete scan; the rescan keeps the count of
+  // matches it held, which its completion is predicted from.
+  function stepBudgetAfterRestart(term: Terminal, search: Search, rows: number) {
+    const step = vi.mocked(VtSearch.prototype.step);
+    step.mockClear();
+    expect(frameAfter(term, rows), 'the complete scan restarts').toBe(true);
+    for (let i = 0; step.mock.calls.length === 0; i++) {
+      if (i > 100 || !search.state.partial) throw new Error('no scan step after the restart');
+      frame();
+    }
+    return step.mock.calls[0][0];
+  }
+
+  test('a backlog predicted to fit the frame is fed, and one predicted over it restarts the scan', async () => {
+    const under = await settled('needle a\r\nneedle b');
+    expect(frameAfter(under.term, Math.floor(LIMIT) - 500)).toBe(false);
+    const over = await settled('needle a\r\nneedle b');
+    expect(frameAfter(over.term, Math.ceil(LIMIT) + 500)).toBe(true);
+    expect(over.search.state.partial, 'the rescan has only begun').toBe(true);
+    settle(over.search);
+    expect(over.search.state).toEqual({ index: 1, total: 2, partial: false });
+  });
+
+  test('feeds measured cheaper than assumed do not lower the read under the assumed cost', async () => {
+    const { term } = await settled('needle a');
+    // A tenth of the assumed cost.
+    costly(term, rows => rows * COLS * PRIOR.read / 10);
+    for (let i = 0; i < 4; i++) expect(frameAfter(term, 1000), `cheap feed ${i}`).toBe(false);
+    expect(frameAfter(term, Math.floor(LIMIT) - 500), 'under the threshold').toBe(false);
+    expect(frameAfter(term, Math.ceil(LIMIT) + 500), 'over it, as at the assumed cost').toBe(true);
+  });
+
+  test('one feed that ran long raises the read estimate, by a quarter at most', async () => {
+    // With nothing to check, 12,500 rows at 200 columns predict 10 ms at the
+    // assumed read and 12.5 ms a quarter above it; 11,000 rows predict 11 ms
+    // a quarter above it and 13.2 ms half above it.
+    for (const [rows, restarts] of [[12_500, true], [11_000, false]] as const) {
+      const { term } = await settled('needle a');
+      const cost = costly(term, () => 100);
+      expect(frameAfter(term, 1000), 'the long feed').toBe(false);
+      cost.ms = () => 0.01;
+      expect(frameAfter(term, rows), `${rows} rows`).toBe(restarts);
+    }
+  });
+
+  test("a feed under the clock's grain, measured as no time, teaches nothing", async () => {
+    // Three feeds of twice the budget raise the read to about 1.95 times its
+    // assumed cost, where 10,000 rows at 200 columns predict 15.6 ms and
+    // restart; four feeds the clock reads as no time leave it there, where
+    // learned as cheap they would lower it back to the assumed 8 ms.
+    const { term } = await settled('needle a');
+    const cost = costly(term, () => 2 * FRAME_MS);
+    for (let i = 0; i < 3; i++) expect(frameAfter(term, 1000), `slow feed ${i}`).toBe(false);
+    cost.ms = () => 0;
+    for (let i = 0; i < 4; i++) expect(frameAfter(term, 1000), `feed under the grain ${i}`).toBe(false);
+    expect(frameAfter(term, 10_000)).toBe(true);
+  });
+
+  test("a complete scan's feed over the budget is fed, not restarted, where the rescan's completion would cost more", async () => {
+    // 50,000 matches in a 50,000-line history at 200 columns: a feed's
+    // check is assumed at about 11 ms and a completing unit's at about 16
+    // once 4,700 rows more are held. Those rows read in 3.8 ms: the feed
+    // predicts 14.7 ms, over the budget but under the completion, and is
+    // fed. 10,000 rows read in 8 ms: the feed predicts 20 ms, dearer than
+    // the completion's 18, and restarts.
+    for (const [rows, restarts] of [[4_700, false], [10_000, true]] as const) {
+      const { term } = await settled(matching(50_000), 80_000);
+      expect(frameAfter(term, rows), `${rows} rows`).toBe(restarts);
+    }
+  });
+
+  test('a running scan restarts for a read of a scan step or more whose completion would not fit, and feeds smaller ones', async () => {
+    const { term, search } = await settled(matching(50_000), 80_000);
+    expect(frameAfter(term, 10_000), 'the complete scan restarts').toBe(true);
+    // 6,000 rows read in 4.8 ms at the assumed cost, a scan step's budget or
+    // more, with the completion over the frame's budget.
+    for (let i = 0; i < 2; i++) expect(frameAfter(term, 6_000), `big write ${i}`).toBe(true);
+    // 100 rows read in 0.08 ms: a restart would throw the scan away to save
+    // next to nothing.
+    for (let i = 0; i < 3; i++) expect(frameAfter(term, 100), `small write ${i}`).toBe(false);
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 50_000, partial: false });
+  });
+
+  test("the scan's step leaves room in the frame for the check of the unit that completes it", async () => {
+    // 36,000 matches at 200 columns, and 8,000 rows that restart the scan:
+    // a 44,000-row history, where the completing unit's check is assumed
+    // at about 9.5 ms, leaving the step about 2.5 ms.
+    const { term, search } = await settled(matching(36_000));
+    const budget = stepBudgetAfterRestart(term, search, 8_000);
+    const completion = 36_000 * term.getScrollbackLength() * COLS * PRIOR.complete;
+    expect(completion).toBeGreaterThan(FRAME_MS - SCAN_MS);
+    expect(completion).toBeLessThan(FRAME_MS - 1);
+    expect(budget).toBeCloseTo(FRAME_MS - completion, 6);
+  });
+
+  test('with under a millisecond left beside the completion the scan step still gets one', async () => {
+    // 41,000 matches and 6,000 rows that restart the scan: a 47,000-row
+    // history, where the completing unit's check is assumed at about
+    // 11.6 ms, leaving about 0.4 ms of the frame.
+    const { term, search } = await settled(matching(41_000));
+    const budget = stepBudgetAfterRestart(term, search, 6_000);
+    const left = FRAME_MS - 41_000 * term.getScrollbackLength() * COLS * PRIOR.complete;
+    expect(left).toBeGreaterThan(0);
+    expect(left).toBeLessThan(1);
+    expect(budget).toBe(1);
+  });
+
+  test('with the completion predicted over the budget the scan step runs its whole budget', async () => {
+    // 50,000 matches and 10,000 rows that restart the scan: the completing
+    // unit's check is assumed at about 18 ms.
+    const { term, search } = await settled(matching(50_000), 80_000);
+    expect(stepBudgetAfterRestart(term, search, 10_000)).toBe(SCAN_MS);
+  });
+});
