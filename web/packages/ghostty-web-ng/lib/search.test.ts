@@ -1798,6 +1798,23 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(0, 6, 0, 11)]);
   });
 
+  test('a find listener that throws during a resize leaves the new size published and painted', async () => {
+    const { term } = await create('needle\r\nneedle\r\n');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    const sizes: string[] = [];
+    term.onResize(({ cols, rows }) => sizes.push(`${cols}x${rows}`));
+    const paint = vi.fn();
+    term.addPaintLayer({ order: 0, paint });
+    search.onChange(() => { throw new Error('find bar listener failed'); });
+    let thrown: unknown;
+    try { term.resize(30, 6); } catch (error) { thrown = error; }
+    expect(sizes, 'the PTY hears the new size').toEqual(['30x6']);
+    expect(paint, 'the screen repaints at the new size').toHaveBeenCalled();
+    expect(thrown, "the listener's error reaches the caller").toEqual(new Error('find bar listener failed'));
+  });
+
   test('a resize keeps a deep active match highlighted until the rescan places it, past one second', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);

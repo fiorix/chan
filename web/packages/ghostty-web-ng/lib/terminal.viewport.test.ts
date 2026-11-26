@@ -260,6 +260,20 @@ describe('content changes', () => {
     expect(widgetInternals(term).wasmTerm!.readResponse(), 'no reply is stranded for a later write').toBeNull();
   });
 
+  test('a throwing change listener cannot leave a resize unpublished or unpainted', async () => {
+    const { term, renderer } = await terminal();
+    const sizes: string[] = [];
+    term.onResize(({ cols, rows }) => sizes.push(`${cols}x${rows}`));
+    term.onChange(() => { throw new Error('observer failed'); });
+    renderer.render.mockClear();
+    let thrown: unknown;
+    try { term.resize(30, 8); } catch (error) { thrown = error; }
+    expect(sizes, 'the PTY hears the new size').toEqual(['30x8']);
+    expect(renderer.render, 'the screen repaints whole at the new size')
+      .toHaveBeenCalledWith(expect.anything(), true, 0, expect.any(Number));
+    expect(thrown, "the listener's error reaches the caller").toEqual(new Error('observer failed'));
+  });
+
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {
     const { term } = await terminal();
     const links = new LinkDetector(term);
