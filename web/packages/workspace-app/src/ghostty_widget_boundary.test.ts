@@ -485,11 +485,17 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   /// The widget type a receiver was cast from: the receiver is a cast of a
   /// widget value, or a variable a cast or a type annotation widened one
   /// into, followed through a few such steps (`(t as Raw)` over
-  /// `const t: unknown = term`).
+  /// `const t: unknown = term`). The walk stops at the first step that is
+  /// already a widget, so a widget-typed variable is not followed into an
+  /// initializer that is not one (`let term: Terminal | null = null`).
   function castFrom(receiver: ts.Expression): ts.Type | undefined {
     let e = outer(receiver);
     let widened = false;
     for (let step = 0; step < 4; step++) {
+      if (widened) {
+        const here = checker.getTypeAtLocation(e);
+        if (isWidget(here)) return here;
+      }
       if (isCast(e)) {
         while (isCast(e)) e = outer(e.expression);
         widened = true;
@@ -879,6 +885,15 @@ const PLANTS = new Map<string, string>([
       'export const refused = (report: (error: unknown) => void) => report(new GhosttyVtRefusal("refused"));',
       "export const sized = (term: Terminal) => ((t: { cols: number; rows: number }) => t.cols * t.rows)(term);",
       "export const shorthand = (t: Terminal): { t: unknown } => ({ t });",
+      "export const nulled = (make: () => Terminal) => {",
+      "  let term: Terminal | null = null;",
+      "  term = make();",
+      "  return (term as unknown as Raw).isOpen;",
+      "};",
+      "export const recast = (box: { t: any }) => {",
+      "  const term = box.t as Terminal;",
+      "  return (term as unknown as { canvas: HTMLCanvasElement }).canvas;",
+      "};",
     ].join("\n"),
   ],
   [
@@ -931,6 +946,16 @@ const PLANTS = new Map<string, string>([
       '  const k = "isOpen" as const;',
       "  return term[k];",
       "};",
+      "type Raw = { isOpen: boolean };",
+      "export const nulled = (make: () => Terminal) => {",
+      "  let term: Terminal | null = null;",
+      "  term = make();",
+      "  return (term as unknown as Raw).isOpen;",
+      "};",
+      "export const recast = (box: { t: any }) => {",
+      "  const term = box.t as Terminal;",
+      "  return (term as unknown as Raw).isOpen;",
+      "};",
     ].join("\n"),
   ],
 ]);
@@ -968,6 +993,10 @@ const PLANTED: readonly Finding[] = [
   { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 46, key: "Terminal.wasmTerm" },
   { rule: "duck", file: "src/terminal/boundaryPlant.ts", line: 47, key: "Terminal.sealedSoon" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 51, key: "Terminal into unknown" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 55, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 55, key: "Terminal.isOpen" },
+  { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 59, key: "unknown" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 59, key: "Terminal.canvas" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
@@ -988,6 +1017,8 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 14, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 17, key: "Terminal.assertOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 21, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 27, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 31, key: "Terminal.isOpen" },
 ];
 
 /// Entries over the planted reads whose counts are off, one each way, and
