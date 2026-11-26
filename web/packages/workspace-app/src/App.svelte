@@ -1810,7 +1810,7 @@
 
   // Tidy localStorage at app load. The terminal snapshots older builds kept
   // there go whole, and go first: nothing else removes them, and the prune
-  // after them does not catch a storage error. Then stale or over-cap
+  // after them does not catch an error from a removal. Then stale or over-cap
   // editor-buffer entries are pruned; editorBuffer self-prunes on
   // quota-exceeded too, but an up-front sweep keeps storage tidy for
   // long-lived sessions.

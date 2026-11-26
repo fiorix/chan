@@ -235,24 +235,36 @@ export function pruneEditorBuffers(): number {
   if (!isStorageAvailable(STORAGE_PROBE_KEY)) return 0;
   const now = Date.now();
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (
-      !key ||
-      !(key.startsWith(BUFFER_KEY_PREFIX) || key.startsWith(BUFFER_DRAFT_PREFIX))
-    ) {
-      continue;
+  // A store that refuses a read must not end the caller's work, the app's
+  // load among them: an entry it will not hand over is left for a later
+  // prune, and a walk it cuts short prunes what it collected.
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (
+        !key ||
+        !(key.startsWith(BUFFER_KEY_PREFIX) || key.startsWith(BUFFER_DRAFT_PREFIX))
+      ) {
+        continue;
+      }
+      let raw: string | null;
+      try {
+        raw = localStorage.getItem(key);
+      } catch {
+        continue;
+      }
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as Partial<EditorBuffer>;
+        if (typeof parsed?.updatedAt !== "number") continue;
+        entries.push({ key, updatedAt: parsed.updatedAt, bytes: raw.length });
+      } catch {
+        // Corrupt entry counts as immediately-evictable.
+        entries.push({ key, updatedAt: 0, bytes: raw.length });
+      }
     }
-    const raw = localStorage.getItem(key);
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw) as Partial<EditorBuffer>;
-      if (typeof parsed?.updatedAt !== "number") continue;
-      entries.push({ key, updatedAt: parsed.updatedAt, bytes: raw.length });
-    } catch {
-      // Corrupt entry counts as immediately-evictable.
-      entries.push({ key, updatedAt: 0, bytes: raw.length });
-    }
+  } catch {
+    // Prune what the walk collected.
   }
   let evicted = 0;
   // Pass 1: TTL.
