@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
 import { GhosttyVt, type VtTerminal, type VtTrackedCell } from "./ghosttyVt";
+import { terminalInternals } from "./internal";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -21,7 +22,7 @@ async function terminal(cols: number, rows: number, scrollbackLimit = 1000): Pro
 /// The handles of the tracked references the core holds for `t` from here
 /// on: each one made and not freed yet.
 function tracked(t: VtTerminal): Set<number> {
-  const wasm = (t as unknown as { wasm: { fn: Record<string, (...args: number[]) => number>; view(): DataView } }).wasm;
+  const wasm = terminalInternals(t).wasm;
   const live = new Set<number>();
   const { ghostty_terminal_grid_ref_track: track, ghostty_tracked_grid_ref_free: free } = wasm.fn;
   wasm.fn.ghostty_terminal_grid_ref_track = (terminal, point, out) => {
@@ -141,7 +142,7 @@ describe("a tracked cell", () => {
     a.free();
     a.free();
     expect(live.size).toBe(2);
-    expect((t as unknown as { trackedCells: Set<unknown> }).trackedCells.size, "the terminal lets go of a freed cell").toBe(2);
+    expect(terminalInternals(t).trackedCells.size, "the terminal lets go of a freed cell").toBe(2);
     expect(a.point()).toBeNull();
     expect(a.moveTo(0, 6)).toBe(false);
     t.free();

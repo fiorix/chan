@@ -48,19 +48,19 @@ function nullCell(): VtCell {
  * Provides access to active, normal, and alternate screen buffers
  */
 export class BufferNamespace implements IBufferNamespace {
-  private terminal: Terminal;
+  #terminal: Terminal;
 
   // Lazy-initialized buffer wrappers (stateless, so we can cache them)
-  private _normalBuffer?: Buffer;
-  private _alternateBuffer?: Buffer;
+  #_normalBuffer?: Buffer;
+  #_alternateBuffer?: Buffer;
 
   constructor(terminal: Terminal) {
-    this.terminal = terminal;
+    this.#terminal = terminal;
   }
 
   get active(): IBuffer {
     // Query WASM to determine which buffer is active
-    const wasmTerm = this.terminal.wasmTerm;
+    const wasmTerm = this.#terminal.wasmTerm;
     if (!wasmTerm) {
       return this.normal; // Default to normal if not initialized
     }
@@ -69,17 +69,17 @@ export class BufferNamespace implements IBufferNamespace {
   }
 
   get normal(): IBuffer {
-    if (!this._normalBuffer) {
-      this._normalBuffer = new Buffer(this.terminal, 'normal');
+    if (!this.#_normalBuffer) {
+      this.#_normalBuffer = new Buffer(this.#terminal, 'normal');
     }
-    return this._normalBuffer;
+    return this.#_normalBuffer;
   }
 
   get alternate(): IBuffer {
-    if (!this._alternateBuffer) {
-      this._alternateBuffer = new Buffer(this.terminal, 'alternate');
+    if (!this.#_alternateBuffer) {
+      this.#_alternateBuffer = new Buffer(this.#terminal, 'alternate');
     }
-    return this._alternateBuffer;
+    return this.#_alternateBuffer;
   }
 }
 
@@ -91,26 +91,26 @@ export class BufferNamespace implements IBufferNamespace {
  * A terminal buffer (normal or alternate screen)
  */
 export class Buffer implements IBuffer {
-  private terminal: Terminal;
-  private bufferType: 'normal' | 'alternate';
+  #terminal: Terminal;
+  #bufferType: 'normal' | 'alternate';
   // A view for each screen row its lines are read into, which reads nothing
   // while its row is unchanged.
-  private screenRows: VtCells[] = [];
+  #screenRows: VtCells[] = [];
 
   constructor(terminal: Terminal, type: 'normal' | 'alternate') {
-    this.terminal = terminal;
-    this.bufferType = type;
+    this.#terminal = terminal;
+    this.#bufferType = type;
   }
 
   get type(): 'normal' | 'alternate' {
-    return this.bufferType;
+    return this.#bufferType;
   }
 
   get length(): number {
-    const wasmTerm = this.getWasmTerm();
+    const wasmTerm = this.#getWasmTerm();
     if (!wasmTerm) return 0;
 
-    if (this.bufferType === 'alternate') {
+    if (this.#bufferType === 'alternate') {
       // Alternate buffer has no scrollback, just visible rows
       return wasmTerm.rows;
     } else {
@@ -121,7 +121,7 @@ export class Buffer implements IBuffer {
   }
 
   getLine(y: number): IBufferLine | undefined {
-    const wasmTerm = this.getWasmTerm();
+    const wasmTerm = this.#getWasmTerm();
     if (!wasmTerm) return undefined;
 
     // Check bounds
@@ -140,7 +140,7 @@ export class Buffer implements IBuffer {
     let read: boolean;
     let isWrapped: boolean;
 
-    if (this.bufferType === 'normal' && y < scrollbackLength) {
+    if (this.#bufferType === 'normal' && y < scrollbackLength) {
       // Accessing scrollback
       // History rows: offset 0 = oldest, offset (length-1) = newest
       // Buffer coords: y=0 = oldest, y=(length-1) = newest
@@ -152,8 +152,8 @@ export class Buffer implements IBuffer {
       isWrapped = false;
     } else {
       // Accessing visible screen
-      const lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
-      cells = this.screenRows[lineNumber] ??= new VtCells();
+      const lineNumber = this.#bufferType === 'normal' ? y - scrollbackLength : y;
+      cells = this.#screenRows[lineNumber] ??= new VtCells();
       read = wasmTerm.readRow(lineNumber, cells);
       isWrapped = wasmTerm.isRowWrapped(lineNumber);
     }
@@ -165,8 +165,8 @@ export class Buffer implements IBuffer {
     return new BufferLine(cells, isWrapped, wasmTerm.cols);
   }
 
-  private getWasmTerm(): VtTerminal | undefined {
-    return this.terminal.wasmTerm;
+  #getWasmTerm(): VtTerminal | undefined {
+    return this.#terminal.wasmTerm;
   }
 }
 
@@ -178,30 +178,30 @@ export class Buffer implements IBuffer {
  * A single line in the buffer
  */
 export class BufferLine implements IBufferLine {
-  private cells: VtCells;
-  private _isWrapped: boolean;
-  private _length: number;
+  #cells: VtCells;
+  #_isWrapped: boolean;
+  #_length: number;
 
   constructor(cells: VtCells, isWrapped: boolean, length: number) {
-    this.cells = cells;
-    this._isWrapped = isWrapped;
-    this._length = length;
+    this.#cells = cells;
+    this.#_isWrapped = isWrapped;
+    this.#_length = length;
   }
 
   get length(): number {
-    return this._length;
+    return this.#_length;
   }
 
   get isWrapped(): boolean {
-    return this._isWrapped;
+    return this.#_isWrapped;
   }
 
   getCell(x: number): IBufferCell | undefined {
-    if (x < 0 || x >= this._length) {
+    if (x < 0 || x >= this.#_length) {
       return undefined;
     }
 
-    const cell = this.cells.at(x);
+    const cell = this.#cells.at(x);
     if (!cell) {
       // Cell beyond what was returned (empty/null cell)
       return new BufferCell(nullCell());
@@ -210,10 +210,10 @@ export class BufferLine implements IBufferLine {
     return new BufferCell(cell);
   }
 
-  translateToString(trimRight = false, startColumn = 0, endColumn = this._length): string {
+  translateToString(trimRight = false, startColumn = 0, endColumn = this.#_length): string {
     // Clamp bounds
-    const start = Math.max(0, Math.min(startColumn, this._length));
-    const end = Math.max(start, Math.min(endColumn, this._length));
+    const start = Math.max(0, Math.min(startColumn, this.#_length));
+    const end = Math.max(start, Math.min(endColumn, this.#_length));
 
     let result = '';
     for (let x = start; x < end; x++) {
@@ -240,14 +240,14 @@ export class BufferLine implements IBufferLine {
  * A single cell in the buffer
  */
 export class BufferCell implements IBufferCell {
-  private cell: VtCell;
+  #cell: VtCell;
 
   constructor(cell: VtCell) {
-    this.cell = cell;
+    this.#cell = cell;
   }
 
   getChars(): string {
-    const codepoint = this.cell.codepoint;
+    const codepoint = this.#cell.codepoint;
 
     // Return empty string for null character or invalid codepoints
     if (codepoint === 0) {
@@ -265,7 +265,7 @@ export class BufferCell implements IBufferCell {
   }
 
   getWidth(): number {
-    return this.cell.width;
+    return this.#cell.width;
   }
 
   /**
@@ -273,7 +273,7 @@ export class BufferCell implements IBufferCell {
    * Used by link detection system
    */
   getHyperlinkId(): number {
-    return this.cell.hyperlink;
+    return this.#cell.hyperlink;
   }
 
   /**
@@ -281,6 +281,6 @@ export class BufferCell implements IBufferCell {
    * Used by link detection system
    */
   getCodepoint(): number {
-    return this.cell.codepoint;
+    return this.#cell.codepoint;
   }
 }

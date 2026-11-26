@@ -19,6 +19,16 @@ import type { IKeyEvent } from './interfaces';
 import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 
 /**
+ * A paste's line ends as Enter sends them: each `\r\n` and `\n` becomes
+ * `\r`, with or without bracketed paste. The core's paste encoder turns
+ * only an unbracketed `\n` into `\r`, which would send a pasted `\r\n` as
+ * two carriage returns and leave a bracketed line feed a line feed.
+ */
+export function pasteLineEnds(text: string): string {
+  return text.replace(/\r?\n/g, '\r');
+}
+
+/**
  * Map KeyboardEvent.code values to USB HID Key enum values
  * Based on: https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/code
  */
@@ -175,40 +185,41 @@ export interface MouseTrackingConfig {
 }
 
 export class InputHandler {
-  private encoder: VtKeyEncoder;
-  private container: HTMLElement;
-  private inputElement?: HTMLElement;
-  private onDataCallback: (data: string, isUserInput?: boolean) => void;
-  private onKeyCallback?: (keyEvent: IKeyEvent) => void;
-  private customKeyEventHandler?: (event: KeyboardEvent) => boolean;
-  private getModeCallback?: (mode: number) => boolean;
-  private onCopyCallback?: () => boolean;
-  private mouseConfig?: MouseTrackingConfig;
-  private keydownListener: ((e: KeyboardEvent) => void) | null = null;
-  private keypressListener: ((e: KeyboardEvent) => void) | null = null;
-  private pasteListener: ((e: ClipboardEvent) => void) | null = null;
-  private beforeInputListener: ((e: InputEvent) => void) | null = null;
-  private compositionStartListener: ((e: CompositionEvent) => void) | null = null;
-  private compositionUpdateListener: ((e: CompositionEvent) => void) | null = null;
-  private compositionEndListener: ((e: CompositionEvent) => void) | null = null;
-  private wheelListener: ((e: WheelEvent) => void) | null = null;
-  private isComposing = false;
-  private isDisposed = false;
-  private mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
+  readonly #ghostty: GhosttyVt;
+  #encoder: VtKeyEncoder;
+  #container: HTMLElement;
+  #inputElement?: HTMLElement;
+  #onDataCallback: (data: string, isUserInput?: boolean) => void;
+  #onKeyCallback?: (keyEvent: IKeyEvent) => void;
+  #customKeyEventHandler?: (event: KeyboardEvent) => boolean;
+  #getModeCallback?: (mode: number) => boolean;
+  #onCopyCallback?: () => boolean;
+  #mouseConfig?: MouseTrackingConfig;
+  #keydownListener: ((e: KeyboardEvent) => void) | null = null;
+  #keypressListener: ((e: KeyboardEvent) => void) | null = null;
+  #pasteListener: ((e: ClipboardEvent) => void) | null = null;
+  #beforeInputListener: ((e: InputEvent) => void) | null = null;
+  #compositionStartListener: ((e: CompositionEvent) => void) | null = null;
+  #compositionUpdateListener: ((e: CompositionEvent) => void) | null = null;
+  #compositionEndListener: ((e: CompositionEvent) => void) | null = null;
+  #wheelListener: ((e: WheelEvent) => void) | null = null;
+  #isComposing = false;
+  #isDisposed = false;
+  #mouseButtonsPressed = 0; // Track which buttons are pressed for motion reporting
   // Non-reported presses stay with the terminal even if tracking or Shift
   // changes before their release.
-  private mouseButtonsBypassed = 0;
-  private lastMouseMotion: { code: number; col: number; row: number } | null = null;
-  private lastKeyDownData: string | null = null;
-  private lastKeyDownTime = 0;
-  private lastPasteData: string | null = null;
-  private lastPasteTime = 0;
-  private lastPasteSource: 'paste' | 'beforeinput' | null = null;
-  private lastCompositionData: string | null = null;
-  private lastCompositionTime = 0;
-  private lastBeforeInputData: string | null = null;
-  private lastBeforeInputTime = 0;
-  private static readonly BEFORE_INPUT_IGNORE_MS = 100;
+  #mouseButtonsBypassed = 0;
+  #lastMouseMotion: { code: number; col: number; row: number } | null = null;
+  #lastKeyDownData: string | null = null;
+  #lastKeyDownTime = 0;
+  #lastPasteData: string | null = null;
+  #lastPasteTime = 0;
+  #lastPasteSource: 'paste' | 'beforeinput' | null = null;
+  #lastCompositionData: string | null = null;
+  #lastCompositionTime = 0;
+  #lastBeforeInputData: string | null = null;
+  #lastBeforeInputTime = 0;
+  static readonly #BEFORE_INPUT_IGNORE_MS = 100;
 
   /**
    * Create a new InputHandler
@@ -236,18 +247,19 @@ export class InputHandler {
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig
   ) {
-    this.encoder = ghostty.createKeyEncoder();
-    this.container = container;
-    this.inputElement = inputElement;
-    this.onDataCallback = onData;
-    this.onKeyCallback = onKey;
-    this.customKeyEventHandler = customKeyEventHandler;
-    this.getModeCallback = getMode;
-    this.onCopyCallback = onCopy;
-    this.mouseConfig = mouseConfig;
+    this.#ghostty = ghostty;
+    this.#encoder = ghostty.createKeyEncoder();
+    this.#container = container;
+    this.#inputElement = inputElement;
+    this.#onDataCallback = onData;
+    this.#onKeyCallback = onKey;
+    this.#customKeyEventHandler = customKeyEventHandler;
+    this.#getModeCallback = getMode;
+    this.#onCopyCallback = onCopy;
+    this.#mouseConfig = mouseConfig;
 
     // Attach event listeners
-    this.attach();
+    this.#attach();
   }
 
   /**
@@ -255,53 +267,53 @@ export class InputHandler {
    * true for is neither sent nor default-prevented here.
    */
   setCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void {
-    this.customKeyEventHandler = handler;
+    this.#customKeyEventHandler = handler;
   }
 
   /**
    * Attach keyboard event listeners to container
    */
-  private attach(): void {
+  #attach(): void {
     // Make container focusable so it can receive keyboard events (browser only)
     if (
-      typeof this.container.hasAttribute === 'function' &&
-      typeof this.container.setAttribute === 'function'
+      typeof this.#container.hasAttribute === 'function' &&
+      typeof this.#container.setAttribute === 'function'
     ) {
-      if (!this.container.hasAttribute('tabindex')) {
-        this.container.setAttribute('tabindex', '0');
+      if (!this.#container.hasAttribute('tabindex')) {
+        this.#container.setAttribute('tabindex', '0');
       }
 
       // Add visual focus indication (only if style exists - for browser environments)
-      if (this.container.style) {
-        this.container.style.outline = 'none'; // Remove default outline
+      if (this.#container.style) {
+        this.#container.style.outline = 'none'; // Remove default outline
       }
     }
 
-    this.keydownListener = this.handleKeyDown.bind(this);
-    this.container.addEventListener('keydown', this.keydownListener);
+    this.#keydownListener = this.#handleKeyDown.bind(this);
+    this.#container.addEventListener('keydown', this.#keydownListener);
 
-    this.pasteListener = this.handlePaste.bind(this);
-    this.container.addEventListener('paste', this.pasteListener);
-    if (this.inputElement && this.inputElement !== this.container) {
-      this.inputElement.addEventListener('paste', this.pasteListener);
+    this.#pasteListener = this.#handlePaste.bind(this);
+    this.#container.addEventListener('paste', this.#pasteListener);
+    if (this.#inputElement && this.#inputElement !== this.#container) {
+      this.#inputElement.addEventListener('paste', this.#pasteListener);
     }
 
-    if (this.inputElement) {
-      this.beforeInputListener = this.handleBeforeInput.bind(this);
-      this.inputElement.addEventListener('beforeinput', this.beforeInputListener);
+    if (this.#inputElement) {
+      this.#beforeInputListener = this.#handleBeforeInput.bind(this);
+      this.#inputElement.addEventListener('beforeinput', this.#beforeInputListener);
     }
 
-    this.compositionStartListener = this.handleCompositionStart.bind(this);
-    this.container.addEventListener('compositionstart', this.compositionStartListener);
+    this.#compositionStartListener = this.#handleCompositionStart.bind(this);
+    this.#container.addEventListener('compositionstart', this.#compositionStartListener);
 
-    this.compositionUpdateListener = this.handleCompositionUpdate.bind(this);
-    this.container.addEventListener('compositionupdate', this.compositionUpdateListener);
+    this.#compositionUpdateListener = this.#handleCompositionUpdate.bind(this);
+    this.#container.addEventListener('compositionupdate', this.#compositionUpdateListener);
 
-    this.compositionEndListener = this.handleCompositionEnd.bind(this);
-    this.container.addEventListener('compositionend', this.compositionEndListener);
+    this.#compositionEndListener = this.#handleCompositionEnd.bind(this);
+    this.#container.addEventListener('compositionend', this.#compositionEndListener);
 
-    this.wheelListener = this.handleWheel.bind(this);
-    this.container.addEventListener('wheel', this.wheelListener, { passive: false });
+    this.#wheelListener = this.#handleWheel.bind(this);
+    this.#container.addEventListener('wheel', this.#wheelListener, { passive: false });
   }
 
   /**
@@ -309,7 +321,7 @@ export class InputHandler {
    * @param code - KeyboardEvent.code value
    * @returns Key enum value or null if unmapped
    */
-  private mapKeyCode(code: string): Key | null {
+  #mapKeyCode(code: string): Key | null {
     return KEY_MAP[code] ?? null;
   }
 
@@ -318,7 +330,7 @@ export class InputHandler {
    * @param event - KeyboardEvent
    * @returns Mods flags
    */
-  private extractModifiers(event: KeyboardEvent): Mods {
+  #extractModifiers(event: KeyboardEvent): Mods {
     let mods = Mods.NONE;
 
     if (event.shiftKey) mods |= Mods.SHIFT;
@@ -338,7 +350,7 @@ export class InputHandler {
    * @param event - KeyboardEvent
    * @returns true if printable character
    */
-  private isPrintableCharacter(event: KeyboardEvent): boolean {
+  #isPrintableCharacter(event: KeyboardEvent): boolean {
     // If Ctrl, Alt, or Meta (Cmd on Mac) is pressed, it's not a simple printable character
     // Exception: AltGr (Ctrl+Alt on some keyboards) can produce printable characters
     if (event.ctrlKey && !event.altKey) return false;
@@ -353,24 +365,24 @@ export class InputHandler {
    * Handle keydown event
    * @param event - KeyboardEvent
    */
-  private handleKeyDown(event: KeyboardEvent): void {
-    if (this.isDisposed) return;
+  #handleKeyDown(event: KeyboardEvent): void {
+    if (this.#isDisposed) return;
 
     // Ignore keydown events during composition
     // Note: Some browsers send keyCode 229 for all keys during composition
-    if (this.isComposing || event.isComposing || event.keyCode === 229) {
+    if (this.#isComposing || event.isComposing || event.keyCode === 229) {
       return;
     }
 
     // Emit onKey event first (before any processing)
-    if (this.onKeyCallback) {
-      this.onKeyCallback({ key: event.key, domEvent: event });
+    if (this.#onKeyCallback) {
+      this.#onKeyCallback({ key: event.key, domEvent: event });
     }
 
     // A key the embedder's handler claims is the embedder's: nothing is sent,
     // and its default is left for the embedder to prevent where it acts on
     // the key, so one it lets out to the page or the browser still works.
-    if (this.customKeyEventHandler?.(event)) return;
+    if (this.#customKeyEventHandler?.(event)) return;
 
     // Allow Ctrl+V and Cmd+V to trigger paste event (don't preventDefault)
     if ((event.ctrlKey || event.metaKey) && event.code === 'KeyV') {
@@ -384,7 +396,7 @@ export class InputHandler {
       // Try to copy selection via callback
       // If there's a selection and copy succeeds, prevent default
       // If no selection, let it fall through (browser may have other text selected)
-      if (this.onCopyCallback && this.onCopyCallback()) {
+      if (this.#onCopyCallback && this.#onCopyCallback()) {
         event.preventDefault();
       }
       return;
@@ -392,22 +404,22 @@ export class InputHandler {
 
     // For printable characters without modifiers, send the character directly
     // This handles: a-z, A-Z (with shift), 0-9, punctuation, etc.
-    if (this.isPrintableCharacter(event)) {
+    if (this.#isPrintableCharacter(event)) {
       event.preventDefault();
-      this.onDataCallback(event.key);
-      this.recordKeyDownData(event.key);
+      this.#onDataCallback(event.key);
+      this.#recordKeyDownData(event.key);
       return;
     }
 
     // Map the physical key code
-    const key = this.mapKeyCode(event.code);
+    const key = this.#mapKeyCode(event.code);
     if (key === null) {
       // Unknown key - ignore it
       return;
     }
 
     // Extract modifiers
-    const mods = this.extractModifiers(event);
+    const mods = this.#extractModifiers(event);
 
     // Handle simple special keys that produce standard sequences
     if (mods === Mods.NONE || mods === Mods.SHIFT) {
@@ -491,8 +503,8 @@ export class InputHandler {
 
       if (simpleOutput !== null) {
         event.preventDefault();
-        this.onDataCallback(simpleOutput);
-        this.recordKeyDownData(simpleOutput);
+        this.#onDataCallback(simpleOutput);
+        this.#recordKeyDownData(simpleOutput);
         return;
       }
     }
@@ -504,9 +516,9 @@ export class InputHandler {
     try {
       // Sync encoder options with terminal mode state
       // Mode 1 (DECCKM) controls whether arrow keys send CSI or SS3 sequences
-      if (this.getModeCallback) {
-        const appCursorMode = this.getModeCallback(1);
-        this.encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
+      if (this.#getModeCallback) {
+        const appCursorMode = this.#getModeCallback(1);
+        this.#encoder.setOption(KeyEncoderOption.CURSOR_KEY_APPLICATION, appCursorMode);
       }
 
       // For letter/number keys, even with modifiers, pass the base character
@@ -517,7 +529,7 @@ export class InputHandler {
           ? event.key.toLowerCase() // Use lowercase for consistency
           : undefined;
 
-      const encoded = this.encoder.encode({
+      const encoded = this.#encoder.encode({
         action,
         key,
         mods,
@@ -534,8 +546,8 @@ export class InputHandler {
 
       // Emit the data
       if (data.length > 0) {
-        this.onDataCallback(data);
-        this.recordKeyDownData(data);
+        this.#onDataCallback(data);
+        this.#recordKeyDownData(data);
       }
     } catch (error) {
       // Encoding failed - log but don't crash
@@ -547,8 +559,8 @@ export class InputHandler {
    * Handle paste event from clipboard
    * @param event - ClipboardEvent
    */
-  private handlePaste(event: ClipboardEvent): void {
-    if (this.isDisposed) return;
+  #handlePaste(event: ClipboardEvent): void {
+    if (this.#isDisposed) return;
 
     // Prevent default paste behavior
     event.preventDefault();
@@ -568,22 +580,22 @@ export class InputHandler {
       return;
     }
 
-    if (this.shouldIgnorePasteEvent(text, 'paste')) {
+    if (this.#shouldIgnorePasteEvent(text, 'paste')) {
       return;
     }
 
-    this.emitPasteData(text);
-    this.recordPasteData(text, 'paste');
+    this.#emitPasteData(text);
+    this.#recordPasteData(text, 'paste');
   }
 
   /**
    * Handle beforeinput event (mobile/IME input)
    * @param event - InputEvent
    */
-  private handleBeforeInput(event: InputEvent): void {
-    if (this.isDisposed) return;
+  #handleBeforeInput(event: InputEvent): void {
+    if (this.#isDisposed) return;
 
-    if (this.isComposing || event.isComposing) {
+    if (this.#isComposing || event.isComposing) {
       return;
     }
 
@@ -610,15 +622,15 @@ export class InputHandler {
         if (!data) {
           return;
         }
-        if (this.shouldIgnorePasteEvent(data, 'beforeinput')) {
+        if (this.#shouldIgnorePasteEvent(data, 'beforeinput')) {
           event.preventDefault();
           event.stopPropagation();
           return;
         }
         event.preventDefault();
         event.stopPropagation();
-        this.emitPasteData(data);
-        this.recordPasteData(data, 'beforeinput');
+        this.#emitPasteData(data);
+        this.#recordPasteData(data, 'beforeinput');
         return;
       default:
         return;
@@ -628,13 +640,13 @@ export class InputHandler {
       return;
     }
 
-    if (this.shouldIgnoreBeforeInput(output)) {
+    if (this.#shouldIgnoreBeforeInput(output)) {
       event.preventDefault();
       event.stopPropagation();
       return;
     }
 
-    if (data && this.shouldIgnoreBeforeInputFromComposition(data)) {
+    if (data && this.#shouldIgnoreBeforeInputFromComposition(data)) {
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -642,25 +654,25 @@ export class InputHandler {
 
     event.preventDefault();
     event.stopPropagation();
-    this.onDataCallback(output);
+    this.#onDataCallback(output);
     if (data) {
-      this.recordBeforeInputData(data);
+      this.#recordBeforeInputData(data);
     }
   }
 
   /**
    * Handle compositionstart event
    */
-  private handleCompositionStart(_event: CompositionEvent): void {
-    if (this.isDisposed) return;
-    this.isComposing = true;
+  #handleCompositionStart(_event: CompositionEvent): void {
+    if (this.#isDisposed) return;
+    this.#isComposing = true;
   }
 
   /**
    * Handle compositionupdate event
    */
-  private handleCompositionUpdate(_event: CompositionEvent): void {
-    if (this.isDisposed) return;
+  #handleCompositionUpdate(_event: CompositionEvent): void {
+    if (this.#isDisposed) return;
     // We could track the current composition string here if we wanted to
     // display it in a custom way, but for now we rely on the browser's
     // input method editor UI.
@@ -669,36 +681,36 @@ export class InputHandler {
   /**
    * Handle compositionend event
    */
-  private handleCompositionEnd(event: CompositionEvent): void {
-    if (this.isDisposed) return;
-    this.isComposing = false;
+  #handleCompositionEnd(event: CompositionEvent): void {
+    if (this.#isDisposed) return;
+    this.#isComposing = false;
 
     const data = event.data;
     if (data && data.length > 0) {
-      if (this.shouldIgnoreCompositionEnd(data)) {
-        this.cleanupCompositionTextNodes();
+      if (this.#shouldIgnoreCompositionEnd(data)) {
+        this.#cleanupCompositionTextNodes();
         return;
       }
-      this.onDataCallback(data);
-      this.recordCompositionData(data);
+      this.#onDataCallback(data);
+      this.#recordCompositionData(data);
     }
 
-    this.cleanupCompositionTextNodes();
+    this.#cleanupCompositionTextNodes();
   }
 
   /**
    * Cleanup text nodes in container after composition
    */
-  private cleanupCompositionTextNodes(): void {
+  #cleanupCompositionTextNodes(): void {
     // Cleanup text nodes in container (fix for duplicate text display)
     // When the container is contenteditable, the browser might insert text nodes
     // upon composition end. We need to remove them to prevent duplicate display.
-    if (this.container && this.container.childNodes) {
-      for (let i = this.container.childNodes.length - 1; i >= 0; i--) {
-        const node = this.container.childNodes[i];
+    if (this.#container && this.#container.childNodes) {
+      for (let i = this.#container.childNodes.length - 1; i >= 0; i--) {
+        const node = this.#container.childNodes[i];
         // Node.TEXT_NODE === 3
         if (node.nodeType === 3) {
-          this.container.removeChild(node);
+          this.#container.removeChild(node);
         }
       }
     }
@@ -711,11 +723,11 @@ export class InputHandler {
   /**
    * Convert pixel coordinates to terminal cell coordinates
    */
-  private pixelToCell(event: MouseEvent): { col: number; row: number } | null {
-    if (!this.mouseConfig) return null;
+  #pixelToCell(event: MouseEvent): { col: number; row: number } | null {
+    if (!this.#mouseConfig) return null;
 
-    const dims = this.mouseConfig.getCellDimensions();
-    const offset = this.mouseConfig.getCanvasOffset();
+    const dims = this.#mouseConfig.getCellDimensions();
+    const offset = this.#mouseConfig.getCanvasOffset();
 
     if (dims.width <= 0 || dims.height <= 0) return null;
 
@@ -726,7 +738,7 @@ export class InputHandler {
     const col = Math.floor(x / dims.width) + 1;
     const row = Math.floor(y / dims.height) + 1;
 
-    const grid = this.mouseConfig.getGridDimensions();
+    const grid = this.#mouseConfig.getGridDimensions();
     return {
       col: Math.max(1, Math.min(col, grid.cols)),
       row: Math.max(1, Math.min(row, grid.rows)),
@@ -736,7 +748,7 @@ export class InputHandler {
   /**
    * Get modifier flags for mouse event
    */
-  private getMouseModifiers(event: MouseEvent): number {
+  #getMouseModifiers(event: MouseEvent): number {
     let mods = 0;
     if (event.shiftKey) mods |= 4;
     if (event.altKey || event.metaKey) mods |= 8;
@@ -748,7 +760,7 @@ export class InputHandler {
    * Encode mouse event as SGR sequence
    * SGR format: \x1b[<Btn;Col;RowM (press/motion) or \x1b[<Btn;Col;Rowm (release)
    */
-  private encodeMouseSGR(
+  #encodeMouseSGR(
     button: number,
     col: number,
     row: number,
@@ -764,7 +776,7 @@ export class InputHandler {
    * Encode mouse event as X10/normal sequence (legacy format)
    * Format: \x1b[M<Btn+32><Col+32><Row+32>
    */
-  private encodeMouseX10(button: number, col: number, row: number, modifiers: number): string {
+  #encodeMouseX10(button: number, col: number, row: number, modifiers: number): string {
     // X10 format adds 32 to all values and encodes as characters
     // Button encoding: 0=left, 1=middle, 2=right, 3=release
     const btn = button + modifiers + 32;
@@ -776,56 +788,56 @@ export class InputHandler {
   /**
    * Send mouse event to terminal
    */
-  private sendMouseEvent(
+  #sendMouseEvent(
     button: number,
     col: number,
     row: number,
     isRelease: boolean,
     event: MouseEvent
   ): void {
-    const modifiers = this.getMouseModifiers(event);
+    const modifiers = this.#getMouseModifiers(event);
     if (!isRelease && button >= 32 && button <= 35) {
       const code = button + modifiers;
-      const last = this.lastMouseMotion;
+      const last = this.#lastMouseMotion;
       if (last?.code === code && last.col === col && last.row === row) return;
-      this.lastMouseMotion = { code, col, row };
+      this.#lastMouseMotion = { code, col, row };
     }
 
     // Check if SGR extended mode is enabled (mode 1006)
-    const useSGR = this.mouseConfig?.hasSgrMouseMode?.() ?? true;
+    const useSGR = this.#mouseConfig?.hasSgrMouseMode?.() ?? true;
 
     let sequence: string;
     if (useSGR) {
-      sequence = this.encodeMouseSGR(button, col, row, isRelease, modifiers);
+      sequence = this.#encodeMouseSGR(button, col, row, isRelease, modifiers);
     } else {
       // X10/normal mode doesn't support release events directly
       // Button 3 means release in X10 mode
       const x10Button = isRelease ? 3 : button;
-      sequence = this.encodeMouseX10(x10Button, col, row, modifiers);
+      sequence = this.#encodeMouseX10(x10Button, col, row, modifiers);
     }
 
-    this.onDataCallback(sequence, false);
+    this.#onDataCallback(sequence, false);
   }
 
   /**
    * Report a press forwarded by the captured pointer owner.
    */
   handleMouseDown(event: MouseEvent, reported?: boolean): void {
-    if (this.isDisposed) return;
-    this.lastMouseMotion = null;
-    reported ??= !!this.mouseConfig?.hasMouseTracking() && !event.shiftKey;
+    if (this.#isDisposed) return;
+    this.#lastMouseMotion = null;
+    reported ??= !!this.#mouseConfig?.hasMouseTracking() && !event.shiftKey;
     // A press starts a fresh gesture, whatever became of the last one's
     // release.
-    this.mouseButtonsBypassed &= ~(1 << event.button);
-    this.mouseButtonsPressed &= ~(1 << event.button);
+    this.#mouseButtonsBypassed &= ~(1 << event.button);
+    this.#mouseButtonsPressed &= ~(1 << event.button);
     // Shift bypasses mouse reporting, as in xterm.js and native terminals:
     // the press, its drag and its release stay with the terminal.
     if (!reported) {
-      this.mouseButtonsBypassed |= 1 << event.button;
+      this.#mouseButtonsBypassed |= 1 << event.button;
       return;
     }
 
-    const cell = this.pixelToCell(event);
+    const cell = this.#pixelToCell(event);
     if (!cell) return;
 
     // Map browser button to terminal button
@@ -834,48 +846,48 @@ export class InputHandler {
     const button = event.button;
 
     // Track pressed buttons for motion events
-    this.mouseButtonsPressed |= 1 << button;
+    this.#mouseButtonsPressed |= 1 << button;
 
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    this.#sendMouseEvent(button, cell.col, cell.row, false, event);
   }
 
   /**
    * Release a reported button only while the program still tracks the mouse.
    */
   handleMouseUp(event: MouseEvent): void {
-    if (this.isDisposed) return;
-    this.releaseMouseButton(event, event.button);
+    if (this.#isDisposed) return;
+    this.#releaseMouseButton(event, event.button);
   }
 
-  private releaseMouseButton(event: MouseEvent, button: number): void {
-    this.lastMouseMotion = null;
+  #releaseMouseButton(event: MouseEvent, button: number): void {
+    this.#lastMouseMotion = null;
     // Shift changes do not break the pair, but a program that stopped
     // tracking must not leave release bytes for the next PTY reader.
-    if (this.mouseButtonsBypassed & (1 << button)) {
-      this.mouseButtonsBypassed &= ~(1 << button);
+    if (this.#mouseButtonsBypassed & (1 << button)) {
+      this.#mouseButtonsBypassed &= ~(1 << button);
       return;
     }
 
-    if (!(this.mouseButtonsPressed & (1 << button))) return;
-    this.mouseButtonsPressed &= ~(1 << button);
-    if (!this.mouseConfig?.hasMouseTracking()) return;
-    const cell = this.pixelToCell(event);
+    if (!(this.#mouseButtonsPressed & (1 << button))) return;
+    this.#mouseButtonsPressed &= ~(1 << button);
+    if (!this.#mouseConfig?.hasMouseTracking()) return;
+    const cell = this.#pixelToCell(event);
     if (!cell) return;
 
-    this.sendMouseEvent(button, cell.col, cell.row, true, event);
+    this.#sendMouseEvent(button, cell.col, cell.row, true, event);
   }
 
   /** Clear held state; report releases only with a position and active tracking. */
   endMouseGesture(event?: MouseEvent): void {
-    this.lastMouseMotion = null;
-    const pressed = this.mouseButtonsPressed;
-    this.mouseButtonsPressed = 0;
-    this.mouseButtonsBypassed = 0;
-    if (!event || this.isDisposed || !this.mouseConfig?.hasMouseTracking()) return;
-    const cell = this.pixelToCell(event);
+    this.#lastMouseMotion = null;
+    const pressed = this.#mouseButtonsPressed;
+    this.#mouseButtonsPressed = 0;
+    this.#mouseButtonsBypassed = 0;
+    if (!event || this.#isDisposed || !this.#mouseConfig?.hasMouseTracking()) return;
+    const cell = this.#pixelToCell(event);
     if (!cell) return;
     for (let button = 0; button < 3; button++) {
-      if (pressed & (1 << button)) this.sendMouseEvent(button, cell.col, cell.row, true, event);
+      if (pressed & (1 << button)) this.#sendMouseEvent(button, cell.col, cell.row, true, event);
     }
   }
 
@@ -883,123 +895,121 @@ export class InputHandler {
    * Report pointer motion with the disposition of its held buttons.
    */
   handleMouseMove(event: MouseEvent, reportMotion = true): void {
-    if (this.isDisposed) return;
+    if (this.#isDisposed) return;
     // Capture can outlive a release with no pointerup. Reconcile only
     // reported buttons; a local selection keeps its buttonless moves.
     for (let button = 0; button < 3; button++) {
-      if ((this.mouseButtonsPressed & (1 << button)) && !(event.buttons & [1, 4, 2][button])) {
-        this.releaseMouseButton(event, button);
+      if ((this.#mouseButtonsPressed & (1 << button)) && !(event.buttons & [1, 4, 2][button])) {
+        this.#releaseMouseButton(event, button);
       }
     }
     if (!reportMotion) return;
-    if (!this.mouseConfig?.hasMouseTracking()) return;
+    if (!this.#mouseConfig?.hasMouseTracking()) return;
 
     // Check if button motion mode or any-event tracking is enabled
     // Mode 1002 = button motion, Mode 1003 = any motion
-    const hasButtonMotion = this.getModeCallback?.(1002) ?? false;
-    const hasAnyMotion = this.getModeCallback?.(1003) ?? false;
+    const hasButtonMotion = this.#getModeCallback?.(1002) ?? false;
+    const hasAnyMotion = this.#getModeCallback?.(1003) ?? false;
 
     if (!hasButtonMotion && !hasAnyMotion) return;
 
     // Motion with Shift held, or during a bypassed press, is not reported.
-    if (event.shiftKey || this.mouseButtonsBypassed !== 0) return;
+    if (event.shiftKey || this.#mouseButtonsBypassed !== 0) return;
 
     // In button motion mode, only report if a button is pressed
-    if (hasButtonMotion && !hasAnyMotion && this.mouseButtonsPressed === 0) return;
+    if (hasButtonMotion && !hasAnyMotion && this.#mouseButtonsPressed === 0) return;
 
-    const cell = this.pixelToCell(event);
+    const cell = this.#pixelToCell(event);
     if (!cell) return;
 
     // Motion combines flag 32 with left/middle/right (0/1/2) or none (3).
     let button = 32; // Motion flag
-    if (this.mouseButtonsPressed & 1)
+    if (this.#mouseButtonsPressed & 1)
       button += 0; // Left
-    else if (this.mouseButtonsPressed & 2)
+    else if (this.#mouseButtonsPressed & 2)
       button += 1; // Middle
-    else if (this.mouseButtonsPressed & 4) button += 2; // Right
+    else if (this.#mouseButtonsPressed & 4) button += 2; // Right
     else button += 3; // No button
 
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    this.#sendMouseEvent(button, cell.col, cell.row, false, event);
   }
 
   /**
    * Handle wheel event (scroll)
    */
-  private handleWheel(event: WheelEvent): void {
-    if (this.isDisposed) return;
-    if (!this.mouseConfig?.hasMouseTracking()) return;
+  #handleWheel(event: WheelEvent): void {
+    if (this.#isDisposed) return;
+    if (!this.#mouseConfig?.hasMouseTracking()) return;
     if (event.shiftKey) return;
 
-    const cell = this.pixelToCell(event);
+    const cell = this.#pixelToCell(event);
     if (!cell) return;
 
     // Wheel events: button 64 = scroll up, button 65 = scroll down
     const button = event.deltaY < 0 ? 64 : 65;
 
-    this.sendMouseEvent(button, cell.col, cell.row, false, event);
+    this.#sendMouseEvent(button, cell.col, cell.row, false, event);
 
     // Prevent default scrolling when mouse tracking is active
     event.preventDefault();
   }
 
   /**
-   * Emit paste data with bracketed paste support
+   * Emit a paste with its line ends as Enter sends them (`pasteLineEnds`),
+   * as the core's paste encoder then renders it (see
+   * GhosttyVt.encodePaste): framed under bracketed paste, with the bytes
+   * that could end the bracket or act as keys turned into spaces.
    */
-  private emitPasteData(text: string): void {
-    const hasBracketedPaste = this.getModeCallback?.(2004) ?? false;
-
-    if (hasBracketedPaste) {
-      this.onDataCallback('\x1b[200~' + text + '\x1b[201~');
-    } else {
-      this.onDataCallback(text);
-    }
+  #emitPasteData(text: string): void {
+    const data = this.#ghostty.encodePaste(pasteLineEnds(text), this.#getModeCallback?.(2004) ?? false);
+    if (data) this.#onDataCallback(data);
   }
 
   /**
    * Record keydown data for beforeinput de-duplication
    */
-  private recordKeyDownData(data: string): void {
-    this.lastKeyDownData = data;
-    this.lastKeyDownTime = this.getNow();
+  #recordKeyDownData(data: string): void {
+    this.#lastKeyDownData = data;
+    this.#lastKeyDownTime = this.#getNow();
   }
 
   /**
    * Record paste data for beforeinput de-duplication
    */
-  private recordPasteData(data: string, source: 'paste' | 'beforeinput'): void {
-    this.lastPasteData = data;
-    this.lastPasteTime = this.getNow();
-    this.lastPasteSource = source;
+  #recordPasteData(data: string, source: 'paste' | 'beforeinput'): void {
+    this.#lastPasteData = data;
+    this.#lastPasteTime = this.#getNow();
+    this.#lastPasteSource = source;
   }
 
   /**
    * Check if beforeinput should be ignored due to a recent keydown
    */
-  private shouldIgnoreBeforeInput(data: string): boolean {
-    if (!this.lastKeyDownData) {
+  #shouldIgnoreBeforeInput(data: string): boolean {
+    if (!this.#lastKeyDownData) {
       return false;
     }
-    const now = this.getNow();
+    const now = this.#getNow();
     const isDuplicate =
-      now - this.lastKeyDownTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastKeyDownData === data;
-    this.lastKeyDownData = null;
+      now - this.#lastKeyDownTime < InputHandler.#BEFORE_INPUT_IGNORE_MS &&
+      this.#lastKeyDownData === data;
+    this.#lastKeyDownData = null;
     return isDuplicate;
   }
 
   /**
    * Check if beforeinput text should be ignored due to a recent composition end
    */
-  private shouldIgnoreBeforeInputFromComposition(data: string): boolean {
-    if (!this.lastCompositionData) {
+  #shouldIgnoreBeforeInputFromComposition(data: string): boolean {
+    if (!this.#lastCompositionData) {
       return false;
     }
-    const now = this.getNow();
+    const now = this.#getNow();
     const isDuplicate =
-      now - this.lastCompositionTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastCompositionData === data;
+      now - this.#lastCompositionTime < InputHandler.#BEFORE_INPUT_IGNORE_MS &&
+      this.#lastCompositionData === data;
     if (isDuplicate) {
-      this.lastCompositionData = null;
+      this.#lastCompositionData = null;
     }
     return isDuplicate;
   }
@@ -1007,16 +1017,16 @@ export class InputHandler {
   /**
    * Check if composition end should be ignored due to a recent beforeinput text
    */
-  private shouldIgnoreCompositionEnd(data: string): boolean {
-    if (!this.lastBeforeInputData) {
+  #shouldIgnoreCompositionEnd(data: string): boolean {
+    if (!this.#lastBeforeInputData) {
       return false;
     }
-    const now = this.getNow();
+    const now = this.#getNow();
     const isDuplicate =
-      now - this.lastBeforeInputTime < InputHandler.BEFORE_INPUT_IGNORE_MS &&
-      this.lastBeforeInputData === data;
+      now - this.#lastBeforeInputTime < InputHandler.#BEFORE_INPUT_IGNORE_MS &&
+      this.#lastBeforeInputData === data;
     if (isDuplicate) {
-      this.lastBeforeInputData = null;
+      this.#lastBeforeInputData = null;
     }
     return isDuplicate;
   }
@@ -1024,35 +1034,35 @@ export class InputHandler {
   /**
    * Record beforeinput text for composition de-duplication
    */
-  private recordBeforeInputData(data: string): void {
-    this.lastBeforeInputData = data;
-    this.lastBeforeInputTime = this.getNow();
+  #recordBeforeInputData(data: string): void {
+    this.#lastBeforeInputData = data;
+    this.#lastBeforeInputTime = this.#getNow();
   }
 
   /**
    * Record composition end data for beforeinput de-duplication
    */
-  private recordCompositionData(data: string): void {
-    this.lastCompositionData = data;
-    this.lastCompositionTime = this.getNow();
+  #recordCompositionData(data: string): void {
+    this.#lastCompositionData = data;
+    this.#lastCompositionTime = this.#getNow();
   }
 
   /**
    * Check if paste should be ignored due to a recent paste event from another source
    */
-  private shouldIgnorePasteEvent(data: string, source: 'paste' | 'beforeinput'): boolean {
-    if (!this.lastPasteData) {
+  #shouldIgnorePasteEvent(data: string, source: 'paste' | 'beforeinput'): boolean {
+    if (!this.#lastPasteData) {
       return false;
     }
-    if (this.lastPasteSource === source) {
+    if (this.#lastPasteSource === source) {
       return false;
     }
-    const now = this.getNow();
+    const now = this.#getNow();
     const isDuplicate =
-      now - this.lastPasteTime < InputHandler.BEFORE_INPUT_IGNORE_MS && this.lastPasteData === data;
+      now - this.#lastPasteTime < InputHandler.#BEFORE_INPUT_IGNORE_MS && this.#lastPasteData === data;
     if (isDuplicate) {
-      this.lastPasteData = null;
-      this.lastPasteSource = null;
+      this.#lastPasteData = null;
+      this.#lastPasteSource = null;
     }
     return isDuplicate;
   }
@@ -1060,7 +1070,7 @@ export class InputHandler {
   /**
    * Get current time in milliseconds
    */
-  private getNow(): number {
+  #getNow(): number {
     return typeof performance !== 'undefined' && typeof performance.now === 'function'
       ? performance.now()
       : Date.now();
@@ -1070,60 +1080,60 @@ export class InputHandler {
    * Dispose the InputHandler and remove event listeners
    */
   dispose(): void {
-    if (this.isDisposed) return;
+    if (this.#isDisposed) return;
 
-    if (this.keydownListener) {
-      this.container.removeEventListener('keydown', this.keydownListener);
-      this.keydownListener = null;
+    if (this.#keydownListener) {
+      this.#container.removeEventListener('keydown', this.#keydownListener);
+      this.#keydownListener = null;
     }
 
-    if (this.keypressListener) {
-      this.container.removeEventListener('keypress', this.keypressListener);
-      this.keypressListener = null;
+    if (this.#keypressListener) {
+      this.#container.removeEventListener('keypress', this.#keypressListener);
+      this.#keypressListener = null;
     }
 
-    if (this.pasteListener) {
-      this.container.removeEventListener('paste', this.pasteListener);
-      if (this.inputElement && this.inputElement !== this.container) {
-        this.inputElement.removeEventListener('paste', this.pasteListener);
+    if (this.#pasteListener) {
+      this.#container.removeEventListener('paste', this.#pasteListener);
+      if (this.#inputElement && this.#inputElement !== this.#container) {
+        this.#inputElement.removeEventListener('paste', this.#pasteListener);
       }
-      this.pasteListener = null;
+      this.#pasteListener = null;
     }
 
-    if (this.beforeInputListener && this.inputElement) {
-      this.inputElement.removeEventListener('beforeinput', this.beforeInputListener);
-      this.beforeInputListener = null;
+    if (this.#beforeInputListener && this.#inputElement) {
+      this.#inputElement.removeEventListener('beforeinput', this.#beforeInputListener);
+      this.#beforeInputListener = null;
     }
 
-    if (this.compositionStartListener) {
-      this.container.removeEventListener('compositionstart', this.compositionStartListener);
-      this.compositionStartListener = null;
+    if (this.#compositionStartListener) {
+      this.#container.removeEventListener('compositionstart', this.#compositionStartListener);
+      this.#compositionStartListener = null;
     }
 
-    if (this.compositionUpdateListener) {
-      this.container.removeEventListener('compositionupdate', this.compositionUpdateListener);
-      this.compositionUpdateListener = null;
+    if (this.#compositionUpdateListener) {
+      this.#container.removeEventListener('compositionupdate', this.#compositionUpdateListener);
+      this.#compositionUpdateListener = null;
     }
 
-    if (this.compositionEndListener) {
-      this.container.removeEventListener('compositionend', this.compositionEndListener);
-      this.compositionEndListener = null;
+    if (this.#compositionEndListener) {
+      this.#container.removeEventListener('compositionend', this.#compositionEndListener);
+      this.#compositionEndListener = null;
     }
 
     this.endMouseGesture();
 
-    if (this.wheelListener) {
-      this.container.removeEventListener('wheel', this.wheelListener);
-      this.wheelListener = null;
+    if (this.#wheelListener) {
+      this.#container.removeEventListener('wheel', this.#wheelListener);
+      this.#wheelListener = null;
     }
 
-    this.isDisposed = true;
+    this.#isDisposed = true;
   }
 
   /**
    * Check if handler is disposed
    */
   isActive(): boolean {
-    return !this.isDisposed;
+    return !this.#isDisposed;
   }
 }

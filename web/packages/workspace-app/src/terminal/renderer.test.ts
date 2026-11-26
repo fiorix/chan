@@ -1,39 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
-import { createRepaintScheduler, type RefreshableTerminal, refreshTerminalRows } from "./renderer";
+import { createRepaintScheduler, refreshTerminalRows } from "./renderer";
 
 describe("terminal renderer helpers", () => {
-  test("asks refresh() for the visible rows", () => {
-    const calls: Array<[number, number]> = [];
-    refreshTerminalRows({ rows: 24, refresh: (start, end) => calls.push([start, end]) });
-    expect(calls).toEqual([[0, 23]]);
+  test("asks the widget for a full repaint", () => {
+    const refresh = vi.fn();
+    refreshTerminalRows({ refresh });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledWith();
   });
 
-  test("does not require refresh support", () => {
-    expect(() => refreshTerminalRows({ rows: 1 })).not.toThrow();
-  });
-
-  // ghostty-web has no refresh(); its renderer repaints dirty rows only, so
-  // the repaint is a forced full pass with the overlay scrollbar left to the
-  // frame loop.
-  test("forces a full ghostty render pass from the viewport offset", () => {
-    const calls: unknown[][] = [];
-    const wasmTerm = { core: true } as unknown as RefreshableTerminal["wasmTerm"];
-    const term = {
-      rows: 24,
-      renderer: { render: (...args: unknown[]) => void calls.push(args) },
-      wasmTerm,
-      getViewportY: () => 7,
-    };
-    refreshTerminalRows(term);
-    expect(calls).toEqual([[wasmTerm, true, 7, 0]]);
-  });
-
-  test("a ghostty terminal that has not opened has nothing to repaint", () => {
-    const calls: unknown[][] = [];
-    expect(() =>
-      refreshTerminalRows({ rows: 24, renderer: { render: (...args: unknown[]) => void calls.push(args) } }),
-    ).not.toThrow();
-    expect(calls).toEqual([]);
+  test("no terminal has nothing to repaint", () => {
+    expect(() => refreshTerminalRows(null)).not.toThrow();
   });
 });
 

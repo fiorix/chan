@@ -12,22 +12,25 @@ import type { ILink, ILinkProvider } from './types';
  * Manages link detection across multiple providers with intelligent caching
  */
 export class LinkDetector {
-  private providers: ILinkProvider[] = [];
+  #terminal: ITerminalForLinkDetector;
+  #providers: ILinkProvider[] = [];
 
   // Cache links by position range: `r${row}:${startX}-${endX}`
-  private linkCache = new Map<string, ILink>();
+  #linkCache = new Map<string, ILink>();
 
   // Track which rows have been scanned to avoid redundant provider calls
-  private scannedRows = new Set<number>();
+  #scannedRows = new Set<number>();
 
   // Terminal instance for buffer access
-  constructor(private terminal: ITerminalForLinkDetector) {}
+  constructor(terminal: ITerminalForLinkDetector) {
+    this.#terminal = terminal;
+  }
 
   /**
    * Register a link provider
    */
   registerProvider(provider: ILinkProvider): void {
-    this.providers.push(provider);
+    this.#providers.push(provider);
     this.invalidateCache(); // New provider may detect different links
   }
 
@@ -38,7 +41,7 @@ export class LinkDetector {
    * @returns Link at position, or undefined if none
    */
   async getLinkAt(col: number, row: number): Promise<ILink | undefined> {
-    const line = this.terminal.buffer.active.getLine(row);
+    const line = this.#terminal.buffer.active.getLine(row);
     if (!line || col < 0 || col >= line.length) {
       return undefined;
     }
@@ -49,20 +52,20 @@ export class LinkDetector {
     }
 
     // Check if any cached link contains this position (fast path)
-    for (const link of this.linkCache.values()) {
-      if (this.isPositionInLink(col, row, link)) {
+    for (const link of this.#linkCache.values()) {
+      if (this.#isPositionInLink(col, row, link)) {
         return link;
       }
     }
 
     // Slow path: scan this row if not already scanned
-    if (!this.scannedRows.has(row)) {
-      await this.scanRow(row);
+    if (!this.#scannedRows.has(row)) {
+      await this.#scanRow(row);
     }
 
     // Check cache again after scanning
-    for (const link of this.linkCache.values()) {
-      if (this.isPositionInLink(col, row, link)) {
+    for (const link of this.#linkCache.values()) {
+      if (this.#isPositionInLink(col, row, link)) {
         return link;
       }
     }
@@ -73,13 +76,13 @@ export class LinkDetector {
   /**
    * Scan a row for links using all registered providers
    */
-  private async scanRow(row: number): Promise<void> {
-    this.scannedRows.add(row);
+  async #scanRow(row: number): Promise<void> {
+    this.#scannedRows.add(row);
 
     const allLinks: ILink[] = [];
 
     // Query all providers
-    for (const provider of this.providers) {
+    for (const provider of this.#providers) {
       const links = await new Promise<ILink[] | undefined>((resolve) => {
         provider.provideLinks(row, resolve);
       });
@@ -91,7 +94,7 @@ export class LinkDetector {
 
     // Cache all discovered links
     for (const link of allLinks) {
-      this.cacheLink(link);
+      this.#cacheLink(link);
     }
   }
 
@@ -102,22 +105,22 @@ export class LinkDetector {
    * returns hyperlink_id as a boolean (0 or 1), not a unique identifier.
    * The actual unique identifier is the URI which is retrieved separately.
    */
-  private cacheLink(link: ILink): void {
+  #cacheLink(link: ILink): void {
     // Cache by position range - this uniquely identifies links even when
     // multiple OSC 8 links exist on the same line
     const { start: s, end: e } = link.range;
     const cacheKey = `r${s.y}:${s.x}-${e.x}`;
     // Don't overwrite existing entries - earlier providers (OSC8) take
     // precedence over later ones (regex) for the same range
-    if (!this.linkCache.has(cacheKey)) {
-      this.linkCache.set(cacheKey, link);
+    if (!this.#linkCache.has(cacheKey)) {
+      this.#linkCache.set(cacheKey, link);
     }
   }
 
   /**
    * Check if a position is within a link's range
    */
-  private isPositionInLink(col: number, row: number, link: ILink): boolean {
+  #isPositionInLink(col: number, row: number, link: ILink): boolean {
     const { start, end } = link.range;
 
     // Check if row is in range
@@ -145,22 +148,22 @@ export class LinkDetector {
    * Should be called on terminal write, resize, or clear
    */
   invalidateCache(): void {
-    this.linkCache.clear();
-    this.scannedRows.clear();
+    this.#linkCache.clear();
+    this.#scannedRows.clear();
   }
 
   /**
    * Dispose and cleanup
    */
   dispose(): void {
-    this.linkCache.clear();
-    this.scannedRows.clear();
+    this.#linkCache.clear();
+    this.#scannedRows.clear();
 
     // Dispose all providers
-    for (const provider of this.providers) {
+    for (const provider of this.#providers) {
       provider.dispose?.();
     }
-    this.providers = [];
+    this.#providers = [];
   }
 }
 

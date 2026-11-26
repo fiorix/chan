@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells, VtTerminal } from '../vt/ghosttyVt';
+import { terminalInternals } from '../vt/internal';
+import { selectionInternals, widgetInternals } from './internal';
 import { Terminal } from './terminal';
 import { CanvasRenderer } from './renderer';
 
@@ -84,7 +86,7 @@ async function open(input: string, cols = 20, rows = 4, copy?: (text: string) =>
 const range = (a: number, b: number, c: number, d: number): Range => ({ start: { col: a, absoluteRow: b }, end: { col: c, absoluteRow: d } });
 
 function trackedCells(term: Terminal) {
-  return (term.wasmTerm! as unknown as { trackedCells: Set<{ point(): unknown }> }).trackedCells;
+  return terminalInternals(term.wasmTerm!).trackedCells;
 }
 
 // The core prunes whole pages. Detect the real boundary instead of assuming
@@ -250,22 +252,22 @@ describe('tracked selection lifetime', () => {
     expect(term.getSelectionRange()).toBeNull();
   });
 
-  test('find writes replace tracked endpoints, follow reflow and release on direct clear', async () => {
+  test('endpoints written through ./internal replace tracked cells, follow reflow and release on direct clear', async () => {
     const { term } = await open('0123456789abcdefghijklmnopqrstuvwxyz', 20, 6);
     term.selectAll();
     const tracked = trackedCells(term);
     const previous = [...tracked];
-    const manager = (term as unknown as { selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null } }).selectionManager;
-    manager.selectionStart = { col: 2, absoluteRow: 0 };
-    manager.selectionEnd = { col: 7, absoluteRow: 1 };
+    const manager = selectionInternals(widgetInternals(term).selectionManager!);
+    manager.start = { col: 2, absoluteRow: 0 };
+    manager.end = { col: 7, absoluteRow: 1 };
     expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
     term.resize(12, 6);
     expect(term.getSelection()).toBe('23456789abcdefghijklmnopqr');
-    expect(manager.selectionEnd).toEqual({ col: 3, absoluteRow: 2 });
+    expect(manager.end).toEqual({ col: 3, absoluteRow: 2 });
     expect(previous.map((cell) => cell.point())).toEqual([null, null]);
     expect(tracked.size).toBe(2);
-    manager.selectionStart = null;
-    manager.selectionEnd = null;
+    manager.start = null;
+    manager.end = null;
     expect(term.getSelectionRange()).toBeNull();
     expect(tracked.size).toBe(0);
   });
@@ -402,7 +404,7 @@ describe('public selection ranges', () => {
 
   test('selection replacement and clear invalidate the old visible rows', async () => {
     const { term } = await open('first\r\nsecond\r\nthird');
-    const manager = (term as unknown as { selectionManager: { getDirtySelectionRows(): Set<number>; clearDirtySelectionRows(): void } }).selectionManager;
+    const manager = widgetInternals(term).selectionManager!;
     term.setSelection(range(0, 0, 3, 1));
     manager.clearDirtySelectionRows();
     term.setSelection(range(0, 2, 4, 2));
@@ -422,12 +424,13 @@ describe('public selection ranges', () => {
     expect(clipboard).not.toHaveBeenCalled();
   });
 
-  test('find can still write and read plain anchors that paint and format', async () => {
+  test('plain anchors written and read through ./internal paint and format', async () => {
     const { term } = await open('hello');
-    const manager = (term as unknown as { selectionManager: { selectionStart: Anchor; selectionEnd: Anchor; getSelectionCoords(): unknown } }).selectionManager;
-    manager.selectionStart = { col: 1, absoluteRow: 0 };
-    manager.selectionEnd = { col: 3, absoluteRow: 0 };
-    expect(manager.selectionStart).toEqual({ col: 1, absoluteRow: 0 });
+    const manager = widgetInternals(term).selectionManager!;
+    const endpoints = selectionInternals(manager);
+    endpoints.start = { col: 1, absoluteRow: 0 };
+    endpoints.end = { col: 3, absoluteRow: 0 };
+    expect(endpoints.start).toEqual({ col: 1, absoluteRow: 0 });
     expect(manager.getSelectionCoords()).toEqual({ startCol: 1, startRow: 0, endCol: 3, endRow: 0 });
     expect(term.getSelection()).toBe('ell');
   });

@@ -1,21 +1,21 @@
-// The ghostty widget's renderer repaints only the rows a frame needs: the
-// rows the core marked dirty, the cursor's rows, the selection's and a
-// hovered link's, and their neighbours. These tests hold every frame of a run
-// of small changes to what one frame that repaints everything would leave:
-// after each frame of the renderer under test, a fresh renderer paints the
-// same terminal whole, and the two canvases must show the same calls in every
-// cell (cellPictureCanvas.ts). A frame that repaints too little leaves a cell
-// showing what it held before, which no single full frame can show.
+// The widget's renderer repaints only the rows a frame needs: the rows the
+// core marked dirty, the cursor's rows, the selection's and a hovered
+// link's, and their neighbours. These tests hold each frame of an opened
+// terminal's render loop, through a run of small changes, to the full frame
+// the terminal paints of the same state right after it: the canvas must
+// show the same calls in every cell before and after (cellPictureCanvas.ts).
+// A frame that repaints too little leaves a cell showing what it held
+// before, which the full frame replaces.
 
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/ghostty-web-ng";
-import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
-import { afterEach, beforeAll, describe, expect, onTestFinished, test, vi } from "vitest";
-import { CellPictureContext, type CellPictures } from "../__tests__/cellPictureCanvas";
-import { DEFAULT_SECRET_MASK_SUFFIXES } from "./secretMasking";
-import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { GhosttyVt } from "../vt/ghosttyVt";
+import { CellPictureContext, type CellPictures } from "./__tests__/cellPictureCanvas";
+import type { ITheme } from "./interfaces";
+import type { PaintLayer } from "./renderer";
+import { Terminal } from "./terminal";
 
-const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 20;
 const ROWS = 8;
 
@@ -26,30 +26,8 @@ const THEME: ITheme = {
   selectionBackground: "rgba(88, 166, 255, 0.35)",
 };
 
-type Coords = { startCol: number; startRow: number; endCol: number; endRow: number };
-
-/// The renderer's view of a selection: the coordinates it paints and the
-/// rows a moved or dropped selection leaves to repaint.
-class Selection {
-  coords: Coords | null = null;
-  readonly dirty = new Set<number>();
-  hasSelection(): boolean {
-    return this.coords !== null;
-  }
-  getSelectionCoords(): Coords | null {
-    return this.coords;
-  }
-  getDirtySelectionRows(): Set<number> {
-    return this.dirty;
-  }
-  clearDirtySelectionRows(): void {
-    this.dirty.clear();
-  }
-  set(coords: Coords | null): void {
-    if (this.coords) for (let row = this.coords.startRow; row <= this.coords.endRow; row++) this.dirty.add(row);
-    this.coords = coords;
-  }
-}
+/// The colour the stand-in mask layer fills a value's cells in.
+const MASK = "#6c6c70";
 
 type Options = {
   cursorStyle?: "block" | "underline" | "bar";
@@ -59,173 +37,143 @@ type Options = {
   masking?: boolean;
 };
 
-type Painter = {
-  term: Terminal;
-  renderer: CanvasRenderer;
-  context: CellPictureContext;
-};
-
 type Rig = {
-  core: VtTerminal;
-  painter: Painter;
-  selection: Selection;
-  theme: ITheme;
-  resize(cols: number, rows: number): void;
-  /// What one full frame of a fresh renderer paints of the terminal
-  /// scrolled back `viewportY` rows. It ends a frame of the core, so a step
-  /// takes it only when the core has changed nothing since the last check.
+  term: Terminal;
+  /// Scrolls the view back `y` rows into the history. The terminal clamps
+  /// its own offset at zero, so an offset below zero is written to the one
+  /// it hands the renderer.
+  view(y: number): void;
+  /// What one full frame paints of the terminal scrolled back `viewportY`
+  /// rows. The terminal is left on the view it showed, painted whole.
   picture(viewportY: number): CellPictures;
 };
 
-/// A step of a run: bytes the program writes, or a change made to the rig.
-type Step = string | ((rig: Rig) => void);
+/// A step of a run: bytes the program writes, or a change made to the rig,
+/// which the run awaits when it settles later.
+type Step = string | ((rig: Rig) => unknown);
+
+/// A mask layer as an embedder's secret masker registers one: on each row
+/// the frame repainted, read from the buffer at the frame's top row, it
+/// fills the cells of a value assigned to a name ending in TOKEN.
+function maskLayer(term: Terminal): PaintLayer {
+  return {
+    order: "mask",
+    paint({ ctx, metrics, topRow, changedRows }) {
+      ctx.fillStyle = MASK;
+      for (const row of changedRows) {
+        const text = term.buffer.active.getLine(topRow + row)?.translateToString(true) ?? "";
+        const value = /TOKEN=(\S+)/.exec(text);
+        if (!value) continue;
+        const x = value.index + "TOKEN=".length;
+        ctx.fillRect(x * metrics.width, row * metrics.height, value[1].length * metrics.width, metrics.height);
+      }
+    },
+  };
+}
 
 let vendored: WebAssembly.Module;
+const opened: Terminal[] = [];
 
 beforeAll(async () => {
   vendored = await WebAssembly.compile(readFileSync(VENDORED));
 });
 
 afterEach(() => {
+  for (const term of opened.splice(0)) term.dispose();
+  document.body.replaceChildren();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-/// Runs `steps` over one terminal: a frame of the renderer under test after
-/// the first write and after each step, each held to a full frame of a
-/// fresh renderer over the same terminal.
+/// Runs `steps` over one opened terminal: a frame of its render loop after
+/// the first write and after each step, each held to the full frame the
+/// terminal paints right after it.
 async function run(setup: string, steps: Step[], options: Options = {}): Promise<void> {
   const contexts = new WeakMap<HTMLCanvasElement, CellPictureContext>();
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
     function (this: HTMLCanvasElement) {
       let context = contexts.get(this);
-      if (!context) {
-        context = new CellPictureContext(this);
-        contexts.set(this, context);
-      }
+      if (!context) contexts.set(this, (context = new CellPictureContext(this)));
       return context as unknown as CanvasRenderingContext2D;
     } as unknown as typeof HTMLCanvasElement.prototype.getContext,
   );
-  const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const core = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
-  let cols = COLS;
-  let rows = ROWS;
-  const selection = new Selection();
-  /// The masker's subscriptions to the content-change event, which the
-  /// widget fires after a write or a resize and this rig fires itself.
-  const changes = new Set<() => void>();
-  const changed = () => {
-    for (const listener of [...changes]) listener();
-  };
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", () => {});
+  if (options.ratio !== undefined) vi.stubGlobal("devicePixelRatio", options.ratio);
+  const ghostty = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+  const term = new Terminal({
+    ghostty,
+    cols: COLS,
+    rows: ROWS,
+    scrollback: 100,
+    theme: THEME,
+    cursorStyle: options.cursorStyle,
+    cursorBlink: options.cursorBlink ?? false,
+    boxGlyphs: options.glyphs,
+    scrollbar: options.glyphs ? "overlay" : undefined,
+    smoothScrollDuration: 0,
+    testHooks: { scrollbarOpacity: 0 },
+  });
+  opened.push(term);
+  const host = document.createElement("div");
+  document.body.append(host);
+  term.open(host);
+  const context = contexts.get(host.querySelector("canvas")!)!;
+  const { width, height } = term.getMetrics()!;
+  context.cell = { width, height };
+  if (options.masking) term.addPaintLayer(maskLayer(term));
+  // The frames open() painted are kept on the context's default grid; one
+  // full frame puts every cell's picture on the measured one.
+  term.refresh();
 
-  /// A terminal over the core with a renderer of its own, wired as
-  /// Terminal.open() and TerminalTab wire them.
-  const paint = (theme: ITheme): Painter => {
-    const term = new Terminal({ ghostty: vt, cols, rows });
-    term.wasmTerm = core;
-    const canvas = document.createElement("canvas");
-    const renderer = new CanvasRenderer(canvas, {
-      devicePixelRatio: options.ratio ?? 1,
-      boxGlyphs: options.glyphs,
-      scrollbar: options.glyphs ? "overlay" : undefined,
-      cursorStyle: options.cursorStyle,
-      cursorBlink: options.cursorBlink,
-      theme,
-    });
-    renderer.resize(cols, rows);
-    term.renderer = renderer;
-    const context = contexts.get(canvas)!;
-    const { width, height } = renderer.getMetrics();
-    context.cell = { width, height };
-    if (options.masking) {
-      // What the masker uses of an open widget, over this hand-wired
-      // renderer: its paint layers, and a refresh that is a full frame.
-      const maskable: GhosttyMaskTerminal = {
-        buffer: term.buffer,
-        getMetrics: () => renderer.getMetrics(),
-        addPaintLayer: (layer) => renderer.addPaintLayer(layer),
-        onChange(listener) {
-          changes.add(listener);
-          return { dispose: () => void changes.delete(listener) };
-        },
-        refresh: () => renderer.render(core, true, term.getViewportY(), 0),
-      };
-      new GhosttySecretMasker(maskable, DEFAULT_SECRET_MASK_SUFFIXES, "#6c6c70", true);
-    }
-    return { term, renderer, context };
+  /// One frame of the render loop: the callbacks queued so far, once.
+  const tick = () => {
+    for (const callback of frames.splice(0)) callback(performance.now());
   };
+  const pictures = () => context.pictures(term.cols, term.rows);
 
   const rig: Rig = {
-    core,
-    painter: paint(THEME),
-    selection,
-    theme: THEME,
-    resize(c, r) {
-      cols = c;
-      rows = r;
-      core.resize(c, r);
-      changed();
+    term,
+    view(y) {
+      if (y < 0) term.viewportY = y;
+      else term.viewport.scrollTo(y);
     },
     picture(viewportY) {
-      const fresh = paint(rig.theme);
-      (fresh.term as unknown as { viewportY: number }).viewportY = viewportY;
-      frame(fresh, true);
-      fresh.renderer.dispose();
-      return fresh.context.pictures(cols, rows);
+      const shown = term.getViewportY();
+      rig.view(viewportY);
+      term.refresh();
+      const whole = pictures();
+      rig.view(shown);
+      term.refresh();
+      return whole;
     },
-  };
-  rig.painter.renderer.setSelectionManager(selection as never);
-  const viewport = (painter: Painter) => (painter.term as unknown as { viewportY: number }).viewportY;
-
-  /// One frame as the widget's render loop issues it.
-  const frame = (painter: Painter, forceAll: boolean) => {
-    painter.renderer.render(core, forceAll, painter.term.getViewportY(), 0);
-    core.getCursor();
   };
 
   const check = (label: string) => {
-    const { painter } = rig;
-    frame(painter, false);
+    tick();
+    const painted = pictures();
     // The whole picture of the same terminal, the same view and the same
     // renderer state, painted in one frame.
-    const whole = paint(rig.theme);
-    (whole.term as unknown as { viewportY: number }).viewportY = viewport(painter);
-    // The selection the renderer under test reads: the rig's, or
-    // ghostty-web's own once a step installs it.
-    const shown = (painter.renderer as unknown as { selectionManager: { getSelectionCoords(): Coords | null } }).selectionManager;
-    const fresh = new Selection();
-    fresh.coords = shown.getSelectionCoords();
-    whole.renderer.setSelectionManager(fresh as never);
-    const hover = painter.renderer as unknown as { hoveredHyperlinkId: number; hoveredLinkRange: unknown; cursorVisible: boolean };
-    whole.renderer.setHoveredHyperlinkId(hover.hoveredHyperlinkId);
-    whole.renderer.setHoveredLinkRange(hover.hoveredLinkRange as never);
-    (whole.renderer as unknown as { cursorVisible: boolean }).cursorVisible = hover.cursorVisible;
-    frame(whole, true);
-    whole.renderer.dispose();
-    expect(painter.context.pictures(cols, rows), label).toEqual(whole.context.pictures(cols, rows));
+    term.refresh();
+    expect(painted, label).toEqual(pictures());
   };
 
-  core.write(setup);
+  term.write(setup);
   check("the first frame");
   for (const [i, step] of steps.entries()) {
-    if (typeof step === "string") {
-      core.write(step);
-      changed();
-    } else {
-      step(rig);
-    }
+    if (typeof step === "string") term.write(step);
+    else await step(rig);
     check(`after step ${i}: ${typeof step === "string" ? JSON.stringify(step) : step.toString()}`);
   }
-  rig.painter.renderer.dispose();
 }
 
 const lines = (n: number, prefix = "line") =>
   Array.from({ length: n }, (_, i) => `${prefix} ${String(i).padStart(2, "0")} ${"abcdefghij".slice(0, 2 + (i % 8))}`).join("\r\n");
 
 /// A step that scrolls the view back `y` rows into the history.
-const at = (y: number) => (r: Rig) => {
-  (r.painter.term as unknown as { viewportY: number }).viewportY = y;
-};
+const at = (y: number) => (r: Rig) => r.view(y);
 
 /// DECTCEM hides and shows the cursor where it stands (`tput civis` at an
 /// idle prompt); the core marks no row dirty for it.
@@ -290,11 +238,11 @@ describe("the ghostty renderer's partial redraws", () => {
 
   test("a resize and back", async () => {
     await run(lines(ROWS + 2), [
-      (r) => r.resize(24, 6),
+      (r) => r.term.resize(24, 6),
       "after",
-      (r) => r.resize(12, 8),
+      (r) => r.term.resize(12, 8),
       "\x1b[1;1Hx",
-      (r) => r.resize(COLS, ROWS),
+      (r) => r.term.resize(COLS, ROWS),
       "y",
     ]);
   });
@@ -302,11 +250,8 @@ describe("the ghostty renderer's partial redraws", () => {
   test("the colours change under painted rows", async () => {
     const styled = "\x1b[31mred\x1b[0m \x1b[42mgreen\x1b[0m \x1b[38;5;208m208\x1b[0m plain\r\n\x1b[7minverse\x1b[0m \x1b[2mfaint\x1b[0m";
     await run(styled, [
-      (r) => {
-        r.theme = { ...THEME, background: "#fafafa", foreground: "#202020" };
-        r.painter.renderer.setTheme(r.theme);
-        r.core.setColors({ fgColor: 0x202020, bgColor: 0xfafafa, palette: [0, 0xaa0000, 0x00aa00] });
-      },
+      (r) =>
+        r.term.setTheme({ ...THEME, background: "#fafafa", foreground: "#202020", black: "#000000", red: "#aa0000", green: "#00aa00" }),
       "\x1b]4;1;rgb:00/ff/00\x07",
       "\x1b]11;rgb:20/20/40\x07",
       "\x1b]10;rgb:ff/ff/00\x07",
@@ -317,11 +262,12 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(lines(ROWS + 12), [at(3), at(5), "x", at(12), at(0), "y", at(1), at(0), "\r\nz"]);
   });
 
-  // chan's macOS pixel scroll moves the view by fractions of a row
-  // (ghosttyViewport.ts). Every reader of the offset floors it (the hover,
-  // the selection, the masker), so the view shows the rows of the floor:
-  // at 2.5 and just below 3 those of 2, at 0.5 the screen and its cursor,
-  // which a hide takes away there as at the bottom.
+  // chan's macOS pixel scroll (the workspace app's
+  // terminal/ghosttyViewport.ts) moves the view by fractions of a row. Every
+  // reader of the offset floors it (the hover, the selection, a mask layer's
+  // top row), so the view shows the rows of the floor: at 2.5 and just below
+  // 3 those of 2, at 0.5 the screen and its cursor, which a hide takes away
+  // there as at the bottom.
   const JUST_BELOW_3 = 3 - 1e-9;
   const floored = (y: number) => (r: Rig) => {
     expect(r.picture(y), `the picture at ${y}`).toEqual(r.picture(Math.floor(y)));
@@ -335,9 +281,9 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(lines(ROWS + 12), [at(from), at(to), floored(to), HIDE, floored(to), SHOW, "x", at(from), at(to), "\r\ny", at(0)]);
   });
 
-  // ghostty-web clamps its own offset at 0, but an offset below it handed
+  // The terminal clamps its own offset at 0, but an offset below it handed
   // to the renderer shows the bottom view, masked values masked, as the
-  // hover, the selection and the masker read it.
+  // hover, the selection and a mask layer's top row read it.
   const bottom = (y: number) => (r: Rig) => {
     expect(r.picture(y), `the picture at ${y}`).toEqual(r.picture(0));
   };
@@ -351,11 +297,12 @@ describe("the ghostty renderer's partial redraws", () => {
   });
 
   // chan's viewport controller keeps a fraction less than a row back under
-  // output (ghosttyViewport.ts): the frames that follow paint the bottom
-  // view, the prompt the output ends on and its cursor.
+  // output (the workspace app's terminal/ghosttyViewport.ts): the frames that
+  // follow paint the bottom view, the prompt the output ends on and its
+  // cursor.
   test("output written while the view rests a fraction back paints the bottom view and its cursor", async () => {
     const cursorShown = (y: number) => (r: Rig) => {
-      const { x, y: row } = r.core.getCursor();
+      const { x, y: row } = r.term.getCursor()!;
       expect(r.picture(y)[row][x].join(" | "), `the cursor at ${y}`).toContain(`fill ${THEME.cursor}`);
     };
     await run(`${lines(ROWS + 12)}\r\n$ `, [
@@ -367,7 +314,7 @@ describe("the ghostty renderer's partial redraws", () => {
 
   test("a masked value in the history scrolled back by a fraction of a row", async () => {
     // The value's row is history row 3 of 7: at an offset of 5 it shows on
-    // view row 1, where the masker's floored offset finds it too.
+    // view row 1, where the mask layer's top row finds it too.
     const masked = (y: number, row: number) => (r: Rig) => {
       const value = r.picture(y)[row].slice(13, 19).flat().join("\n");
       expect(value, `the value at ${y}`).toContain("#6c6c70");
@@ -381,46 +328,51 @@ describe("the ghostty renderer's partial redraws", () => {
   });
 
   test("a link hovered and left", async () => {
-    const hover = (id: number) => (r: Rig) => r.painter.renderer.setHoveredHyperlinkId(id);
-    const range = (value: { startX: number; startY: number; endX: number; endY: number } | null) => (r: Rig) =>
-      r.painter.renderer.setHoveredLinkRange(value);
+    // The pointer over the cell at `col` of view row `row`, and the link
+    // lookup it starts settled: hover moves are throttled to one per 16 ms
+    // and the lookup resolves asynchronously.
+    const over = (col: number, row: number) => async (r: Rig) => {
+      const { width, height } = r.term.getMetrics()!;
+      const at = { clientX: (col + 0.5) * width, clientY: (row + 0.5) * height };
+      r.term.element!.querySelector("canvas")!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+    const leave = (r: Rig) => void r.term.element!.dispatchEvent(new MouseEvent("mouseleave"));
+    // The OSC 8 link on row 0 and the text after it, the URL on row 1 that
+    // wraps onto row 2, and an empty row.
+    const [link, text, url, empty] = [over(1, 0), over(7, 0), over(3, 1), over(0, 5)];
     await run(
       "\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\ text\r\nhttps://plain.example/b\r\n\x1b]8;;https://e.x/c\x1b\\other\x1b]8;;\x1b\\",
-      [hover(1), hover(0), range({ startX: 0, startY: 1, endX: 18, endY: 1 }), range(null), hover(1), "\x1b[5;1Hmore", hover(0)],
+      [link, text, url, empty, link, "\x1b[5;1Hmore", leave],
     );
   });
 
-  test("a selection moved and dropped", async () => {
-    const select = (coords: Coords | null) => (r: Rig) => r.selection.set(coords);
+  // The screen holds no history, so a view row is its absolute row.
+  const range = (startCol: number, startRow: number, endCol: number, endRow: number) => ({
+    start: { col: startCol, absoluteRow: startRow },
+    end: { col: endCol, absoluteRow: endRow },
+  });
+  const call = (f: (term: Terminal) => void) => (r: Rig) => f(r.term);
+
+  test("a selection set, moved and dropped", async () => {
     await run(lines(ROWS), [
-      select({ startCol: 3, startRow: 1, endCol: 6, endRow: 3 }),
-      select({ startCol: 0, startRow: 2, endCol: 19, endRow: 5 }),
+      call((t) => t.setSelection(range(3, 1, 6, 3))),
+      call((t) => t.setSelection(range(0, 2, 19, 5))),
       "\x1b[4;2Hchanged",
-      select({ startCol: 5, startRow: 6, endCol: 9, endRow: 6 }),
-      select(null),
+      call((t) => t.setSelection(range(5, 6, 9, 6))),
+      call((t) => t.setSelection(null)),
     ]);
   });
-
-  /// A step that gives the renderer under test ghostty-web's own
-  /// SelectionManager, wired as Terminal.open() wires it.
-  const ownSelection = (r: Rig) => {
-    const manager = new SelectionManager(r.painter.term, r.painter.renderer, r.core, document.createElement("textarea"));
-    onTestFinished(() => manager.dispose());
-    (r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
-    r.painter.renderer.setSelectionManager(manager);
-  };
-  const call = (f: (term: Terminal) => void) => (r: Rig) => f(r.painter.term);
 
   test.each([
     ["select", call((t) => t.select(4, 1, COLS + 10)), call((t) => t.select(2, 5, 6))],
     ["selectLines", call((t) => t.selectLines(0, 1)), call((t) => t.selectLines(5, 6))],
-  ])("ghostty-web's %s moves a selection to other rows", async (_name, first, second) => {
-    await run(lines(ROWS), [ownSelection, first, second]);
+  ])("%s moves a selection to other rows", async (_name, first, second) => {
+    await run(lines(ROWS), [first, second]);
   });
 
-  test("ghostty-web's own selection made, moved, dropped and made again", async () => {
+  test("a selection made, moved, dropped and made again", async () => {
     await run(lines(ROWS), [
-      ownSelection,
       call((t) => t.select(4, 1, COLS + 10)),
       call((t) => t.select(2, 3, COLS * 2 + 6)),
       call((t) => t.selectLines(6, 7)),

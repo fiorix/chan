@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt, VtCells } from '../vt/ghosttyVt';
+import { terminalInternals } from '../vt/internal';
 import type { ITheme } from './interfaces';
 import type { PaintFrame } from './renderer';
 import { Terminal } from './terminal';
@@ -87,11 +88,7 @@ function cells(term: Terminal) {
 // Package-local C API snapshots pin effective colors as well as defaults,
 // including cursor and palette slots that a cell read cannot expose.
 function coreColors(term: Terminal): Record<string, number[] | null> {
-  const raw = term.wasmTerm as unknown as {
-    handle: number;
-    wasm: { fn: { ghostty_terminal_get(handle: number, data: number, out: number): number };
-      alloc(length: number): number; free(ptr: number, length: number): void; bytes(): Uint8Array };
-  };
+  const raw = terminalInternals(term.wasmTerm!);
   const out: Record<string, number[] | null> = {};
   const ptr = raw.wasm.alloc(768);
   try {

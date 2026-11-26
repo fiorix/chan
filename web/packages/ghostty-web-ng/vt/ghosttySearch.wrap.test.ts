@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ABI, GhosttyVt, LAYOUT, type MatchRange, type VtSearch, type VtTerminal } from "./ghosttyVt";
+import { searchInternals, terminalInternals } from "./internal";
 
 let module: WebAssembly.Module;
 beforeAll(async () => {
@@ -48,16 +49,6 @@ const cases = [
 
 type Matches = { total: number; matches: MatchRange[] };
 type Observation = { core: Matches; binding: Matches };
-type Raw = {
-  handle: number;
-  wasm: {
-    fn: Record<string, (...args: number[]) => number>;
-    view(): DataView;
-    alloc(len: number): number;
-    free(ptr: number, len: number): void;
-  };
-};
-const raw = (value: unknown): Raw => value as Raw;
 
 function check(result: number): void {
   if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`core result ${result}`);
@@ -65,7 +56,7 @@ function check(result: number): void {
 
 // Drive and read the core directly so binding iteration cannot create the duplicate.
 function coreMatches(t: VtTerminal, s: VtSearch): Matches {
-  const { wasm, handle } = raw(s);
+  const { wasm, handle } = searchInternals(s);
   const scratch = wasm.alloc(24);
   let array = 0;
   let bytes = 0;
@@ -91,7 +82,7 @@ function coreMatches(t: VtTerminal, s: VtSearch): Matches {
     check(wasm.fn.ghostty_search_get(handle, ABI.GhosttySearchData.MATCHES, scratch));
     const length = wasm.view().getUint32(scratch + B.len, true);
     const point = (ref: number) => {
-      check(wasm.fn.ghostty_terminal_point_from_grid_ref(raw(t).handle, ref, ABI.GhosttyPointTag.SCREEN, scratch + 16));
+      check(wasm.fn.ghostty_terminal_point_from_grid_ref(terminalInternals(t).handle, ref, ABI.GhosttyPointTag.SCREEN, scratch + 16));
       const C = LAYOUT.GhosttyPointCoordinate.fields;
       return {
         row: wasm.view().getUint32(scratch + 16 + C.y, true),

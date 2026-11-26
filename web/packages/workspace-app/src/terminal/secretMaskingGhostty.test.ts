@@ -255,6 +255,17 @@ describe("ghostty secret masking over a fake buffer", () => {
     expect(screen.frame().fills).toEqual([cells(6, 0, 3)]);
   });
 
+  test("an offset below zero maps rows as the bottom view does", () => {
+    const lines = ["x", "y", "z", "w", "p", "TOKEN=abc"].map((text) => new FakeLine(text, 20));
+    const screen = ghosttyTerminal({ cols: 20, rows: 3, lines });
+    new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
+    expect(screen.frame().fills).toEqual([cells(6, 2, 3)]);
+    for (const below of [-0.5, -1, -2]) {
+      screen.scroll(below);
+      expect(screen.frame().fills, `at ${below}`).toEqual([cells(6, 2, 3)]);
+    }
+  });
+
   test("a scrollback line filled to its last column reads as wrapping into the next", () => {
     // ghostty-web's buffer reports no wrap flag for a scrollback line, so both read
     // unwrapped; the first is full, which is what a soft wrap leaves.
@@ -605,8 +616,58 @@ describe("ghostty secret masking over the pinned build", () => {
         const metrics = term.getMetrics()!;
         return context.pixelAt((x + 0.5) * metrics.width, (row + 0.5) * metrics.height);
       },
+      /// The pixel at the centre of every cell, by row.
+      cells() {
+        return Array.from({ length: ROWS }, (_, row) => Array.from({ length: COLS }, (_, x) => this.pixel(x, row)));
+      },
     };
   }
+
+  /// One frame of the render loop, held to the full frame the widget paints
+  /// of the same state right after it.
+  function expectFrameWhole(screen: Awaited<ReturnType<typeof pinnedTerminal>>, label: string) {
+    screen.frame();
+    const painted = screen.cells();
+    screen.term.refresh();
+    expect(painted, label).toEqual(screen.cells());
+  }
+
+  test("a value typed a character at a time is masked in each frame as a full frame masks it", async () => {
+    const screen = await pinnedTerminal();
+    const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
+    for (const typed of ["$ export TOKEN=", "a", "b", "c"]) {
+      screen.write(typed);
+      expectFrameWhole(screen, `after ${JSON.stringify(typed)}`);
+    }
+    expect(masker.maskCount).toBe(1);
+    expectPixel(screen.pixel(14, 0), BACKGROUND);
+    for (const x of [15, 16, 17]) expectPixel(screen.pixel(x, 0), MASKED);
+    // The name rewritten under the value: the row is no longer masked.
+    screen.write("\x1b[1;14Hd");
+    expectFrameWhole(screen, "after the name is rewritten");
+    expect(masker.maskCount).toBe(0);
+    for (const x of [15, 16, 17]) expectPixel(screen.pixel(x, 0), BACKGROUND);
+  });
+
+  test("a value in the history masks on the row its fractional offset's floor shows", async () => {
+    const screen = await pinnedTerminal();
+    new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
+    // Eleven lines over four rows: the value line is history row 3 of 7, so
+    // at an offset of 5 it shows on view row 1, and at 4.75 on view row 0.
+    screen.write(["a", "b", "c", "TOKEN=abc", "d", "e", "f", "g", "h", "i", "j"].join("\r\n"));
+    expect(screen.term.getScrollbackLength()).toBe(7);
+    for (const [offset, row] of [
+      [5, 1],
+      [5.5, 1],
+      [4.75, 0],
+    ]) {
+      screen.term.viewport.scrollTo(offset);
+      expect(screen.term.getViewportY()).toBe(offset);
+      expectFrameWhole(screen, `at ${offset}`);
+      expectPixel(screen.pixel(5, row), BACKGROUND);
+      for (const x of [6, 7, 8]) expectPixel(screen.pixel(x, row), MASKED);
+    }
+  });
 
   test("the mask is the widget's one mask layer, and the renderer keeps its own render", async () => {
     const screen = await pinnedTerminal();

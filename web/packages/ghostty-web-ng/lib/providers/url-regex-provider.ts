@@ -24,21 +24,25 @@ import type { ILink, ILinkProvider } from '../types';
  * - gemini://, gopher://, news:
  */
 export class UrlRegexProvider implements ILinkProvider {
+  #terminal: ITerminalForUrlProvider;
+
   /**
    * URL regex pattern
    * Matches common protocols followed by valid URL characters
    * Excludes file paths (no ./ or ../ or bare /)
    */
-  private static readonly URL_REGEX =
+  static readonly #URL_REGEX =
     /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
 
   /**
    * Characters to strip from end of URLs
    * Common punctuation that's unlikely to be part of the URL
    */
-  private static readonly TRAILING_PUNCTUATION = /[.,;!?)\]]+$/;
+  static readonly #TRAILING_PUNCTUATION = /[.,;!?)\]]+$/;
 
-  constructor(private terminal: ITerminalForUrlProvider) {}
+  constructor(terminal: ITerminalForUrlProvider) {
+    this.#terminal = terminal;
+  }
 
   /**
    * Provide all regex-detected URLs on the given row
@@ -46,27 +50,27 @@ export class UrlRegexProvider implements ILinkProvider {
   provideLinks(y: number, callback: (links: ILink[] | undefined) => void): void {
     const links: ILink[] = [];
 
-    const line = this.terminal.buffer.active.getLine(y);
+    const line = this.#terminal.buffer.active.getLine(y);
     if (!line) {
       callback(undefined);
       return;
     }
 
     // Convert line cells to text
-    const lineText = this.lineToText(line);
+    const lineText = this.#lineToText(line);
 
     // Reset regex state (global flag maintains state)
-    UrlRegexProvider.URL_REGEX.lastIndex = 0;
+    UrlRegexProvider.#URL_REGEX.lastIndex = 0;
 
     // Find all URL matches in the line
-    let match: RegExpExecArray | null = UrlRegexProvider.URL_REGEX.exec(lineText);
+    let match: RegExpExecArray | null = UrlRegexProvider.#URL_REGEX.exec(lineText);
     while (match !== null) {
       let url = match[0];
       const startX = match.index;
       let endX = match.index + url.length - 1; // Inclusive end
 
       // Strip trailing punctuation
-      const stripped = url.replace(UrlRegexProvider.TRAILING_PUNCTUATION, '');
+      const stripped = url.replace(UrlRegexProvider.#TRAILING_PUNCTUATION, '');
       if (stripped.length < url.length) {
         url = stripped;
         endX = startX + url.length - 1;
@@ -85,7 +89,7 @@ export class UrlRegexProvider implements ILinkProvider {
       }
 
       // Get next match
-      match = UrlRegexProvider.URL_REGEX.exec(lineText);
+      match = UrlRegexProvider.#URL_REGEX.exec(lineText);
     }
 
     callback(links.length > 0 ? links : undefined);
@@ -94,7 +98,7 @@ export class UrlRegexProvider implements ILinkProvider {
   /**
    * Convert a buffer line to plain text string
    */
-  private lineToText(line: IBufferLineForUrlProvider): string {
+  #lineToText(line: IBufferLineForUrlProvider): string {
     const chars: string[] = [];
 
     for (let x = 0; x < line.length; x++) {

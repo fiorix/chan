@@ -1,39 +1,12 @@
-import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
-
-/// What a repaint of the visible rows needs from the terminal: a refresh()
-/// over the visible row range. The widget's refresh() takes no range and
-/// runs a full pass: its canvas renderer otherwise repaints only
-/// the rows the core marked dirty since the last frame, so pixels the host
+/// What a repaint of the visible rows needs from the terminal: the widget's
+/// refresh(), a full pass. Its canvas renderer otherwise repaints only the
+/// rows the core marked dirty since the last frame, so pixels the host
 /// dropped (a canvas backing store purged while the window sat off-screen)
-/// stay gone until a full pass is forced. A terminal with no refresh() gets
-/// that pass through its renderer.
-export type RefreshableTerminal = {
-  rows: number;
-  refresh?: (start: number, end: number) => void;
-  renderer?: {
-    render?(
-      term: VtTerminal,
-      forceAll?: boolean,
-      viewportY?: number,
-      scrollbarOpacity?: number,
-    ): void;
-  };
-  wasmTerm?: VtTerminal;
-  getViewportY?: () => number;
-};
+/// stay gone until a full pass is forced.
+export type RefreshableTerminal = { refresh(): void };
 
 export function refreshTerminalRows(term: RefreshableTerminal | null): void {
-  if (!term) return;
-  if (term.refresh) {
-    term.refresh(0, Math.max(0, term.rows - 1));
-    return;
-  }
-  // A zero scrollbar opacity leaves the overlay scrollbar to the widget's
-  // render loop, which paints it every frame while it is shown.
-  const render = term.renderer?.render;
-  if (typeof render === "function" && term.wasmTerm) {
-    render.call(term.renderer, term.wasmTerm, true, term.getViewportY?.() ?? 0, 0);
-  }
+  term?.refresh();
 }
 
 /// What a pending repaint waits on: the next animation frame, and the page's

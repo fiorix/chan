@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
-import type { EventEmitter } from './event-emitter';
-import type { TerminalChange } from './interfaces';
+import { terminalInternals } from '../vt/internal';
+import { widgetInternals } from './internal';
 import { LinkDetector } from './link-detector';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { Terminal } from './terminal';
@@ -41,9 +41,10 @@ async function terminal(rows = 6) {
   Object.assign(term, {
     wasmTerm: ghostty.createTerminal(40, rows, { scrollbackLimit: 1000 }),
     renderer,
-    canvas: document.createElement('canvas'),
-    isOpen: true,
   });
+  const internals = widgetInternals(term);
+  internals.canvas = document.createElement('canvas');
+  internals.isOpen = true;
   terminals.push(term);
   return { term, renderer };
 }
@@ -233,6 +234,22 @@ describe('content changes', () => {
     expect(renderer.render, 'the next real echo still paints synchronously').toHaveBeenCalledOnce();
   });
 
+  test("a paste scrolls to the bottom and its echo paints inside the write", async () => {
+    const { term, renderer } = await history();
+    renderer.render.mockClear();
+    term.write('quiet');
+    expect(renderer.render, 'output with no paste before it waits for a frame').not.toHaveBeenCalled();
+    term.viewport.scrollTo(7);
+    const sent: string[] = [];
+    term.onData((data) => sent.push(data));
+    term.paste('x');
+    expect(sent).toEqual(['x']);
+    expect(term.viewport.offset, 'the paste brought the prompt into view').toBe(0);
+    renderer.render.mockClear();
+    term.write('x');
+    expect(renderer.render, "the paste's echo painted inside its write").toHaveBeenCalledOnce();
+  });
+
   test('a throwing change listener cannot leave parsed terminal replies unsent', async () => {
     const { term } = await terminal();
     const replies: string[] = [];
@@ -248,7 +265,7 @@ describe('content changes', () => {
     const { term } = await terminal();
     const links = new LinkDetector(term);
     links.registerProvider(new UrlRegexProvider(term));
-    Object.assign(term, { linkDetector: links });
+    widgetInternals(term).linkDetector = links;
     term.write('https://before.example');
     expect(await links.getLinkAt(0, 0), 'prime the real provider cache').toBeDefined();
     const observed: Array<Promise<ILink | undefined>> = [];
@@ -291,7 +308,7 @@ describe('content changes', () => {
     term.resize(40, 100);
     expect(term.getScrollbackLength()).toBe(0);
     expect(term.viewport.offset).toBe(0);
-    expect((term as unknown as { targetViewportY: number }).targetViewportY).toBe(0);
+    expect(widgetInternals(term).targetViewportY).toBe(0);
   });
 
   test('unsubscribed and disposed listeners receive no further changes', async () => {
@@ -314,7 +331,7 @@ describe('content changes', () => {
     const { term } = await terminal();
     const changed = vi.fn();
     term.onChange(changed);
-    const emitter = (term as unknown as { changeEmitter: EventEmitter<TerminalChange> }).changeEmitter;
+    const emitter = widgetInternals(term).changeEmitter;
     term.dispose();
     // write() refuses a disposed widget before reaching the emitter; drive
     // delivery here so that guard cannot hide retained subscriptions.
@@ -349,11 +366,7 @@ async function historyPrune(offset: number | 'oldest' = 7.5, target?: number) {
   const { term } = await terminal();
   term.resize(80, 6);
   const core = term.wasmTerm!;
-  const scrolling = term as unknown as {
-    targetViewportY: number;
-    scrollAnimationStartTime?: number;
-    scrollAnimationFrame?: number;
-  };
+  const scrolling = widgetInternals(term);
   for (let line = 0; line < 5000; line++) {
     const before = term.getScrollbackLength();
     if (before < 20) {
@@ -439,7 +452,7 @@ describe('retained history at the scrollback cap', () => {
   test('write anchors are released after a write, a screen change and a parser failure', async () => {
     const { term } = await history();
     const core = term.wasmTerm!;
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     expect(tracked.size).toBe(0);
     term.viewport.scrollTo(7.5);
     term.write('more\r\n');
@@ -464,12 +477,12 @@ describe('retained history at the scrollback cap', () => {
   test('the viewport anchor is released if acquiring the gesture anchor throws', async () => {
     const { term } = await history();
     term.viewport.scrollTo(7.5);
-    const scrolling = term as unknown as { targetViewportY: number; scrollAnimationStartTime?: number };
+    const scrolling = widgetInternals(term);
     scrolling.targetViewportY = 12.25;
     scrolling.scrollAnimationStartTime = Date.now();
     const core = term.wasmTerm!;
     const track = core.trackCell.bind(core);
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     vi.spyOn(core, 'trackCell')
       .mockImplementationOnce(track)
       .mockImplementationOnce(() => { throw new Error('tracking failed'); });
@@ -497,11 +510,7 @@ async function beforeHistoryPrune() {
 }
 
 function gestureTarget(term: Terminal, target: number) {
-  const scrolling = term as unknown as {
-    targetViewportY: number;
-    scrollAnimationStartTime?: number;
-    scrollAnimationFrame?: number;
-  };
+  const scrolling = widgetInternals(term);
   scrolling.targetViewportY = target;
   scrolling.scrollAnimationStartTime = Date.now();
   scrolling.scrollAnimationFrame = 999;
@@ -563,7 +572,7 @@ describe('history-cap boundary guards', () => {
     term.viewport.scrollTo(7.5);
     gestureTarget(term, 12.25);
     const core = term.wasmTerm!;
-    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const tracked = terminalInternals(core).trackedCells;
     const write = core.write.bind(core);
     const observed: number[] = [];
     vi.spyOn(core, 'write').mockImplementationOnce((data) => {
