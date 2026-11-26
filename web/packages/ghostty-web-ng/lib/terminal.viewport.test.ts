@@ -296,6 +296,27 @@ describe('content changes', () => {
     ]);
   });
 
+  test.each([
+    ['a change listener throws', (term: Terminal) => {
+      term.onChange(() => { throw new Error('change listener failed'); });
+    }],
+    ["the core's own resize fails", (term: Terminal) => {
+      widgetInternals(term).wasmTerm!.beforeResize(() => { throw new Error('before-resize listener failed'); });
+    }],
+  ])('the render loop runs on after a resize in which %s', async (_, fail) => {
+    const { term, renderer } = await terminal();
+    vi.stubGlobal('reportError', () => {});
+    const booked: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => booked.push(run));
+    fail(term);
+    // The core's own failure reaches the caller; a listener's is reported.
+    try { term.resize(30, 8); } catch { /* asserted on the loop below */ }
+    expect(booked.length, "the resize books the loop's next frame").toBeGreaterThan(0);
+    renderer.render.mockClear();
+    for (const run of booked.splice(0)) run(0);
+    expect(renderer.render, 'that frame paints').toHaveBeenCalledWith(expect.anything(), false, expect.any(Number), expect.any(Number));
+  });
+
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {
     const { term } = await terminal();
     const links = new LinkDetector(term);
