@@ -546,6 +546,21 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   const isError = (type: ts.Type): boolean =>
     type.isClassOrInterface() &&
     (checker.getBaseTypes(type) ?? []).some((base) => base.getSymbol()?.getName() === "Error" || isError(base));
+  /// Whether a type says nothing of the members of what it holds, so a
+  /// widget that flows into it is out of sight of the member, cast and duck
+  /// rules: `any`, `unknown`, `object`, or an object type with no member,
+  /// signature or index (`{}`), with or without `null` and `undefined`.
+  const opaque = (type: ts.Type): boolean => {
+    const t = checker.getNonNullableType(type);
+    return (
+      (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive)) !== 0 ||
+      ((t.flags & ts.TypeFlags.Object) !== 0 &&
+        checker.getPropertiesOfType(t).length === 0 &&
+        checker.getSignaturesOfType(t, ts.SignatureKind.Call).length === 0 &&
+        checker.getSignaturesOfType(t, ts.SignatureKind.Construct).length === 0 &&
+        checker.getIndexInfosOfType(t).length === 0)
+    );
+  };
   const widgetOf = (receiver: ts.Expression): ts.Type | undefined => {
     const own = checker.getTypeAtLocation(receiver);
     return isWidget(own) ? own : castFrom(receiver);
@@ -798,13 +813,13 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         if (widget) report("patch", node, `${node.expression.getText(sf)} ${nameOf(widget)}`);
       }
 
-      // 6 and 7. A widget instance that escapes into `any` or `unknown`, or
-      // flows into a duck type of the app's.
+      // 6 and 7. A widget instance that escapes into a type that says
+      // nothing of its members, or flows into a duck type of the app's.
       if (source.kind === "shipped" && ts.isExpression(node) && flows(node)) {
         const type = checker.getTypeAtLocation(node);
         const classes = parts(type).filter((t) => widgetClass(t.getSymbol()));
         const target = classes.length > 0 ? targetOf(node) : undefined;
-        if (target && target.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) {
+        if (target && opaque(target)) {
           if (!classes.every(isError)) report("escape", node, `${nameOf(type)} into ${checker.typeToString(target)}`);
         } else if (target && !isWidget(target)) {
           for (const shape of parts(target)) {
@@ -898,6 +913,12 @@ const PLANTS = new Map<string, string>([
       "  const term = box.t as Terminal;",
       "  return (term as unknown as { canvas: HTMLCanvasElement }).canvas;",
       "};",
+      "const rawObject = (o: object): Raw => o as Raw;",
+      "export const viaObject = (term: Terminal) => rawObject(term).isOpen;",
+      "const rawEmpty = (o: {}): Raw => o as Raw;",
+      "export const viaEmpty = (term: Terminal) => rawEmpty(term).isOpen;",
+      "export const walked = (term: Terminal) => Object.entries(term).length;",
+      "export const kept = (term: Terminal) => new Set<object>([term]);",
     ].join("\n"),
   ],
   [
@@ -993,6 +1014,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Object.getPrototypeOf Terminal" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Reflect.getPrototypeOf Terminal" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Terminal into any" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 13, key: "Terminal into object" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 14, key: "constructor Terminal" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 15, key: "Terminal.__proto__" },
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 16, key: "../../../ghostty-web-ng/lib/*.ts" },
@@ -1002,6 +1024,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 21, key: "Terminal into any" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 22, key: "Terminal.isOpen" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 23, key: "Terminal.isOpen" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 23, key: "Terminal into object" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 26, key: "Terminal into unknown" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 28, key: "VtTerminal into unknown" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 30, key: "Terminal into unknown" },
@@ -1019,6 +1042,10 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 55, key: "Terminal.isOpen" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 59, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 59, key: "Terminal.canvas" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 62, key: "Terminal into object" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 64, key: "Terminal into {}" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 65, key: "Terminal into {}" },
+  { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 66, key: "Terminal into object" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
