@@ -568,10 +568,16 @@
   /// The find bar's match count, the terminal search's state; null leaves
   /// the count blank.
   let findCount = $state<TerminalSearchState | null>(null);
+  /// "k of n", with a plus while the scan runs. A scan that has counted
+  /// nothing yet reads "searching" rather than a zero: a fresh find can
+  /// show its newest match, read from the core's listing, with a count of
+  /// none for as long as output keeps its frames from placing a match.
   const findCountText = $derived(
     findCount === null
       ? ""
-      : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
+      : findCount.partial && findCount.total === 0
+        ? "searching"
+        : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
   );
   /// The find bar's live region: the count as a screen reader hears it,
   /// once it settles rather than on every frame the shown count changes.

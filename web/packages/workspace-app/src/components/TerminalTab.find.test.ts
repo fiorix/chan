@@ -457,6 +457,49 @@ describe("terminal find count", () => {
     expect(countElement()?.textContent).toBe("0 of 0");
   });
 
+  // A scan's count can stay at nothing for as long as its frames place
+  // nothing, while find already shows the newest match it read from the
+  // core's listing. The bar says it is searching then, never a zero.
+  test("reads searching while the scan has counted nothing, with the newest match already shown", async () => {
+    const term = await renderGhostty();
+    const frames = await holdFrames(term);
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+    slowClock(5);
+    typeQuery(findInput()!, "needle");
+    for (let i = 0; i < 5; i++) {
+      frames.frame();
+      await tick();
+      expect(term.search.state).toEqual({ index: null, total: 0, partial: true });
+      expect(activeHighlight(term)).toEqual(match(5));
+      expect(countElement()?.textContent).toBe("searching");
+      expect(statusRegion()?.textContent, "nothing heard while partial").toBe("");
+    }
+    vi.restoreAllMocks();
+    frames.settle();
+    await tick();
+    expect(countElement()?.textContent).toBe("1 of 3");
+  });
+
+  test("reads searching for a query with nothing found yet, and 0 of 0 once its scan completes", async () => {
+    const term = await renderGhostty();
+    const frames = await holdFrames(term);
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+    slowClock(5);
+    typeQuery(findInput()!, "absent");
+    frames.frame();
+    await tick();
+    expect(term.search.state).toMatchObject({ total: 0, partial: true });
+    expect(countElement()?.textContent).toBe("searching");
+    vi.restoreAllMocks();
+    frames.settle();
+    await tick();
+    expect(countElement()?.textContent).toBe("0 of 0");
+  });
+
 
   test("goes blank when the query empties and clears the highlight", async () => {
     const term = await renderGhostty();
