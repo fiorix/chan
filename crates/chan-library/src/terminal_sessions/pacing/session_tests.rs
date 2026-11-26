@@ -453,6 +453,11 @@ fn a_reader_with_nothing_to_read_waits_for_output_before_it_waits_for_a_view() {
     );
 }
 
+/// A reader that cannot poll learns whether a view holds it, and what it may
+/// read, in one decision. A view that uses its event credit after that
+/// decision does not hold the read: the reader asks the program for output
+/// with the credit it was given, so an idle program is not held and the
+/// view's clock does not run.
 #[test]
 fn events_published_once_a_reader_found_no_hold_do_not_hold_an_idle_program() {
     #[derive(Debug)]
