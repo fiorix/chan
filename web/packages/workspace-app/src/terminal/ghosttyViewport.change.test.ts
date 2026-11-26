@@ -157,10 +157,11 @@ describe("the widget owns viewport changes", () => {
     const top = term.getScrollbackLength() - term.getViewportY();
     const seen: Array<[string, number]> = [];
     term.onChange(({ kind }) => seen.push([kind, term.getViewportY()]));
-    term.addPaintLayer({ order: 0, paint: () => { seen.push(["paint", term.getViewportY()]); } });
+    term.addPaintLayer({ order: 0, paint: ({ viewportOffset }) => { seen.push(["paint", viewportOffset]); } });
     term.write("more\r\n");
     expect(term.getScrollbackLength() - term.getViewportY()).toBe(top);
-    // A plain write paints nothing itself; its frame does.
+    // With the scrollbar already shown, the write itself paints nothing; its frame does.
+    expect(seen).toEqual([["write", 8]]);
     const pending = [...frames.values()];
     frames.clear();
     for (const callback of pending) callback(performance.now());
