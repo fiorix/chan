@@ -169,7 +169,7 @@ function legText(kind, label, bracketed) {
 /// it by `how`, and return what the PTY read and what the page saw.
 async function pasteLeg(ctx, page, file, mode, how, kind, failures) {
   const bracketed = mode === "bracketed";
-  const { text, want, end } = legText(kind, `${how} ghostty ${mode} ${kind}`, bracketed);
+  const { text, want, end } = legText(kind, `${how} ${mode} ${kind}`, bracketed);
   await writeClipboardText(page, text);
   const offset = statSync(file).size;
   const events = await page.evaluate(() => window.__pastes216.length);
@@ -184,12 +184,12 @@ async function pasteLeg(ctx, page, file, mode, how, kind, failures) {
     const host = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(host.x, host.y, { button: "right" });
     await page.waitForSelector(MENU, { visible: true, timeout: 10_000 });
-    await ctx.shot(`216-ghostty-${mode}-menu-${kind}`, page);
+    await ctx.shot(`216-${mode}-menu-${kind}`, page);
     await clickMenuPaste(page);
   }
   const pty = await pastedSince(file, offset, end);
   const seen = await page.evaluate((from) => window.__pastes216.slice(from), events);
-  const leg = `ghostty-${mode}-${how}-${kind}`;
+  const leg = `${mode}-${how}-${kind}`;
   const result = { leg, text, pty: pty.bytes, complete: pty.complete, events: seen, focus: await focusOnTerminal(page) };
   if (pty.bytes !== want) {
     failures.push(`${leg}: the PTY read ${JSON.stringify(pty.bytes)}, not ${JSON.stringify(want)}`);
@@ -231,14 +231,14 @@ export default {
       await page.evaluate(recordPastes);
       for (const mode of ["bracketed", "unbracketed"]) {
         await openTerminal(ctx, page, cs, windowId, `Paste216-${RUN}-${mode}`);
-        const file = join(dir, `ghostty-${mode}.bytes`);
+        const file = join(dir, `${mode}.bytes`);
         await startRecorder(page, file, { bracketedPaste: mode === "bracketed" });
         for (const how of ["chord", "menu"]) {
           for (const kind of ["plain", "hostile"]) {
             result.legs.push(await pasteLeg(ctx, page, file, mode, how, kind, failures));
           }
         }
-        await ctx.shot(`216-ghostty-${mode}`, page);
+        await ctx.shot(`216-${mode}`, page);
       }
       for (const leg of result.legs) {
         console.log(`[smoke]   ${leg.leg}: PTY ${JSON.stringify(leg.pty)}; paste events ${JSON.stringify(leg.events.map((e) => ({ trusted: e.trusted, types: e.types })))}`);

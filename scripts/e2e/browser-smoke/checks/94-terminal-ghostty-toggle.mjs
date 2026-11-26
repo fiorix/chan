@@ -660,7 +660,7 @@ export default {
       await ctx.shot("ghostty-core-loaded");
       details.loadLeg = { wasmFetched: true };
       const ghosttyFit = await terminalFitSnapshot(TAB_G, ghosttyResizeStart, ghosttySocketStart);
-      details.fitLeg = { ghostty: ghosttyFit };
+      details.fitLeg = ghosttyFit;
       if (ghosttyFit.canvasWidth === null || ghosttyFit.cols < 1) {
         throw new Error(
           `fit leg: ghostty canvas width or columns are not measurable: ` +
@@ -690,7 +690,7 @@ export default {
             `reserved=${reservedWidthCols} snapshot=${JSON.stringify(ghosttyFit)}`,
         );
       }
-      details.fitLeg.ghosttyCellWidth = ghosttyCellWidth;
+      details.fitLeg.cellWidth = ghosttyCellWidth;
       details.fitLeg.fullWidthCols = fullWidthCols;
       details.fitLeg.reservedWidthCols = reservedWidthCols;
       details.fitLeg.strictlyBeatsReservedWidth = true;

@@ -85,6 +85,9 @@ export function readSizeRun(run) {
     return { ...page, clock, records: page.records.map((r) => ({ ...r, monoMs: r.pageMs + clock.offsetMs })) };
   });
   const findings = [];
+  // A shown full-screen checkpoint with no readable frame surface leaves its
+  // far corners unjudged, so the run cannot end as a clean search.
+  const unreadFrameSteps = [];
   const steps = run.steps.map((step) => {
     assert.ok(step.endMs - step.settledMs >= observationMs, "settled observation too short");
     assert.equal(step.geometryChanged, false, "geometry changed after settlement");
@@ -138,6 +141,7 @@ export function readSizeRun(run) {
         page: surface.page, surface });
       frameSurfaces.push({ page: surface.page, kind: surface.kind, readable, farCorners });
     }
+    if (run.fullScreen && visible.length && !frameSurfaces.some((s) => s.readable)) unreadFrameSteps.push(step.label);
     const late = run.probe.filter((r) => r.kind === "SIGWINCH" && r.monoMs > step.settledMs && r.monoMs <= step.endMs);
     const sizes = new Set(late.map((r) => `${r.cols}x${r.rows}`));
     if (late.length) findings.push({ step: step.label, kind: "resize-after-settlement", count: late.length });
@@ -193,13 +197,13 @@ export function readSizeRun(run) {
         after: after ? { monoMs: after.monoMs, views: after.views.filter((v) => v.name === run.name) } : null };
     }),
   }));
-  return { verdict: findings.length ? "fault-observed" : "bounded-search-no-fault",
+  return { verdict: findings.length ? "fault-observed" : unreadFrameSteps.length ? "inconclusive" : "bounded-search-no-fault",
     engine: run.engine, cycles: run.cycles, coView: run.coView, observer: observed, fullScreen: run.fullScreen === true,
     redrawCount: redraws.length, clocks: pages.map((p) => ({ page: p.name, ...p.clock })),
     unmeasuredHiddenDialQualifiers: pages.flatMap((p) => p.records.filter((r) => r.kind === "attach" &&
       !r.view.visible && validGrid(r.view.grid) && typeof r.view.sizeIfUnset !== "boolean")
       .map((r) => ({ page: p.name, tab: r.view.tab, monoMs: r.monoMs }))),
-    unjudgedHiddenDialWidths, findings, steps, resizes };
+    unjudgedHiddenDialWidths, unreadFrameSteps, findings, steps, resizes };
 }
 
 export function staleFullScreenRun() {
@@ -236,11 +240,23 @@ export function preflight() {
     steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
       checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view] }] };
   assert.equal(readSizeRun(base).verdict, "bounded-search-no-fault");
+  const border = `+${"-".repeat(78)}+`;
   const fullScreenStale = staleFullScreenRun();
-  assert.ok(readSizeRun(fullScreenStale).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+  const stale = readSizeRun(fullScreenStale);
+  assert.ok(stale.findings.some((f) => f.kind === "full-screen-stale-redraw"),
     "full-screen stale redraw at a shown checkpoint");
+  assert.equal(stale.verdict, "fault-observed", "a finding is a fault where the frame is unread too");
   fullScreenStale.probe[3].cols = 80;
-  assert.equal(readSizeRun(fullScreenStale).verdict, "bounded-search-no-fault", "matching full-screen redraw");
+  const unread = readSizeRun(fullScreenStale);
+  assert.equal(unread.verdict, "inconclusive", "a shown full-screen checkpoint with no readable surface");
+  assert.deepEqual(unread.unreadFrameSteps, ["split"], "the unread checkpoint is named");
+  const matching = structuredClone(fullScreenStale);
+  matching.steps[0].frameSurfaces[0] = { page: "primary", kind: "buffer", rowCount: 24, first: border, last: border };
+  assert.equal(readSizeRun(matching).verdict, "bounded-search-no-fault", "matching full-screen redraw");
+  const hiddenFullScreen = structuredClone(fullScreenStale);
+  hiddenFullScreen.steps[0].views[0].visible = false;
+  assert.equal(readSizeRun(hiddenFullScreen).verdict, "bounded-search-no-fault",
+    "a hidden full-screen checkpoint needs no readable surface");
   const laterCorrectRedraw = staleFullScreenRun();
   laterCorrectRedraw.probe.push({ sequence: 6, kind: "SIGWINCH", monoMs: 4100, cols: 80, rows: 24 },
     { sequence: 7, kind: "redraw", monoMs: 4101, cols: 80, rows: 24, redrawCount: 3, trigger: "SIGWINCH" });
@@ -270,7 +286,6 @@ export function preflight() {
   missingRedrawRecord.probe[3].redrawCount = 3;
   assert.throws(() => readSizeRun(missingRedrawRecord), /missing redraw record/,
     "full-screen missing redraw record is refused");
-  const border = `+${"-".repeat(78)}+`;
   const screenRows = Array.from({ length: 24 }, (_, i) => i === 0 || i === 23 ? border : "");
   // A stand-in for the widget capture: another tab's terminal first, then the
   // one on the probe tab's host, with retained history ahead of the screen,
@@ -304,10 +319,14 @@ export function preflight() {
   assert.equal(readSizeRun(uncaptured).steps[0].frameSurfaces[0].readable, false,
     "a tab no captured terminal owns is unreadable");
   const [, probeTerminal] = captured[FRAME_CAPTURE_KEY].terminals;
+  // The short buffer's last row is a full border, so only its row count can
+  // make it unreadable.
   probeTerminal.rows = 23;
+  screenRows[22] = border;
   const shortRows = structuredClone(corners);
   shortRows.steps[0].frameSurfaces[0] = frame();
   probeTerminal.rows = 24;
+  screenRows[22] = "";
   assert.equal(readSizeRun(shortRows).steps[0].frameSurfaces[0].readable, false,
     "the buffer needs every grid row");
   screenRows[0] = border.slice(0, -1);
@@ -515,7 +534,7 @@ export function preflight() {
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
     equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 4, fullScreenReviewRows: 6,
-    bufferCornerRows: 7, refusalCases };
+    bufferCornerRows: 7, unreadFrameRows: 4, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -524,7 +543,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     try {
       const result = readSizeRun(JSON.parse(readFileSync(process.argv[2], "utf8")));
       console.log(JSON.stringify(result, null, 2));
-      process.exitCode = result.verdict === "fault-observed" ? 10 : 0;
+      process.exitCode = result.verdict === "fault-observed" ? 10 : result.verdict === "bounded-search-no-fault" ? 0 : 3;
     } catch (error) { console.error(error.message); process.exitCode = 3; }
   }
 }
