@@ -36,8 +36,9 @@ const FINAL_NAME = "Load347f";
 const FILE = "load347.md";
 const WAIT_MS = 30_000;
 const KEYBOARD_MS = 5_000;
-// Long enough for a reload a key started to ask for its document, or a close
-// it started to show.
+// How long the check waits after the final card's keys: long enough for a
+// reload a key started to ask for its new document, or a close it started to
+// show.
 const KEYS_SETTLE_MS = 1_000;
 const CORE = /\/ghostty-vt[^/]*\.wasm(?:[?#]|$)/;
 // The widget's chunk, as the build emits it (`assets/ghostty-web-<hash>.js`).
@@ -646,14 +647,14 @@ export default {
       // neither reload the window nor close the tab, and the card still holds
       // the keyboard after them. A reload shows first as the page's request
       // for its new document, well before that document commits, so the
-      // check waits for that request or a navigation and passes only when
-      // both waits time out.
+      // check waits KEYS_SETTLE_MS for that request and passes only when the
+      // wait times out; the document's mark, read after it, catches a reload
+      // that committed all the same. A navigation within the document, such
+      // as the app's own write of its URL hash when the layout changes, is
+      // no reload and is not waited for.
       await markDocument("final-keys");
-      const keysNavigated = Promise.any([
-        page.waitForRequest((request) => request.isNavigationRequest() && request.frame() === page.mainFrame(),
-          { timeout: KEYS_SETTLE_MS }).then(() => "document request"),
-        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: KEYS_SETTLE_MS }).then(() => "navigation"),
-      ]).catch(() => null);
+      const keysNavigated = page.waitForRequest((request) => request.isNavigationRequest() && request.frame() === page.mainFrame(),
+        { timeout: KEYS_SETTLE_MS }).then(() => "document request", () => null);
       for (const key of ["Enter", "Space"]) await page.keyboard.press(key);
       fresh.afterKeys = { navigated: await keysNavigated };
       fresh.afterKeys.mark = await documentMark().catch(() => null);
