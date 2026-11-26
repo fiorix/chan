@@ -190,11 +190,7 @@
     shouldReclaimPtySize,
     type FitLike,
   } from "../terminal/resize";
-  import {
-    clampScrollbackMb,
-    scrollbackLinesFromMb,
-    SCROLLBACK_MB_DEFAULT,
-  } from "../terminal/scrollback";
+  import { clampScrollbackMb } from "../terminal/scrollback";
   import {
     effectiveBackgroundOpacity,
     transparentColor,
@@ -461,11 +457,6 @@
   // the width to stay put this long.
   const RESIZE_SCAN_QUIET_MS = 150;
   let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
-  // Scrollback line cap captured at construction time from the
-  // persisted MB budget so the widget gets a stable number. Held on
-  // the component so the "copy scrollback" actions read the same
-  // window that's actually in memory.
-  let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
   const terminalConnection = createTerminalConnectionHealth(() => sendPing());
   $effect(() => {
@@ -1241,13 +1232,12 @@
     loadFailure = null;
     const terminalPrefs = currentPreferences()?.terminal;
     const rendererFontSize = terminalPrefs?.font_size ?? 14;
-    // Scrollback honors the Settings MB budget. Read once here so a
-    // settings change after spawn doesn't reach through and resize
-    // the existing terminal's buffer; the hint copy under the slider
-    // names this spawn-time-only contract.
-    scrollbackLines = scrollbackLinesFromMb(
-      clampScrollbackMb(terminalPrefs?.scrollback_mb),
-    );
+    // Scrollback honors the Settings MB budget, which the widget takes as
+    // its core's history budget in bytes (a MiB each), with no line count
+    // beside it. Read once here so a settings change after spawn doesn't
+    // reach through and resize the existing terminal's buffer; the hint
+    // copy under the slider names this spawn-time-only contract.
+    const scrollbackBytes = clampScrollbackMb(terminalPrefs?.scrollback_mb) * 1_048_576;
     // Mouse capture honors the Settings toggle under the same spawn-time
     // contract: read once here, so flipping the setting later affects only
     // newly opened terminals (the hint copy says so). Absent field (older
@@ -1307,7 +1297,7 @@
     }
     if (attempt !== startAttempt || !host || term) return;
     try {
-      openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, secretMaskSuffixes });
+      openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes });
     } catch (err) {
       // What was built and wired goes as at a restart, and the error takes
       // the terminal's place: the next instance may open.
@@ -1340,9 +1330,10 @@
     host: HTMLElement,
     ghosttyKit: GhosttyKit,
     ghosttyInstance: GhosttyVt,
-    { fontFamily, rendererFontSize, secretMaskSuffixes }: {
+    { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes }: {
       fontFamily: string;
       rendererFontSize: number;
+      scrollbackBytes: number;
       secretMaskSuffixes: readonly string[];
     },
   ): void {
@@ -1378,7 +1369,7 @@
       fontFamily,
       fontSize: rendererFontSize,
       ghostty: ghosttyInstance,
-      scrollback: scrollbackLines,
+      scrollbackBytes,
       // Synchronous scrolling (the widget's default eases over 100 ms) lets
       // calibrated pixel gestures accumulate directly in the widget's
       // fractional viewport.
