@@ -314,6 +314,91 @@ describe("editorBuffer queued-write debounce + flush", () => {
   });
 });
 
+describe("writeEditorBuffer's quota retry", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // The store refuses the first write under `key` with a quota error, and,
+  // given `walkError`, every walk past its first key throws that.
+  function refuseOnce(key: string, walkError: Error | null = null): void {
+    const store = typeof Storage !== "undefined" && localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const setItem = store.setItem;
+    let refused = false;
+    vi.spyOn(store, "setItem").mockImplementation(function (this: Storage, k: string, v: string) {
+      if (k === key && !refused) {
+        refused = true;
+        throw new DOMException("quota", "QuotaExceededError");
+      }
+      return setItem.call(this, k, v);
+    });
+    if (!walkError) return;
+    const keyAt = store.key;
+    vi.spyOn(store, "key").mockImplementation(function (this: Storage, index: number) {
+      if (index >= 1) throw walkError;
+      return keyAt.call(this, index);
+    });
+  }
+
+  // Two entries, so the prune's walk reaches the key a broken walk throws at.
+  function twoOthers(): void {
+    writeForeignBuffer("other-1", "o", "o1.md");
+    writeForeignBuffer("other-2", "o", "o2.md");
+  }
+
+  test("a write the store refuses is written after a prune", () => {
+    writeForeignBuffer("stale", "old", "x.md", Date.now() - 8 * MS_PER_DAY);
+    refuseOnce(bufferKey("a"));
+    writeEditorBuffer("a", "body", "a.md");
+    expect(localStorage.getItem(bufferKey("stale")), "the prune ran").toBeNull();
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+  });
+
+  test("a prune that meets a bug still lets the write through, and reports the bug", () => {
+    twoOthers();
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const reported: unknown[] = [];
+    vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
+    expect(() => writeEditorBuffer("a", "body", "a.md"), "the editor's write throws nothing").not.toThrow();
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+    expect(reported.map(String), "the bug is reported").toEqual(["TypeError: a bug in the walk"]);
+  });
+
+  test("without reportError the bug is thrown again in a microtask", () => {
+    twoOthers();
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const queued: Array<() => void> = [];
+    vi.stubGlobal("reportError", undefined);
+    vi.stubGlobal("queueMicrotask", (callback: () => void) => void queued.push(callback));
+    try {
+      expect(() => writeEditorBuffer("a", "body", "a.md"), "the editor's write throws nothing").not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(readEditorBuffer("a")?.content, "the retry wrote the buffer").toBe("body");
+    expect(queued, "one microtask queued").toHaveLength(1);
+    expect(() => queued[0](), "the microtask throws the bug").toThrow("a bug in the walk");
+  });
+
+  test("the unload flush writes every entry when one write's prune meets a bug", () => {
+    twoOthers();
+    queueBufferWrite("a", "first", "a.md");
+    queueBufferWrite("b", "second", "b.md");
+    refuseOnce(bufferKey("a"), new TypeError("a bug in the walk"));
+    const reported: unknown[] = [];
+    vi.stubGlobal("reportError", (error: unknown) => void reported.push(error));
+    let flushed = -1;
+    expect(() => {
+      flushed = flushPendingBufferWrites();
+    }, "the flush throws nothing").not.toThrow();
+    expect(flushed, "both entries flushed").toBe(2);
+    expect(readEditorBuffer("a")?.content, "the refused entry was written on its retry").toBe("first");
+    expect(readEditorBuffer("b")?.content, "the entry after it was written").toBe("second");
+    expect(reported.map(String), "the bug is reported").toEqual(["TypeError: a bug in the walk"]);
+  });
+});
+
 describe("editorBuffer path-keyed buffers survive a reload", () => {
   test("a buffer written under a path key is readable by the same path after reload", () => {
     // Path keys are stable across reloads (tab ids are not), so the
