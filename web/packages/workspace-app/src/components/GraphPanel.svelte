@@ -260,13 +260,16 @@
   /// directory, at most OPENED_CHILDREN_READS_PER_STEP, shallowest first.
   /// One opened under a closed parent is read once the parent opens, since
   /// until the parent's level lands the spine has no node of it to read.
-  /// Only a directory a patch can read is asked: one the spine holds a node
-  /// of, or one whose parent is read ahead of it, by this ask or by one
-  /// before it (`askedUnread`). Any other (a folder gone from disk, an empty
-  /// one under a level the spine never read) would be skipped, and while a
-  /// whole fetch is in flight asking it would start that fetch again for
-  /// nothing. With no spine yet every one is asked, for the fetch that
-  /// brings their nodes.
+  /// Only a directory a patch may read is asked: one the spine holds a node
+  /// of, or one whose parent this ask or one before it asked and the spine
+  /// holds no level of (`askedUnread`), since a parent asked is read ahead
+  /// of it. Any other (a folder gone from disk, an empty one under a level
+  /// the spine never read) would be skipped, and while a whole fetch is in
+  /// flight asking it would start that fetch again for nothing. The rule
+  /// also admits a folder under a parent whose read found it gone: it is
+  /// asked once, which during a whole fetch starts that fetch again, and
+  /// then stays asked until a patch reads that parent's level. With no
+  /// spine yet every one is asked, for the fetch that brings their nodes.
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
