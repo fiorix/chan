@@ -18,8 +18,6 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
-import { copiedText } from "./ghosttyCopy";
-
 /// Enum values of the pinned build, by upstream C type.
 export const ABI = {
   GhosttyResult: { SUCCESS: 0, OUT_OF_SPACE: -3, NO_VALUE: -4 },
@@ -2226,29 +2224,3 @@ export class VtKeyEncoder {
 /// row, and then the screen's rows, the way ghostty-web's selection numbers
 /// them.
 export type TextRange = { startCol: number; startRow: number; endCol: number; endRow: number };
-
-/// What Copy scrollback reads of a ghostty-web terminal.
-export type ScrollbackSource = {
-  readonly wasmTerm?: unknown;
-  readonly buffer: {
-    readonly active: {
-      readonly length: number;
-      getLine(y: number): { translateToString(trimRight?: boolean): string } | undefined;
-    };
-  };
-};
-
-/// Copy scrollback's text of a ghostty terminal, without what the screen
-/// does not draw (`copiedText`). The binding's terminal formats its history
-/// and rows in one core call (`VtTerminal.plainText`), where reading them
-/// through ghostty-web's buffer costs a few wasm calls a cell and blocks the
-/// page for seconds over a long history. Any other terminal, or a format
-/// that fails, is read row by row through the buffer.
-export function ghosttyScrollbackText(term: ScrollbackSource): string {
-  const text = term.wasmTerm instanceof VtTerminal ? term.wasmTerm.plainText() : null;
-  if (text !== null) return copiedText(text);
-  const buf = term.buffer.active;
-  const lines: string[] = [];
-  for (let y = 0; y < buf.length; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
-  return copiedText(lines.join("\n").trimEnd());
-}
