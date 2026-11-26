@@ -774,7 +774,7 @@ export class VtTerminal {
   /// frees them with itself.
   readonly #trackedCells = new Set<VtTrackedCell>();
   readonly #cellOwner: TrackedCellOwner;
-  private readonly resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
+  readonly #resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
 
   constructor(wasm: VtWasm, owner: GhosttyVt, cols: number, rows: number, config?: VtTerminalConfig) {
     this.wasm = wasm;
@@ -835,7 +835,7 @@ export class VtTerminal {
   resize(cols: number, rows: number): void {
     if (cols === this.#_cols && rows === this.#_rows) return;
     const from = { cols: this.#_cols, rows: this.#_rows };
-    for (const listener of this.resizeListeners) listener(from);
+    for (const listener of this.#resizeListeners) listener(from);
     this.#_cols = cols;
     this.#_rows = rows;
     this.#changes++;
@@ -864,9 +864,9 @@ export class VtTerminal {
   /// grid as it was (find, to tell whether its match was on the screen)
   /// reads it here. Returns the call that stops it.
   beforeResize(listener: (from: { cols: number; rows: number }) => void): () => void {
-    this.resizeListeners.add(listener);
+    this.#resizeListeners.add(listener);
     return () => {
-      this.resizeListeners.delete(listener);
+      this.#resizeListeners.delete(listener);
     };
   }
 
