@@ -132,6 +132,25 @@ function serveCore() {
   };
 }
 
+/// The specifiers `keepFailedImport` failed, unmocked after each case.
+const keptFailures: string[] = [];
+
+/// An engine that keeps a failed module import for the page's life, as
+/// WebKit does: from now on every import of `specifier` rejects, answered
+/// from the failure the engine keeps even once the file is served again,
+/// while the module under another URL still loads. Installed after the page
+/// opened, so a module it imported up front stays loaded. Returns how many
+/// times the page asked for `specifier`.
+function keepFailedImport(specifier: string): () => number {
+  let asked = 0;
+  keptFailures.push(specifier);
+  vi.doMock(specifier, () => {
+    asked += 1;
+    throw new TypeError("Importing a module script failed.");
+  });
+  return () => asked;
+}
+
 /// Instantiates the core with its build info reporting another major, which
 /// the binding refuses.
 async function instanceReportingMajor(module: WebAssembly.Module, major: number): Promise<WebAssembly.Instance> {
@@ -264,6 +283,7 @@ afterEach(() => {
     page.store.__testSetStandalonePreferences(null);
     page = null;
   }
+  for (const specifier of keptFailures.splice(0)) vi.doUnmock(specifier);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -768,6 +788,55 @@ describe("terminals that failed one load together", () => {
     await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the open terminal dialed").toHaveLength(1));
     expect(loadError(a.target), "and opened").toBeNull();
     expect(takeShownLoadFailures(), "two errors shown").toBe(2);
+  });
+});
+
+describe("a terminal on an engine that keeps a failed module import", () => {
+  test("Retry after the widget's chunk failed once attaches every failed terminal to its shell in the same page", async () => {
+    const core = serveCore();
+    page = await openPage();
+    const askedForWidget = keepFailedImport("@chan/ghostty-web-ng");
+    const closeTerminal = vi.spyOn(page.api, "closeTerminal").mockResolvedValue(undefined);
+    const [first, second] = page.harness.seatTerminals([
+      page.harness.terminalTab({ id: "term-1", terminalSessionId: "sess-a" }),
+      page.harness.terminalTab({ id: "term-2", terminalSessionId: "sess-b" }),
+    ]);
+    const a = page.open(first!);
+    const b = page.place(second!, { active: true, focused: false });
+    const errorA = await shownLoadError(a.target);
+    await shownLoadError(b.target);
+    expect(actions(errorA), "a failed import can pass at the next try").toEqual(waysOut(page, first!, true));
+    expect(errorA.textContent).toContain(SHELL_RUNS);
+    expect(askedForWidget(), "one failed import failed both").toBe(1);
+    expect(core.requests(), "and the core was not asked for").toBe(0);
+
+    action(errorA, "Retry").click();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "both terminals dialed").toHaveLength(2));
+    expect([a.target, b.target].map(loadError), "the errors are gone").toEqual([null, null]);
+    for (const target of [a.target, b.target]) {
+      expect(terminalArea(target).querySelectorAll("canvas"), "a terminal in each area").toHaveLength(1);
+    }
+    const attached = page.harness.TerminalSocket.all.map((socket) => new URL(socket.url).searchParams.get("session"));
+    expect(attached.sort(), "each attached to its own shell").toEqual(["sess-a", "sess-b"]);
+    expect(askedForWidget(), "the retry did not ask again at the URL the engine failed").toBe(1);
+    expect(page.reloadWindow, "nor reload the window").not.toHaveBeenCalled();
+    expect(closeTerminal, "no shell was ended").not.toHaveBeenCalled();
+    expect(takeShownLoadFailures(), "two errors shown").toBe(2);
+  });
+
+  test("a terminal opens with the module of the core's URL kept failed: a spawn imports no module for it", async () => {
+    const core = serveCore();
+    page = await openPage();
+    const askedForCoreUrl = keepFailedImport("@chan/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm?url");
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab({ terminalSessionId: SESSION })]);
+    const { target } = page.open(tab!);
+
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the terminal dialed").toHaveLength(1));
+    expect(loadError(target), "no error").toBeNull();
+    expect(terminalArea(target).querySelectorAll("canvas"), "a terminal in its area").toHaveLength(1);
+    expect(askedForCoreUrl(), "no module asked for").toBe(0);
+    expect(core.requests(), "the core fetched once").toBe(1);
+    expect(takeShownLoadFailures(), "no error shown").toBe(0);
   });
 });
 

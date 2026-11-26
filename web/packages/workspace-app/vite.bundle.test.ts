@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { expect, test } from "vitest";
@@ -27,6 +28,17 @@ test("the terminal bundle ships the vendored wasm without an inline copy", async
   const wasm = result.output.filter((item) => item.type === "asset" && item.fileName.endsWith(".wasm"));
   expect(wasm).toHaveLength(1);
   expect(Buffer.from(wasm[0].source)).toEqual(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
+  const loader = chunks.filter((chunk) => Object.keys(chunk.modules).some((id) => id.endsWith("/src/terminal/backend.ts")));
+  expect(loader.map((chunk) => chunk.fileName), "the loader is bundled in one chunk").toHaveLength(1);
+  // An engine may keep a failed module import for the page's life. The
+  // loader's own chunk names the core's URL, so no module import stands
+  // between a spawn and the core's fetch.
+  const core = posix.basename(wasm[0].fileName);
+  expect(chunks.filter((chunk) => chunk.code.includes(core)).map((chunk) => chunk.fileName), "the chunks naming the core").toEqual([loader[0].fileName]);
+  // And after an import of the widget failed, the loader asks for the
+  // widget's chunk at the chunk's own URL.
+  const widget = posix.basename(renderer[0].fileName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  expect(loader[0].code).toMatch(new RegExp(`new URL\\(\\s*(["'\`])${widget}\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`));
 });
 
 // The app's one terminal is the Ghostty widget. @xterm/xterm stays installed
