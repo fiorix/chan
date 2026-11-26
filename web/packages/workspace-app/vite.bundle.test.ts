@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "vite";
+import { build, type Plugin } from "vite";
 import { expect, test } from "vitest";
 
 test("the terminal bundle ships the vendored wasm without an inline copy", async () => {
@@ -39,6 +39,33 @@ test("the terminal bundle ships the vendored wasm without an inline copy", async
   // widget's chunk at the chunk's own URL.
   const widget = posix.basename(renderer[0].fileName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   expect(loader[0].code).toMatch(new RegExp(`new URL\\(\\s*(["'\`])${widget}\\1\\s*,\\s*import\\.meta\\.url\\s*\\)`));
+});
+
+// After a failed import the loader asks for the widget's chunk at a new URL,
+// which leaves the chunks it imports at theirs. A lazily loaded module that
+// shares one of the widget's modules makes the bundler put that module in a
+// chunk of its own, which the widget's chunk imports and no entry loads.
+test("a build fails when the widget's chunk would import a chunk no entry loads at startup", async () => {
+  const entry = "\0shared-widget-module-entry";
+  const lazy = "\0shared-widget-module-lazy";
+  const backend = fileURLToPath(new URL("./src/terminal/backend.ts", import.meta.url));
+  const glyphs = fileURLToPath(new URL("../ghostty-web-ng/lib/box-glyphs.ts", import.meta.url));
+  const sharesAWidgetModule: Plugin = {
+    name: "shares-a-widget-module",
+    resolveId: (id) => (id === "virtual:entry" ? entry : id === "virtual:lazy" ? lazy : undefined),
+    load(id) {
+      if (id === entry) return `export * from ${JSON.stringify(backend)};\nexport const lazy = () => import("virtual:lazy");`;
+      if (id === lazy) return `export { isCustomGlyph } from ${JSON.stringify(glyphs)};`;
+      return undefined;
+    },
+  };
+  const building = build({
+    configFile: fileURLToPath(new URL("./vite.config.ts", import.meta.url)),
+    logLevel: "silent",
+    plugins: [sharesAWidgetModule],
+    build: { write: false, rollupOptions: { input: "virtual:entry", preserveEntrySignatures: "strict" } },
+  });
+  await expect(building).rejects.toThrow(/the terminal widget's chunk assets\/ghostty-web-[\w-]+\.js imports assets\/box-glyphs-[\w-]+\.js, which no entry loads at startup/);
 });
 
 // The app's one terminal is the Ghostty widget. @xterm/xterm stays installed

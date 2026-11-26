@@ -142,6 +142,30 @@ function ghosttyWidgetUrl(): Plugin {
       if (!widget) this.error(`${chunk.fileName} asks for the terminal widget's chunk, which this build does not make`);
       return code.replaceAll(GHOSTTY_WIDGET_CHUNK, posix.relative(posix.dirname(chunk.fileName), widget.fileName));
     },
+    // The query renames the widget's chunk only: the chunks it imports keep
+    // their URLs, so one that failed would stay failed on an engine that keeps
+    // failed imports. The widget may import only chunks an entry loads at
+    // startup.
+    generateBundle(_options, bundle) {
+      const chunks = Object.values(bundle).flatMap((item) => (item.type === "chunk" ? [item] : []));
+      const widget = chunks.find((chunk) => chunk.facadeModuleId !== null && normalize(chunk.facadeModuleId) === ghosttyWidgetEntry);
+      if (!widget) return;
+      const byFile = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
+      const atStartup = new Set<string>();
+      const load = (file: string): void => {
+        if (atStartup.has(file)) return;
+        atStartup.add(file);
+        for (const next of byFile.get(file)?.imports ?? []) load(next);
+      };
+      for (const chunk of chunks) if (chunk.isEntry) load(chunk.fileName);
+      const late = widget.imports.filter((file) => !atStartup.has(file));
+      if (late.length > 0) {
+        this.error(
+          `the terminal widget's chunk ${widget.fileName} imports ${late.join(", ")}, which no entry loads at startup, ` +
+            "so a failed import of it would outlast the loader's retry at a new URL (src/terminal/backend.ts)",
+        );
+      }
+    },
   };
 }
 
