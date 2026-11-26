@@ -178,7 +178,6 @@ const pending = (
 
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
 const THEME = "the theme test reads the core's colours off the canvas, or moves into the package";
-const KIT = "the kit test tells two instances apart by what their terminals show";
 const EMPTY_PASTE = "the empty paste emit, which no input event produces, goes";
 
 const PENDING: readonly Pending[] = [
@@ -230,9 +229,6 @@ const PENDING: readonly Pending[] = [
     ],
     "VtTerminal.handle": ["vt.handle"],
     "VtTerminal.wasm": ["vt.wasm", "vt.wasm", "vt.wasm", "vt.wasm"],
-  }),
-  ...pending("app terminal", KIT, "member", "src/terminal/backend.test.ts", {
-    "GhosttyVt.wasm": ["ghostty.wasm"],
   }),
   ...pending("app terminal", EMPTY_PASTE, "member", "src/terminal/ghosttyViewport.change.test.ts", {
     "Terminal.inputHandler": [

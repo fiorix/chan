@@ -552,23 +552,23 @@ export type VtHost = {
 
 /// The core ghostty-web's `Terminal` takes as its `ghostty` option.
 export class GhosttyVt {
-  private readonly wasm: VtWasm;
+  readonly #wasm: VtWasm;
   readonly #terminals = new Map<number, VtTerminal>();
   readonly writePtyCallback: number;
   readonly deviceAttributesCallback: number;
 
   constructor(instance: WebAssembly.Instance, readonly host?: VtHost) {
-    this.wasm = new VtWasm(instance);
-    this.writePtyCallback = this.wasm.addFunction(
+    this.#wasm = new VtWasm(instance);
+    this.writePtyCallback = this.#wasm.addFunction(
       (terminal, _userdata, data, len) => {
         this.#terminals.get(terminal >>> 0)?.queueReply(data >>> 0, len >>> 0);
       },
       4,
       false,
     );
-    this.deviceAttributesCallback = this.wasm.addFunction(
+    this.deviceAttributesCallback = this.#wasm.addFunction(
       (_terminal, _userdata, out) => {
-        writeDeviceAttributes(this.wasm, out >>> 0);
+        writeDeviceAttributes(this.#wasm, out >>> 0);
         return 1;
       },
       3,
@@ -577,7 +577,7 @@ export class GhosttyVt {
   }
 
   createKeyEncoder(): VtKeyEncoder {
-    return new VtKeyEncoder(this.wasm);
+    return new VtKeyEncoder(this.#wasm);
   }
 
   /// What a paste of `text` sends the program, by the core's own paste
@@ -594,26 +594,26 @@ export class GhosttyVt {
     const data = new TextEncoder().encode(text);
     // The frame adds ESC[200~ and ESC[201~ at most.
     const cap = data.length + 12;
-    const src = this.wasm.alloc(Math.max(data.length, 1));
-    const buf = this.wasm.alloc(cap);
-    const written = this.wasm.alloc(8);
+    const src = this.#wasm.alloc(Math.max(data.length, 1));
+    const buf = this.#wasm.alloc(cap);
+    const written = this.#wasm.alloc(8);
     try {
-      this.wasm.bytes().set(data, src);
-      const result = this.wasm.fn.ghostty_paste_encode(src, data.length, bracketed ? 1 : 0, buf, cap, written);
+      this.#wasm.bytes().set(data, src);
+      const result = this.#wasm.fn.ghostty_paste_encode(src, data.length, bracketed ? 1 : 0, buf, cap, written);
       if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: encoding a paste failed (${result})`);
-      const len = this.wasm.view().getUint32(written, true);
+      const len = this.#wasm.view().getUint32(written, true);
       // The encoder replaces ASCII bytes with ASCII ones, so the UTF-8 it
       // returns decodes whole.
-      return new TextDecoder().decode(this.wasm.bytes().slice(buf, buf + len));
+      return new TextDecoder().decode(this.#wasm.bytes().slice(buf, buf + len));
     } finally {
-      this.wasm.free(src, Math.max(data.length, 1));
-      this.wasm.free(buf, cap);
-      this.wasm.free(written, 8);
+      this.#wasm.free(src, Math.max(data.length, 1));
+      this.#wasm.free(buf, cap);
+      this.#wasm.free(written, 8);
     }
   }
 
   createTerminal(cols = 80, rows = 24, config?: VtTerminalConfig): VtTerminal {
-    return new VtTerminal(this.wasm, this, cols, rows, config);
+    return new VtTerminal(this.#wasm, this, cols, rows, config);
   }
 
   register(handle: number, terminal: VtTerminal): void {

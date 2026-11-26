@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { VtCells, type GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { ghosttyKitFrom } from "./backend";
 
 describe("ghostty kit instances", () => {
@@ -58,12 +58,13 @@ describe("ghostty kit instances", () => {
 
   test("each instance owns its memory", async () => {
     const kit = ghosttyKitFrom(await vendoredModule(), { Terminal });
-    const memories = await Promise.all(
-      [kit.instantiate(), kit.instantiate()].map(async (pending) => {
-        const ghostty = (await pending) as unknown as { wasm: { memory: WebAssembly.Memory } };
-        return ghostty.wasm.memory;
-      }),
-    );
+    const instantiate = vi.spyOn(WebAssembly, "instantiate");
+    onTestFinished(() => instantiate.mockRestore());
+    await kit.instantiate();
+    await kit.instantiate();
+    expect(instantiate).toHaveBeenCalledTimes(2);
+    const made = await Promise.all(instantiate.mock.results.map(({ value }) => value as Promise<WebAssembly.Instance>));
+    const memories = made.map((instance) => instance.exports.memory);
     expect(memories[0]).toBeInstanceOf(WebAssembly.Memory);
     expect(memories[0]).not.toBe(memories[1]);
   });
