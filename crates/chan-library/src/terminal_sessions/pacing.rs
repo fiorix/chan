@@ -161,30 +161,53 @@ impl Pacing {
         }
     }
 
+    /// [`Pacing::decide`] after the views' clocks have run: a view that has
+    /// used its credit starts its clock, or stops pacing the reader once the
+    /// clock has run for [`NO_PROGRESS_LIMIT`], and a view with credit stops
+    /// its clock.
     fn admit(&self, state: &mut State, maximum: usize, now: Instant) -> Admission {
+        if !state.bypass {
+            let (seq, events) = (state.seq, state.events);
+            for view in state.views.values_mut() {
+                let Some(remaining) = self.view_credit(view, seq, events) else {
+                    continue;
+                };
+                if remaining > 0 {
+                    // The clock measures a hold, so an idle view never expires.
+                    view.blocked_since = None;
+                    continue;
+                }
+                let started = *view.blocked_since.get_or_insert(now);
+                if now >= started + NO_PROGRESS_LIMIT {
+                    view.released = true;
+                    view.blocked_since = None;
+                }
+            }
+        }
+        self.decide(state, maximum, now)
+    }
+
+    /// What the views let the reader do now: read at most `maximum` bytes
+    /// and no more than any view's credit, or, while a view has used its
+    /// credit, wait until the earliest such view's clock runs out, counting
+    /// a clock that has not started from `now`.
+    fn decide(&self, state: &State, maximum: usize, now: Instant) -> Admission {
         if state.bypass {
             return Admission::Read(maximum);
         }
-        let (seq, published_events) = (state.seq, state.events);
         let mut credit = maximum;
         let mut deadline: Option<Instant> = None;
-        for view in state.views.values_mut() {
-            let Some(remaining) = self.view_credit(view, seq, published_events) else {
-                continue;
-            };
-            if remaining > 0 {
-                // The clock measures a hold, so an idle view never expires.
-                view.blocked_since = None;
-                credit = credit.min(usize::try_from(remaining).unwrap_or(usize::MAX));
-                continue;
+        for view in state.views.values() {
+            match self.view_credit(view, state.seq, state.events) {
+                None => {}
+                Some(0) => {
+                    let until = view.blocked_since.unwrap_or(now) + NO_PROGRESS_LIMIT;
+                    deadline = Some(deadline.map_or(until, |earliest| earliest.min(until)));
+                }
+                Some(remaining) => {
+                    credit = credit.min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                }
             }
-            let until = *view.blocked_since.get_or_insert(now) + NO_PROGRESS_LIMIT;
-            if now >= until {
-                view.released = true;
-                view.blocked_since = None;
-                continue;
-            }
-            deadline = Some(deadline.map_or(until, |earliest| earliest.min(until)));
         }
         match deadline {
             Some(deadline) => Admission::Wait(deadline),
@@ -210,28 +233,19 @@ impl Pacing {
     }
 
     /// The bytes a read may take now, at most `maximum`, or `None` when a
-    /// view would hold it: whether a view holds the read and how much it may
-    /// take are one decision, under one lock. Unlike [`Pacing::credit`] this
-    /// never waits and starts no view's clock: the clock measures a hold, and
-    /// a reader with nothing to read holds no program. A clock runs only
-    /// during a wait in [`Pacing::credit`], which ends with none running
-    /// unless credit is bypassed, so there is none here to expire.
+    /// view would hold it: [`Pacing::credit`]'s decision, taken once under
+    /// one lock, so whether a view holds the read and how much it may take
+    /// cannot part. Unlike [`Pacing::credit`] this never waits and runs no
+    /// view's clock: the clock measures a hold, and a reader with nothing to
+    /// read holds no program. A clock runs only during a wait in
+    /// [`Pacing::credit`], which ends with none running unless credit is
+    /// bypassed, so there is none here to expire.
     pub(super) fn try_credit(&self, maximum: usize) -> Option<usize> {
         let state = self.state.lock().expect("terminal pacing poisoned");
-        if state.bypass {
-            return Some(maximum);
+        match self.decide(&state, maximum, Instant::now()) {
+            Admission::Read(bytes) => Some(bytes),
+            Admission::Wait(_) => None,
         }
-        let mut credit = maximum;
-        for view in state.views.values() {
-            match self.view_credit(view, state.seq, state.events) {
-                None => {}
-                Some(0) => return None,
-                Some(remaining) => {
-                    credit = credit.min(usize::try_from(remaining).unwrap_or(usize::MAX));
-                }
-            }
-        }
-        Some(credit)
     }
 
     /// When the reader last stopped waiting for credit, in Unix milliseconds
