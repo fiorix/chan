@@ -120,7 +120,11 @@ type Rule = "deep" | "cast" | "member" | "patch" | "name" | "escape" | "duck";
 type Kind = "shipped" | "test";
 const TEST_RULES: ReadonlySet<Rule> = new Set(["deep", "member", "patch"]);
 
-type Finding = { rule: Rule; file: string; line: number; key: string };
+/// Where a finding is and what it names.
+type Site = { rule: Rule; file: string; line: number; key: string };
+/// A finding keeps the text of the node it reports, whitespace collapsed,
+/// which a pending entry pins.
+type Finding = Site & { text: string };
 
 /// Who removes a pending reader: the app's terminal code, or the widget
 /// package by taking over what the reader tests.
@@ -128,14 +132,24 @@ type Owner = "app terminal" | "widget package";
 
 /// Readers that are there today and that the change named in `until`
 /// removes. An entry covers the findings of `key` under `rule` in `file`,
-/// and `count` is how many: the check fails when an entry covers more or
-/// fewer, so a new reader in a listed file fails as it would anywhere
-/// else, and each reader that goes takes its count down with it.
-type Pending = { rule: Rule; file: string; key: string; count: number; owner: Owner; until: string };
+/// and `readers` is the text of each node it covers, as a multiset: the
+/// check fails when the covered findings' texts differ from it, so a
+/// reader more, on a line of its own or beside another, a reader fewer,
+/// and a reader replaced by one of another text all fail, and each reader
+/// that goes takes its text off the list. A reader moved with its text
+/// unchanged passes, and so does a reader replaced by another of the same
+/// text in the same file.
+type Pending = { rule: Rule; file: string; key: string; readers: readonly string[]; owner: Owner; until: string };
 
-/// The entries of one owner, change, rule and file, a count per key.
-const pending = (owner: Owner, until: string, rule: Rule, file: string, counts: Record<string, number>): Pending[] =>
-  Object.entries(counts).map(([key, count]) => ({ rule, file, key, count, owner, until }));
+/// The entries of one owner, change, rule and file, the readers' texts per
+/// key.
+const pending = (
+  owner: Owner,
+  until: string,
+  rule: Rule,
+  file: string,
+  readers: Record<string, readonly string[]>,
+): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
 
 const TAB = "src/components/TerminalTab.svelte";
 const ONE_TERMINAL = "the terminal tab and its helpers hold the widget's terminal alone";
@@ -149,60 +163,128 @@ const EMPTY_PASTE = "the empty paste emit, which no input event produces, goes";
 
 const PENDING: readonly Pending[] = [
   ...pending("app terminal", ONE_TERMINAL, "cast", TAB, {
-    GhosttyTerminal: 4,
-    "GhosttyTerminal | null": 7,
-    Terminal: 3,
-    "Terminal | null": 1,
+    GhosttyTerminal: [
+      "t as GhosttyTerminal",
+      "t as GhosttyTerminal",
+      "term as GhosttyTerminal",
+      "term as GhosttyTerminal",
+      "term as GhosttyTerminal",
+    ],
+    "GhosttyTerminal | null": [
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+      "term as GhosttyTerminal | null",
+    ],
+    Terminal: ["t as Terminal", "term as Terminal", "term as Terminal"],
+    "Terminal | null": ["term as Terminal | null"],
   }),
-  ...pending("app terminal", ONE_TERMINAL, "name", TAB, { viewportY: 1 }),
+  ...pending("app terminal", ONE_TERMINAL, "name", TAB, {
+    viewportY: ["(t as Terminal).buffer.active.viewportY"],
+  }),
   ...pending("app terminal", ONE_TERMINAL, "cast", "src/terminal/primarySelection.ts", {
-    GhosttyTerminal: 1,
-    XtermTerminal: 2,
+    GhosttyTerminal: ["term as GhosttyTerminal"],
+    XtermTerminal: ["term as XtermTerminal", "term as XtermTerminal"],
   }),
   ...pending("app terminal", ONE_TERMINAL, "member", "src/terminal/primarySelection.ts", {
-    "Terminal.onSelectionChange": 1,
+    "Terminal.onSelectionChange": ["(term as XtermTerminal).onSelectionChange"],
   }),
-  ...pending("app terminal", ONE_TERMINAL, "name", "src/terminal/secretMaskingXterm.ts", { viewportY: 2 }),
-  ...pending("app terminal", METRICS, "name", TAB, { renderer: 4 }),
-  ...pending("app terminal", REFRESH, "name", "src/terminal/renderer.ts", { renderer: 3, wasmTerm: 3 }),
-  ...pending("app terminal", REFRESH, "duck", TAB, { "Terminal.renderer": 1, "Terminal.wasmTerm": 1 }),
-  ...pending("app terminal", FIND, "name", "src/terminal/ghosttyFind.ts", { wasmTerm: 1 }),
+  ...pending("app terminal", ONE_TERMINAL, "name", "src/terminal/secretMaskingXterm.ts", {
+    viewportY: ["buffer.viewportY", "buffer.viewportY", "buffer.viewportY"],
+  }),
+  ...pending("app terminal", METRICS, "name", TAB, {
+    renderer: [
+      "(term as GhosttyTerminal | null)?.renderer",
+      "ghosttyTerm.renderer",
+      "ghosttyTerm.renderer",
+      "t.renderer",
+    ],
+  }),
+  ...pending("app terminal", REFRESH, "name", "src/terminal/renderer.ts", {
+    renderer: [
+      "renderer?: { render?( term: VtTerminal, forceAll?: boolean, viewportY?: number, scrollbarOpacity?: number, ): void; };",
+      "term.renderer",
+      "term.renderer",
+    ],
+    wasmTerm: ["term.wasmTerm", "term.wasmTerm", "wasmTerm?: VtTerminal;"],
+  }),
+  ...pending("app terminal", REFRESH, "duck", TAB, {
+    "Terminal.renderer": ["term"],
+    "Terminal.wasmTerm": ["term"],
+  }),
+  ...pending("app terminal", FIND, "name", "src/terminal/ghosttyFind.ts", {
+    wasmTerm: ["term.wasmTerm"],
+  }),
   ...pending("app terminal", FIND, "member", "src/terminal/ghosttyFind.test.ts", {
-    "VtTerminal.resizeListeners": 2,
-    "VtTerminal.wasm": 3,
+    "VtTerminal.resizeListeners": [
+      "(core as unknown as { resizeListeners: Set<unknown> }).resizeListeners",
+      "(core as unknown as { resizeListeners: Set<unknown> }).resizeListeners",
+    ],
+    "VtTerminal.wasm": [
+      "(core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number>; view(): DataView } }).wasm",
+      "(f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm",
+      "(f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm",
+    ],
   }),
   ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
-    "Terminal.buildWasmConfig": 3,
-    "Terminal.selectionManager": 1,
+    "Terminal.buildWasmConfig": [
+      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
+      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
+      "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",
+    ],
+    "Terminal.selectionManager": ["(term as unknown as { selectionManager: SelectionManager }).selectionManager"],
   }),
   ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.test.ts", {
-    "write Terminal.element": 1,
-    "write Terminal.renderer": 4,
-    "write Terminal.selectionManager": 1,
-    "write Terminal.wasmTerm": 4,
+    "write Terminal.element": ["(term as unknown as { element: HTMLElement }).element"],
+    "write Terminal.renderer": ["term.renderer", "term.renderer", "term.renderer", "term.renderer"],
+    "write Terminal.selectionManager": ["(term as unknown as { selectionManager: SelectionManager }).selectionManager"],
+    "write Terminal.wasmTerm": ["term.wasmTerm", "term.wasmTerm", "term.wasmTerm", "term.wasmTerm"],
   }),
   ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.redraw.test.ts", {
-    "CanvasRenderer.cursorVisible": 1,
-    "CanvasRenderer.hoveredHyperlinkId": 1,
-    "CanvasRenderer.hoveredLinkRange": 1,
-    "CanvasRenderer.selectionManager": 1,
-    "Terminal.selectionManager": 1,
+    "CanvasRenderer.cursorVisible": [
+      "(whole.renderer as unknown as { cursorVisible: boolean }).cursorVisible",
+      "hover.cursorVisible",
+    ],
+    "CanvasRenderer.hoveredHyperlinkId": ["hover.hoveredHyperlinkId"],
+    "CanvasRenderer.hoveredLinkRange": ["hover.hoveredLinkRange"],
+    "CanvasRenderer.selectionManager": [
+      "(painter.renderer as unknown as { selectionManager: { getSelectionCoords(): Coords | null } }).selectionManager",
+    ],
+    "Terminal.selectionManager": [
+      "(r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager",
+    ],
   }),
   ...pending("widget package", RENDERER_TESTS, "patch", "src/terminal/ghosttyRenderer.redraw.test.ts", {
-    "write CanvasRenderer.cursorVisible": 1,
-    "write Terminal.renderer": 1,
-    "write Terminal.selectionManager": 1,
-    "write Terminal.viewportY": 3,
-    "write Terminal.wasmTerm": 1,
+    "write CanvasRenderer.cursorVisible": ["(whole.renderer as unknown as { cursorVisible: boolean }).cursorVisible"],
+    "write Terminal.renderer": ["term.renderer"],
+    "write Terminal.selectionManager": [
+      "(r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager",
+    ],
+    "write Terminal.viewportY": [
+      "(fresh.term as unknown as { viewportY: number }).viewportY",
+      "(r.painter.term as unknown as { viewportY: number }).viewportY",
+      "(whole.term as unknown as { viewportY: number }).viewportY",
+    ],
+    "write Terminal.wasmTerm": ["term.wasmTerm"],
   }),
   ...pending("app terminal", THEME, "member", "src/terminal/ghosttyTheme.test.ts", {
-    "CanvasRenderer.ctx": 2,
-    "VtTerminal.handle": 1,
-    "VtTerminal.wasm": 4,
+    "CanvasRenderer.ctx": [
+      "(term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx",
+      "(term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx",
+    ],
+    "VtTerminal.handle": ["vt.handle"],
+    "VtTerminal.wasm": ["vt.wasm", "vt.wasm", "vt.wasm", "vt.wasm"],
   }),
-  ...pending("app terminal", KIT, "member", "src/terminal/backend.test.ts", { "GhosttyVt.wasm": 1 }),
+  ...pending("app terminal", KIT, "member", "src/terminal/backend.test.ts", {
+    "GhosttyVt.wasm": ["ghostty.wasm"],
+  }),
   ...pending("app terminal", EMPTY_PASTE, "member", "src/terminal/ghosttyViewport.change.test.ts", {
-    "Terminal.inputHandler": 1,
+    "Terminal.inputHandler": [
+      "(term as unknown as { inputHandler: { emitPasteData(text: string): void } }).inputHandler",
+    ],
   }),
 ];
 
@@ -677,8 +759,10 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     if (broken) throw new Error(`${source.rel} reads as broken TypeScript: ${ts.flattenDiagnosticMessageText(broken.messageText, " ")}`);
     const report = (rule: Rule, at: ts.Node, key: string) => {
       if (source.kind === "test" && !TEST_RULES.has(rule)) return;
-      const finding = { rule, file: source.rel, line: lineIn(source, at.getStart(sf)), key };
-      findings.set(show(finding), finding);
+      const start = at.getStart(sf);
+      const finding = { rule, file: source.rel, line: lineIn(source, start), key, text: at.getText(sf).replace(/\s+/g, " ") };
+      // One finding per node: two reads on one line are two findings.
+      findings.set(`${show(finding)} @${start}`, finding);
     };
 
     const read = (receiver: ts.Expression, name: string, at: ts.Node) => {
@@ -954,6 +1038,7 @@ const PLANTS = new Map<string, string>([
       "export const inKey = (term: Terminal) => OPEN in term;",
       "export const ownKey = (term: Terminal) => Object.hasOwn(term, OPEN);",
       "export const ownPropertyKey = (term: Terminal) => term.hasOwnProperty(OPEN);",
+      'export const twice = (term: Terminal) => [term["canvas"], term["canvas"]];',
     ].join("\n"),
   ],
   [
@@ -1042,7 +1127,7 @@ const PLANTS = new Map<string, string>([
   ],
 ]);
 
-const PLANTED: readonly Finding[] = [
+const PLANTED: readonly Site[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 2, key: "@chan/ghostty-web-ng/lib/renderer" },
   { rule: "cast", file: "src/terminal/boundaryPlant.ts", line: 3, key: "unknown" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 4, key: "Terminal.isOpen" },
@@ -1094,12 +1179,17 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 75, key: "Terminal.isOpen" },
   { rule: "escape", file: "src/terminal/boundaryPlant.ts", line: 75, key: "Terminal into object" },
   { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 76, key: "Terminal.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 77, key: "Terminal.canvas" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 77, key: "Terminal.canvas" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
+  { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
+  { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 3, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 4, key: "wasmTerm" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
+  { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 7, key: "renderer" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 8, key: "any" },
@@ -1125,26 +1215,38 @@ const PLANTED: readonly Finding[] = [
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 34, key: "Terminal.assertOpen" },
 ];
 
-/// Entries over the planted reads whose counts are off, one each way, and
-/// one that is right, so the count rule shows it fires on a reader more
-/// and a reader fewer, and only there.
+/// Entries over the planted reads that pin a reader too few, a reader too
+/// many, a second read on a line where one is pinned, and a reader of
+/// another text, and one that is right, so the pin shows it fires on each
+/// and only there.
 const PLANT_PENDING: readonly Pending[] = [
   ...pending("app terminal", "planted", "deep", "src/terminal/boundaryPlant.ts", {
-    "@chan/ghostty-web-ng/lib/renderer": 0,
+    "@chan/ghostty-web-ng/lib/renderer": [],
   }),
-  ...pending("app terminal", "planted", "patch", "src/terminal/boundaryPlant.ts", { "Object.assign Terminal": 2 }),
-  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", { wasmTerm: 1 }),
+  ...pending("app terminal", "planted", "patch", "src/terminal/boundaryPlant.ts", {
+    "Object.assign Terminal": ["Object.assign(term, { cols: 1 })", "Object.assign(term, { cols: 1 })"],
+  }),
+  ...pending("app terminal", "planted", "member", "src/terminal/boundaryPlant.ts", {
+    "Terminal.canvas": ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]'],
+    "Terminal.__proto__": ["term.__proto__"],
+  }),
+  ...pending("app terminal", "planted", "name", "src/terminal/boundaryPlant.ts", { wasmTerm: ["wasmTerm?: unknown"] }),
 ];
 
-function show(f: Finding): string {
+function show(f: Site): string {
   return `${f.rule} ${f.file}:${f.line} ${f.key}`;
 }
 const covers = (p: Pending, f: Finding) => p.rule === f.rule && p.file === f.file && p.key === f.key;
-/// The entries whose count is not the number of findings they cover.
-const miscounted = (entries: readonly Pending[], findings: readonly Finding[]) =>
+/// The entries whose readers are not the texts of the findings they cover,
+/// each with the texts it pins and the texts it covers, sorted.
+const mispinned = (entries: readonly Pending[], findings: readonly Finding[]) =>
   entries.flatMap((p) => {
-    const found = findings.filter((f) => covers(p, f)).length;
-    return found === p.count ? [] : [`${p.rule} ${p.file} ${p.key}: counts ${p.count}, covers ${found}`];
+    const pins = [...p.readers].sort();
+    const found = findings
+      .filter((f) => covers(p, f))
+      .map((f) => f.text)
+      .sort();
+    return JSON.stringify(found) === JSON.stringify(pins) ? [] : [{ entry: `${p.rule} ${p.file} ${p.key}`, pins, covers: found }];
   });
 
 // Source-text contract: no app module reaches the terminal widget past its public API, in modules written later too.
@@ -1171,14 +1273,32 @@ describe("the terminal widget's boundary", () => {
     expect(real.filter((f) => !PENDING.some((p) => covers(p, f))).map(show)).toEqual([]);
   });
 
-  test("each pending entry covers exactly the readers it counts", () => {
-    expect(miscounted(PENDING, real)).toEqual([]);
+  test("each pending entry covers exactly the readers it pins", () => {
+    expect(mispinned(PENDING, real)).toEqual([]);
   });
 
-  test("a pending entry fails on a reader more or fewer than it counts", () => {
-    expect(miscounted(PLANT_PENDING, planted)).toEqual([
-      "deep src/terminal/boundaryPlant.ts @chan/ghostty-web-ng/lib/renderer: counts 0, covers 1",
-      "patch src/terminal/boundaryPlant.ts Object.assign Terminal: counts 2, covers 1",
+  test("a pending entry fails on a reader more, fewer or of another text than it pins", () => {
+    expect(mispinned(PLANT_PENDING, planted)).toEqual([
+      {
+        entry: "deep src/terminal/boundaryPlant.ts @chan/ghostty-web-ng/lib/renderer",
+        pins: [],
+        covers: ['"@chan/ghostty-web-ng/lib/renderer"'],
+      },
+      {
+        entry: "patch src/terminal/boundaryPlant.ts Object.assign Terminal",
+        pins: ["Object.assign(term, { cols: 1 })", "Object.assign(term, { cols: 1 })"],
+        covers: ["Object.assign(term, { cols: 1 })"],
+      },
+      {
+        entry: "member src/terminal/boundaryPlant.ts Terminal.canvas",
+        pins: ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]'],
+        covers: ["(term as unknown as { canvas: HTMLCanvasElement }).canvas", 'term["canvas"]', 'term["canvas"]'],
+      },
+      {
+        entry: "member src/terminal/boundaryPlant.ts Terminal.__proto__",
+        pins: ["term.__proto__"],
+        covers: ['term["__proto__"]'],
+      },
     ]);
   });
 });
