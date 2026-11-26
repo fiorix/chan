@@ -368,10 +368,12 @@
       graphState.depth = 1;
       depthDraft = null;
       // A raise under way reads the directories its first pass opened above
-      // its own only once it finishes; one ended here reads them now.
+      // its own only once it finishes; one ended here reads them now. With
+      // a whole fetch in flight it leaves them to that fetch's landing
+      // (`loadSpine`), since asking now would start the fetch again.
       if (depthRaise !== null) {
         depthRaise = null;
-        loadOpenedChildren(true);
+        if (!spineLoading) loadOpenedChildren(true);
       }
       depthNote = null;
     }
