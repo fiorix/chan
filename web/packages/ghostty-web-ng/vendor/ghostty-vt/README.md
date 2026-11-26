@@ -1,4 +1,4 @@
-# libghostty-vt for the ghostty terminal backend
+# libghostty-vt for chan's terminal widget
 
 `ghostty-vt.wasm` is Ghostty's own WebAssembly build of libghostty-vt, the terminal emulator core of Ghostty (parser, terminal state, scrollback, encoders, search) with no renderer. chan's ghostty terminals run ghostty-web's renderer, input and selection over it; `vt/ghosttyVt.ts` in this package binds it, and the widget's sources in `lib/` are typed against that binding. The workspace app's `src/terminal/backend.ts` loads it through the package's `./vendor/ghostty-vt/ghostty-vt.wasm` export. It is the only wasm the package carries: ghostty-web's own build, which upstream's npm tarball bundles, left the package with upstream's binding of it.
 
@@ -14,7 +14,7 @@
 | Size    | 1,228,525 bytes                                                    |
 | License | MIT, `LICENSE` beside it                                           |
 
-libghostty-vt's C ABI is stable from 1.0 (upstream's `dist/doxygen/pages/stability.md`): a 1.x minor only adds functions, types, enum values and trailing fields of sized structs, nothing is removed, resized, reordered or re-typed, and a behavior change to a function ships as a new function. The promise covers the C interface, not the emulation behind it: what the core does with a program's output through the same functions (how it wraps, moves and measures cells, which queries it answers) changes in patch releases, so a re-pin reads what changed (step 2 below). Each release's wasm is published with its signature and a `SHA256SUMS` file at `release.files.ghostty.org`, Ghostty's release file host; the GitHub release assets are not the source of this file. The binding refuses a core whose major version is not 1 or that lacks the search feature when it loads, and the terminal falls back to xterm.js.
+libghostty-vt's C ABI is stable from 1.0 (upstream's `dist/doxygen/pages/stability.md`): a 1.x minor only adds functions, types, enum values and trailing fields of sized structs, nothing is removed, resized, reordered or re-typed, and a behavior change to a function ships as a new function. The promise covers the C interface, not the emulation behind it: what the core does with a program's output through the same functions (how it wraps, moves and measures cells, which queries it answers) changes in patch releases, so a re-pin reads what changed (step 2 below). Each release's wasm is published with its signature and a `SHA256SUMS` file at `release.files.ghostty.org`, Ghostty's release file host; the GitHub release assets are not the source of this file. The binding refuses a core whose major version is not 1 or that lacks the search feature when it loads; the app's loader keeps that refusal for the page's life, and the terminal shows it in its own area until a reload.
 
 ## Verifying
 
