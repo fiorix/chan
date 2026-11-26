@@ -417,6 +417,28 @@ describe("a redial after a socket ended inside a replay that continued the view"
     expect(dialed(fourth).since, "the redial still echoes the cursor the lost bytes start at").toBe(String(cursor));
   });
 
+  test("that missed bytes and is cut inside a sequence, then re-asked after the ring moved past the view, notices the new gap", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    const pasteOff = "\x1b[?2004l";
+    const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\x1b[1m!\x1b[0m\r\n`).join("");
+    const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
+    // The socket ends inside line 21's bold sequence.
+    await deliver(second, served(second, program), lines.indexOf("line 21") + "line 21\x1b[".length);
+    const third = await redialedAfterCut(second);
+    expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
+    // While the tab redials, the ring moves past line 30.
+    const moved = { ...program, ringStart: program.ringStart + lines.indexOf("line 31") };
+    await deliver(third, served(third, moved));
+    const buffer = term.buffer.normal;
+    const rows = Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+    const counts = Array.from({ length: 40 }, (_, i) => rows.filter((row) => row === `line ${i + 1}!`).length);
+    expect(Math.max(...counts), "no line twice").toBeLessThanOrEqual(1);
+    expect(counts.slice(30), "lines 31 to 40 whole, once, none run into the sequence the cut split").toEqual(Array(10).fill(1));
+    expect(rows.filter((row) => row.includes("terminal replay missed")), "a notice for each gap").toHaveLength(2);
+    expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+  });
+
   test("that missed bytes and ended after its suffix resumes from the replay's end", async () => {
     const { term, socket } = await viewOnTheAlternateScreen();
     const second = await redialed(socket);
