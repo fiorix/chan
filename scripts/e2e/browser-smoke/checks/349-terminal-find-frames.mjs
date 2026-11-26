@@ -65,29 +65,31 @@
 //               straight to the terminal: lines of the same shape whose
 //               filler spreads more "e", REFLOW_MARGIN of the smaller limit
 //               in rows, as dense as makes about 700,000 matches, so that
-//               no resize prunes a match. The history's bound sets the
-//               rows (a byte budget keeps about half the rows a row cap
-//               does), so the leg sets the matches, and a rescan has that
-//               many to place. Then, with no output, a fresh find steps to
-//               a match of a line's second segment at least 90 percent of
-//               the way up from the newest match, so each rescan places it
-//               late. The page narrows and widens back twice. The leg reads
-//               find only when its instrument holds: the narrow width's
-//               reading filled its history, the erase emptied it, the
-//               fill's first line is the history's oldest row (the fill
-//               pruned nothing), the count and the history's rows after
-//               each resize equal those before (the reflow pruned nothing
-//               and no line changed its rows), the narrow width moves the
-//               active match to its line's second row, and 1.5 s after the
-//               first narrowing the match is kept with its
-//               index unplaced (the reading is past the one-second press
-//               cap and ahead of placement). Then 1.5 s after each resize
-//               the active match must still be highlighted on the same line
-//               and offset, on the row of its line that offset falls on at
-//               that width and reading "e", placed or not, and once the
-//               count completes it must have the index it had before the
-//               reflow. At the end the count must again equal the buffer's
-//               "e".
+//               no resize prunes a match, and an empty row after them,
+//               which takes the shell's prompt redraw at each resize. The
+//               history's bound sets the rows (a byte budget keeps about
+//               half the rows a row cap does), so the leg sets the matches,
+//               and a rescan has that many to place. Then, with no output,
+//               a fresh find steps to a match of a line's second segment at
+//               least 90 percent of the way up from the newest match, so
+//               each rescan places it late. The page narrows and widens
+//               back twice. The leg reads find only when its instrument
+//               holds: the narrow width's reading filled its history, the
+//               erase emptied it, the fill's first line is the history's
+//               oldest row (the fill pruned nothing), the count and the
+//               history's rows before the reflow are the fill's, the count
+//               and the history's rows after each resize equal those before
+//               (no match left the buffer and no line changed its rows),
+//               the narrow width moves the active match to its line's
+//               second row, and 1.5 s after the first narrowing the match
+//               is kept with its index unplaced (the reading is past the
+//               one-second press cap and ahead of placement). Then 1.5 s
+//               after each resize the active match must still be
+//               highlighted on the same line and offset, on the row of its
+//               line that offset falls on at that width and reading "e",
+//               placed or not, and once the count completes it must have
+//               the index it had before the reflow. At the end the count
+//               must again equal the buffer's "e".
 //
 // The widget's frame work is the time spent in the animation-frame
 // callbacks the widget's chunk registers (its render loop, whose search work
@@ -531,6 +533,15 @@ export default {
         return t.getScrollbackLength();
       });
       details.reflowFill = await writeLines(8, denseTail, fillLines);
+      // The shell sits at its prompt behind these writes, and at each resize
+      // bash redraws the prompt on the cursor's row: a carriage return, an
+      // erase to the end of the line and "$ ". On the fill's last line that
+      // erases its second row at the narrow width and the rest at the full
+      // one, so the count falls by that line's matches and, from the second
+      // resize, the line takes one row. An empty row after the fill takes
+      // the redraw instead, one row at both widths, so the count stays
+      // perLine * lines and the history 2 * lines + 1 - rows throughout.
+      await term.evaluate((t) => t.write("\r\n"));
       Object.assign(details.reflowFill, {
         budget, held, narrowCols, measuredOldest: measured.oldest, cleared, limit, margin: REFLOW_MARGIN,
         lines: fillLines, every, perLine, planned: perLine * fillLines,
@@ -547,7 +558,7 @@ export default {
         const onSecond = (id) => id !== null && id.offset >= second && id.offset < second + length;
         for (let i = 0; i < perLine && !onSecond(window.__find349.identity()); i++) t.search.step("e", "newer");
         const identity = window.__find349.identity();
-        return { steps, state: t.search.state, identity, onSecond: onSecond(identity), history: t.getScrollbackLength(), cols: t.cols };
+        return { steps, state: t.search.state, identity, onSecond: onSecond(identity), history: t.getScrollbackLength(), cols: t.cols, rows: t.rows };
       }, [second, SEGMENT.length, perLine]);
       const start = details.reflowStart;
       // The match on its line and offset, read where that offset falls at
@@ -580,6 +591,9 @@ export default {
       }
       if (fillRead.cleared !== 0) instrument.push(`erasing the history left ${fillRead.cleared} rows`);
       if (fillRead.oldest !== "8:000001") instrument.push(`the history's oldest row opens "${fillRead.oldest}", not the fill's first line: the fill pruned`);
+      if (start.state.total !== fillRead.planned) instrument.push(`the count before the reflow is ${start.state.total}, not the fill's ${fillRead.planned}`);
+      const plannedHistory = 2 * fillRead.lines + 1 - start.rows;
+      if (start.history !== plannedHistory) instrument.push(`the history before the reflow is ${start.history} rows, not the fill's ${plannedHistory}`);
       if (!start.identity) instrument.push("no active match before the reflow");
       else {
         if (!start.onSecond) instrument.push(`the active match ${at(start.identity)} is not on a line's second segment`);
@@ -590,7 +604,7 @@ export default {
         }
       }
       details.reflow.forEach(({ width, settled }, i) => {
-        if (settled.state.total !== start.state.total) instrument.push(`resize ${i + 1} (${width}px) took the count from ${start.state.total} to ${settled.state.total}: the reflow pruned matches`);
+        if (settled.state.total !== start.state.total) instrument.push(`resize ${i + 1} (${width}px) took the count from ${start.state.total} to ${settled.state.total}: matches left or entered the buffer`);
         if (settled.history !== start.history) instrument.push(`resize ${i + 1} (${width}px) took the history from ${start.history} to ${settled.history} rows: a line changed its rows`);
       });
       const first = details.reflow[0]?.during;
