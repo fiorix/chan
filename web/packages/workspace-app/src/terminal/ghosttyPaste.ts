@@ -1,4 +1,4 @@
-import { VtTerminal } from "@chan/ghostty-web-ng/vt";
+import type { TerminalCore } from "@chan/ghostty-web-ng";
 
 // ghostty-web's paste path, cleaned and brought level with xterm.js.
 //
@@ -21,11 +21,10 @@ import { VtTerminal } from "@chan/ghostty-web-ng/vt";
 // The bare Ctrl+V that ghostty-web would drop with its paste chords is
 // keyboard input, sent by ghosttyKeys.ts like every other key.
 
-/// The slice of ghostty-web's Terminal a paste needs.
+/// The slice of ghostty-web's Terminal a paste needs: its core, which it
+/// has while it is open, and its input.
 export type GhosttyPasteTerminal = {
-  readonly wasmTerm?: unknown;
-  hasBracketedPaste(): boolean;
-  paste(text: string): void;
+  readonly core?: Pick<TerminalCore, "encodePaste">;
   input(data: string, wasUserInput?: boolean): void;
   clearSelection?(): void;
 };
@@ -38,19 +37,15 @@ export function pasteLineEnds(text: string): string {
 }
 
 /// Paste `text` into a ghostty terminal: line ends as xterm.js converts them,
-/// then the core's paste encoder (`VtTerminal.encodePaste`), sent as the
+/// then the core's paste encoder (`TerminalCore.encodePaste`), sent as the
 /// user's input, so ghostty-web's own framing is never reached. An empty
 /// text is an empty bracketed paste under bracketed paste, and nothing
-/// otherwise. A terminal over another core pastes through ghostty-web's own
-/// paste, line ends converted.
+/// otherwise. A terminal that is not open has no core and refuses the
+/// paste, as its own input does.
 export function pasteIntoGhostty(term: GhosttyPasteTerminal, text: string): void {
-  const lines = pasteLineEnds(text);
-  const core = term.wasmTerm;
-  if (!(core instanceof VtTerminal)) {
-    if (lines || term.hasBracketedPaste()) term.paste(lines);
-    return;
-  }
-  const data = core.encodePaste(lines);
+  const core = term.core;
+  if (!core) throw new Error("Terminal must be opened before a paste");
+  const data = core.encodePaste(pasteLineEnds(text));
   if (data) term.input(data, true);
 }
 

@@ -61,11 +61,7 @@ async function core(bracketed: boolean): Promise<VtTerminal> {
 function ghosttySends(terminal: VtTerminal, text: string): string[] {
   const sent: string[] = [];
   const term: GhosttyPasteTerminal = {
-    wasmTerm: terminal,
-    hasBracketedPaste: () => terminal.hasBracketedPaste(),
-    paste: () => {
-      throw new Error("the core's encoder is the path");
-    },
+    core: terminal,
     input: (data) => void sent.push(data),
   };
   pasteIntoGhostty(term, text);
