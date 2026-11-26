@@ -1511,8 +1511,21 @@ impl<'a> TreeMergeCtx<'a> {
         dirs: &std::collections::BTreeSet<String>,
         blocked_dirs: &[String],
     ) {
-        let held: Vec<String> = self
-            .nodes
+        for path in self.held_file_paths() {
+            if path.is_empty() || is_below_any(blocked_dirs, &path) {
+                continue;
+            }
+            let parent = parent_directory(&path);
+            if parent.is_empty() || dirs.contains(&parent) {
+                self.merge_tree_entry(&path, false);
+            }
+        }
+    }
+
+    /// The paths of the files the graph holds and does not mark missing,
+    /// which the tree layer joins to their folders.
+    fn held_file_paths(&self) -> Vec<String> {
+        self.nodes
             .values()
             .filter_map(|node| match node {
                 GraphNodeView::File { path, missing, .. }
@@ -1523,16 +1536,7 @@ impl<'a> TreeMergeCtx<'a> {
                 }
                 _ => None,
             })
-            .collect();
-        for path in held {
-            if path.is_empty() || is_below_any(blocked_dirs, &path) {
-                continue;
-            }
-            let parent = parent_directory(&path);
-            if parent.is_empty() || dirs.contains(&parent) {
-                self.merge_tree_entry(&path, false);
-            }
-        }
+            .collect()
     }
 }
 
@@ -1621,41 +1625,30 @@ fn merge_subtree_layer(
             .map(|entry| (entry.path.as_str(), entry.is_dir)),
     );
 
-    // Anchor every included file to its folder ancestors. In directory/file
-    // scope the file NODES are seeded workspace-wide (a node per indexed file,
-    // plus referenced on-disk targets), but the tree walk above is
-    // PREFIX-scoped -- so any file outside the scoped subtree gets a node with
-    // no `contains` ancestor chain and the frontend renders it edgeless. Spine
-    // each remaining non-missing file to its parent directory chain so
-    // directory scope keeps the "no file renders edgeless" invariant Workspace
-    // scope already has. This mirrors the Workspace-scope walk (which spines
-    // the whole tree); the extra out-of-prefix folder bubbles are
-    // declutterable via the folder chip. An old user-root `.Drafts` directory
-    // is anchored like any other live directory. The spine ops are idempotent
-    // (`edge_set`/`merge_directory_node`
-    // dedup), so an in-scope file already spined by the prefix walk is a no-op.
-    // Workspace scope walks the full tree, so it needs no backfill.
-    let unspined: Vec<String> = ctx
-        .nodes
-        .values()
-        .filter_map(|node| match node {
-            GraphNodeView::File { path, missing, .. }
-            | GraphNodeView::Media { path, missing, .. }
-                if !missing =>
-            {
-                Some(path.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    for path in unspined {
-        let clean = path.trim_matches('/');
-        if clean.is_empty() {
+    // Anchor every file the graph holds to its folder chain. In directory
+    // and file scope the file nodes are seeded workspace-wide (a node per
+    // indexed file, plus referenced on-disk targets), but the walk above
+    // lists the scoped subtree alone, so a file outside it would have a node
+    // with no `contains` chain and the frontend would draw it edgeless. Each
+    // one is joined to its parent folder, and that folder to the root.
+    // Workspace scope joins the files it holds through its own walk instead:
+    // the whole tree's under the listing cap; over it, the walked folders'
+    // through `spine_held_files`, which also leaves out a file below a
+    // read-only dead end or under a folder the walk does not list; over both
+    // bounds, or when the listing fails, there is no tree layer. This anchor
+    // leaves out neither kind of file, since outside the scoped subtree no
+    // walk says which folders are listed. The folders it adds outside the
+    // prefix can be decluttered with the folder chip, and an old user-root
+    // `.Drafts` directory is anchored like any other live directory. Merging
+    // keeps one node and one edge, so a file the prefix walk joined already
+    // is joined once.
+    for path in ctx.held_file_paths() {
+        if path.is_empty() {
             continue;
         }
-        let parent = parent_directory(clean);
+        let parent = parent_directory(&path);
         ctx.ensure_directory_path(&parent);
-        ctx.push_contains_edge(directory_node_id(&parent), clean.to_string());
+        ctx.push_contains_edge(directory_node_id(&parent), path);
     }
 }
 
