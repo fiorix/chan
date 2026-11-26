@@ -175,6 +175,7 @@ export interface MouseTrackingConfig {
 }
 
 export class InputHandler {
+  private readonly ghostty: GhosttyVt;
   private encoder: VtKeyEncoder;
   private container: HTMLElement;
   private inputElement?: HTMLElement;
@@ -236,6 +237,7 @@ export class InputHandler {
     inputElement?: HTMLElement,
     mouseConfig?: MouseTrackingConfig
   ) {
+    this.ghostty = ghostty;
     this.encoder = ghostty.createKeyEncoder();
     this.container = container;
     this.inputElement = inputElement;
@@ -943,16 +945,13 @@ export class InputHandler {
   }
 
   /**
-   * Emit paste data with bracketed paste support
+   * Emit a paste as the core's paste encoder renders it (see
+   * GhosttyVt.encodePaste): framed under bracketed paste, with the bytes
+   * that could end the bracket or act as keys turned into spaces.
    */
   private emitPasteData(text: string): void {
-    const hasBracketedPaste = this.getModeCallback?.(2004) ?? false;
-
-    if (hasBracketedPaste) {
-      this.onDataCallback('\x1b[200~' + text + '\x1b[201~');
-    } else {
-      this.onDataCallback(text);
-    }
+    const data = this.ghostty.encodePaste(text, this.getModeCallback?.(2004) ?? false);
+    if (data) this.onDataCallback(data);
   }
 
   /**

@@ -692,19 +692,14 @@ export class Terminal {
       return;
     }
 
-    const bracketed = this.wasmTerm!.hasBracketedPaste();
-    if (data || bracketed) this.awaitingEcho = true;
-
-    // Check if terminal has bracketed paste mode enabled
-    if (bracketed) {
-      this.scrollToBottom();
-      // Wrap with bracketed paste sequences (DEC mode 2004)
-      this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
-    } else {
-      // Send data directly
-      if (data) this.scrollToBottom();
-      this.dataEmitter.fire(data);
-    }
+    // The core's paste encoder frames the text under bracketed paste (DEC
+    // mode 2004) and turns the bytes that could end the bracket or act as
+    // keys into spaces; an empty text without bracketed paste sends nothing.
+    const encoded = this.wasmTerm!.encodePaste(data);
+    if (!encoded) return;
+    this.awaitingEcho = true;
+    this.scrollToBottom();
+    this.dataEmitter.fire(encoded);
   }
 
   /**

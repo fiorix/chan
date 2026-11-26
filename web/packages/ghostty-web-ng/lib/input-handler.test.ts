@@ -1443,8 +1443,29 @@ describe('InputHandler', () => {
 
       container.dispatchEvent(pasteEvent);
 
-      expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toBe(pasteText);
+      // Without bracketed paste the core's encoder sends each line feed as
+      // the carriage return Enter sends.
+      expect(dataReceived).toEqual(['Line 1\rLine 2\rLine 3']);
+    });
+
+    test('encodes a paste through the core, so a pasted end marker cannot close the bracket', () => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (mode) => mode === 2004,
+        undefined,
+        inputElement as any
+      );
+
+      container.dispatchEvent(createClipboardEvent('a\x1b[201~b'));
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', 'c\x1b[201~d'));
+
+      expect(dataReceived).toEqual(['\x1b[200~a [201~b\x1b[201~', '\x1b[200~c [201~d\x1b[201~']);
     });
 
     test('ignores beforeinput insertFromPaste when paste already handled', () => {
