@@ -176,35 +176,12 @@ const pending = (
   readers: Record<string, readonly string[]>,
 ): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
 
-const TAB = "src/components/TerminalTab.svelte";
-const METRICS = "the terminal tab reads cell metrics through getMetrics()";
-const REFRESH = "refreshTerminalRows needs refresh() and drops its renderer path";
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
 const THEME = "the theme test reads the core's colours off the canvas, or moves into the package";
 const KIT = "the kit test tells two instances apart by what their terminals show";
 const EMPTY_PASTE = "the empty paste emit, which no input event produces, goes";
 
 const PENDING: readonly Pending[] = [
-  ...pending("app terminal", METRICS, "name", TAB, {
-    renderer: [
-      "(term as GhosttyTerminal | null)?.renderer",
-      "ghosttyTerm.renderer",
-      "ghosttyTerm.renderer",
-      "t.renderer",
-    ],
-  }),
-  ...pending("app terminal", REFRESH, "name", "src/terminal/renderer.ts", {
-    renderer: [
-      "renderer?: { render?( term: VtTerminal, forceAll?: boolean, viewportY?: number, scrollbarOpacity?: number, ): void; };",
-      "term.renderer",
-      "term.renderer",
-    ],
-    wasmTerm: ["term.wasmTerm", "term.wasmTerm", "wasmTerm?: VtTerminal;"],
-  }),
-  ...pending("app terminal", REFRESH, "duck", TAB, {
-    "Terminal.renderer": ["term"],
-    "Terminal.wasmTerm": ["term"],
-  }),
   ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
     "Terminal.buildWasmConfig": [
       "(term as unknown as { buildWasmConfig(): Parameters<GhosttyVt[\"createTerminal\"]>[2] }).buildWasmConfig",

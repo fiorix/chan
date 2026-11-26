@@ -1286,7 +1286,7 @@
       // A terminal that is gone needs no instance.
       if (overtaken()) return;
       ghosttyInstance = await ghosttyKit.instantiate({
-        cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
+        cellSize: () => term?.getMetrics(),
         onResizeReply: sendGeneratedTerminalInput,
       });
     } catch (err) {
@@ -1385,7 +1385,7 @@
     // This FitLike keeps upstream's measurement and clamp behavior over the
     // whole content box.
     const proposeGhosttyGrid = () => {
-      const metrics = ghosttyTerm.renderer?.getMetrics();
+      const metrics = ghosttyTerm.getMetrics();
       if (!metrics) return null;
       const style = window.getComputedStyle(terminalHost);
       return proposeGhosttyDimensions(
@@ -1430,7 +1430,7 @@
       hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),
       isAlternateScreen: () =>
         ghosttyTerm.buffer.active === ghosttyTerm.buffer.alternate,
-      cellHeight: () => ghosttyTerm.renderer?.getMetrics().height ?? 0,
+      cellHeight: () => ghosttyTerm.getMetrics()?.height ?? 0,
     });
     ghosttyViewport = viewport;
     keyboardProtocolObserver = new KeyboardProtocolObserver(
@@ -2418,7 +2418,7 @@
       return ghosttyViewport?.handleWheel(e) ?? false;
     }
     if (!tracking) {
-      const cellHeight = t.renderer?.getMetrics().height ?? 0;
+      const cellHeight = t.getMetrics()?.height ?? 0;
       if (!(cellHeight > 0)) return false;
       if (ghosttyWheelRows.consume(e, cellHeight, t.rows) !== 0) {
         sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)), false, false);
