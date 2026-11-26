@@ -185,6 +185,21 @@ describe('the widget core facade', () => {
     expect(sent).toEqual(['\x1b[200~a [201~b\x1b[201~', '\x1b[200~\x1b[201~', 'c [201~d\r']);
   });
 
+  test("the widget's own paste sends each line end as one carriage return, bracketed or not", async () => {
+    const { term } = await open();
+    const sent: string[] = [];
+    term.onData(data => sent.push(data));
+    const texts = ['a\r\nb', 'a\nb', 'a\rb', 'a\n\n', 'a\r\nb\nc\rd\r\n'];
+    for (const text of texts) term.paste(text);
+    term.write('\x1b[?2004h');
+    for (const text of texts) term.paste(text);
+    expect(sent).toEqual([
+      'a\rb', 'a\rb', 'a\rb', 'a\r\r', 'a\rb\rc\rd\r',
+      '\x1b[200~a\rb\x1b[201~', '\x1b[200~a\rb\x1b[201~', '\x1b[200~a\rb\x1b[201~', '\x1b[200~a\r\r\x1b[201~',
+      '\x1b[200~a\rb\rc\rd\r\x1b[201~',
+    ]);
+  });
+
   test('search handles forward incremental scans without changing widget selection or viewport', async () => {
     const { term } = await open();
     const saved = core(term);

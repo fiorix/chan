@@ -19,6 +19,16 @@ import type { IKeyEvent } from './interfaces';
 import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 
 /**
+ * A paste's line ends as Enter sends them: each `\r\n` and `\n` becomes
+ * `\r`, with or without bracketed paste. The core's paste encoder turns
+ * only an unbracketed `\n` into `\r`, which would send a pasted `\r\n` as
+ * two carriage returns and leave a bracketed line feed a line feed.
+ */
+export function pasteLineEnds(text: string): string {
+  return text.replace(/\r?\n/g, '\r');
+}
+
+/**
  * Map KeyboardEvent.code values to USB HID Key enum values
  * Based on: https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/code
  */
@@ -945,12 +955,13 @@ export class InputHandler {
   }
 
   /**
-   * Emit a paste as the core's paste encoder renders it (see
+   * Emit a paste with its line ends as Enter sends them (`pasteLineEnds`),
+   * as the core's paste encoder then renders it (see
    * GhosttyVt.encodePaste): framed under bracketed paste, with the bytes
    * that could end the bracket or act as keys turned into spaces.
    */
   private emitPasteData(text: string): void {
-    const data = this.#ghostty.encodePaste(text, this.#getModeCallback?.(2004) ?? false);
+    const data = this.#ghostty.encodePaste(pasteLineEnds(text), this.#getModeCallback?.(2004) ?? false);
     if (data) this.#onDataCallback(data);
   }
 

@@ -21,7 +21,7 @@ import { BufferNamespace } from './buffer';
 import { parseColor } from './color';
 import { EventEmitter } from './event-emitter';
 import { HighlightsManager } from './highlights';
-import { InputHandler, type MouseTrackingConfig } from './input-handler';
+import { InputHandler, pasteLineEnds, type MouseTrackingConfig } from './input-handler';
 import { registerWidgetInternals } from './internal';
 import type {
   IBufferNamespace,
@@ -713,10 +713,11 @@ export class Terminal {
       return;
     }
 
-    // The core's paste encoder frames the text under bracketed paste (DEC
-    // mode 2004) and turns the bytes that could end the bracket or act as
-    // keys into spaces; an empty text without bracketed paste sends nothing.
-    const encoded = this.wasmTerm!.encodePaste(data);
+    // Line ends go as Enter sends them, bracketed or not; then the core's
+    // paste encoder frames the text under bracketed paste (DEC mode 2004)
+    // and turns the bytes that could end the bracket or act as keys into
+    // spaces. An empty text without bracketed paste sends nothing.
+    const encoded = this.wasmTerm!.encodePaste(pasteLineEnds(data));
     if (!encoded) return;
     this.#awaitingEcho = true;
     this.scrollToBottom();

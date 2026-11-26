@@ -114,6 +114,10 @@ For test instruments only, `testHooks: { scrollbarOpacity: number }` fixes paint
 
 `attachCustomKeyEventHandler(handler)` sees each keydown before the widget encodes it. A key the handler returns true for is the embedder's: the widget sends nothing for it, does not prevent its default and does not stop its propagation, so a chord the embedder lets out reaches the page and the browser as if the terminal were not focused. The embedder prevents the default wherever it acts on such a key. The widget prevents the default only of keys it sends itself; the paste chord keeps its default so the native paste event fires.
 
+## Paste
+
+`term.paste(text)` and the widget's own `paste` and `insertFromPaste` listeners send a paste's line ends as Enter sends them (each `\r\n` and `\n` becomes `\r`, bracketed or not) and then encode the text as `encodePaste` does. Either way the paste scrolls the viewport to the bottom, and the next write paints at once, as after typed input. Under bracketed paste `term.paste('')` sends an empty bracketed paste and without it nothing; the listeners send nothing for an empty clipboard.
+
 ## Links
 
 The link detector underlines what its two providers find: OSC 8 hyperlinks first, then URLs in the text (`http`, `https`, `mailto`, `ftp`, `ssh`, `git`, `tel`, `magnet`, `gemini`, `gopher`, `news`). A click on a link opens nothing by itself. `term.onLinkActivate(({ target, kind, range, event }) => ...)` reports it: `target` is the OSC 8 URI exactly as the program wrote it, or the matched URL, and can name another place than the text on the screen; `kind` is `"osc8"` or `"url"`; `range` holds the link's first and last cells, absolute rows with row zero at the oldest retained history row; `event` is the click, modifiers included. With no listener a click on a link does nothing; the widget calls `window.open` nowhere.

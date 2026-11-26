@@ -1468,6 +1468,27 @@ describe('InputHandler', () => {
       expect(dataReceived).toEqual(['\x1b[200~a [201~b\x1b[201~', '\x1b[200~c [201~d\x1b[201~']);
     });
 
+    test.each([false, true])('sends each pasted line end as one carriage return (bracketed: %s)', (bracketed) => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (mode) => bracketed && mode === 2004,
+        undefined,
+        inputElement as any
+      );
+
+      container.dispatchEvent(createClipboardEvent('a\r\nb\nc\rd\r\n'));
+      inputElement.dispatchEvent(createBeforeInputEvent('insertFromPaste', 'e\r\nf\n'));
+
+      const frame = (text: string) => (bracketed ? `\x1b[200~${text}\x1b[201~` : text);
+      expect(dataReceived).toEqual([frame('a\rb\rc\rd\r'), frame('e\rf\r')]);
+    });
+
     test('ignores beforeinput insertFromPaste when paste already handled', () => {
       const inputElement = createMockContainer();
       new InputHandler(
