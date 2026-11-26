@@ -10,8 +10,9 @@
 // its markup, and reports, with file and line:
 //
 // 1. deep: an import, export, dynamic import, `import()` type, module mock,
-//    `import.meta.glob` pattern or `new URL(..., import.meta.url)` that
-//    reaches a path inside the package other than its export map's entries,
+//    module augmentation (`declare module`), `import.meta.glob` pattern or
+//    `new URL(..., import.meta.url)` that reaches a path inside the package
+//    other than its export map's entries,
 //    by the package's name or by a relative path with its links resolved
 //    (the workspace's `node_modules/@chan/ghostty-web-ng` is a link to the
 //    package, so a path through it reaches the package's own files);
@@ -25,7 +26,10 @@
 //    widened, up to the first that is a widget), `in`, `vi.spyOn`,
 //    `Reflect.get`, `Reflect.has`, `getOwnPropertyDescriptor`,
 //    `Object.hasOwn` or `hasOwnProperty`, with the key a literal, one under
-//    parentheses or a cast, or a value whose type is a string literal;
+//    parentheses or a cast, or a value whose type is a string literal. A
+//    member that only an app module declares on a widget class, by a
+//    module augmentation or a type intersected with the class, is not
+//    public to this rule;
 // 4. patch: a write to a member of a widget object, `Object.assign` and its
 //    kin on one, and any reach of a widget's prototype: a widget class's
 //    `prototype`, or a widget value's `constructor`, `Object.getPrototypeOf`
@@ -508,6 +512,14 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     !!symbol?.declarations?.some((d) => inWidget(d.getSourceFile().fileName));
   const widgetClass = (symbol: ts.Symbol | undefined) =>
     !!symbol && (symbol.flags & ts.SymbolFlags.Class) !== 0 && declaredInWidget(symbol);
+  /// Whether a declaration is in one of the app's modules, where a module
+  /// augmentation or an intersection adds a member to a widget type.
+  const appDeclared = (d: ts.Declaration) => {
+    const fileName = d.getSourceFile().fileName;
+    return fileName.startsWith(`${APP}/`) && !fileName.includes("/node_modules/");
+  };
+  /// Whether a type is a widget class's instance or an intersection with one.
+  const classPart = (type: ts.Type) => (type.isIntersection() ? type.types : [type]).some((t) => widgetClass(t.getSymbol()));
 
   function isWidget(type: ts.Type, depth = 0): boolean {
     if (depth > 4) return false;
@@ -615,12 +627,18 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
   };
 
   /// Whether some widget part of `type` lacks `name` or keeps it private.
+  /// A member only the app declares on a widget class, by a module
+  /// augmentation or an intersection, is one the class lacks at run time.
   function hidden(type: ts.Type, name: string): boolean {
     return parts(type).some((part) => {
       if (!isWidget(part)) return false;
       const member = checker.getApparentType(part).getProperty(name);
       if (!member) return true;
-      return (member.declarations ?? []).some((d) => {
+      const declarations = member.declarations ?? [];
+      if (classPart(part) && declarations.some(appDeclared) && !declarations.some((d) => inWidget(d.getSourceFile().fileName))) {
+        return true;
+      }
+      return declarations.some((d) => {
         if (!inWidget(d.getSourceFile().fileName)) return false;
         const id = (d as ts.NamedDeclaration).name;
         if (id && ts.isPrivateIdentifier(id)) return true;
@@ -754,6 +772,7 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
         specifier = node.moduleReference.expression;
       }
       if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) specifier = node.argument.literal;
+      if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) specifier = node.name;
       if (ts.isCallExpression(node) && node.arguments.length > 0) {
         const callee = node.expression;
         const dynamic = callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === "require");
@@ -1014,6 +1033,22 @@ const PLANTS = new Map<string, string>([
       'export const linkedGlob = import.meta.glob("../../../../node_modules/@chan/ghostty-web-ng/lib/*.ts");',
       'export const linkedScope = import.meta.glob("../../../../node_modules/@chan/*/lib/*.ts");',
       'export const linkedAsset = new URL("../../../../node_modules/@chan/ghostty-web-ng/lib/renderer.ts", import.meta.url);',
+      'declare module "../../../ghostty-web-ng/lib/terminal" {',
+      "  interface Terminal {",
+      "    isDisposed: boolean;",
+      "  }",
+      "}",
+      "export const augmented = (term: Terminal) => term.isDisposed;",
+      "const isRawTerminal = (t: Terminal): t is Terminal & Raw => t !== null;",
+      "export const predicated = (term: Terminal) => (isRawTerminal(term) ? term.isOpen : false);",
+      "function assertRawTerminal(t: Terminal): asserts t is Terminal & Raw {",
+      "  void t;",
+      "}",
+      "export const asserted = (term: Terminal) => {",
+      "  assertRawTerminal(term);",
+      "  return term.isOpen;",
+      "};",
+      "export const intersected = (t: Terminal & { isOpen?: boolean }) => t.isOpen;",
     ].join("\n"),
   ],
   [
@@ -1168,6 +1203,11 @@ const PLANTED: readonly Site[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 83, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/*.ts" },
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 84, key: "../../../../node_modules/@chan/*/lib/*.ts" },
   { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 85, key: "../../../../node_modules/@chan/ghostty-web-ng/lib/renderer.ts" },
+  { rule: "deep", file: "src/terminal/boundaryPlant.ts", line: 86, key: "../../../ghostty-web-ng/lib/terminal" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 91, key: "Terminal.isDisposed" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 93, key: "Terminal & Raw.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 99, key: "Terminal & Raw.isOpen" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 101, key: "Terminal & { isOpen?: boolean | undefined; }.isOpen" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
