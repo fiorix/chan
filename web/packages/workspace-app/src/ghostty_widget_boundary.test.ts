@@ -279,11 +279,14 @@ const TEMPLATE_HELPERS = [
 
 /// A component as modules, from Svelte's own parser: its `<script module>`
 /// when it also has an instance script, then the instance script (or the
-/// module script, or nothing) followed by its markup as statements. Each
-/// expression is copied as written into the scope the markup gives it: an
-/// each block's item and index, a snippet's parameters, an await block's
-/// value and error, a `{@const}`. A `let:` binding is the slot's and left
-/// out, so a name it binds has no type.
+/// module script, or nothing) followed by its markup as the statements of
+/// a function there. Inside a function a script variable has its declared
+/// type, as markup sees it after any assignment, where at the script's top
+/// level the checker would narrow `let term: Terminal | null = null` to
+/// `null`. Each expression is copied as written into the scope the markup
+/// gives it: an each block's item and index, a snippet's parameters, an
+/// await block's value and error, a `{@const}`. A `let:` binding is the
+/// slot's and left out, so a name it binds has no type.
 function componentSources(file: string, rel: string, kind: Kind, text: string): Source[] {
   const root = parse(text, { modern: true }) as unknown as {
     module: { content: Range } | null;
@@ -388,8 +391,9 @@ function componentSources(file: string, rel: string, kind: Kind, text: string): 
   }
   const host = root.instance ?? root.module;
   if (host) copy(host.content);
-  put("\n");
+  put("\nfunction __boundaryMarkup() {\n");
   walk(root.fragment);
+  put("}\n");
   put(TEMPLATE_HELPERS);
   sources.push(take(root.instance || !root.module ? "instance" : "module"));
   return sources;
@@ -922,6 +926,24 @@ const PLANTS = new Map<string, string>([
     ].join("\n"),
   ],
   [
+    "src/terminal/BoundaryHolder.svelte",
+    [
+      '<script lang="ts">',
+      '  import type { Terminal } from "@chan/ghostty-web-ng";',
+      "  let { make }: { make: () => Terminal } = $props();",
+      "  let term: Terminal | null = null;",
+      "  let held: Terminal | null = $state(null);",
+      "  $effect(() => {",
+      "    term = make();",
+      "    held = make();",
+      "  });",
+      "</script>",
+      "",
+      "<p>{(term as any)?.isOpen}</p>",
+      "<p>{(held as unknown as { isOpen: boolean } | null)?.isOpen}</p>",
+    ].join("\n"),
+  ],
+  [
     "src/terminal/boundaryPlant.test.ts",
     [
       'import { Terminal } from "@chan/ghostty-web-ng";',
@@ -1010,6 +1032,10 @@ const PLANTED: readonly Finding[] = [
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 9, key: "Terminal.canvas" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 10, key: "Terminal.isOpen" },
+  { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "any" },
+  { rule: "member", file: "src/terminal/BoundaryHolder.svelte", line: 12, key: "Terminal.isOpen" },
+  { rule: "cast", file: "src/terminal/BoundaryHolder.svelte", line: 13, key: "unknown" },
+  { rule: "member", file: "src/terminal/BoundaryHolder.svelte", line: 13, key: "Terminal.isOpen" },
   { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 2, key: "../../../ghostty-web-ng/lib/renderer" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 3, key: "Terminal.isOpen" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 4, key: "write Terminal.cols" },
