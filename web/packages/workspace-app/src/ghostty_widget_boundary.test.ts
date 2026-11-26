@@ -249,8 +249,9 @@ const ENTRIES = new Set(
   ),
 );
 
-/// Implementation members of the widget (all `#private`) an app module has
-/// no reason to name: catches what has no widget type to check, such as a
+/// Implementation members of the widget (each `#private`, or held only by
+/// a `#private` member, as the binding's plumbing is) an app module has no
+/// reason to name: catches what has no widget type to check, such as a
 /// duck-typed parameter or an untyped JavaScript reader.
 const IMPLEMENTATION = new Set([
   "wasmTerm",
@@ -260,6 +261,9 @@ const IMPLEMENTATION = new Set([
   "linkDetector",
   "buildWasmConfig",
   "hoveredHyperlinkId",
+  "writePtyCallback",
+  "deviceAttributesCallback",
+  "queueReply",
 ]);
 /// Terminal's `#private` renderer, textarea and scroll offset: other modules
 /// name objects of their own the same, so rule 5 counts these in the
@@ -1537,6 +1541,7 @@ const PLANTS = new Map<string, string>([
       '/** @param {import("@chan/ghostty-web-ng").Terminal} term */',
       "export const typed = (term) => term.isOpen;",
       '/** @typedef {import("../../../ghostty-web-ng/lib/internal")} Internal */',
+      "export const plumbing = (vt, t) => [vt.writePtyCallback, vt.deviceAttributesCallback, t.queueReply];",
     ].join("\n"),
   ],
   [
@@ -1699,6 +1704,9 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
   { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
   { rule: "member", file: "src/terminal/boundaryPlant.js", line: 5, key: "Terminal.isOpen" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "writePtyCallback" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "deviceAttributesCallback" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "queueReply" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },
