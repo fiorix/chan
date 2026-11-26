@@ -1329,6 +1329,21 @@ async fn terminal_ws(
     {
         return;
     }
+    // A view resuming past missed bytes may still show the screen its
+    // program left inside them, so it is put on the replay's screen first.
+    // The switch goes ahead of the session frame, which is where the
+    // client starts counting: before it on a socket's first attach nothing
+    // is a stream byte, and after it the first `replay_bytes` are the
+    // replay. A recovery on a live socket sends no switch, because its
+    // client counts the bytes ahead of that frame as live output.
+    if !session.replay_screen.is_empty()
+        && socket
+            .send(&session, Message::binary(session.replay_screen.clone()))
+            .await
+            .is_err()
+    {
+        return;
+    }
     if socket.input.size_conditional {
         if let Some(size) = socket.input.size {
             session.fit_if_unsized(size);
