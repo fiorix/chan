@@ -9,7 +9,12 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const EVENT_CREDIT: u64 = 512;
-const NO_PROGRESS_LIMIT: Duration = Duration::from_secs(5);
+/// How long a view may go without reporting progress: the reader stops
+/// waiting for a view that holds it this long, and a socket closes a view
+/// that waits for its client, one that needs recovery or one whose window
+/// is full after its program exited, once its running client has shown
+/// none for as long.
+pub const NO_PROGRESS_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct Pacing {
@@ -278,6 +283,12 @@ impl OutputProgress {
             }
         }
         self.0.pacing.changed.notify_all();
+    }
+
+    /// The position the client last reported parsed, never past what this
+    /// socket sent; `None` when the client does not acknowledge.
+    pub fn acked(&self) -> Option<u64> {
+        self.with_view(View::acked_position).flatten()
     }
 
     /// The next raw output byte this attachment has yet to send.

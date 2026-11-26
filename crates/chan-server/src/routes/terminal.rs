@@ -24,7 +24,7 @@ use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, OutputFlow, ProgramReading,
     ProgramStatusSnapshot, QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle,
     TerminalExit, TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
-    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
+    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP, NO_PROGRESS_LIMIT,
 };
 
 #[path = "terminal_socket.rs"]
@@ -1311,6 +1311,17 @@ async fn terminal_ws(
         opts.declared_size,
         opts.size_if_unset,
     );
+    // A client whose generation is neither the live one nor the one a
+    // lossy restore continues gets the reset a live socket gets at the
+    // restart: ahead of this life's session frame, outside its replay.
+    if session.stale_generation
+        && socket
+            .send(&session, Message::binary(RESET_TERMINAL))
+            .await
+            .is_err()
+    {
+        return;
+    }
     if socket.input.size_conditional {
         if let Some(size) = socket.input.size {
             session.fit_if_unsized(size);
@@ -1320,6 +1331,7 @@ async fn terminal_ws(
     }
     let size = socket.input.size.unwrap_or(opts.size);
     let Ok(attached_at) = send_attach_prelude(&mut socket, &session, size, false).await else {
+        socket.end(None).await;
         return;
     };
     socket.observe(&session);
@@ -1356,6 +1368,7 @@ async fn terminal_ws(
             break;
         }
         let restarting = matches!(lifecycle, Some(SessionLifecycle::Restarted));
+        let exited = matches!(lifecycle, Some(SessionLifecycle::Exit(_)));
         let progress = session
             .output_progress()
             .expect("terminal socket has output progress");
@@ -1386,6 +1399,9 @@ async fn terminal_ws(
             };
             drop(progress);
             session = next;
+            // A wait belongs to the view it started for. The new view's
+            // starts at its own release, also inside the prelude below.
+            socket.input.stall = None;
             // The subscription precedes this barrier: replies accepted before
             // the snapshot arrive before its queue reproof; newer requests are
             // represented on the new receiver.
@@ -1453,6 +1469,23 @@ async fn terminal_ws(
         if behind && progress.drained() {
             continue;
         }
+        // An exit ends the reader's waits, so a view whose window is full
+        // when its program exits is never released, and only its client's
+        // ack lets the rest of the output and the exit reach it.
+        let waiting = behind || (exited && progress.send_credit() == Some(0));
+        let stall_deadline = if waiting {
+            let (acked, frames) = (progress.acked(), socket.input.frames);
+            socket
+                .input
+                .stall
+                .get_or_insert_with(|| Stall::new(acked, frames))
+                .update(acked, frames)
+        } else {
+            // Room in its window ends an exited view's wait, so a frame
+            // read while it can send starts no clock for the next one.
+            socket.input.stall = None;
+            None
+        };
         let may_send = !behind && progress.send_credit() != Some(0);
         #[cfg(all(test, unix))]
         program_status_tests::loop_gate(session.id()).await;
@@ -1464,6 +1497,14 @@ async fn terminal_ws(
             }
             changed = lifecycle_rx.changed() => {
                 if changed.is_err() { break; }
+            }
+            // Above the client's frames, so a client whose frames are ready
+            // at every poll cannot hold the close off.
+            () = tokio::time::sleep_until(
+                stall_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if stall_deadline.is_some() => {
+                finish = Some(STALL_CLOSE);
+                break;
             }
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
@@ -1546,8 +1587,51 @@ async fn terminal_ws(
     if let Some(epoch) = socket.input.focus {
         session.withdraw_focus(epoch);
     }
-    if let Some((code, reason)) = finish {
-        socket.finish(code, reason.into()).await;
+    socket.end(finish).await;
+}
+
+/// The close of a view whose stall ran out: 1013, try again later, which
+/// the client answers by redialing. A redial that echoes its parsed cursor
+/// continues its view.
+const STALL_CLOSE: (u16, &str) = (1013, "terminal view stalled");
+
+/// A view waiting for its client to report having parsed what it was
+/// sent: one that needs recovery, or one whose window is full after its
+/// program exited. The wait starts at a lag or an exit, when the socket
+/// loop sees it, or at the reader's release, when the loop next passes or
+/// the socket reads its first client frame after it, wherever it reads
+/// it, so that frame starts the clock. A client that runs (it sends
+/// frames) and still reports no progress for [`NO_PROGRESS_LIMIT`] is
+/// wedged: its socket closes, from the loop or from a replay's wait for
+/// send credit, and the client redials. A stopped page sends nothing and
+/// keeps waiting, and its view goes on over this socket when it wakes.
+struct Stall {
+    /// The parsed position the wait started at; an advance restarts it.
+    acked: Option<u64>,
+    /// The client frames read when the wait started.
+    frames: u64,
+    /// Set by the client's first frame after the start.
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl Stall {
+    fn new(acked: Option<u64>, frames: u64) -> Self {
+        Self {
+            acked,
+            frames,
+            deadline: None,
+        }
+    }
+
+    /// Bring the wait to the client's parsed position and frame count, and
+    /// return when it ends, once a frame has started its clock.
+    fn update(&mut self, acked: Option<u64>, frames: u64) -> Option<tokio::time::Instant> {
+        if acked != self.acked {
+            *self = Self::new(acked, frames);
+        } else if self.deadline.is_none() && frames > self.frames {
+            self.deadline = Some(tokio::time::Instant::now() + NO_PROGRESS_LIMIT);
+        }
+        self.deadline
     }
 }
 
@@ -1574,9 +1658,11 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
     }
 }
 
-/// Send one coherent replay window, from Session through Ready. A live
-/// recovery appends retained bytes without clearing its existing screen or
-/// applying the client's older fit. Only raw replay bytes advance progress;
+/// Send one coherent replay window, from Session through Ready. A replay
+/// that continues its view, a live recovery's or a redial's of the live
+/// generation, appends retained bytes without clearing the screen, and a
+/// live recovery does not apply the client's older fit either. Only raw
+/// replay bytes advance progress;
 /// mode reconciliation stays inside the window without advancing the cursor.
 /// The returned time anchors status pacing before a potentially slow replay.
 async fn send_attach_prelude(
@@ -1622,7 +1708,9 @@ async fn send_attach_prelude(
             rest = tail;
         }
     }
-    if !recovering
+    // A view whose alternate-screen replay was skipped enters a cleared
+    // alternate screen, which the redraw nudge has its program paint.
+    if !session.continues_view
         && session.alt_screen
         && socket
             .send(session, Message::binary(ALT_SCREEN_ATTACH_PRELUDE))
@@ -2023,6 +2111,40 @@ mod tests {
             "these refusals have no branching reader"
         );
         body["error"].as_str().expect("sentence").to_owned()
+    }
+
+    #[test]
+    fn a_stall_starts_its_clock_at_a_client_frame_and_restarts_on_progress() {
+        // A stopped page sends nothing, and its wait has no deadline.
+        let mut stall = Stall::new(Some(100), 3);
+        assert_eq!(
+            stall.update(Some(100), 3),
+            None,
+            "a silent client keeps waiting"
+        );
+        let before = tokio::time::Instant::now();
+        let deadline = stall
+            .update(Some(100), 4)
+            .expect("the client's first frame starts the clock");
+        let after = tokio::time::Instant::now();
+        assert!(
+            before + NO_PROGRESS_LIMIT <= deadline && deadline <= after + NO_PROGRESS_LIMIT,
+            "the client gets the whole limit from its first frame"
+        );
+        assert_eq!(
+            stall.update(Some(100), 9),
+            Some(deadline),
+            "later frames do not extend the wait"
+        );
+        assert_eq!(
+            stall.update(Some(150), 10),
+            None,
+            "an ack advance restarts the wait"
+        );
+        assert!(
+            stall.update(Some(150), 11).is_some(),
+            "the next frame starts the clock again"
+        );
     }
 
     #[tokio::test]
@@ -5496,24 +5618,26 @@ mod tests {
         };
         assert_eq!(session["type"], "session");
         let mut replay = Vec::new();
-        for frame in &frames[1..frames.len() - 2] {
+        for frame in &frames[1..frames.len() - 1] {
             let WireFrame::Bytes(bytes) = frame else {
                 panic!("only replay bytes follow the session frame");
             };
             replay.extend_from_slice(bytes);
         }
-        assert_eq!(replay, chunks.concat());
         assert_eq!(
-            wire_shape(&frames[frames.len() - 2..]),
-            wire_shape(&[
-                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
-                WireFrame::Control(serde_json::json!({ "type": "ready" })),
-            ])
+            String::from_utf8_lossy(&replay),
+            String::from_utf8_lossy(&chunks.concat()),
+            "a resume of the live generation gets its delta and, as a live recovery, no mode \
+             reassert after it"
+        );
+        assert_eq!(
+            wire_shape(&frames[frames.len() - 1..]),
+            wire_shape(&[WireFrame::Control(serde_json::json!({ "type": "ready" }))])
         );
         assert_eq!(
             session["replay_bytes"].as_u64(),
             Some(replay.len() as u64),
-            "replay_bytes counts the ring bytes on the socket, excluding the mode reassert"
+            "replay_bytes counts the ring bytes on the socket"
         );
         state.terminal_sessions.close(id, CloseReason::Explicit);
         server.abort();
@@ -5579,9 +5703,10 @@ mod tests {
             wire_shape(&frames),
             wire_shape(&[
                 WireFrame::Control(serde_json::json!({ "type": "session" })),
-                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
                 WireFrame::Control(serde_json::json!({ "type": "ready" })),
-            ])
+            ]),
+            "a resume of the live generation at the ring end gets, as a live recovery, no \
+             mode reassert"
         );
         let WireFrame::Control(session) = &frames[0] else {
             unreachable!();
