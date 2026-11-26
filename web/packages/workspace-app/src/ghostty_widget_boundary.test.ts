@@ -13,11 +13,14 @@
 //    `import.meta.glob` pattern or `new URL(..., import.meta.url)` that
 //    reaches a path inside the package other than its export map's entries;
 // 2. cast: a cast of a widget value to a type it does not satisfy, `any`
-//    and `unknown` included;
+//    and `unknown` included, and a cast of a value typed by a type
+//    parameter to a type that names none of its members (`any`,
+//    `unknown`, `object`, `{}`), which launders whatever a caller passes;
 // 3. member: a read of a member the package does not make public, by a
-//    dot, a bracket or a destructuring on a widget value or one cast from
-//    it (through variables a cast or an annotation widened), `in`,
-//    `vi.spyOn`, `Reflect.get`, `Reflect.has`, `getOwnPropertyDescriptor`,
+//    dot, a bracket or a variable declaration's destructuring on a widget
+//    value or one cast from it (through variables a cast or an annotation
+//    widened, up to the first that is a widget), `in`, `vi.spyOn`,
+//    `Reflect.get`, `Reflect.has`, `getOwnPropertyDescriptor`,
 //    `Object.hasOwn` or `hasOwnProperty`, with the key a literal, one under
 //    parentheses or a cast, or a value whose type is a string literal;
 // 4. patch: a write to a member of a widget object, `Object.assign` and its
@@ -28,11 +31,13 @@
 // 5. name: the name of one of the widget's implementation members, which
 //    catches what has no widget type to check, such as a duck-typed
 //    parameter;
-// 6. escape: a widget class instance where the program expects `any` or
-//    `unknown` (an argument, an initializer, a property value, a return,
-//    an assigned value, an array element), past which no other rule can
-//    follow it; an Error subclass is exempt, since errors travel as
-//    `unknown` by design and are read after `instanceof`;
+// 6. escape: a widget class instance where the program expects a type that
+//    names none of its members (`any`, `unknown`, `object`, `{}`, with or
+//    without `null`): an argument, an initializer, a property value, a
+//    return, an assigned value, an array element, or a callback's
+//    parameter so declared that its caller hands a widget; past it no
+//    other rule can follow the value. An Error subclass is exempt, since
+//    errors travel as `unknown` by design and are read after `instanceof`;
 // 7. duck: a widget class instance flowing into a type of the app's that
 //    names a member the class keeps private, lacks, or holds as one of its
 //    implementation members, which reads `undefined` once that member is
@@ -42,17 +47,37 @@
 // Shipped modules are held to all seven rules, tests to 1, 3 and 4. A dot
 // read of a private member on a widget-typed value is a type error, but
 // `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
-// so rule 3 reads dots as well.
+// so rule 3 reads dots as well. Markup is read as the body of a function
+// in the instance script's scope, so a script variable has its declared
+// type there, as markup sees it after the script assigns it.
 //
-// It does not see, in tests, a widget value laundered through `any` or
-// `unknown`, which is how the package's white-box tests read; a key held
-// in a variable typed `string`; or a destructuring that is not a
-// declaration. Markup is read in the instance script's scope, so a name
-// declared in a component's `<script module>` beside an instance script,
-// or a `$store` read, has no type there, and a value markup passes to a
-// component's props has no contextual type. The `scripts/e2e`
-// instruments (the browser checks, the pixel harness) are not app
-// modules: they are read by grep only.
+// It does not see:
+// - in tests, a widget value laundered through `any` or `unknown`, which
+//   is how the package's white-box tests read, or a spy on a private
+//   member of the prototype `Object.getPrototypeOf` returns;
+// - a key held in a variable typed `string`, one whose literal type a cast
+//   hides (`KEY as never`), or one computed from parts (`"is" + "Open"`);
+// - a destructuring other than at the top of a variable declaration: a
+//   parameter's, a `for`-`of`'s, a nested one, an assignment's (a computed
+//   literal key in a declaration is seen by rule 7 alone, so only in a
+//   shipped module);
+// - a spread copy of a widget (`{ ...term }`) read through a cast;
+// - a duck type reached through a type parameter's constraint, and the
+//   other parts of a type with a widget part (a union with a duck type, a
+//   generic holder with the widget as its type argument);
+// - in markup, a name declared in a component's `<script module>` beside
+//   an instance script, or a `$store` read, which has no type there, and a
+//   value markup passes to a component's props, which has no contextual
+//   type.
+// Rule 6 also reports a widget kept in a `WeakMap<object>` or a
+// `Set<object>` and never read back as anything else; the app has none.
+// The `scripts/e2e` instruments (the browser checks, the pixel harness)
+// are not app modules: they are read by grep only.
+//
+// Readers that other changes remove are listed as pending, each pinned by
+// the text of the node it reports: a reader more or fewer in a listed
+// file fails, and so does one replaced by a reader of another text, while
+// a reader moved with its text unchanged does not.
 //
 // The package keeps four members TypeScript private on purpose, as its
 // search measurement's seam: `SearchOwner`'s `pump` and `readResults` and
