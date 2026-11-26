@@ -12,8 +12,9 @@
 //    mock of a path inside the package other than its export map's entries;
 // 2. cast: a cast of a widget value to a type it does not satisfy, `any`
 //    and `unknown` included;
-// 3. member: a read of a member the package does not make public, through
-//    a bracket, a cast, `in`, `vi.spyOn` or `Reflect.get`;
+// 3. member: a read of a member the package does not make public, by a dot
+//    or a bracket on a widget value or one cast from it, `in`, `vi.spyOn`
+//    or `Reflect.get`;
 // 4. patch: a write to a member of a widget object, `Object.assign` and its
 //    kin on one, and any reach of a widget class's `prototype` (tests may
 //    read and spy on its public members);
@@ -22,10 +23,11 @@
 //    Svelte template expression.
 //
 // Shipped modules are held to all five rules, tests to 1, 3 and 4. A dot
-// read of a private member on a widget-typed value is a type error, which
-// svelte-check reports, so rule 3 looks only where the type system does
-// not. It is a property of every module, including ones not written yet,
-// that no mounted test can observe, so it reads the source.
+// read of a private member on a widget-typed value is a type error, but
+// `@ts-expect-error` and `@ts-ignore` keep svelte-check from reporting it,
+// so rule 3 reads dots as well. It is a property of every module,
+// including ones not written yet, that no mounted test can observe, so it
+// reads the source.
 
 import ts from "typescript";
 import { beforeAll, describe, expect, test } from "vitest";
@@ -372,8 +374,8 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
     if (!sf) throw new Error(`the program did not read ${source.rel}`);
     const lineOf = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
 
-    const read = (receiver: ts.Expression, name: string, at: ts.Node, typed: boolean) => {
-      const widget = typed ? widgetOf(receiver) : castFrom(receiver);
+    const read = (receiver: ts.Expression, name: string, at: ts.Node) => {
+      const widget = widgetOf(receiver);
       if (widget && hidden(widget, name)) report("member", lineOf(at), `${nameOf(widget)}.${name}`);
     };
     const written = (target: ts.Expression) => {
@@ -418,16 +420,16 @@ function scan(plants: ReadonlyMap<string, string>): Finding[] {
       }
 
       // 3. Reads of members the package keeps to itself.
-      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) read(node.expression, node.name.text, node, false);
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) read(node.expression, node.name.text, node);
       if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
-        read(node.expression, node.argumentExpression.text, node, true);
+        read(node.expression, node.argumentExpression.text, node);
       }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword && ts.isStringLiteralLike(node.left)) {
-        read(node.right, node.left.text, node, true);
+        read(node.right, node.left.text, node);
       }
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.arguments.length >= 2) {
         const [target, key] = node.arguments;
-        if (READERS.has(node.expression.getText(sf)) && ts.isStringLiteralLike(key)) read(target, key.text, node, true);
+        if (READERS.has(node.expression.getText(sf)) && ts.isStringLiteralLike(key)) read(target, key.text, node);
       }
 
       // 4. Patches of widget objects.
@@ -490,6 +492,10 @@ const PLANTS = new Map<string, string>([
       "export const proto = () => [Terminal.prototype, CanvasRenderer];",
       "export const duck: { wasmTerm?: unknown } = {};",
       "export const narrow = (term: Terminal | null) => term as Terminal;",
+      "export const dot = (term: Terminal) => {",
+      "  // @ts-expect-error a private member",
+      "  return term.isOpen;",
+      "};",
     ].join("\n"),
   ],
   [
@@ -514,6 +520,10 @@ const PLANTS = new Map<string, string>([
       "export const duck = (t: { wasmTerm?: unknown }) => t.wasmTerm;",
       "export const cast = (term: Terminal) => term as unknown;",
       'export const spy = (term: Terminal) => [vi.spyOn(term, "write"), vi.spyOn(Terminal.prototype, "open")];',
+      "export const dot = (term: Terminal) => {",
+      "  // @ts-expect-error a private member",
+      "  return term.selectionManager;",
+      "};",
     ].join("\n"),
   ],
 ]);
@@ -525,6 +535,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 5, key: "Object.assign Terminal" },
   { rule: "patch", file: "src/terminal/boundaryPlant.ts", line: 6, key: "prototype Terminal" },
   { rule: "name", file: "src/terminal/boundaryPlant.ts", line: 7, key: "wasmTerm" },
+  { rule: "member", file: "src/terminal/boundaryPlant.ts", line: 11, key: "Terminal.isOpen" },
   { rule: "cast", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "unknown" },
   { rule: "member", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "Terminal.linkDetector" },
   { rule: "name", file: "src/terminal/BoundaryPlant.svelte", line: 4, key: "linkDetector" },
@@ -532,6 +543,7 @@ const PLANTED: readonly Finding[] = [
   { rule: "deep", file: "src/terminal/boundaryPlant.test.ts", line: 2, key: "../../../ghostty-web-ng/lib/renderer" },
   { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 3, key: "Terminal.isOpen" },
   { rule: "patch", file: "src/terminal/boundaryPlant.test.ts", line: 4, key: "write Terminal.cols" },
+  { rule: "member", file: "src/terminal/boundaryPlant.test.ts", line: 10, key: "Terminal.selectionManager" },
 ];
 
 /// Entries over the planted reads whose counts are off, one each way, and
