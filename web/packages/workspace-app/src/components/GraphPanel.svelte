@@ -225,11 +225,20 @@
   /// Bumped to fetch the whole spine again when a directory is opened whose
   /// children the drawn graph does not hold and there is no spine to patch.
   let spineReload = $state(0);
-  /// Directories a patch read, or is about to read, the level of, so one
-  /// that is empty or gone on disk asks once. One the patch skips, since the
-  /// spine holds no node of it yet, is not asked, and asks again once
-  /// another read may have brought its node.
+  /// Directories asked for their level, so one that is empty or gone on
+  /// disk is asked once. Only a directory a patch can read is asked
+  /// (`loadOpenedChildren`). One the patch then finds no node of is
+  /// forgotten, so the first ask after a level brings its node reads it,
+  /// except under a parent asked whose level the spine does not hold, as
+  /// one found gone (`askedUnread`): asked again, it would only be skipped
+  /// again, so it stays asked.
   const spineAsked = new Set<string>();
+
+  /// A directory asked for whose level the spine does not hold: one a patch
+  /// has still to read, or one whose read found it gone.
+  function askedUnread(dir: string): boolean {
+    return spineAsked.has(dir) && !spineHoldsChildren(dir);
+  }
 
   /// The most directories one read asks for children before what they
   /// bring is drawn and, for a depth change, counted against the drawn-node
@@ -247,6 +256,13 @@
   /// directory, at most OPENED_CHILDREN_READS_PER_STEP, shallowest first.
   /// One opened under a closed parent is read once the parent opens, since
   /// until the parent's level lands the spine has no node of it to read.
+  /// Only a directory a patch can read is asked: one the spine holds a node
+  /// of, or one whose parent is read ahead of it, by this ask or by one
+  /// before it (`askedUnread`). Any other (a folder gone from disk, an empty
+  /// one under a level the spine never read) would be skipped, and while a
+  /// whole fetch is in flight asking it would start that fetch again for
+  /// nothing. With no spine yet every one is asked, for the fetch that
+  /// brings their nodes.
   /// Taking an answer over the cap reads by the same rule the directories
   /// opened over an answer of the whole tree, and `leaveFailed` leaves a
   /// directory whose read failed to its retry (`retrySpineFailures`). A
@@ -268,7 +284,18 @@
       missing.push(dir);
     }
     if (missing.length === 0) return;
-    const reading = new Set(missing.sort(byDepth).slice(0, OPENED_CHILDREN_READS_PER_STEP));
+    const reading = new Set<string>();
+    for (const dir of missing.sort(byDepth)) {
+      if (reading.size >= OPENED_CHILDREN_READS_PER_STEP) break;
+      const parent = parentDir(dir);
+      const readable =
+        spineRead === null ||
+        isFsDirectoryNode(spineRead.nodes.get(dir)) ||
+        reading.has(parent) ||
+        askedUnread(parent);
+      if (readable) reading.add(dir);
+    }
+    if (reading.size === 0) return;
     for (const dir of reading) spineAsked.add(dir);
     if (spineRead !== null && !spineLoading && spineError === null) void patchSpine(reading);
     else spineReload += 1;
@@ -1898,9 +1925,11 @@
         // brings is in the spine by the time its own turn comes.
         for (const dir of [...reading].sort(byDepth)) {
           // A directory is read only when the spine holds it: what the walk
-          // never drew, a patch never draws either.
+          // never drew, a patch never draws either. Not on disk as its
+          // parent was last read, it is asked again once a level brings it,
+          // unless that parent was found gone (`spineAsked`).
           if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) {
-            spineAsked.delete(dir);
+            if (!askedUnread(parentDir(dir))) spineAsked.delete(dir);
             continue;
           }
           const level = await fetchSpineLevel(dir, seq);
@@ -1912,8 +1941,8 @@
         if (seq === spineSeq) void loadSpine();
         return;
       }
-      // A patch that read nothing changed nothing, and a folder it skipped
-      // is asked again on every opening and answer taken.
+      // A patch that read nothing changed nothing, so it lays nothing out
+      // again.
       if (landed) publishSpine(read);
     };
     spinePatches = spinePatches.then(run, run);
