@@ -1883,9 +1883,12 @@
         }
         // After a cut, the protocol a reset replay restores is the one its
         // life had before the cut replay began. An answer in a generation
-        // other than the one the dial echoed is another life, a restart
-        // whose reset came ahead of this frame, and starts from the protocol
-        // as it is now.
+        // other than the one the dial echoed is either another life (a
+        // restart whose reset came ahead of this frame) or a lossy restore
+        // (another generation of the same program, with no reset ahead).
+        // Both start from the protocol as it stands: the restart has already
+        // reset it, and a lossy restore's ring may end behind the view, so
+        // its replay may not repeat changes the view already saw.
         if (
           tab.keyboardProtocol &&
           (cut === null || (liveResumeGeneration !== undefined && frame.generation !== liveResumeGeneration))
