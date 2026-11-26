@@ -92,15 +92,12 @@ type Pending = { rule: Rule; file: string; key?: string; until: string };
 
 const METRICS = "the terminal tab reads cell metrics through getMetrics()";
 const REFRESH = "refreshTerminalRows needs refresh() and drops its renderer path";
-const FIND = "the find bar runs on the widget's term.search";
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
 
 const PENDING: readonly Pending[] = [
   { rule: "name", file: "src/components/TerminalTab.svelte", key: "renderer", until: METRICS },
   { rule: "name", file: "src/terminal/renderer.ts", key: "renderer", until: REFRESH },
   { rule: "name", file: "src/terminal/renderer.ts", key: "wasmTerm", until: REFRESH },
-  { rule: "name", file: "src/terminal/ghosttyFind.ts", key: "wasmTerm", until: FIND },
-  { rule: "member", file: "src/terminal/ghosttyFind.test.ts", until: FIND },
   { rule: "member", file: "src/terminal/ghosttyRenderer.test.ts", until: RENDERER_TESTS },
   { rule: "patch", file: "src/terminal/ghosttyRenderer.test.ts", until: RENDERER_TESTS },
   { rule: "member", file: "src/terminal/ghosttyRenderer.redraw.test.ts", until: RENDERER_TESTS },

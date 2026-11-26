@@ -164,14 +164,18 @@
   } from "../terminal/backend";
   import { freshShellResetSequence } from "../terminal/freshShellReset";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
-  import { FIND_HIGHLIGHT_LAYER, GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal, TerminalLinkActivation } from "@chan/ghostty-web-ng";
+  import type {
+    Terminal as GhosttyTerminal,
+    TerminalLinkActivation,
+    TerminalSearch,
+    TerminalSearchState,
+  } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -186,11 +190,7 @@
     shouldReclaimPtySize,
     type FitLike,
   } from "../terminal/resize";
-  import {
-    clampScrollbackMb,
-    scrollbackLinesFromMb,
-    SCROLLBACK_MB_DEFAULT,
-  } from "../terminal/scrollback";
+  import { clampScrollbackMb } from "../terminal/scrollback";
   import {
     effectiveBackgroundOpacity,
     transparentColor,
@@ -457,11 +457,6 @@
   // the width to stay put this long.
   const RESIZE_SCAN_QUIET_MS = 150;
   let resizeScanTimer: ReturnType<typeof setTimeout> | null = null;
-  // Scrollback line cap captured at construction time from the
-  // persisted MB budget so the widget gets a stable number. Held on
-  // the component so the "copy scrollback" actions read the same
-  // window that's actually in memory.
-  let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
   const terminalConnection = createTerminalConnectionHealth(() => sendPing());
   $effect(() => {
@@ -561,13 +556,19 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
-  /// The find bar's match count (see `FindCount`); null
-  /// leaves the count blank.
-  let findCount = $state<FindCount | null>(null);
+  /// The find bar's match count, the terminal search's state; null leaves
+  /// the count blank.
+  let findCount = $state<TerminalSearchState | null>(null);
+  /// "k of n", with a plus while the scan runs. A scan that has counted
+  /// nothing yet reads "searching" rather than a zero: a fresh find can
+  /// show its newest match, read from the core's listing, with a count of
+  /// none for as long as output keeps its frames from placing a match.
   const findCountText = $derived(
     findCount === null
       ? ""
-      : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
+      : findCount.partial && findCount.total === 0
+        ? "searching"
+        : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
   );
   /// The find bar's live region: the count as a screen reader hears it,
   /// once it settles rather than on every frame the shown count changes.
@@ -652,14 +653,13 @@
   // open.
   let ghosttyKeyParity: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
-  // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
-  // reconciliation plus the calibrated macOS pixel-scroll path) and the one
-  // path chan writes to the terminal through (PTY output and writeChanLine),
-  // non-null while a terminal is open and disposed with it.
+  // Owns the calibrated macOS pixel-scroll path and hands PTY output and
+  // writeChanLine to the terminal's write unchanged. Non-null while a
+  // terminal is open and disposed with it.
   let ghosttyViewport: GhosttyViewportController | null = null;
-  // Find, made when the find bar first opens (see ghosttyFinder) and
-  // disposed with the terminal.
-  let ghosttyFind: GhosttyFind | null = null;
+  // The find bar's count following the terminal's search, subscribed when
+  // the bar first opens (see terminalSearch) and ended with the terminal.
+  let findSubscription: { dispose(): void } | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   let primarySelectionCleanup: (() => void) | null = null;
@@ -1014,6 +1014,27 @@
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
+  /// Find's colours: a background and an ink for every match and for the
+  /// active one. Each carries its own ink, since a cell's inherited ink on
+  /// a match background can fall near 1:1 and the dark theme and a
+  /// see-through window take no contrast floor to lift it; every pair
+  /// reads at 4.5:1 or more.
+  function terminalSearchColors() {
+    return effectiveTerminalTheme() === "light"
+      ? {
+          searchMatchBackground: "#f6dc7f",
+          searchMatchForeground: "#000000",
+          searchActiveMatchBackground: "#f0961e",
+          searchActiveMatchForeground: "#000000",
+        }
+      : {
+          searchMatchBackground: "#806d36",
+          searchMatchForeground: "#ffffff",
+          searchActiveMatchBackground: "#ffb454",
+          searchActiveMatchForeground: "#000000",
+        };
+  }
+
   /// The widget's theme: the colours plus the contrast floor, which it
   /// takes only there. The widget measures a cell on the default background
   /// against the background it paints. In a window built transparent that
@@ -1023,6 +1044,7 @@
   function ghosttyTerminalTheme() {
     return {
       ...terminalTheme(),
+      ...terminalSearchColors(),
       minimumContrastRatio: terminalMinimumContrastRatio(),
       contrastBackdrop: transparentWindow
         ? terminalBackground(getComputedStyle(host ?? document.documentElement))
@@ -1209,13 +1231,12 @@
     loadFailure = null;
     const terminalPrefs = currentPreferences()?.terminal;
     const rendererFontSize = terminalPrefs?.font_size ?? 14;
-    // Scrollback honors the Settings MB budget. Read once here so a
-    // settings change after spawn doesn't reach through and resize
-    // the existing terminal's buffer; the hint copy under the slider
-    // names this spawn-time-only contract.
-    scrollbackLines = scrollbackLinesFromMb(
-      clampScrollbackMb(terminalPrefs?.scrollback_mb),
-    );
+    // Scrollback honors the Settings MB budget, which the widget takes as
+    // its core's history budget in bytes (a MiB each), with no line count
+    // beside it. Read once here so a settings change after spawn doesn't
+    // reach through and resize the existing terminal's buffer; the hint
+    // copy under the slider names this spawn-time-only contract.
+    const scrollbackBytes = clampScrollbackMb(terminalPrefs?.scrollback_mb) * 1_048_576;
     // Mouse capture honors the Settings toggle under the same spawn-time
     // contract: read once here, so flipping the setting later affects only
     // newly opened terminals (the hint copy says so). Absent field (older
@@ -1275,7 +1296,7 @@
     }
     if (attempt !== startAttempt || !host || term) return;
     try {
-      openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, secretMaskSuffixes });
+      openTerminal(host, ghosttyKit, ghosttyInstance, { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes });
     } catch (err) {
       // What was built and wired goes as at a restart, and the error takes
       // the terminal's place: the next instance may open.
@@ -1308,9 +1329,10 @@
     host: HTMLElement,
     ghosttyKit: GhosttyKit,
     ghosttyInstance: GhosttyVt,
-    { fontFamily, rendererFontSize, secretMaskSuffixes }: {
+    { fontFamily, rendererFontSize, scrollbackBytes, secretMaskSuffixes }: {
       fontFamily: string;
       rendererFontSize: number;
+      scrollbackBytes: number;
       secretMaskSuffixes: readonly string[];
     },
   ): void {
@@ -1346,7 +1368,7 @@
       fontFamily,
       fontSize: rendererFontSize,
       ghostty: ghosttyInstance,
-      scrollback: scrollbackLines,
+      scrollbackBytes,
       // Synchronous scrolling (the widget's default eases over 100 ms) lets
       // calibrated pixel gestures accumulate directly in the widget's
       // fractional viewport.
@@ -2260,9 +2282,9 @@
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
-  /// ending, an error. It takes the viewport controller's write, as output
-  /// does, so an open find bar counts it and a scrolled-back viewport keeps
-  /// its place.
+  /// ending, an error. It is written to the terminal as output is, so the
+  /// widget counts it in an open find bar's search and keeps a scrolled-back
+  /// viewport where it is.
   function writeChanLine(line: string): void {
     ghosttyViewport?.write(`${line}\r\n`);
   }
@@ -2595,10 +2617,9 @@
     resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
-    // Before the terminal: it frees its search and clears its highlight
-    // layer on the terminal.
-    ghosttyFind?.dispose();
-    ghosttyFind = null;
+    // The terminal's disposal frees its search and removes its layers.
+    findSubscription?.dispose();
+    findSubscription = null;
     term?.dispose();
     term = null;
     sawSessionControl = false;
@@ -2767,7 +2788,7 @@
   /// range. Empty with the bar closed and with no match.
   function findMatchText(): string {
     if (!findOpen) return "";
-    const match = term?.highlights.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
+    const match = term?.highlights.get("search-active")?.ranges[0];
     return match ? term!.getRangeText(match) : "";
   }
 
@@ -2814,10 +2835,9 @@
 
   function openFind(): void {
     closeTabMenu();
-    // Find searches the terminal through libghostty-vt's search on chan's
-    // binding: with no terminal shown, or a core without search, the bar
-    // stays closed.
-    if (!ghosttyFinder()) return;
+    // Find is the terminal's own search: with no terminal open, the failed
+    // load's card included, the bar stays closed.
+    if (!terminalSearch()) return;
     findOpen = true;
     void tick().then(() => {
       if (searchInput && mayFocus(searchInput)) searchInput.focus();
@@ -2944,21 +2964,21 @@
   // prompt-frame path every terminal uses). Per-terminal text input is the
   // universal Rich Prompt (Cmd+Shift+P) - see RichPrompt.svelte / sendPrompt.
 
-  /// The terminal's find, made on first use; null before the terminal
-  /// exists and on a core without search.
-  function ghosttyFinder(): GhosttyFind | null {
-    if (!ghosttyFind && term && ghosttyViewport) {
-      ghosttyFind = GhosttyFind.attach(term, ghosttyViewport, (count) => {
-        findCount = count;
-      });
-    }
-    return ghosttyFind;
+  /// The open terminal's search, with the find bar's count following its
+  /// state from the first use; null while no terminal is open, since a
+  /// search reached before open is inert and reports nothing.
+  function terminalSearch(): TerminalSearch | null {
+    if (!term?.core) return null;
+    findSubscription ??= term.search.onChange((state) => {
+      findCount = state;
+    });
+    return term.search;
   }
 
   /// The bar closed or its query emptied: drop the highlights and the count,
   /// free the search and stop its scan.
   function clearFind(): void {
-    ghosttyFind?.close();
+    term?.search.close();
     findCount = null;
   }
 
@@ -2969,7 +2989,7 @@
       clearFind();
       return;
     }
-    ghosttyFinder()?.find(findQuery);
+    terminalSearch()?.find(findQuery);
   }
 
   /// Step from the selected match. Next (Enter) walks toward older output,
@@ -2980,7 +3000,7 @@
       clearFind();
       return;
     }
-    ghosttyFinder()?.step(findQuery, direction);
+    terminalSearch()?.step(findQuery, direction);
   }
 
   function onFindKeydown(e: KeyboardEvent): void {

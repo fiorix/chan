@@ -175,6 +175,74 @@ describe("the widget's contrast floor", () => {
   });
 });
 
+/// The WCAG contrast of two opaque `#rrggbb` colours.
+function contrast(a: string, b: string): number {
+  const luminance = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5]
+      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * bl!;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi! + 0.05) / (lo! + 0.05);
+}
+
+const SEARCH_KEYS = [
+  "searchMatchBackground", "searchMatchForeground", "searchActiveMatchBackground", "searchActiveMatchForeground",
+] as const;
+
+/// How far apart, as a WCAG contrast ratio, the active match's background
+/// stands from every match's. It is held in luminance and not in hue alone,
+/// so the active match still stands out to a reader who cannot tell the two
+/// hues apart. The floor sits just under the closer of today's two pairs
+/// (light 1.70:1, dark 2.86:1), so a change that brings either pair closer
+/// fails; WCAG's 3:1 for a component's state is more than the light pair
+/// has.
+const ACTIVE_SEPARATION = 1.5;
+
+/// Find paints every match and the active one in these theme keys. Each
+/// carries its own ink: a cell's inherited ink on a match background can
+/// fall near 1:1, and the dark theme and a see-through window take no
+/// contrast floor to lift it.
+describe("find's colours", () => {
+  function search(term: { options: { theme: unknown } }): Record<(typeof SEARCH_KEYS)[number], string | undefined> {
+    const theme = term.options.theme as Record<string, string | undefined>;
+    return Object.fromEntries(SEARCH_KEYS.map((key) => [key, theme[key]])) as Record<(typeof SEARCH_KEYS)[number], string | undefined>;
+  }
+
+  function expectReadable(term: { options: { theme: unknown } }, label: string): void {
+    const colors = search(term);
+    for (const key of SEARCH_KEYS) expect(colors[key], `${label}: ${key}`).toMatch(/^#[0-9a-f]{6}$/);
+    expect(contrast(colors.searchMatchBackground!, colors.searchMatchForeground!), `${label}: a match`)
+      .toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.searchActiveMatchBackground!, colors.searchActiveMatchForeground!), `${label}: the active match`)
+      .toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.searchActiveMatchBackground!, colors.searchMatchBackground!), `${label}: the active match stands apart`)
+      .toBeGreaterThanOrEqual(ACTIVE_SEPARATION);
+  }
+
+  test("set a background and an ink at 4.5:1 for a match and the active one, and follow a switch of theme", async () => {
+    const { term } = await mounted();
+    expectReadable(term, "dark");
+    const dark = search(term);
+
+    hybridSurfaceThemes.terminal = "light";
+    flushSync();
+    await tick();
+    expectReadable(term, "light");
+    expect(search(term), "the light theme has its own").not.toEqual(dark);
+  });
+
+  test("are the same in a see-through window, which takes no floor", async () => {
+    window.history.replaceState(null, "", `?${TRANSPARENT_WINDOW_PARAM}=1`);
+    applyDesktopTerminalOpacity(90);
+    hybridSurfaceThemes.terminal = "light";
+    const { term } = await mounted();
+    expect((term.options.theme as { minimumContrastRatio?: number }).minimumContrastRatio).toBe(1);
+    expectReadable(term, "see-through light");
+  });
+});
+
 describe("the terminal body", () => {
   test("carries the terminal surface's theme override, and none when unset", async () => {
     hybridSurfaceThemes.terminal = "light";

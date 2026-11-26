@@ -114,24 +114,12 @@ describe("the widget owns viewport changes", () => {
     expect(painted.mock.calls.length).toBeGreaterThan(0);
   });
 
-  test("find observers hear direct writes as well as adapter writes, exactly once", async () => {
-    const { term, controller } = await fixture();
-    const seen: string[] = [];
-    const stop = controller.observeChanges((kind) => seen.push(kind));
-    term.write("direct\r\n");
-    controller.write("adapter\r\n");
-    term.resize(30, 8);
-    stop();
-    term.write("unobserved\r\n");
-    expect(seen).toEqual(["write", "write", "resize"]);
-  });
-
-  test("a direct write keeps an anchored view and observers read that view before paint", async () => {
-    const { term, controller } = await fixture();
+  test("a direct write keeps an anchored view and its change observers read that view before paint", async () => {
+    const { term } = await fixture();
     term.scrollLines(-7);
     const top = term.getScrollbackLength() - term.getViewportY();
     const seen: Array<[string, number]> = [];
-    controller.observeChanges((kind) => seen.push([kind, term.getViewportY()]));
+    term.onChange(({ kind }) => seen.push([kind, term.getViewportY()]));
     const render = term.renderer!.render.bind(term.renderer);
     vi.spyOn(term.renderer!, "render").mockImplementation((...args) => {
       seen.push(["paint", term.getViewportY()]);

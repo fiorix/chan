@@ -15,11 +15,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { settingsPanel, workspace } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
-import {
-  SCROLLBACK_MB_DEFAULT,
-  SCROLLBACK_MB_MAX,
-  SCROLLBACK_MB_MIN,
-} from "../terminal/scrollback";
+import { SCROLLBACK_MB_MAX, SCROLLBACK_MB_MIN } from "../terminal/scrollback";
 
 type Cfg = {
   revision: number;
@@ -44,7 +40,7 @@ function basePrefs(): Record<string, unknown> {
       idle_timeout_secs: 900,
       session_cap: 20,
       ring_bytes: 1048576,
-      scrollback_mb: 50,
+      scrollback_mb: 30,
       default_term: "xterm-256color",
       font: "os-default",
       font_size: 14,
@@ -579,11 +575,10 @@ describe("settings surface render", () => {
     expect(terminal.default_term).toBe("xterm-256color");
   });
 
-  test("the scrollback slider renders the server's real ceiling and default", async () => {
-    // Asserted against the rendered DOM, not the source text: before the
-    // reorganisation the slider offered 500 against a server that clamps
-    // to [10, 50], and the absent-field fallback was 50 against a
-    // documented default of 10.
+  test("the scrollback slider renders the server's range and the stored value", async () => {
+    // Asserted against the rendered DOM: the slider's range is the
+    // server's clamp, and the fixture stores a value apart from the
+    // default so the fallback cannot pass for it.
     const target = openSurface();
     await flush();
     clickTab(target, "Terminal");
@@ -593,10 +588,10 @@ describe("settings surface render", () => {
     ) as HTMLInputElement;
     expect(slider.max).toBe(String(SCROLLBACK_MB_MAX));
     expect(slider.min).toBe(String(SCROLLBACK_MB_MIN));
-    expect(slider.value).toBe("50"); // the fixture's stored value
+    expect(slider.value).toBe("30"); // the fixture's stored value
   });
 
-  test("the scrollback fallback is SCROLLBACK_MB_DEFAULT when the field is absent", async () => {
+  test("the scrollback slider sits at the 50 MB default when the field is absent", async () => {
     const terminal = server.preferences.terminal as Record<string, unknown>;
     delete terminal.scrollback_mb;
     const target = openSurface();
@@ -606,7 +601,7 @@ describe("settings surface render", () => {
     const slider = target.querySelector(
       'input[aria-label="Terminal scrollback megabytes"]',
     ) as HTMLInputElement;
-    expect(slider.value).toBe(String(SCROLLBACK_MB_DEFAULT));
+    expect(slider.value).toBe("50");
   });
 
   test("every pill renders inside a SettingField .control scope", async () => {

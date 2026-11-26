@@ -64,7 +64,7 @@
 
 <section class="manual-block" id="find">
   <h2><a class="heading-anchor" href="#find">Find in a terminal</a></h2>
-  <p>With a terminal focused, press the find key or choose <strong>Find</strong> from its right-click menu. The bar searches the scrollback as you type and selects the newest match, the one nearest the prompt.</p>
+  <p>With a terminal focused, press the find key or choose <strong>Find</strong> from its right-click menu. The bar searches the scrollback as you type, highlights every match, and selects the newest match, the one nearest the prompt, in a colour of its own.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
@@ -88,7 +88,9 @@
       <tbody>
         <tr><td><code>2 of 7</code></td><td>The second newest of seven matches is selected.</td></tr>
         <tr><td><code>0 of 0</code></td><td>No match.</td></tr>
+        <tr><td><code>searching</code></td><td>The scrollback is being searched and no match has been found yet.</td></tr>
         <tr><td><code>2 of 40+</code></td><td>The scrollback is still being searched; the total can grow.</td></tr>
+        <tr><td><code>? of 40+</code></td><td>The selected match stays selected and highlighted while the search finds its place again, as after output or a resize. The next step lands on the match next to it, waiting at most a second for that place.</td></tr>
         <tr><td><code>? of 7</code></td><td>No match is selected. The next step starts from the newest match with <kbd>Enter</kbd>, or the oldest with <kbd>Shift+Enter</kbd>.</td></tr>
       </tbody>
     </table>
@@ -102,7 +104,7 @@
       <li>A browser steps with <kbd>Enter</kbd> and <kbd>Shift+Enter</kbd> only.</li>
       <li>The query is kept for the next time the bar opens. A restart that replaces the terminal closes the bar.</li>
       <li>A resize keeps the selected match. A resize that removes it, as narrowing a full-screen program can, leaves no match selected.</li>
-      <li>Heavy output into a long scrollback restarts the search for a moment, shown as <code>+</code> and <code>?</code>. If it has not caught up after about a second, or the output pushes the match out of the scrollback, no match stays selected.</li>
+      <li>While output arrives, the count reads <code>+</code> and the selected match keeps its place and its highlight while the search catches up, however long that takes, reading <code>?</code> until it is placed again. A step pressed meanwhile waits at most a second for that, then starts from no match. Output that pushes the selected match out of the scrollback leaves no match selected.</li>
     </ul>
   </details>
 </section>
