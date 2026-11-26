@@ -80,9 +80,9 @@
 // argument its function takes.
 //
 // It does not see:
-// - in tests, a widget value laundered through `any` or `unknown`, which
-//   is how the package's white-box tests read, or a spy on a private
-//   member of the prototype `Object.getPrototypeOf` returns;
+// - in tests, a widget value laundered through `any` or `unknown`, or a
+//   spy on a private member of the prototype `Object.getPrototypeOf`
+//   returns;
 // - a key held in a variable typed `string`, one whose literal type a cast
 //   hides (`KEY as never`), or one computed from parts (`"is" + "Open"`);
 // - a destructuring other than at the top of a variable declaration: a
@@ -124,7 +124,12 @@
 //   `Partial<Terminal>`, `Pick<Terminal, ...>`): `isWidget` sees its type
 //   argument at the call while `classPart` is false on the mapped type, so
 //   rules 4, 6 and 7 miss writes, escapes and ducks through it
-//   (`readonlyEscape`, `partialPatch`);
+//   (`readonlyEscape`, `partialPatch`, `mappedDuck`);
+// - an app subclass's own field named like a member the widget keeps
+//   `#private` and declared without an initializer (`isOpen!: boolean`),
+//   which reads `undefined`: rules 3 and 4 take an app subclass's own
+//   runtime members as its own, and rule 5 sees only its listed names
+//   (`viaShadowSub`);
 // - a write through an assignment's destructuring (`[term.cols] = [1]`,
 //   `({ rows: term.rows } = rows)`), a Svelte `bind:` directive
 //   (`bind:this={live.element}`, `bind:value={live.cols}`), or a nested
@@ -249,8 +254,9 @@ const ENTRIES = new Set(
   ),
 );
 
-/// Implementation members of the widget (all `#private`) an app module has
-/// no reason to name: catches what has no widget type to check, such as a
+/// Implementation members of the widget (each `#private`, or held only by
+/// a `#private` member, as the binding's plumbing is) an app module has no
+/// reason to name: catches what has no widget type to check, such as a
 /// duck-typed parameter or an untyped JavaScript reader.
 const IMPLEMENTATION = new Set([
   "wasmTerm",
@@ -260,6 +266,9 @@ const IMPLEMENTATION = new Set([
   "linkDetector",
   "buildWasmConfig",
   "hoveredHyperlinkId",
+  "writePtyCallback",
+  "deviceAttributesCallback",
+  "queueReply",
 ]);
 /// Terminal's `#private` renderer, textarea and scroll offset: other modules
 /// name objects of their own the same, so rule 5 counts these in the
@@ -1324,6 +1333,11 @@ const PLANTS = new Map<string, string>([
       "export const nestedPatch = (term: Terminal) => patchNested(term);",
       "export const readonlyEscape = (term: Terminal) => ((t: Readonly<Terminal>) => raw(t))(term);",
       "export const partialPatch = (term: Terminal) => ((t: Partial<Terminal>) => { t.cols = 1; })(term);",
+      "export const mappedDuck = (term: Terminal) => ((t: Readonly<Terminal>) => ((h: { cols: number; isOpen?: boolean }) => h.isOpen)(t))(term);",
+      "class ShadowSub extends Terminal {",
+      "  isOpen!: boolean;",
+      "}",
+      "export const viaShadowSub = (s: ShadowSub) => s.isOpen;",
     ].join("\n"),
   ],
   [
@@ -1537,6 +1551,7 @@ const PLANTS = new Map<string, string>([
       '/** @param {import("@chan/ghostty-web-ng").Terminal} term */',
       "export const typed = (term) => term.isOpen;",
       '/** @typedef {import("../../../ghostty-web-ng/lib/internal")} Internal */',
+      "export const plumbing = (vt, t) => [vt.writePtyCallback, vt.deviceAttributesCallback, t.queueReply];",
     ].join("\n"),
   ],
   [
@@ -1699,6 +1714,9 @@ const PLANTED: readonly Site[] = [
   { rule: "name", file: "src/terminal/boundaryPlant.js", line: 2, key: "wasmTerm" },
   { rule: "deep", file: "src/terminal/boundaryPlant.js", line: 3, key: "../../../ghostty-web-ng/lib/internal" },
   { rule: "member", file: "src/terminal/boundaryPlant.js", line: 5, key: "Terminal.isOpen" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "writePtyCallback" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "deviceAttributesCallback" },
+  { rule: "name", file: "src/terminal/boundaryPlant.js", line: 7, key: "queueReply" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "wasmTerm" },
   { rule: "name", file: "src/state/boundaryPlant.ts", line: 1, key: "selectionManager" },

@@ -356,3 +356,28 @@ describe('the widget core facade', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('the buffer', () => {
+  // The buffer keeps no core of its own and reads the terminal's live one on
+  // each call, so a freed core is never read through it.
+  test('reads the core only while the terminal is open', async () => {
+    const { term, host } = await unopened();
+    const { normal, alternate } = term.buffer;
+    const read = () => ({
+      active: term.buffer.active === normal,
+      normal: normal.length,
+      normalLine: normal.getLine(0),
+      alternate: alternate.length,
+      alternateLine: alternate.getLine(0),
+    });
+    const nothing = { active: true, normal: 0, normalLine: undefined, alternate: 0, alternateLine: undefined };
+    expect(read()).toEqual(nothing);
+    term.open(host);
+    term.write('hello');
+    expect(normal.length).toBe(3);
+    expect(normal.getLine(0)?.translateToString(true)).toBe('hello');
+    expect(alternate.length).toBe(3);
+    term.dispose();
+    expect(read()).toEqual(nothing);
+  });
+});

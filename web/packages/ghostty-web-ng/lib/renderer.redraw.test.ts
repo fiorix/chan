@@ -139,8 +139,12 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
   const rig: Rig = {
     term,
     view(y) {
-      if (y < 0) widgetInternals(term).viewportY = y;
-      else term.viewport.scrollTo(y);
+      if (y < 0) {
+        widgetInternals(term).viewportY = y;
+        // A write that went nowhere leaves the bottom view, the picture an
+        // offset below zero is checked against.
+        expect(term.getViewportY(), "the offset written below zero").toBe(y);
+      } else term.viewport.scrollTo(y);
     },
     picture(viewportY) {
       const shown = term.getViewportY();
