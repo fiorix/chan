@@ -43,10 +43,26 @@ async function fixture() {
   terminals.push(term);
   const controller = new GhosttyViewportController(term, {
     os: () => "mac", hasMouseTracking: () => false,
-    isAlternateScreen: () => term.wasmTerm!.isAlternateScreen(), cellHeight: () => 20,
+    isAlternateScreen: () => term.buffer.active.type === "alternate", cellHeight: () => 20,
   });
   controller.write(Array.from({ length: 40 }, (_, n) => `history ${n}\r\n`).join(""));
   return { term, controller };
+}
+
+/// The widget's input textarea, in the element it opened in.
+function input(term: Terminal): HTMLTextAreaElement {
+  const textarea = term.element?.querySelector("textarea");
+  if (!textarea) throw new Error("the widget opened no input textarea");
+  return textarea;
+}
+
+/// The viewport offset of each widget paint that repaints rows, read through
+/// an ordinary paint layer. Registering the layer invalidates the next frame,
+/// so the first paint after it repaints every row.
+function observeLayerPaints(term: Terminal): number[] {
+  const offsets: number[] = [];
+  term.addPaintLayer({ order: 0, paint: ({ viewportOffset }) => { offsets.push(viewportOffset); } });
+  return offsets;
 }
 
 /// The two ways a browser delivers a paste to the widget's own listeners: a
@@ -59,13 +75,13 @@ const PASTE_EVENTS = [
       Object.defineProperty(event, "clipboardData", {
         value: { getData: (type: string) => (type === "text/plain" ? text : "") },
       });
-      term.textarea!.dispatchEvent(event);
+      input(term).dispatchEvent(event);
     },
   },
   {
     name: "insertFromPaste input",
     send: (term: Terminal, text: string) => {
-      term.textarea!.dispatchEvent(
+      input(term).dispatchEvent(
         new InputEvent("beforeinput", { inputType: "insertFromPaste", data: text, bubbles: true, cancelable: true }),
       );
     },
@@ -84,7 +100,7 @@ describe("the widget owns viewport changes", () => {
     const row = term.buffer.active.getLine(top)?.translateToString(true);
     const sent: string[] = [];
     term.onData((data) => sent.push(data));
-    const render = vi.spyOn(term.renderer!, "render");
+    const layered = observeLayerPaints(term);
     const painted = vi.spyOn(SoftwareCanvasContext.prototype, "fillRect");
     send(term);
     expect(sent.join("")).toBe("");
@@ -93,22 +109,21 @@ describe("the widget owns viewport changes", () => {
     expect(term.viewport.offset).toBe(8.5);
     expect(term.getScrollbackLength() - Math.floor(term.viewport.offset)).toBe(top);
     expect(term.buffer.active.getLine(top)?.translateToString(true)).toBe(row);
-    expect(render.mock.calls.length, "empty input does not arm a synchronous echo paint").toBe(0);
+    expect(layered, "empty input does not arm a synchronous echo paint").toEqual([]);
     expect(painted).not.toHaveBeenCalled();
     const pending = [...frames.values()];
     frames.clear();
     for (const callback of pending) callback(performance.now());
-    expect(render.mock.calls.length).toBeGreaterThan(0);
-    expect(render.mock.calls.every((args) => args[2] === 8.5)).toBe(true);
+    expect(layered.length, "the scheduled frame paints").toBeGreaterThan(0);
+    expect(new Set(layered), "at the anchored offset").toEqual(new Set([8.5]));
     expect(painted.mock.calls.length).toBeGreaterThan(0);
-    render.mockClear();
+    layered.splice(0);
     painted.mockClear();
     term.input("x", true);
     send(term);
     expect(sent.join("")).toBe("x");
     term.write("x");
-    expect(render).toHaveBeenCalledOnce();
-    expect(render.mock.calls[0][2]).toBe(0);
+    expect(layered, "the real echo paints once, at the bottom").toEqual([0]);
     expect(painted.mock.calls.length).toBeGreaterThan(0);
   });
 
@@ -129,11 +144,10 @@ describe("the widget owns viewport changes", () => {
     term.paste("");
     expect(sent).toEqual(["\x1b[200~\x1b[201~"]);
     expect(term.viewport.offset).toBe(0);
-    const render = vi.spyOn(term.renderer!, "render");
+    const layered = observeLayerPaints(term);
     const painted = vi.spyOn(SoftwareCanvasContext.prototype, "fillRect");
     term.write("ack");
-    expect(render).toHaveBeenCalledOnce();
-    expect(render.mock.calls[0][2]).toBe(0);
+    expect(layered, "the echo paints once, at the bottom").toEqual([0]);
     expect(painted.mock.calls.length).toBeGreaterThan(0);
   });
 
@@ -143,14 +157,15 @@ describe("the widget owns viewport changes", () => {
     const top = term.getScrollbackLength() - term.getViewportY();
     const seen: Array<[string, number]> = [];
     term.onChange(({ kind }) => seen.push([kind, term.getViewportY()]));
-    const render = term.renderer!.render.bind(term.renderer);
-    vi.spyOn(term.renderer!, "render").mockImplementation((...args) => {
-      seen.push(["paint", term.getViewportY()]);
-      return render(...args);
-    });
+    term.addPaintLayer({ order: 0, paint: () => { seen.push(["paint", term.getViewportY()]); } });
     term.write("more\r\n");
     expect(term.getScrollbackLength() - term.getViewportY()).toBe(top);
+    // A plain write paints nothing itself; its frame does.
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
     expect(seen[0]).toEqual(["write", 8]);
+    expect(seen.some(([kind]) => kind === "paint"), "the write's frame paints").toBe(true);
     expect(seen.every(([, offset]) => offset === 8)).toBe(true);
   });
 
