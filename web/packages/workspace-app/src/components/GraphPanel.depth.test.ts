@@ -1852,6 +1852,27 @@ describe("the workspace tree", () => {
     });
   });
 
+  test("a folder read, then closed across a whole spine fetch, is read again when it opens again, over the listing cap", async () => {
+    serveFoldersWithoutFiles();
+    graphServer.tree = "folders";
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    await doubleClick("directory:a");
+    await settle(20);
+    expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }, "the first opening reads a").toEqual({ a: 1, drawsX: true });
+    await doubleClick("directory:a");
+    expect(tab.expanded.a).toBeUndefined();
+    // A change that names no path fetches the spine whole while `a` is
+    // closed, so the new spine holds no level of it.
+    await changeNames([]);
+    await settle(20);
+    expect(levelReads(""), "the whole fetch read the root").toBe(2);
+
+    await doubleClick("directory:a");
+    await settle(20);
+    expect(tab.expanded.a).toBe(true);
+    expect({ a: levelReads("a"), drawsX: visibleIds().includes("a/x.md") }).toEqual({ a: 2, drawsX: true });
+  });
+
   test("a whole fetch whose landing starts another leaves a folder opened during it to that one, under an answer over the listing cap", async () => {
     serveWholeTree();
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
