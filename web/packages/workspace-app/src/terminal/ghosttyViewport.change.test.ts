@@ -49,19 +49,34 @@ async function fixture() {
   return { term, controller };
 }
 
+/// The two ways a browser delivers a paste to the widget's own listeners: a
+/// clipboard event, and an insertFromPaste input on its textarea.
+const PASTE_EVENTS = [
+  {
+    name: "clipboard paste event",
+    send: (term: Terminal, text: string) => {
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", {
+        value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+      });
+      term.textarea!.dispatchEvent(event);
+    },
+  },
+  {
+    name: "insertFromPaste input",
+    send: (term: Terminal, text: string) => {
+      term.textarea!.dispatchEvent(
+        new InputEvent("beforeinput", { inputType: "insertFromPaste", data: text, bubbles: true, cancelable: true }),
+      );
+    },
+  },
+];
+
 describe("the widget owns viewport changes", () => {
   test.each([
     { name: "user-marked input", send: (term: Terminal) => term.input("", true) },
     { name: "unbracketed paste", send: (term: Terminal) => term.paste("") },
-    {
-      name: "input-handler emission",
-      send: (term: Terminal) => {
-        // Exercise the handler's wired callback; native empty pastes stop
-        // before this emitter and are not established by this seam.
-        const handler = (term as unknown as { inputHandler: { emitPasteData(text: string): void } }).inputHandler;
-        handler.emitPasteData("");
-      },
-    },
+    ...PASTE_EVENTS.map(({ name, send }) => ({ name, send: (term: Terminal) => send(term, "") })),
   ])("empty $name leaves output on its scheduled paint and preserves a pending real echo", async ({ send }) => {
     const { term } = await fixture();
     term.viewport.scrollTo(7.5);
@@ -95,6 +110,14 @@ describe("the widget owns viewport changes", () => {
     expect(render).toHaveBeenCalledOnce();
     expect(render.mock.calls[0][2]).toBe(0);
     expect(painted.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  test.each(PASTE_EVENTS)("the $name, with text, reaches the program", async ({ send }) => {
+    const { term } = await fixture();
+    const sent: string[] = [];
+    term.onData((data) => sent.push(data));
+    send(term, "a");
+    expect(sent.join("")).toBe("a");
   });
 
   test("an empty bracketed paste sends its protocol frames and arms their echo", async () => {

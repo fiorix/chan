@@ -106,7 +106,7 @@ export class Terminal {
   /** Available from open to dispose; the widget retains ownership of the raw core. */
   get core(): TerminalCore | undefined { return this.#coreAccess?.core; }
   public renderer?: CanvasRenderer;
-  private inputHandler?: InputHandler;
+  #inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   #highlightsManager?: HighlightsManager;
   #searchOwner?: SearchOwner;
@@ -482,7 +482,7 @@ export class Terminal {
       };
 
       // Create input handler
-      this.inputHandler = new InputHandler(
+      this.#inputHandler = new InputHandler(
         this.#ghostty!,
         parent,
         (data: string, isUserInput = true) => {
@@ -528,17 +528,17 @@ export class Terminal {
           claimScrollbarPress: (event) => this.#claimScrollbarPress(event),
           press: (event, reported) => {
             this.#handleLinkPress(event, reported);
-            this.inputHandler?.handleMouseDown(event, reported);
+            this.#inputHandler?.handleMouseDown(event, reported);
           },
           move: (event, reportMotion) => {
             if (this.#scrollbarDrag) return;
             this.#checkLinkDrag(event);
-            this.inputHandler?.handleMouseMove(event, reportMotion);
+            this.#inputHandler?.handleMouseMove(event, reportMotion);
           },
-          release: (event) => this.inputHandler?.handleMouseUp(event),
+          release: (event) => this.#inputHandler?.handleMouseUp(event),
           end: (event) => {
             this.#finishLinkPress(event);
-            this.inputHandler?.endMouseGesture(event);
+            this.#inputHandler?.endMouseGesture(event);
           },
         }
       );
@@ -978,8 +978,8 @@ export class Terminal {
   ): void {
     this.#customKeyEventHandler = customKeyEventHandler;
     // Update input handler if already created
-    if (this.inputHandler) {
-      this.inputHandler.setCustomKeyEventHandler(customKeyEventHandler);
+    if (this.#inputHandler) {
+      this.#inputHandler.setCustomKeyEventHandler(customKeyEventHandler);
     }
   }
 
@@ -1289,9 +1289,9 @@ export class Terminal {
     }
 
     // Dispose input handler
-    if (this.inputHandler) {
-      this.inputHandler.dispose();
-      this.inputHandler = undefined;
+    if (this.#inputHandler) {
+      this.#inputHandler.dispose();
+      this.#inputHandler = undefined;
     }
 
     // Dispose renderer

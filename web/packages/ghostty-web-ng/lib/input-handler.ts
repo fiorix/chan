@@ -584,7 +584,7 @@ export class InputHandler {
       return;
     }
 
-    this.emitPasteData(text);
+    this.#emitPasteData(text);
     this.#recordPasteData(text, 'paste');
   }
 
@@ -629,7 +629,7 @@ export class InputHandler {
         }
         event.preventDefault();
         event.stopPropagation();
-        this.emitPasteData(data);
+        this.#emitPasteData(data);
         this.#recordPasteData(data, 'beforeinput');
         return;
       default:
@@ -960,7 +960,7 @@ export class InputHandler {
    * GhosttyVt.encodePaste): framed under bracketed paste, with the bytes
    * that could end the bracket or act as keys turned into spaces.
    */
-  private emitPasteData(text: string): void {
+  #emitPasteData(text: string): void {
     const data = this.#ghostty.encodePaste(pasteLineEnds(text), this.#getModeCallback?.(2004) ?? false);
     if (data) this.#onDataCallback(data);
   }
