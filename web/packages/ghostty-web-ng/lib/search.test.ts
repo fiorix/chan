@@ -3,7 +3,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { GhosttyVt, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 
-// Structural contract lets the same assertions run on a widget without search.
 type Count = Readonly<{ index: number | null; total: number; partial: boolean }>;
 type Search = {
   find(query: string): void;
@@ -1798,6 +1797,27 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(0, 6, 0, 11)]);
   });
 
+  test('a find listener that throws during a resize leaves the new size published and painted', async () => {
+    const { term } = await create('needle\r\nneedle\r\n');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    const sizes: string[] = [];
+    term.onResize(({ cols, rows }) => sizes.push(`${cols}x${rows}`));
+    const paint = vi.fn();
+    term.addPaintLayer({ order: 0, paint });
+    search.onChange(() => { throw new Error('find bar listener failed'); });
+    const changes: string[] = [];
+    term.onChange(({ kind }) => changes.push(kind));
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    expect(() => term.resize(30, 6), 'the caller sizing the terminal sees no error').not.toThrow();
+    expect(changes, 'change listeners still hear the resize').toEqual(['resize']);
+    expect(sizes, 'the PTY hears the new size').toEqual(['30x6']);
+    expect(paint, 'the screen repaints at the new size').toHaveBeenCalled();
+    expect(reported, "the listener's error is reported").toEqual([new Error('find bar listener failed')]);
+  });
+
   test('a resize keeps a deep active match highlighted until the rescan places it, past one second', async () => {
     const { term } = await create('needle\r\n'.repeat(2000));
     const search = searchOf(term);
@@ -2497,6 +2517,31 @@ describe('the cost model', () => {
     // unit's check is assumed at about 18 ms.
     const { term, search } = await settled(matching(50_000), 80_000);
     expect(stepBudgetAfterRestart(term, search, 10_000)).toBe(SCAN_MS);
+  });
+
+  test('a frame that starts with found results unplaced places them and scans no further', async () => {
+    // Ten matches a line, so a scan step finds more than one batch places.
+    const { term } = await create(paged(10, 300), COLS, 10, 60_000);
+    batchPerFrame();
+    const read = vi.mocked(VtSearch.prototype.readMatches);
+    const step = vi.mocked(VtSearch.prototype.step);
+    const search = searchOf(term);
+    search.find('needle');
+    let draining = 0;
+    for (let i = 0; search.state.partial; i++) {
+      if (i > 1000) throw new Error('search did not complete');
+      // Nothing runs the scan between frames, so the last read says what
+      // the next frame starts with.
+      const last = read.mock.results.at(-1)?.value;
+      const steps = step.mock.calls.length;
+      frame();
+      if (last && last.next < last.total) {
+        draining++;
+        expect(step.mock.calls.length, `frame ${i} scans with results unplaced`).toBe(steps);
+      }
+    }
+    expect(draining, 'the frames that start with results unplaced').toBeGreaterThan(1);
+    expect(search.state.total).toBe(3_000);
   });
 
   test('small feeds of a complete scan that take long raise the check its next feed predicts', async () => {

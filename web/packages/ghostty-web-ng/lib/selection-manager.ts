@@ -506,7 +506,6 @@ export class SelectionManager {
 
   /**
    * Select entire lines from start to end
-   * xterm.js compatible API
    */
   selectLines(start: number, end: number): void {
     // The rows the old selection painted repaint without it

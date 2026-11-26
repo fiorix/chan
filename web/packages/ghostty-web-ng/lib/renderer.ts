@@ -1048,7 +1048,7 @@ export class CanvasRenderer {
    */
 
   /**
-   * Render scrollbar (Phase 2)
+   * Render scrollbar
    * Shows scroll position and allows click/drag interaction
    * @param opacity Opacity level (0-1) for fade in/out effect
    */

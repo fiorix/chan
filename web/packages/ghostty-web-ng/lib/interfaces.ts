@@ -192,7 +192,7 @@ export interface IKeyEvent {
 }
 
 // ============================================================================
-// Buffer API Interfaces (xterm.js compatibility)
+// Buffer API Interfaces
 // ============================================================================
 
 /**

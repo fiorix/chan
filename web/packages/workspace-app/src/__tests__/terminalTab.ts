@@ -7,7 +7,7 @@
 
 import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { mount, tick, unmount, type Component } from "svelte";
-import { expect, vi } from "vitest";
+import { expect, onTestFinished, vi } from "vitest";
 
 import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -309,6 +309,20 @@ export function menuRow(label: string): HTMLButtonElement {
   );
   if (!row) throw new Error(`no menu row ${label}`);
   return row;
+}
+
+/// Collect what the widget reports through `reportError` until the test
+/// ends. jsdom has no `reportError`, and the widget's fallback throws from a
+/// timer, which fake timers would raise inside the test's next advance.
+export function collectReports(): unknown[] {
+  const reported: unknown[] = [];
+  const own = Object.getOwnPropertyDescriptor(globalThis, "reportError");
+  globalThis.reportError = (failure: unknown) => void reported.push(failure);
+  onTestFinished(() => {
+    if (own) Object.defineProperty(globalThis, "reportError", own);
+    else Reflect.deleteProperty(globalThis, "reportError");
+  });
+  return reported;
 }
 
 export function resetTerminals(): void {

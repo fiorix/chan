@@ -56,7 +56,7 @@ function isButtonlessMotionReport(data: string): boolean {
 }
 
 /** Report an error as an uncaught one, without unwinding the caller. */
-function reportPaintError(error: unknown): void {
+function reportUncaught(error: unknown): void {
   if (typeof globalThis.reportError === 'function') globalThis.reportError(error);
   else setTimeout(() => { throw error; });
 }
@@ -92,16 +92,16 @@ export class Terminal {
     }));
   }
 
-  // Public properties (xterm.js compatibility)
+  // Public properties
   public cols: number;
   public rows: number;
   public element?: HTMLElement;
 
-  // Buffer API (xterm.js compatibility)
+  // Buffer API
   public readonly buffer: IBufferNamespace;
   public readonly viewport: TerminalViewport;
 
-  // Options (public for xterm.js compatibility)
+  // Options
   public readonly options!: Required<ITerminalOptions>;
 
   // Components (created on open())
@@ -141,7 +141,7 @@ export class Terminal {
   #resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
   #changeEmitter = new EventEmitter<TerminalChange>();
   #linkEmitter = new EventEmitter<TerminalLinkActivation>();
-  // Public event accessors (xterm.js compatibility)
+  // Public event accessors
   public readonly onData: IEvent<string> = this.#dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.#resizeEmitter.event;
   public readonly onChange: IEvent<TerminalChange> = this.#changeEmitter.event;
@@ -160,10 +160,10 @@ export class Terminal {
   #writeQueue: Uint8Array[] = [];
   #awaitingEcho = false;
 
-  // Phase 1: Custom event handlers
+  // Custom event handlers
   #customKeyEventHandler?: (event: KeyboardEvent) => boolean;
 
-  // Phase 2: Viewport and scrolling state
+  // Viewport and scrolling state
   #viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   #targetViewportY: number = 0; // Target viewport position for smooth scrolling
   #scrollAnimationStartTime?: number;
@@ -211,7 +211,7 @@ export class Terminal {
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
 
-    // Wrap in Proxy to intercept runtime changes (xterm.js compatibility)
+    // Wrap in Proxy to intercept runtime changes
     (this.options as any) = new Proxy(baseOptions, {
       set: (target: any, prop: string, value: any) => {
         const oldValue = target[prop];
@@ -256,7 +256,6 @@ export class Terminal {
 
   /**
    * Handle runtime option changes (called when options are modified after terminal is open)
-   * This enables xterm.js compatibility where options can be changed at runtime
    */
   #handleOptionChange(key: string, newValue: any, oldValue: any): void {
     if (newValue === oldValue) return;
@@ -576,7 +575,7 @@ export class Terminal {
       parent.addEventListener('mouseleave', this.#handleMouseLeave);
       parent.addEventListener('click', this.#handleClick);
 
-      // Setup wheel event handling for scrolling (Phase 2)
+      // Setup wheel event handling for scrolling
       // Use capture phase to ensure we get the event before browser scrolling
       parent.addEventListener('wheel', this.#handleWheel, { passive: false, capture: true });
 
@@ -584,7 +583,7 @@ export class Terminal {
       this.#renderer.render(this.#wasmTerm, true, this.#viewportY, this.#paintScrollbarOpacity());
 
       // Start render loop
-      this.#startRenderLoop();
+      this.#startRenderLoop('now');
 
       // No focus here, as xterm.js's open() takes none: a terminal can open
       // where it is not the one being typed into, and taking the keyboard
@@ -684,7 +683,7 @@ export class Terminal {
           this.#searchOwner?.runDue();
           this.#renderer.render(this.#wasmTerm, false, this.#viewportY, this.#paintScrollbarOpacity());
         } catch (error) {
-          reportPaintError(error);
+          reportUncaught(error);
         }
       }
     }
@@ -767,10 +766,8 @@ export class Terminal {
       return; // No change
     }
 
-    // Cancel render loop before resize to prevent accessing detached TypedArray
-    // views while WASM reallocates buffers. We restart it after resize completes.
-    // This avoids the background-tab regression of using an isResizing flag
-    // cleared via requestAnimationFrame (rAF is throttled/paused in background tabs).
+    // Cancel the loop's booked frame. The finally below books a new one when
+    // the resize ends, whether or not it completed.
     this.#cancelRenderLoop();
 
     try {
@@ -788,21 +785,35 @@ export class Terminal {
       // Resize renderer
       this.#renderer!.resize(cols, rows);
 
-      this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen());
-      this.#changeEmitter.fire({ kind: 'resize' });
-
+      // Each kind of observer hears the resize, the PTY gets the new size and
+      // the screen repaints even when an observer throws. An observer's error
+      // is reported rather than thrown, as a failed paint is, so a caller
+      // sizing the terminal never takes a listener's failure for its own.
+      const notify = (observe: () => void) => {
+        try {
+          observe();
+        } catch (error) {
+          reportUncaught(error);
+        }
+      };
+      notify(() => this.#searchOwner?.changed('resize', this.#wasmTerm!.isAlternateScreen()));
+      notify(() => this.#changeEmitter.fire({ kind: 'resize' }));
       // The dimension event also serves PTY size publication.
-      this.#resizeEmitter.fire({ cols, rows });
+      notify(() => this.#resizeEmitter.fire({ cols, rows }));
 
-      // Force full render
-      this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
-    } catch (e) {
-      console.error('Terminal resize failed:', e);
+      // Force full render. A failed paint is reported, as a write's echo
+      // paint is.
+      try {
+        this.#renderer!.render(this.#wasmTerm!, true, this.#viewportY, this.#paintScrollbarOpacity());
+      } catch (error) {
+        reportUncaught(error);
+      }
+    } finally {
+      // Restart the render loop. Nothing adds to the write queue, so the
+      // flush finds it empty.
+      this.#flushWriteQueue();
+      this.#startRenderLoop('next frame');
     }
-
-    // Flush any writes that were queued during resize, then restart render loop
-    this.#flushWriteQueue();
-    this.#startRenderLoop();
   }
 
   /**
@@ -832,7 +843,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Selection API (xterm.js compatible)
+  // Selection API
   // ==========================================================================
 
   /**
@@ -970,7 +981,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Phase 1: Custom Event Handlers
+  // Custom Event Handlers
   // ==========================================================================
 
   /**
@@ -990,7 +1001,7 @@ export class Terminal {
   }
 
   /**
-   * Attach a custom wheel event handler (Phase 2)
+   * Attach a custom wheel event handler
    * Returns true to prevent default handling
    */
   public attachCustomWheelEventHandler(
@@ -1000,7 +1011,7 @@ export class Terminal {
   }
 
   // ==========================================================================
-  // Phase 2: Scrolling Methods
+  // Scrolling Methods
   // ==========================================================================
 
   /**
@@ -1223,7 +1234,7 @@ export class Terminal {
   }
 
   /**
-   * Flush any writes that were queued during resize
+   * Write what the write queue holds to the core; nothing adds to it.
    */
   #flushWriteQueue(): void {
     while (this.#writeQueue.length > 0) {
@@ -1233,13 +1244,15 @@ export class Terminal {
   }
 
   /**
-   * Start the render loop
+   * Start the render loop. Open paints the loop's first frame at once; a
+   * resize has just painted in full, so its loop starts at the next frame,
+   * where a paint that fails is the frame's error rather than the resize's.
    */
-  #startRenderLoop(): void {
+  #startRenderLoop(first: 'now' | 'next frame'): void {
     if (this.#animationFrameId) return; // already running
-    // Search work belongs to animation frames, not to the open or resize
-    // call that starts the loop with a paint of its own.
-    let inFrame = false;
+    // Search work belongs to animation frames, not to the open call that
+    // starts the loop with a paint of its own.
+    let inFrame = first === 'next frame';
     const loop = () => {
       if (!this.#isDisposed && this.#isOpen) {
         // Render using the core's own dirty tracking
@@ -1258,7 +1271,8 @@ export class Terminal {
         }
       }
     };
-    loop();
+    if (first === 'now') loop();
+    else if (!this.#isDisposed && this.#isOpen) this.#animationFrameId = requestAnimationFrame(loop);
   }
 
   /**
@@ -1661,7 +1675,7 @@ export class Terminal {
   };
 
   /**
-   * Handle wheel events for scrolling (Phase 2)
+   * Handle wheel events for scrolling
    */
   #handleWheel = (e: WheelEvent): void => {
     // Always prevent default browser scrolling

@@ -260,6 +260,76 @@ describe('content changes', () => {
     expect(widgetInternals(term).wasmTerm!.readResponse(), 'no reply is stranded for a later write').toBeNull();
   });
 
+  test('a throwing change listener cannot leave a resize unpublished or unpainted', async () => {
+    const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    const sizes: string[] = [];
+    term.onResize(({ cols, rows }) => sizes.push(`${cols}x${rows}`));
+    term.onChange(() => { throw new Error('observer failed'); });
+    renderer.render.mockClear();
+    expect(() => term.resize(30, 8), 'the caller sizing the terminal sees no error').not.toThrow();
+    expect(sizes, 'the PTY hears the new size').toEqual(['30x8']);
+    expect(renderer.render, 'the screen repaints whole at the new size')
+      .toHaveBeenCalledWith(expect.anything(), true, 0, expect.any(Number));
+    expect(reported, "the listener's error is reported").toEqual([new Error('observer failed')]);
+  });
+
+  test('a resize runs every observer and its paint, and reports each failure in turn', async () => {
+    const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    const heard: string[] = [];
+    term.onChange(() => { heard.push('change'); throw new Error('change listener failed'); });
+    term.onResize(() => { heard.push('resize'); throw new Error('resize listener failed'); });
+    renderer.render.mockImplementation((_core: unknown, forceAll: boolean) => {
+      if (!forceAll) return;
+      heard.push('paint');
+      throw new Error('paint failed');
+    });
+    expect(() => term.resize(30, 8)).not.toThrow();
+    expect(heard).toEqual(['change', 'resize', 'paint']);
+    expect(reported, 'each failure is reported, as a write reports a failed paint').toEqual([
+      new Error('change listener failed'),
+      new Error('resize listener failed'),
+      new Error('paint failed'),
+    ]);
+  });
+
+  test("a resize paints in full once and leaves the loop's paint to its next frame", async () => {
+    const { term, renderer } = await terminal();
+    const reported: unknown[] = [];
+    vi.stubGlobal('reportError', (failure: unknown) => reported.push(failure));
+    term.onChange(() => { throw new Error('change listener failed'); });
+    renderer.render.mockImplementation((_core: unknown, forceAll: boolean) => {
+      throw new Error(forceAll ? 'full paint failed' : 'loop paint failed');
+    });
+    expect(() => term.resize(30, 8), 'no paint inside the resize throws').not.toThrow();
+    expect(renderer.render.mock.calls.map((call) => call[1]), 'the full paint alone').toEqual([true]);
+    expect(reported).toEqual([new Error('change listener failed'), new Error('full paint failed')]);
+  });
+
+  test.each([
+    ['a change listener throws', (term: Terminal) => {
+      term.onChange(() => { throw new Error('change listener failed'); });
+    }],
+    ["the core's own resize fails", (term: Terminal) => {
+      widgetInternals(term).wasmTerm!.beforeResize(() => { throw new Error('before-resize listener failed'); });
+    }],
+  ])('the render loop runs on after a resize in which %s', async (_, fail) => {
+    const { term, renderer } = await terminal();
+    vi.stubGlobal('reportError', () => {});
+    const booked: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => booked.push(run));
+    fail(term);
+    // The core's own failure reaches the caller; a listener's is reported.
+    try { term.resize(30, 8); } catch { /* asserted on the loop below */ }
+    expect(booked.length, "the resize books the loop's next frame").toBeGreaterThan(0);
+    renderer.render.mockClear();
+    for (const run of booked.splice(0)) run(0);
+    expect(renderer.render, 'that frame paints').toHaveBeenCalledWith(expect.anything(), false, expect.any(Number), expect.any(Number));
+  });
+
   test('a change listener queries links from the parsed content rather than the previous cache', async () => {
     const { term } = await terminal();
     const links = new LinkDetector(term);
