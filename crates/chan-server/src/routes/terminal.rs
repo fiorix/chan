@@ -36,10 +36,14 @@ const DEFAULT_ROWS: u16 = 24;
 const MAX_COLS: u16 = 500;
 const MAX_ROWS: u16 = 200;
 
-/// RIS (ESC c) -- full terminal reset, sent to an attached terminal view when
-/// its session is restarted in place so the relaunched shell starts on a clean
-/// screen. A fresh SPA reattach gets a brand-new empty terminal; a server-side
-/// re-attach reuses the live one, so reset it here to match.
+/// RIS (ESC c), a full terminal reset, sent ahead of a session frame to a
+/// view whose screen is taken to show a program this life never ran. That
+/// is a view whose session is restarted in place, so the relaunched shell
+/// starts on a clean screen, and a dial whose generation is neither the
+/// live one nor the one a lossy restore continues, which its attach handle
+/// marks [`AttachHandle::stale_generation`]. A fresh SPA reattach gets a
+/// brand-new empty terminal; both of these views keep the terminal they
+/// have, so it is reset here to match.
 const RESET_TERMINAL: &[u8] = b"\x1bc";
 
 #[derive(Debug, Default, Deserialize)]
@@ -1665,9 +1669,9 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
 /// that continues its view, a live recovery's or a redial's of the live
 /// generation, appends retained bytes without clearing the screen, and a
 /// live recovery does not apply the client's older fit either. Only raw
-/// replay bytes advance progress;
-/// mode reconciliation stays inside the window without advancing the cursor.
-/// The returned time anchors status pacing before a potentially slow replay.
+/// replay bytes advance progress; mode reconciliation stays inside the
+/// window without advancing the cursor. The returned time anchors status
+/// pacing before a potentially slow replay.
 async fn send_attach_prelude(
     socket: &mut TerminalSocket,
     session: &AttachHandle,
