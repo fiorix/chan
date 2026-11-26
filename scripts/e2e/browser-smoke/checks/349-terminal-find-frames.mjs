@@ -59,23 +59,27 @@
 //               after the active match in the buffer as it is then, and a
 //               second later a press "older" on the "e" before the active
 //               match then. The slow stream's frames are their own leg.
-//   REFLOW   -- first the leg writes its own history straight to the
-//               terminal: lines of the same shape whose filler spreads more
-//               "e", as dense as makes about 700,000 matches of the rows the
-//               history holds, and enough of them that no older line stays.
-//               The history's bound sets its rows (a byte budget keeps
-//               about half the rows a row cap does), so the leg sets the
-//               matches, and a rescan has that many to place. Then, with no
-//               output, a fresh find steps to a match of a line's
-//               second segment at least 90 percent of the way up from the
-//               newest match, so each rescan places it late. The page
-//               narrows and widens back twice. The leg reads find only when
-//               its instrument holds: the count and the history's rows
-//               after each resize equal those before (the reflow pruned
-//               nothing and no line changed its rows), the dense lines
-//               fill the history to its oldest row, the narrow
-//               width moves the active match to its line's second row, and
-//               1.5 s after the first narrowing the match is kept with its
+//   REFLOW   -- first the leg reads the history's limit at each width it
+//               resizes to, as the rows a full history of lines of this
+//               shape holds there, erases the history and writes its own
+//               straight to the terminal: lines of the same shape whose
+//               filler spreads more "e", REFLOW_MARGIN of the smaller limit
+//               in rows, as dense as makes about 700,000 matches, so that
+//               no resize prunes a match. The history's bound sets the
+//               rows (a byte budget keeps about half the rows a row cap
+//               does), so the leg sets the matches, and a rescan has that
+//               many to place. Then, with no output, a fresh find steps to
+//               a match of a line's second segment at least 90 percent of
+//               the way up from the newest match, so each rescan places it
+//               late. The page narrows and widens back twice. The leg reads
+//               find only when its instrument holds: the narrow width's
+//               reading filled its history, the erase emptied it, the
+//               fill's first line is the history's oldest row (the fill
+//               pruned nothing), the count and the history's rows after
+//               each resize equal those before (the reflow pruned nothing
+//               and no line changed its rows), the narrow width moves the
+//               active match to its line's second row, and 1.5 s after the
+//               first narrowing the match is kept with its
 //               index unplaced (the reading is past the one-second press
 //               cap and ahead of placement). Then 1.5 s after each resize
 //               the active match must still be highlighted on the same line
@@ -124,6 +128,19 @@ const FILL = 60_000;
 // active match unplaced 1.5 s after each resize, and at the byte budget's
 // 184,000 placement had reached it by then, so about twice the former.
 const REFLOW_MATCHES = 700_000;
+// The share of the smaller of the two widths' history limits the REFLOW
+// leg fills. A full history's rows read up to a page of the core short of
+// its limit, since the core prunes whole pages, and a reflow of a full
+// history prunes rows too: the fifth left free is thousands of rows at
+// this geometry, many pages. At 199 and 139 columns (the guest's 1600 and
+// 1120 pixels), lines of 259 cells, two rows at both widths:
+// - row cap (`scrollback`, about 54,565 rows read full at 199 columns,
+//   the same at 139): 21,826 lines, about 43,600 history rows; an "e"
+//   every 9 filler cells, 34 a line, about 742,000 matches;
+// - 50 MiB byte budget (about 30,669 rows read full at 199 columns, more
+//   at 139): 12,267 lines, about 24,500 history rows; an "e" every 4
+//   cells, 64 a line, about 785,000 matches.
+const REFLOW_MARGIN = 0.8;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default {
@@ -463,25 +480,61 @@ export default {
       }
 
       // REFLOW
-      // The leg's own history: the tail's shape, an "e" every `every` cells
-      // of its filler, so the rows the history holds carry REFLOW_MATCHES.
-      const reflowRows = await term.evaluate((t) => t.getScrollbackLength() + t.rows);
+      // The leg's own history, written into an emptied one and kept below
+      // the limit the terminal's history budget sets at each width the leg
+      // resizes to, so that no narrowing or widening prunes a match or
+      // splits a line. Under a row cap a row costs one row of it at either
+      // width. Under a byte budget a row costs what the core's pages spend
+      // on it, which grows with the width, so the narrow width holds more
+      // rows. The widget exposes neither cost, so the leg reads each
+      // width's limit as the rows its history holds when full of lines of
+      // this shape: at the full width it has been full since FILL; at the
+      // narrow width the leg fills it once, with stream 6. Every line takes
+      // two rows at both widths, so the fill is REFLOW_MARGIN of the
+      // smaller limit, halved, in lines.
+      const narrowWidth = Math.round(pageViewport.width * 0.7);
+      const budget = await term.evaluate((t) => ({ bytes: t.options.scrollbackBytes ?? null, rows: t.options.scrollback ?? null }));
+      const held = { full: await term.evaluate((t) => t.getScrollbackLength()) };
+      const writeLines = (k, line, lines) => term.evaluate((t, [k, line, lines]) => {
+        for (let from = 0; from < lines; from += 1000) {
+          let chunk = "";
+          for (let i = from + 1; i <= Math.min(lines, from + 1000); i++) chunk += `${i === 1 ? "" : "\r\n"}${k}:${String(i).padStart(6, "0")} ${line}`;
+          t.write(chunk);
+        }
+        // The oldest line's number: a pruned history can open on the second
+        // row of a line whose first row went.
+        const first = t.getScrollbackLength() > 0 && t.core.isScrollbackRowWrapped(0) ? 1 : 0;
+        const oldest = t.core.plainText({ startRow: first, startCol: 0, endRow: first, endCol: t.cols - 1 }) ?? "";
+        return { oldest: oldest.split(" ")[0], history: t.getScrollbackLength() };
+      }, [k, line, lines]);
+      await term.evaluate((t) => t.search.close());
+      await page.setViewport({ ...pageViewport, width: narrowWidth });
+      const narrowCols = await until("the terminal at the narrow width", async () => {
+        const now = await term.evaluate((t) => t.cols);
+        return now < cols ? now : null;
+      });
+      const measured = await writeLines(6, tail, FILL);
+      held.narrow = measured.history;
+      await page.setViewport(pageViewport);
+      await until("the terminal back at the full width", async () => (await term.evaluate((t) => t.cols)) === cols);
+      const limit = Math.min(held.full, held.narrow);
+      const fillLines = Math.floor((REFLOW_MARGIN * limit) / 2);
+      // The density: an "e" every `every` cells of the tail's filler, so
+      // the fill's lines carry REFLOW_MATCHES.
       const segmentE = [...SEGMENT].filter((c) => c === "e").length;
-      const every = Math.max(2, Math.floor((gap + end) / Math.max(1, Math.round((2 * REFLOW_MATCHES) / reflowRows) - 2 * segmentE)));
+      const every = Math.max(2, Math.floor((gap + end) / Math.max(1, Math.ceil(REFLOW_MATCHES / fillLines) - 2 * segmentE)));
       const spread = (n) => Array.from({ length: n }, (_, i) => ((i + 1) % every === 0 ? "e" : "x")).join("");
       const denseTail = `${SEGMENT} ${spread(gap)} ${SEGMENT} ${spread(end)}`;
       const perLine = 2 * segmentE + Math.floor(gap / every) + Math.floor(end / every);
-      details.reflowFill = await term.evaluate((t, [line, lines]) => {
-        t.search.close();
-        for (let from = 0; from < lines; from += 1000) {
-          let chunk = "";
-          for (let i = from + 1; i <= Math.min(lines, from + 1000); i++) chunk += `\r\n8:${String(i).padStart(6, "0")} ${line}`;
-          t.write(chunk);
-        }
-        const oldest = t.core.plainText({ startRow: 0, startCol: 0, endRow: 0, endCol: t.cols - 1 }) ?? "";
-        return { oldest: oldest.split(" ")[0], history: t.getScrollbackLength() };
-      }, [denseTail, FILL]);
-      Object.assign(details.reflowFill, { rows: reflowRows, every, perLine, lines: FILL, planned: Math.round((perLine * reflowRows) / 2) });
+      const cleared = await term.evaluate((t) => {
+        t.write("\x1b[2J\x1b[3J\x1b[H");
+        return t.getScrollbackLength();
+      });
+      details.reflowFill = await writeLines(8, denseTail, fillLines);
+      Object.assign(details.reflowFill, {
+        budget, held, narrowCols, measuredOldest: measured.oldest, cleared, limit, margin: REFLOW_MARGIN,
+        lines: fillLines, every, perLine, planned: perLine * fillLines,
+      });
       await term.evaluate((t) => { t.search.close(); t.search.find("e"); });
       await complete("a complete count for the reflow");
       details.reflowStart = await term.evaluate((t, [second, length, perLine]) => {
@@ -521,7 +574,12 @@ export default {
       // The instrument: what the leg needs of the buffer and of the timing
       // before its readings say anything about find.
       const instrument = [];
-      if (!/^8:\d{6}$/.test(details.reflowFill.oldest)) instrument.push(`the history's oldest row opens "${details.reflowFill.oldest}", not one of the leg's dense lines`);
+      const fillRead = details.reflowFill;
+      if (!/^6:\d{6}$/.test(fillRead.measuredOldest) || fillRead.measuredOldest === "6:000001") {
+        instrument.push(`at ${narrowCols} columns the history opens "${fillRead.measuredOldest}" after stream 6's ${FILL} lines, not a later line of stream 6: it was not full, so its limit is unread`);
+      }
+      if (fillRead.cleared !== 0) instrument.push(`erasing the history left ${fillRead.cleared} rows`);
+      if (fillRead.oldest !== "8:000001") instrument.push(`the history's oldest row opens "${fillRead.oldest}", not the fill's first line: the fill pruned`);
       if (!start.identity) instrument.push("no active match before the reflow");
       else {
         if (!start.onSecond) instrument.push(`the active match ${at(start.identity)} is not on a line's second segment`);
