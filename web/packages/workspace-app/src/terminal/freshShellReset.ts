@@ -1,7 +1,8 @@
 /// The DEC private modes a fresh-shell reset clears when a tab's session id
-/// changes, with the alternate-screen exit it keeps beside them, and that a
-/// cut answer which starts no reset clears before its reassert. This list
-/// must stay the server's whole tracked set (`TRACKED_PRIVATE_MODES` in
+/// changes, with the alternate-screen exit it keeps beside them, and that
+/// every answer after a cut that does not continue the view clears before
+/// its replay or reassert. This list must stay the server's whole tracked
+/// set (`TRACKED_PRIVATE_MODES` in
 /// `crates/chan-library/src/terminal_sessions.rs`): a mode the server tracks
 /// is a mode the fresh-shell reset clears. `TerminalTab.freshShellModes`
 /// ties the two; change both together.
