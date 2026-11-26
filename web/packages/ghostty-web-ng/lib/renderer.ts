@@ -105,7 +105,7 @@ export const DEFAULT_THEME: RendererTheme = {
 
 export class CanvasRenderer {
   #canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
+  #ctx: CanvasRenderingContext2D;
   #fontSize: number;
   #fontFamily: string;
   #cursorStyle: 'block' | 'underline' | 'bar';
@@ -174,7 +174,7 @@ export class CanvasRenderer {
     if (!ctx) {
       throw new Error('Failed to get 2D rendering context');
     }
-    this.ctx = ctx;
+    this.#ctx = ctx;
 
     // Apply options
     this.#fontSize = options.fontSize ?? 15;
@@ -308,15 +308,15 @@ export class CanvasRenderer {
 
     // Scale context to match DPI: the size assignment above reset the
     // context, so this puts the device scale back for the rest of the frame.
-    this.ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
+    this.#ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
 
     // Set text rendering properties for crisp text
-    this.ctx.textBaseline = 'alphabetic';
-    this.ctx.textAlign = 'left';
+    this.#ctx.textBaseline = 'alphabetic';
+    this.#ctx.textAlign = 'left';
 
     // Fill background after resize
-    this.ctx.fillStyle = this.#theme.background;
-    this.ctx.fillRect(0, 0, cssWidth, cssHeight);
+    this.#ctx.fillStyle = this.#theme.background;
+    this.#ctx.fillRect(0, 0, cssWidth, cssHeight);
   }
 
   // ==========================================================================
@@ -380,7 +380,7 @@ export class CanvasRenderer {
     // drawing state at an unchanged size leaves an identity transform
     // behind, and the next repaint must heal it without waiting for a
     // resize. Every row, glyph and cursor below draws in CSS units.
-    this.ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
+    this.#ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
     this.#currentTerm = term;
 
     const cursor = term.getCursor();
@@ -547,7 +547,7 @@ export class CanvasRenderer {
 
     if (changedRows.length === 0) return [];
     const frame: PaintFrame = Object.freeze({
-      ctx: this.ctx,
+      ctx: this.#ctx,
       metrics: Object.freeze(this.getMetrics()),
       pixelRatio: this.#devicePixelRatio,
       viewportOffset: viewportY,
@@ -559,22 +559,22 @@ export class CanvasRenderer {
     });
     const errors: unknown[] = [];
     for (const layer of layers) {
-      this.ctx.save();
+      this.#ctx.save();
       try {
         // Layers only composite onto fresh pixels, even if they draw a full
         // canvas. A failing ordinary layer must not skip the final mask.
-        this.ctx.beginPath();
+        this.#ctx.beginPath();
         for (const row of changedRows) {
-          this.ctx.rect(0, row * this.#metrics.height, dims.cols * this.#metrics.width, this.#metrics.height);
+          this.#ctx.rect(0, row * this.#metrics.height, dims.cols * this.#metrics.width, this.#metrics.height);
         }
-        this.ctx.clip();
-        this.ctx.beginPath();
+        this.#ctx.clip();
+        this.#ctx.beginPath();
         layer.paint(frame);
       } catch (error) {
         errors.push(error);
       } finally {
-        this.ctx.restore();
-        this.ctx.beginPath();
+        this.#ctx.restore();
+        this.#ctx.beginPath();
       }
     }
     return errors;
@@ -615,9 +615,9 @@ export class CanvasRenderer {
     // redrawing adjacent rows (see render() method).
     // clearRect is needed because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
-    this.ctx.clearRect(0, lineY, lineWidth, this.#metrics.height);
-    this.ctx.fillStyle = this.#theme.background;
-    this.ctx.fillRect(0, lineY, lineWidth, this.#metrics.height);
+    this.#ctx.clearRect(0, lineY, lineWidth, this.#metrics.height);
+    this.#ctx.fillStyle = this.#theme.background;
+    this.#ctx.fillRect(0, lineY, lineWidth, this.#metrics.height);
 
     // PASS 1: Draw all cell backgrounds first
     // This ensures all backgrounds are painted before any text, allowing text
@@ -652,15 +652,15 @@ export class CanvasRenderer {
 
     if (isSelected) {
       // Draw selection background (solid color, not overlay)
-      this.ctx.fillStyle = this.#theme.selectionBackground;
-      this.ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
+      this.#ctx.fillStyle = this.#theme.selectionBackground;
+      this.#ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
       return; // Selection background replaces cell background
     }
 
     const highlight = this.highlightAt(x, y, cell.width);
     if (highlight) {
-      this.ctx.fillStyle = highlight.background ?? this.#theme.selectionBackground;
-      this.ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
+      this.#ctx.fillStyle = highlight.background ?? this.#theme.selectionBackground;
+      this.#ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
       return;
     }
 
@@ -671,8 +671,8 @@ export class CanvasRenderer {
     // default or not.
     const inverse = (cell.flags & VtFlag.INVERSE) !== 0;
     if (!inverse && cell.defaultBg) return;
-    this.ctx.fillStyle = this.#rgbToCSS(inverse ? cell.fg : cell.bg);
-    this.ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
+    this.#ctx.fillStyle = this.#rgbToCSS(inverse ? cell.fg : cell.bg);
+    this.#ctx.fillRect(cellX, cellY, cellWidth, this.#metrics.height);
   }
 
   /**
@@ -698,15 +698,15 @@ export class CanvasRenderer {
     let fontStyle = '';
     if (cell.flags & VtFlag.ITALIC) fontStyle += 'italic ';
     if (cell.flags & VtFlag.BOLD) fontStyle += 'bold ';
-    this.ctx.font = `${fontStyle}${this.#fontSize}px ${this.#fontFamily}`;
+    this.#ctx.font = `${fontStyle}${this.#fontSize}px ${this.#fontFamily}`;
 
     // Set text color - use override, selection foreground, or normal color
     if (colorOverride) {
-      this.ctx.fillStyle = colorOverride;
+      this.#ctx.fillStyle = colorOverride;
     } else if (isSelected && this.#theme.selectionForeground) {
-      this.ctx.fillStyle = this.#theme.selectionForeground;
+      this.#ctx.fillStyle = this.#theme.selectionForeground;
     } else if (highlight?.foreground) {
-      this.ctx.fillStyle = highlight.foreground;
+      this.#ctx.fillStyle = highlight.foreground;
     } else {
       // Extract colors and handle inverse: when inverted, foreground
       // becomes background
@@ -723,12 +723,12 @@ export class CanvasRenderer {
           background = inverse ? rgbColor(cell.fg) : cell.defaultBg ? rowBackground : rgbColor(cell.bg);
         }
       }
-      this.ctx.fillStyle = this.#cellForeground(foreground, background);
+      this.#ctx.fillStyle = this.#cellForeground(foreground, background);
     }
 
     // Apply faint effect
     if (cell.flags & VtFlag.FAINT) {
-      this.ctx.globalAlpha = 0.5;
+      this.#ctx.globalAlpha = 0.5;
     }
 
     // Draw text
@@ -739,41 +739,41 @@ export class CanvasRenderer {
     // foreground and decorations, including selection and cursor overrides.
     const char = cell.cluster ?? String.fromCodePoint(cell.codepoint || 32);
     const boxed = this.#boxGlyphs && cell.cluster === null && isCustomGlyph(cell.codepoint);
-    if (!boxed) this.ctx.fillText(char, textX, textY);
+    if (!boxed) this.#ctx.fillText(char, textX, textY);
 
     // Reset alpha
     if (cell.flags & VtFlag.FAINT) {
-      this.ctx.globalAlpha = 1.0;
+      this.#ctx.globalAlpha = 1.0;
     }
 
     // Draw the underline in its style: in the colour SGR 58 gave it, which
     // neither a selection nor the cursor changes, or else in the glyph's
     if (cell.underline !== ABI.GhosttySgrUnderline.NONE) {
-      this.ctx.strokeStyle =
-        cell.underlineColor === null ? this.ctx.fillStyle : this.#rgbToCSS(cell.underlineColor);
+      this.#ctx.strokeStyle =
+        cell.underlineColor === null ? this.#ctx.fillStyle : this.#rgbToCSS(cell.underlineColor);
       this.#renderUnderline(cell.underline, cellX, cellY, cell.width);
     }
 
     // Draw overline along the top pixel row of the cell
     if (cell.flags & VtFlag.OVERLINE) {
       const overlineY = cellY + 0.5;
-      this.ctx.strokeStyle = this.ctx.fillStyle;
-      this.ctx.lineWidth = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cellX, overlineY);
-      this.ctx.lineTo(cellX + cellWidth, overlineY);
-      this.ctx.stroke();
+      this.#ctx.strokeStyle = this.#ctx.fillStyle;
+      this.#ctx.lineWidth = 1;
+      this.#ctx.beginPath();
+      this.#ctx.moveTo(cellX, overlineY);
+      this.#ctx.lineTo(cellX + cellWidth, overlineY);
+      this.#ctx.stroke();
     }
 
     // Draw strikethrough
     if (cell.flags & VtFlag.STRIKETHROUGH) {
       const strikeY = cellY + this.#metrics.height / 2;
-      this.ctx.strokeStyle = this.ctx.fillStyle;
-      this.ctx.lineWidth = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cellX, strikeY);
-      this.ctx.lineTo(cellX + cellWidth, strikeY);
-      this.ctx.stroke();
+      this.#ctx.strokeStyle = this.#ctx.fillStyle;
+      this.#ctx.lineWidth = 1;
+      this.#ctx.beginPath();
+      this.#ctx.moveTo(cellX, strikeY);
+      this.#ctx.lineTo(cellX + cellWidth, strikeY);
+      this.#ctx.stroke();
     }
 
     // Draw hyperlink underline (for OSC8 hyperlinks)
@@ -783,12 +783,12 @@ export class CanvasRenderer {
       // Only show underline when hovered (cleaner look)
       if (isHovered) {
         const underlineY = cellY + this.#metrics.baseline + 2;
-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(cellX, underlineY);
-        this.ctx.lineTo(cellX + cellWidth, underlineY);
-        this.ctx.stroke();
+        this.#ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
+        this.#ctx.lineWidth = 1;
+        this.#ctx.beginPath();
+        this.#ctx.moveTo(cellX, underlineY);
+        this.#ctx.lineTo(cellX + cellWidth, underlineY);
+        this.#ctx.stroke();
       }
     }
 
@@ -803,18 +803,18 @@ export class CanvasRenderer {
 
       if (isInRange) {
         const underlineY = cellY + this.#metrics.baseline + 2;
-        this.ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(cellX, underlineY);
-        this.ctx.lineTo(cellX + cellWidth, underlineY);
-        this.ctx.stroke();
+        this.#ctx.strokeStyle = '#4A90E2'; // Blue underline on hover
+        this.#ctx.lineWidth = 1;
+        this.#ctx.beginPath();
+        this.#ctx.moveTo(cellX, underlineY);
+        this.#ctx.lineTo(cellX + cellWidth, underlineY);
+        this.#ctx.stroke();
       }
     }
 
     // Cell paths sit above decorations where their ink intersects.
     if (boxed) {
-      drawBoxGlyph(this.ctx, this.#metrics, cell.codepoint, x, y,
+      drawBoxGlyph(this.#ctx, this.#metrics, cell.codepoint, x, y,
         (cell.flags & VtFlag.FAINT) !== 0, this.#devicePixelRatio);
     }
   }
@@ -832,7 +832,7 @@ export class CanvasRenderer {
    */
   #renderUnderline(style: number, cellX: number, cellY: number, columns: number): void {
     const U = ABI.GhosttySgrUnderline;
-    const ctx = this.ctx;
+    const ctx = this.#ctx;
     const { width, height, baseline } = this.#metrics;
     const right = cellX + width * columns;
     const y = cellY + baseline + 2;
@@ -895,22 +895,22 @@ export class CanvasRenderer {
     const cursorX = x * this.#metrics.width;
     const cursorY = y * this.#metrics.height;
 
-    this.ctx.fillStyle = this.#theme.cursor;
+    this.#ctx.fillStyle = this.#theme.cursor;
 
     switch (this.#cursorStyle) {
       case 'block':
         // Full cell block
-        this.ctx.fillRect(cursorX, cursorY, this.#metrics.width, this.#metrics.height);
+        this.#ctx.fillRect(cursorX, cursorY, this.#metrics.width, this.#metrics.height);
         // Re-draw character under cursor with cursorAccent color
         {
           const cell = this.#currentTerm?.readRow(y, this.#cells) ? this.#cells.at(x) : undefined;
           if (cell) {
-            this.ctx.save();
-            this.ctx.beginPath();
-            this.ctx.rect(cursorX, cursorY, this.#metrics.width, this.#metrics.height);
-            this.ctx.clip();
+            this.#ctx.save();
+            this.#ctx.beginPath();
+            this.#ctx.rect(cursorX, cursorY, this.#metrics.width, this.#metrics.height);
+            this.#ctx.clip();
             this.#renderCellText(cell, x, y, this.#theme.cursorAccent);
-            this.ctx.restore();
+            this.#ctx.restore();
           }
         }
         break;
@@ -918,7 +918,7 @@ export class CanvasRenderer {
       case 'underline':
         // Underline at bottom of cell
         const underlineHeight = Math.max(2, Math.floor(this.#metrics.height * 0.15));
-        this.ctx.fillRect(
+        this.#ctx.fillRect(
           cursorX,
           cursorY + this.#metrics.height - underlineHeight,
           this.#metrics.width,
@@ -929,7 +929,7 @@ export class CanvasRenderer {
       case 'bar':
         // Vertical bar at left of cell
         const barWidth = Math.max(2, Math.floor(this.#metrics.width * 0.15));
-        this.ctx.fillRect(cursorX, cursorY, barWidth, this.#metrics.height);
+        this.#ctx.fillRect(cursorX, cursorY, barWidth, this.#metrics.height);
         break;
     }
   }
@@ -1058,7 +1058,7 @@ export class CanvasRenderer {
     visibleRows: number,
     opacity: number = 1
   ): void {
-    const ctx = this.ctx;
+    const ctx = this.#ctx;
     const canvasHeight = this.#canvas.height / this.#devicePixelRatio;
     const canvasWidth = this.#canvas.width / this.#devicePixelRatio;
 
@@ -1241,12 +1241,12 @@ export class CanvasRenderer {
    */
   public clear(): void {
     this.#repaintAll = true;
-    this.ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
+    this.#ctx.setTransform(this.#devicePixelRatio, 0, 0, this.#devicePixelRatio, 0, 0);
     // clearRect first because fillRect composites rather than replaces,
     // so transparent/translucent backgrounds wouldn't clear previous content.
-    this.ctx.clearRect(0, 0, this.#canvas.width, this.#canvas.height);
-    this.ctx.fillStyle = this.#theme.background;
-    this.ctx.fillRect(0, 0, this.#canvas.width, this.#canvas.height);
+    this.#ctx.clearRect(0, 0, this.#canvas.width, this.#canvas.height);
+    this.#ctx.fillStyle = this.#theme.background;
+    this.#ctx.fillRect(0, 0, this.#canvas.width, this.#canvas.height);
   }
 
   /**

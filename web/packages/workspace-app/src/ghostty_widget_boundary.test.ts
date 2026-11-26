@@ -177,7 +177,6 @@ const pending = (
 ): Pending[] => Object.entries(readers).map(([key, texts]) => ({ rule, file, key, readers: texts, owner, until }));
 
 const RENDERER_TESTS = "the renderer tests move into the package, over an opened terminal";
-const THEME = "the theme test reads the core's colours off the canvas, or moves into the package";
 
 const PENDING: readonly Pending[] = [
   ...pending("widget package", RENDERER_TESTS, "member", "src/terminal/ghosttyRenderer.test.ts", {
@@ -220,14 +219,6 @@ const PENDING: readonly Pending[] = [
       "(whole.term as unknown as { viewportY: number }).viewportY",
     ],
     "write Terminal.wasmTerm": ["term.wasmTerm"],
-  }),
-  ...pending("app terminal", THEME, "member", "src/terminal/ghosttyTheme.test.ts", {
-    "CanvasRenderer.ctx": [
-      "(term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx",
-      "(term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx",
-    ],
-    "VtTerminal.handle": ["vt.handle"],
-    "VtTerminal.wasm": ["vt.wasm", "vt.wasm", "vt.wasm", "vt.wasm"],
   }),
 ];
 

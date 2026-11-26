@@ -3,9 +3,12 @@
 // A theme switch on a live ghostty terminal. ghostty-web's Terminal is opened
 // over chan's binding on the vendored core, its canvases software contexts
 // that keep their pixels and its animation frames run by hand. A switch has
-// to leave the core reporting, and resolving every cell with, the colors of a
-// terminal opened in the new theme and fed the same output, the next frame
-// has to paint every pixel that terminal paints, and nothing else may change.
+// to leave the core resolving every cell with the colors of a terminal opened
+// in the new theme and fed the same output, the next frame has to paint every
+// pixel that terminal paints, and nothing else may change. The core's own
+// color state, its defaults and the slots no cell shows (the cursor, the
+// palette entries the output leaves unused), is the widget's to keep, and the
+// package's theme test reads it.
 
 import { readFileSync } from "node:fs";
 import { Terminal, type ITheme } from "@chan/ghostty-web-ng";
@@ -66,17 +69,18 @@ const COLOR_ROWS =
 const OUTPUT = COLOR_ROWS + "plain one\r\nplain two\r\nplain three\r\n" + COLOR_ROWS + "$ ";
 
 let vendored: WebAssembly.Module;
-let TERMINAL_DATA: Record<string, number> = {};
 let frames: FrameRequestCallback[] = [];
 const opened: Terminal[] = [];
 
 beforeAll(async () => {
   vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  TERMINAL_DATA = terminalData(await WebAssembly.instantiate(vendored, {}));
 });
 
+/// The context each canvas hands out, one per canvas as a browser's is.
+let contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+
 beforeEach(() => {
-  const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+  contexts = new WeakMap();
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
     let context = contexts.get(this);
     if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, CELL_WIDTH)));
@@ -155,54 +159,18 @@ function defaults(term: Terminal): { foreground: string; background: string } {
   return { foreground: fg(cell), background: bg(cell) };
 }
 
-/// The core's own colors, read through its C API rather than the binding's
-/// cache: the effective and default foreground, background and cursor, and
-/// the effective and default 256-color palettes. An unset color is null.
-function coreColors(term: Terminal): Record<string, number[] | null> {
-  const vt = core(term) as unknown as {
-    handle: number;
-    wasm: {
-      fn: { ghostty_terminal_get(terminal: number, data: number, out: number): number };
-      alloc(len: number): number;
-      free(ptr: number, len: number): void;
-      bytes(): Uint8Array;
-    };
-  };
-  const out: Record<string, number[] | null> = {};
-  const buf = vt.wasm.alloc(768);
-  try {
-    for (const name of ["FOREGROUND", "BACKGROUND", "CURSOR", "PALETTE"]) {
-      for (const data of [`COLOR_${name}`, `COLOR_${name}_DEFAULT`]) {
-        const size = name === "PALETTE" ? 768 : 3;
-        const value = TERMINAL_DATA[data];
-        if (value === undefined) throw new Error(`no GhosttyTerminalData.${data} in the pinned build`);
-        const result = vt.wasm.fn.ghostty_terminal_get(vt.handle, value, buf);
-        out[data] = result === 0 ? [...vt.wasm.bytes().slice(buf, buf + size)] : null;
-      }
-    }
-  } finally {
-    vt.wasm.free(buf, 768);
-  }
-  return out;
-}
-
-/// `GhosttyTerminalData`'s values, from the pinned build's own type
-/// description.
-function terminalData(instance: WebAssembly.Instance): Record<string, number> {
-  const exports = instance.exports as Record<string, unknown>;
-  const ptr = (exports.ghostty_type_json as () => number)();
-  const bytes = new Uint8Array((exports.memory as WebAssembly.Memory).buffer);
-  let end = ptr;
-  while (bytes[end] !== 0) end++;
-  const json = JSON.parse(new TextDecoder().decode(bytes.subarray(ptr, end))) as {
-    types: Record<string, { values?: Record<string, number> }>;
-  };
-  return json.types.GhosttyTerminalData?.values ?? {};
+/// The context of the terminal's canvas, the one its renderer paints.
+function canvasContext(term: Terminal): SoftwareCanvasContext {
+  const canvases = term.element?.querySelectorAll("canvas") ?? [];
+  expect(canvases, "the terminal's one canvas").toHaveLength(1);
+  const context = contexts.get(canvases[0]!);
+  if (!context) throw new Error("the terminal's canvas has no context");
+  return context;
 }
 
 /// Every pixel of the terminal's canvas, as `r,g,b,a` strings.
 function pixels(term: Terminal): string[] {
-  const context = (term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx;
+  const context = canvasContext(term);
   const out: string[] = [];
   for (let y = 0; y < ROWS * CELL_HEIGHT; y++) {
     for (let x = 0; x < COLS * CELL_WIDTH; x++) {
@@ -215,7 +183,7 @@ function pixels(term: Terminal): string[] {
 
 /// The pixel in the middle of cell (`col`, `row`) of the viewport.
 function cellPixel(term: Terminal, col: number, row: number): string {
-  const context = (term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx;
+  const context = canvasContext(term);
   const p = context.pixelAt(col * CELL_WIDTH + CELL_WIDTH / 2, row * CELL_HEIGHT + CELL_HEIGHT / 2);
   return `${p.r},${p.g},${p.b},${p.a}`;
 }
@@ -238,15 +206,13 @@ const SCREEN_FG_ROW = 2;
 const SCREEN_BG_ROW = 3;
 
 describe("a theme switch on a live ghostty terminal", () => {
-  test("the core reports the new defaults and palette and resolves every cell as a terminal opened in the theme", async () => {
+  test("the core resolves its defaults and every cell as a terminal opened in the theme", async () => {
     const term = await openTerminal(DARK);
     const before = cells(term);
-    const beforeColors = coreColors(term);
     expect(defaults(term).background).toBe(DARK.background);
 
     expect(applyGhosttyTheme(term, LIGHT)).toBe(true);
     const fresh = await openTerminal(LIGHT);
-    expect(coreColors(term), "the core's own colors").toEqual(coreColors(fresh));
     expect(defaults(term)).toEqual(defaults(fresh));
     expect(defaults(term).background).toBe(LIGHT.background);
     expect(cells(term), "every cell of the screen and the history").toEqual(cells(fresh));
@@ -263,7 +229,6 @@ describe("a theme switch on a live ghostty terminal", () => {
     }
 
     expect(applyGhosttyTheme(term, DARK)).toBe(true);
-    expect(coreColors(term), "switched back, the core's colors").toEqual(beforeColors);
     expect(cells(term), "switched back, every cell").toEqual(before);
   });
 
@@ -299,12 +264,10 @@ describe("a theme switch on a live ghostty terminal", () => {
     const term = await openTerminal(DARK, own);
     applyGhosttyTheme(term, LIGHT);
     const fresh = await openTerminal(LIGHT, own);
-    expect(coreColors(term)).toEqual(coreColors(fresh));
     expect(cells(term)).toEqual(cells(fresh));
     expect(fg(row(term, SCREEN_FG_ROW)[2]!), "the program's red").toBe("#123456");
     expect(defaults(term).background, "the program's background").toBe("#203040");
     expect(defaults(term).foreground, "the program's foreground").toBe("#aabbcc");
-    expect(coreColors(term).COLOR_CURSOR, "the program's cursor").toEqual([1, 2, 3]);
   });
 
   test("a color the new theme leaves out takes upstream's default, as in a terminal opened in it", async () => {
@@ -312,7 +275,6 @@ describe("a theme switch on a live ghostty terminal", () => {
     const term = await openTerminal(DARK);
     applyGhosttyTheme(term, partial);
     const fresh = await openTerminal(partial);
-    expect(coreColors(term)).toEqual(coreColors(fresh));
     expect(cells(term)).toEqual(cells(fresh));
     expect(fg(row(term, SCREEN_FG_ROW)[2]!)).not.toBe(DARK.red);
   });

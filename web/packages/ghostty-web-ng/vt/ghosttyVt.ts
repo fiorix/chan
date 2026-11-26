@@ -706,8 +706,8 @@ export class VtTerminal {
   // The package's white-box tests read these through ./internal.
   static {
     registerTerminalInternals((t) => ({
-      wasm: t.wasm,
-      handle: t.handle,
+      wasm: t.#wasm,
+      handle: t.#handle,
       scratch: t.#scratch,
       writeBuf: t.#writeBuf,
       writeCap: t.#writeCap,
@@ -715,9 +715,9 @@ export class VtTerminal {
     }));
   }
 
-  private readonly wasm: VtWasm;
+  readonly #wasm: VtWasm;
   readonly #owner: GhosttyVt;
-  private handle: number;
+  #handle: number;
   #renderState: number;
   #rowIterator: number;
   #rowCells: number;
@@ -777,26 +777,26 @@ export class VtTerminal {
   readonly #resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
 
   constructor(wasm: VtWasm, owner: GhosttyVt, cols: number, rows: number, config?: VtTerminalConfig) {
-    this.wasm = wasm;
+    this.#wasm = wasm;
     this.#owner = owner;
     this.#_cols = cols;
     this.#_rows = rows;
     this.#cellOwner = {
-      handle: () => this.handle,
+      handle: () => this.#handle,
       point: (row, col) => this.#writePoint(ABI.GhosttyPointTag.SCREEN, col, row),
       coordinate: () => this.#scratch + SCRATCH.slot,
       release: (cell) => void this.#trackedCells.delete(cell),
     };
     const fn = wasm.fn;
     this.#scratch = wasm.alloc(SCRATCH.size);
-    this.handle = wasm.newHandle((slot) => fn.ghostty_terminal_new(0, slot, cols, rows), "terminal");
-    owner.register(this.handle, this);
+    this.#handle = wasm.newHandle((slot) => fn.ghostty_terminal_new(0, slot, cols, rows), "terminal");
+    owner.register(this.#handle, this);
     this.#renderState = wasm.newHandle((slot) => fn.ghostty_render_state_new(0, slot), "render state");
     this.#rowIterator = wasm.newHandle((slot) => fn.ghostty_render_state_row_iterator_new(0, slot), "row iterator");
     this.#rowCells = wasm.newHandle((slot) => fn.ghostty_render_state_row_cells_new(0, slot), "row cells");
 
-    fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.WRITE_PTY, owner.writePtyCallback);
-    fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.DEVICE_ATTRIBUTES, owner.deviceAttributesCallback);
+    fn.ghostty_terminal_set(this.#handle, ABI.GhosttyTerminalOption.WRITE_PTY, owner.writePtyCallback);
+    fn.ghostty_terminal_set(this.#handle, ABI.GhosttyTerminalOption.DEVICE_ATTRIBUTES, owner.deviceAttributesCallback);
     this.#setMode(MODE_GRAPHEME_CLUSTER, false, true);
     this.#applyConfig(config);
     this.#writeMultiArgs();
@@ -821,15 +821,15 @@ export class VtTerminal {
     if (bytes.length === 0) return;
     if (bytes.length > this.#writeCap) {
       const cap = Math.max(bytes.length, 4096);
-      const buf = this.wasm.alloc(cap);
-      this.wasm.free(this.#writeBuf, this.#writeCap);
+      const buf = this.#wasm.alloc(cap);
+      this.#wasm.free(this.#writeBuf, this.#writeCap);
       this.#writeCap = cap;
       this.#writeBuf = buf;
     }
-    this.wasm.bytes().set(bytes, this.#writeBuf);
+    this.#wasm.bytes().set(bytes, this.#writeBuf);
     this.#stale = true;
     this.#changes++;
-    this.wasm.fn.ghostty_terminal_vt_write(this.handle, this.#writeBuf, bytes.length);
+    this.#wasm.fn.ghostty_terminal_vt_write(this.#handle, this.#writeBuf, bytes.length);
   }
 
   resize(cols: number, rows: number): void {
@@ -840,8 +840,8 @@ export class VtTerminal {
     this.#_rows = rows;
     this.#changes++;
     const cell = this.#owner.host?.cellSize();
-    this.wasm.fn.ghostty_terminal_resize(
-      this.handle, cols, rows,
+    this.#wasm.fn.ghostty_terminal_resize(
+      this.#handle, cols, rows,
       Math.round(cell?.width ?? 0), Math.round(cell?.height ?? 0),
     );
     // The render state's next update redraws every row; until then, nothing
@@ -871,16 +871,16 @@ export class VtTerminal {
   }
 
   free(): void {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     for (const cell of [...this.#trackedCells]) cell.free();
-    this.#owner.unregister(this.handle);
+    this.#owner.unregister(this.#handle);
     fn.ghostty_render_state_row_cells_free(this.#rowCells);
     fn.ghostty_render_state_row_iterator_free(this.#rowIterator);
     fn.ghostty_render_state_free(this.#renderState);
-    fn.ghostty_terminal_free(this.handle);
-    this.wasm.free(this.#writeBuf, this.#writeCap);
-    this.wasm.free(this.#scratch, SCRATCH.size);
-    this.handle = this.#renderState = this.#rowIterator = this.#rowCells = 0;
+    fn.ghostty_terminal_free(this.#handle);
+    this.#wasm.free(this.#writeBuf, this.#writeCap);
+    this.#wasm.free(this.#scratch, SCRATCH.size);
+    this.#handle = this.#renderState = this.#rowIterator = this.#rowCells = 0;
     this.#writeBuf = this.#writeCap = 0;
   }
 
@@ -907,8 +907,8 @@ export class VtTerminal {
   /// Ends a frame: what changed so far counts as painted, in the core's
   /// render state too.
   endFrame(): void {
-    if (this.#dirty === ABI.GhosttyRenderStateDirty.FALSE || !this.handle) return;
-    this.wasm.fn.ghostty_render_state_clean(this.#renderState);
+    if (this.#dirty === ABI.GhosttyRenderStateDirty.FALSE || !this.#handle) return;
+    this.#wasm.fn.ghostty_render_state_clean(this.#renderState);
     this.#dirty = ABI.GhosttyRenderStateDirty.FALSE;
     this.#rowDirty.fill(0);
   }
@@ -919,10 +919,10 @@ export class VtTerminal {
   /// outside the screen or once the terminal is freed. A view that holds the
   /// row already, as no update since has changed it, is left as it is.
   readRow(y: number, into: VtCells): boolean {
-    if (y < 0 || y >= this.#_rows || !this.handle) return false;
+    if (y < 0 || y >= this.#_rows || !this.#handle) return false;
     this.#sync();
     if (into.holds(this, false, y, this.#rowVersions[y])) return true;
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     const ok = ABI.GhosttyResult.SUCCESS;
     const V = LAYOUT.GhosttyCellsView.fields;
@@ -930,7 +930,7 @@ export class VtTerminal {
       into.drop();
       return false;
     }
-    let view = this.wasm.view();
+    let view = this.#wasm.view();
     const raw = view.getUint32(s + SCRATCH.cellsView + V.ptr, true);
     const len = view.getUint32(s + SCRATCH.cellsView + V.len, true);
     const cells = into.fill(this, false, y, this.#rowVersions[y], this.#_cols);
@@ -956,14 +956,14 @@ export class VtTerminal {
         const result = selected
           ? fn.ghostty_render_state_row_cells_get_multi(this.#rowCells, count, s + SCRATCH.cellKeys + first * 4, s + SCRATCH.cellValues + first * 4, s + SCRATCH.slot)
           : ABI.GhosttyResult.NO_VALUE;
-        view = this.wasm.view();
+        view = this.#wasm.view();
         const written = selected ? view.getUint32(s + SCRATCH.slot, true) : 0;
         if (wantStyle && written >= 1) style = this.#rememberStyle(styleId, view, s + SCRATCH.style);
         if (grapheme && selected) {
           // A cluster longer than the scratch holds reads again into a
           // buffer of its own.
           const cps = result === ok ? this.#scratchCodepoints() : this.#rowCellCluster();
-          view = this.wasm.view();
+          view = this.#wasm.view();
           if (cps && cps.length > 1) cell.cluster = String.fromCodePoint(...cps);
         }
       }
@@ -979,7 +979,7 @@ export class VtTerminal {
   /// history or once the terminal is freed. A view that holds the row
   /// already, read since the last update, is left as it is.
   readHistoryRow(offset: number, into: VtCells): boolean {
-    if (offset < 0 || !this.handle) return false;
+    if (offset < 0 || !this.#handle) return false;
     this.#sync();
     if (this.#historyGeneration !== this.#generation) {
       this.#historyRows = this.getScrollbackLength();
@@ -987,7 +987,7 @@ export class VtTerminal {
     }
     if (offset >= this.#historyRows) return false;
     if (into.holds(this, true, offset, this.#generation)) return true;
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     const ok = ABI.GhosttyResult.SUCCESS;
     const T = ABI.GhosttyCellContentTag;
@@ -999,11 +999,11 @@ export class VtTerminal {
         this.#blank(cell);
         continue;
       }
-      let view = this.wasm.view();
+      let view = this.#wasm.view();
       const styleId = this.#rawCell(cell, view.getUint32(s + SCRATCH.raw, true), view.getUint32(s + SCRATCH.raw + 4, true));
       let style = styleId === 0 ? -1 : this.#knownStyle(styleId);
       if (styleId !== 0 && style < 0 && fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, s + SCRATCH.style) === ok) {
-        view = this.wasm.view();
+        view = this.#wasm.view();
         style = this.#rememberStyle(styleId, view, s + SCRATCH.style);
       }
       if (style >= 0) this.#applyStyle(cell, style);
@@ -1020,12 +1020,12 @@ export class VtTerminal {
   /// Its shape and blinking are the widget's own options.
   getCursor(): { x: number; y: number; visible: boolean } {
     this.#sync();
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
-    fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.CURSOR_X, s + SCRATCH.slot);
-    fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.CURSOR_Y, s + SCRATCH.slot2);
+    fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.CURSOR_X, s + SCRATCH.slot);
+    fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.CURSOR_Y, s + SCRATCH.slot2);
     fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.CURSOR_VISIBLE, s + SCRATCH.rgb);
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const x = view.getUint16(s + SCRATCH.slot, true);
     const y = view.getUint16(s + SCRATCH.slot2, true);
     return { x, y, visible: view.getUint8(s + SCRATCH.rgb) !== 0 };
@@ -1053,17 +1053,17 @@ export class VtTerminal {
   getMode(mode: number, isAnsi = false): boolean {
     const ptr = this.#scratch + SCRATCH.mode;
     const F = LAYOUT.GhosttyTerminalModeConfig.fields;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     view.setUint16(ptr + F.mode, packMode(mode, isAnsi), true);
     view.setUint8(ptr + F.value, 0);
-    const result = this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.MODE, ptr);
-    return result === ABI.GhosttyResult.SUCCESS && this.wasm.view().getUint8(ptr + F.value) !== 0;
+    const result = this.#wasm.fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.MODE, ptr);
+    return result === ABI.GhosttyResult.SUCCESS && this.#wasm.view().getUint8(ptr + F.value) !== 0;
   }
 
   isAlternateScreen(): boolean {
     const ptr = this.#scratch + SCRATCH.slot;
-    this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.ACTIVE_SCREEN, ptr);
-    return this.wasm.view().getInt32(ptr, true) === ABI.GhosttyTerminalScreen.ALTERNATE;
+    this.#wasm.fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.ACTIVE_SCREEN, ptr);
+    return this.#wasm.view().getInt32(ptr, true) === ABI.GhosttyTerminalScreen.ALTERNATE;
   }
 
   hasBracketedPaste(): boolean {
@@ -1105,7 +1105,7 @@ export class VtTerminal {
   /// those rows and columns; a range past the last row stops there. `null`
   /// when the core cannot format it.
   plainText(range?: TextRange): string | null {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     let selection = 0;
     let formatter = 0;
@@ -1121,8 +1121,8 @@ export class VtTerminal {
       // several, so unwrapping is set; trimming is its default and is set
       // too, since a copy's text depends on it. A range narrows it to the
       // selection, which the formatter copies.
-      formatter = this.wasm.newHandle(
-        (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle),
+      formatter = this.#wasm.newHandle(
+        (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.#handle),
         "formatter",
       );
       if (!this.#setFormatterFlag(formatter, ABI.GhosttyFormatterOption.UNWRAP, true)) return null;
@@ -1132,12 +1132,12 @@ export class VtTerminal {
       }
       const result = fn.ghostty_formatter_format_alloc(formatter, 0, s + SCRATCH.slot, s + SCRATCH.slot2);
       if (result !== ABI.GhosttyResult.SUCCESS) return null;
-      const ptr = this.wasm.view().getUint32(s + SCRATCH.slot, true);
-      const len = this.wasm.view().getUint32(s + SCRATCH.slot2, true);
+      const ptr = this.#wasm.view().getUint32(s + SCRATCH.slot, true);
+      const len = this.#wasm.view().getUint32(s + SCRATCH.slot2, true);
       // Empty output is a success with no buffer.
       if (!ptr) return "";
       try {
-        return new TextDecoder().decode(this.wasm.bytes().subarray(ptr, ptr + len));
+        return new TextDecoder().decode(this.#wasm.bytes().subarray(ptr, ptr + len));
       } finally {
         fn.ghostty_free(0, ptr, len);
       }
@@ -1145,15 +1145,15 @@ export class VtTerminal {
       return null;
     } finally {
       if (formatter) fn.ghostty_formatter_free(formatter);
-      this.wasm.free(selection, LAYOUT.GhosttySelection.size);
+      this.#wasm.free(selection, LAYOUT.GhosttySelection.size);
     }
   }
 
   /// Set the bool `option` of `formatter`; false when the core refuses it.
   #setFormatterFlag(formatter: number, option: number, on: boolean): boolean {
     const ptr = this.#scratch + SCRATCH.slot;
-    this.wasm.view().setUint8(ptr, on ? 1 : 0);
-    return this.wasm.fn.ghostty_formatter_set(formatter, option, ptr) === ABI.GhosttyResult.SUCCESS;
+    this.#wasm.view().setUint8(ptr, on ? 1 : 0);
+    return this.#wasm.fn.ghostty_formatter_set(formatter, option, ptr) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// A `GhosttySelection` over `range`, its rows clamped to `last`, in a
@@ -1171,24 +1171,24 @@ export class VtTerminal {
           : this.#gridRef(ABI.GhosttyPointTag.ACTIVE, col(x), y - history);
       if (found) {
         const from = this.#scratch + SCRATCH.gridRef;
-        this.wasm.bytes().copyWithin(at, from, from + R.size);
+        this.#wasm.bytes().copyWithin(at, from, from + R.size);
       }
       return found;
     };
-    const sel = this.wasm.alloc(S.size);
+    const sel = this.#wasm.alloc(S.size);
     // Zeroed: not rectangular.
-    this.wasm.bytes().fill(0, sel, sel + S.size);
+    this.#wasm.bytes().fill(0, sel, sel + S.size);
     if (corner(range.startCol, range.startRow, sel + S.fields.start) && corner(range.endCol, range.endRow, sel + S.fields.end)) {
       return sel;
     }
-    this.wasm.free(sel, S.size);
+    this.#wasm.free(sel, S.size);
     return 0;
   }
 
   getScrollbackLength(): number {
     const ptr = this.#scratch + SCRATCH.slot;
-    this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.SCROLLBACK_ROWS, ptr);
-    return this.wasm.view().getUint32(ptr, true);
+    this.#wasm.fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.SCROLLBACK_ROWS, ptr);
+    return this.#wasm.view().getUint32(ptr, true);
   }
 
   /// Whether row `row` continues the row above it, the meaning xterm's
@@ -1205,12 +1205,12 @@ export class VtTerminal {
 
   #continuesRowAbove(tag: number, y: number): boolean {
     if (!this.#gridRef(tag, 0, y)) return false;
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     if (fn.ghostty_grid_ref_row(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ABI.GhosttyResult.SUCCESS) return false;
-    const raw = this.wasm.view().getBigUint64(s + SCRATCH.raw, true);
+    const raw = this.#wasm.view().getBigUint64(s + SCRATCH.raw, true);
     if (fn.ghostty_row_get(raw, ABI.GhosttyRowData.WRAP_CONTINUATION, s + SCRATCH.slot) !== ABI.GhosttyResult.SUCCESS) return false;
-    return this.wasm.view().getUint8(s + SCRATCH.slot) !== 0;
+    return this.#wasm.view().getUint8(s + SCRATCH.slot) !== 0;
   }
 
   getHyperlinkUri(row: number, col: number): string | null {
@@ -1227,7 +1227,7 @@ export class VtTerminal {
 
   /// A search of this terminal on the core's engine; see `VtSearch`.
   createSearch(): VtSearch {
-    return new VtSearch(this.wasm, { handle: () => this.handle, changes: () => this.#changes });
+    return new VtSearch(this.#wasm, { handle: () => this.#handle, changes: () => this.#changes });
   }
 
   /// Tracks the cell at SCREEN row `row` and column `col` of the screen
@@ -1235,11 +1235,11 @@ export class VtTerminal {
   /// terminal was freed. The core bounds-checks the point, so a negative row
   /// or column, written unsigned, is outside the screen too.
   trackCell(row: number, col: number): VtTrackedCell | null {
-    if (!this.handle) return null;
+    if (!this.#handle) return null;
     const point = this.#writePoint(ABI.GhosttyPointTag.SCREEN, col, row);
     const out = this.#scratch + SCRATCH.slot;
-    if (this.wasm.fn.ghostty_terminal_grid_ref_track(this.handle, point, out) !== ABI.GhosttyResult.SUCCESS) return null;
-    const cell = new VtTrackedCell(this.wasm, this.#cellOwner, this.wasm.view().getUint32(out, true));
+    if (this.#wasm.fn.ghostty_terminal_grid_ref_track(this.#handle, point, out) !== ABI.GhosttyResult.SUCCESS) return null;
+    const cell = new VtTrackedCell(this.#wasm, this.#cellOwner, this.#wasm.view().getUint32(out, true));
     this.#trackedCells.add(cell);
     return cell;
   }
@@ -1249,7 +1249,7 @@ export class VtTerminal {
   // ------------------------------------------------------------------
 
   queueReply(ptr: number, len: number): void {
-    const reply = this.wasm.bytes().slice(ptr, ptr + len);
+    const reply = this.#wasm.bytes().slice(ptr, ptr + len);
     if (isColorReport(reply) || isVersionReport(reply) || isKittyKeyboardReport(reply)) return;
     this.#replies.push(reply);
   }
@@ -1274,34 +1274,34 @@ export class VtTerminal {
   // ------------------------------------------------------------------
 
   #applyConfig(config?: VtTerminalConfig): void {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     const O = ABI.GhosttyTerminalOption;
     // A supplied byte budget replaces the line ceiling. Without one,
     // SIZE_MAX lifts the core's default byte cap so only lines limit history.
-    this.wasm.view().setUint32(s + SCRATCH.slot, config?.scrollbackMaxBytes ?? 0xffff_ffff, true);
-    fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_BYTES, s + SCRATCH.slot);
+    this.#wasm.view().setUint32(s + SCRATCH.slot, config?.scrollbackMaxBytes ?? 0xffff_ffff, true);
+    fn.ghostty_terminal_set(this.#handle, O.SCROLLBACK_MAX_BYTES, s + SCRATCH.slot);
     const lines = config?.scrollbackMaxBytes === undefined ? config?.scrollbackLimit ?? 10_000 : 0;
     if (lines > 0) {
-      this.wasm.view().setUint32(s + SCRATCH.slot, lines, true);
-      fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, s + SCRATCH.slot);
+      this.#wasm.view().setUint32(s + SCRATCH.slot, lines, true);
+      fn.ghostty_terminal_set(this.#handle, O.SCROLLBACK_MAX_LINES, s + SCRATCH.slot);
     } else {
-      fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, 0);
+      fn.ghostty_terminal_set(this.#handle, O.SCROLLBACK_MAX_LINES, 0);
     }
     this.#writeColors(config);
   }
 
   /// Writes the configured defaults, clearing any omitted override.
   #writeColors(config?: VtTerminalConfig): void {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     const O = ABI.GhosttyTerminalOption;
     const setColor = (option: number, rgb: number) => {
-      const view = this.wasm.view();
+      const view = this.#wasm.view();
       view.setUint8(s + SCRATCH.rgb, (rgb >> 16) & 0xff);
       view.setUint8(s + SCRATCH.rgb + 1, (rgb >> 8) & 0xff);
       view.setUint8(s + SCRATCH.rgb + 2, rgb & 0xff);
-      fn.ghostty_terminal_set(this.handle, option, s + SCRATCH.rgb);
+      fn.ghostty_terminal_set(this.#handle, option, s + SCRATCH.rgb);
     };
     setColor(O.COLOR_FOREGROUND, config?.fgColor ?? DEFAULT_FG);
     setColor(O.COLOR_BACKGROUND, config?.bgColor ?? DEFAULT_BG);
@@ -1309,23 +1309,23 @@ export class VtTerminal {
     // back, so on a live terminal a color the config omits takes
     // upstream's default rather than the one an earlier config wrote.
     if (config?.cursorColor !== undefined) setColor(O.COLOR_CURSOR, config.cursorColor);
-    else fn.ghostty_terminal_set(this.handle, O.COLOR_CURSOR, 0);
-    fn.ghostty_terminal_set(this.handle, O.COLOR_PALETTE, 0);
+    else fn.ghostty_terminal_set(this.#handle, O.COLOR_CURSOR, 0);
+    fn.ghostty_terminal_set(this.#handle, O.COLOR_PALETTE, 0);
     const overrides = config?.palette ?? [];
     if (overrides.some((c) => c !== undefined)) {
-      const palette = this.wasm.alloc(768);
+      const palette = this.#wasm.alloc(768);
       try {
-        fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.COLOR_PALETTE_DEFAULT, palette);
-        const bytes = this.wasm.bytes();
+        fn.ghostty_terminal_get(this.#handle, ABI.GhosttyTerminalData.COLOR_PALETTE_DEFAULT, palette);
+        const bytes = this.#wasm.bytes();
         overrides.slice(0, 16).forEach((rgb, i) => {
           if (rgb === undefined) return;
           bytes[palette + i * 3] = (rgb >> 16) & 0xff;
           bytes[palette + i * 3 + 1] = (rgb >> 8) & 0xff;
           bytes[palette + i * 3 + 2] = rgb & 0xff;
         });
-        fn.ghostty_terminal_set(this.handle, O.COLOR_PALETTE, palette);
+        fn.ghostty_terminal_set(this.#handle, O.COLOR_PALETTE, palette);
       } finally {
-        this.wasm.free(palette, 768);
+        this.#wasm.free(palette, 768);
       }
     }
   }
@@ -1333,20 +1333,20 @@ export class VtTerminal {
   #setMode(mode: number, ansi: boolean, value: boolean): void {
     const ptr = this.#scratch + SCRATCH.mode;
     const F = LAYOUT.GhosttyTerminalModeConfig.fields;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     view.setUint16(ptr + F.mode, packMode(mode, ansi), true);
     view.setUint8(ptr + F.value, value ? 1 : 0);
     // The reset default keeps it across a full reset (RIS); the mode
     // itself applies it now.
-    this.wasm.fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.MODE_DEFAULT, ptr);
-    this.wasm.fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.MODE, ptr);
+    this.#wasm.fn.ghostty_terminal_set(this.#handle, ABI.GhosttyTerminalOption.MODE_DEFAULT, ptr);
+    this.#wasm.fn.ghostty_terminal_set(this.#handle, ABI.GhosttyTerminalOption.MODE, ptr);
   }
 
   /// Writes the key and value arrays of the multi-get calls a row's read
   /// makes, which stay put: the row's raw cells and its cells handle, and a
   /// cell's style and cluster.
   #writeMultiArgs(): void {
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const s = this.#scratch;
     view.setInt32(s + SCRATCH.rowKeys, ABI.GhosttyRenderStateRowData.CELLS_RAW, true);
     view.setInt32(s + SCRATCH.rowKeys + 4, ABI.GhosttyRenderStateRowData.CELLS, true);
@@ -1367,15 +1367,15 @@ export class VtTerminal {
   /// screen changed after a resize, a switch of screens, new colours and
   /// output that scrolled.
   #sync(): void {
-    if (!this.#stale || !this.handle) return;
+    if (!this.#stale || !this.#handle) return;
     this.#stale = false;
     this.#generation++;
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     const D = ABI.GhosttyRenderStateDirty;
-    fn.ghostty_render_state_update(this.#renderState, this.handle);
+    fn.ghostty_render_state_update(this.#renderState, this.#handle);
     fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.DIRTY, s + SCRATCH.slot);
-    let dirty = this.wasm.view().getInt32(s + SCRATCH.slot, true);
+    let dirty = this.#wasm.view().getInt32(s + SCRATCH.slot, true);
     // Every cell's colours resolve against the defaults and the palette read
     // here, so a change to them repaints every row whatever the core says.
     if (this.#readColors()) dirty = D.FULL;
@@ -1388,12 +1388,12 @@ export class VtTerminal {
 
   /// Marks the rows the core's dirty iteration lists.
   #readDirtyRows(): void {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
-    this.wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
+    this.#wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
     fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
     while (fn.ghostty_render_state_row_iterator_next_dirty(this.#rowIterator, s + SCRATCH.dirtyY)) {
-      const y = this.wasm.view().getUint16(s + SCRATCH.dirtyY, true);
+      const y = this.#wasm.view().getUint16(s + SCRATCH.dirtyY, true);
       if (y >= this.#rowDirty.length) continue;
       this.#rowDirty[y] = 1;
       this.#rowVersions[y] = ++this.#versions;
@@ -1404,10 +1404,10 @@ export class VtTerminal {
   /// render state was updated since or the row is above it; rows are read
   /// top to bottom in a frame, so a frame steps it down the screen once.
   #seekRow(y: number): boolean {
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     if (this.#iteratorGeneration !== this.#generation || y < this.#iteratorRow) {
       const s = this.#scratch;
-      this.wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
+      this.#wasm.view().setUint32(s + SCRATCH.slot, this.#rowIterator, true);
       fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
       this.#iteratorGeneration = this.#generation;
       this.#iteratorRow = -1;
@@ -1510,7 +1510,7 @@ export class VtTerminal {
   /// Points the codepoint buffer of a cell's multi-get at the scratch room.
   #clearCodepoints(): void {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const cb = this.#scratch + SCRATCH.codepoints;
     view.setUint32(cb + B.ptr, this.#scratch + SCRATCH.graphemes, true);
     view.setUint32(cb + B.cap, GRAPHEME_CAP, true);
@@ -1520,7 +1520,7 @@ export class VtTerminal {
   /// The codepoints a cell's multi-get wrote to the scratch room.
   #scratchCodepoints(): number[] {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const len = Math.min(view.getUint32(this.#scratch + SCRATCH.codepoints + B.len, true), GRAPHEME_CAP);
     const cps: number[] = [];
     for (let i = 0; i < len; i++) cps.push(view.getUint32(this.#scratch + SCRATCH.graphemes + i * 4, true));
@@ -1533,12 +1533,12 @@ export class VtTerminal {
     const s = this.#scratch;
     const C = LAYOUT.GhosttyRenderStateColors;
     const ptr = s + SCRATCH.colors;
-    this.wasm.view().setUint32(ptr + C.fields.size, C.size, true);
-    this.wasm.fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.COLORS, ptr);
-    const view = this.wasm.view();
+    this.#wasm.view().setUint32(ptr + C.fields.size, C.size, true);
+    this.#wasm.fn.ghostty_render_state_get(this.#renderState, ABI.GhosttyRenderStateData.COLORS, ptr);
+    const view = this.#wasm.view();
     const bg = readRgb(view, ptr + C.fields.background);
     const fg = readRgb(view, ptr + C.fields.foreground);
-    const palette = this.wasm.bytes().subarray(ptr + C.fields.palette, ptr + C.fields.palette + 768);
+    const palette = this.#wasm.bytes().subarray(ptr + C.fields.palette, ptr + C.fields.palette + 768);
     let changed = bg !== this.#bg || fg !== this.#fg;
     for (let i = 0; i < 768 && !changed; i++) changed = palette[i] !== this.#palette[i];
     this.#bg = bg;
@@ -1551,13 +1551,13 @@ export class VtTerminal {
   /// outside the screen.
   #gridRef(tag: number, x: number, y: number): boolean {
     const point = this.#writePoint(tag, x, y);
-    return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, this.#scratch + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
+    return this.#wasm.fn.ghostty_terminal_grid_ref(this.#handle, point, this.#scratch + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// Writes a `GhosttyPoint` to the scratch area and returns its address; a
   /// point is passed by value, which wasm32 does by address.
   #writePoint(tag: number, x: number, y: number): number {
-    const view = this.wasm.view();
+    const view = this.#wasm.view();
     const point = this.#scratch + SCRATCH.point;
     const coord = point + LAYOUT.GhosttyPoint.fields.value;
     view.setInt32(point + LAYOUT.GhosttyPoint.fields.tag, tag, true);
@@ -1589,7 +1589,7 @@ export class VtTerminal {
     let want = GRAPHEME_CAP;
     for (let attempt = 0; attempt < 2; attempt++) {
       const cap = want;
-      const own = cap > GRAPHEME_CAP ? this.wasm.alloc(cap * 4) : 0;
+      const own = cap > GRAPHEME_CAP ? this.#wasm.alloc(cap * 4) : 0;
       const buf = own || this.#scratch + SCRATCH.graphemes;
       try {
         const [result, len] = read(buf, cap);
@@ -1598,12 +1598,12 @@ export class VtTerminal {
           continue;
         }
         if (result !== ABI.GhosttyResult.SUCCESS || len === 0) return null;
-        const view = this.wasm.view();
+        const view = this.#wasm.view();
         const cps: number[] = [];
         for (let i = 0; i < Math.min(len, cap); i++) cps.push(view.getUint32(buf + i * 4, true));
         return cps;
       } finally {
-        this.wasm.free(own, cap * 4);
+        this.#wasm.free(own, cap * 4);
       }
     }
     return null;
@@ -1614,14 +1614,14 @@ export class VtTerminal {
     const B = LAYOUT.GhosttyCodepointBuffer.fields;
     const cb = this.#scratch + SCRATCH.codepoints;
     return this.#cluster((buf, cap) => {
-      const view = this.wasm.view();
+      const view = this.#wasm.view();
       view.setUint32(cb + B.ptr, buf, true);
       view.setUint32(cb + B.cap, cap, true);
       view.setUint32(cb + B.len, 0, true);
-      const result = this.wasm.fn.ghostty_render_state_row_cells_get(
+      const result = this.#wasm.fn.ghostty_render_state_row_cells_get(
         this.#rowCells, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, cb,
       );
-      return [result, this.wasm.view().getUint32(cb + B.len, true)];
+      return [result, this.#wasm.view().getUint32(cb + B.len, true)];
     });
   }
 
@@ -1629,31 +1629,31 @@ export class VtTerminal {
   #gridGraphemes(): string | null {
     const s = this.#scratch;
     const cps = this.#cluster((buf, cap) => {
-      const result = this.wasm.fn.ghostty_grid_ref_graphemes(s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot);
-      return [result, this.wasm.view().getUint32(s + SCRATCH.slot, true)];
+      const result = this.#wasm.fn.ghostty_grid_ref_graphemes(s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot);
+      return [result, this.#wasm.view().getUint32(s + SCRATCH.slot, true)];
     });
     return cps ? String.fromCodePoint(...cps) : null;
   }
 
   #hyperlinkAt(tag: number, x: number, y: number): string | null {
     if (!this.#gridRef(tag, x, y)) return null;
-    const fn = this.wasm.fn;
+    const fn = this.#wasm.fn;
     const s = this.#scratch;
     let want = 2048;
     for (let attempt = 0; attempt < 2; attempt++) {
       const cap = want;
-      const buf = this.wasm.alloc(cap);
+      const buf = this.#wasm.alloc(cap);
       try {
         const result = fn.ghostty_grid_ref_hyperlink_uri(s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot);
-        const len = this.wasm.view().getUint32(s + SCRATCH.slot, true);
+        const len = this.#wasm.view().getUint32(s + SCRATCH.slot, true);
         if (result === ABI.GhosttyResult.OUT_OF_SPACE && len > cap) {
           want = len;
           continue;
         }
         if (result !== ABI.GhosttyResult.SUCCESS || len === 0) return null;
-        return new TextDecoder().decode(this.wasm.bytes().slice(buf, buf + len));
+        return new TextDecoder().decode(this.#wasm.bytes().slice(buf, buf + len));
       } finally {
-        this.wasm.free(buf, cap);
+        this.#wasm.free(buf, cap);
       }
     }
     return null;
