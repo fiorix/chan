@@ -394,8 +394,9 @@ fn a_reader_with_nothing_to_read_waits_for_output_before_it_waits_for_a_view() {
     let attached = attach_acked(&session, None);
     let progress = attached.output_progress().expect("lease");
     session.record_output(&[b'x'; 512]);
-    assert!(
-        session.pacing.would_hold(),
+    assert_eq!(
+        session.pacing.try_credit(PTY_READ_BYTES),
+        None,
         "the view is a full window behind"
     );
     let (asked_tx, asked_rx) = std::sync::mpsc::channel();

@@ -209,16 +209,29 @@ impl Pacing {
         })
     }
 
-    /// Whether a read now would wait for a view. Unlike [`Pacing::credit`]
-    /// this starts no view's clock: the clock measures a hold, and a reader
-    /// with nothing to read holds no program.
-    pub(super) fn would_hold(&self) -> bool {
+    /// The bytes a read may take now, at most `maximum`, or `None` when a
+    /// view would hold it: whether a view holds the read and how much it may
+    /// take are one decision, under one lock. Unlike [`Pacing::credit`] this
+    /// never waits and starts no view's clock: the clock measures a hold, and
+    /// a reader with nothing to read holds no program. A clock runs only
+    /// during a wait in [`Pacing::credit`], which ends with none running
+    /// unless credit is bypassed, so there is none here to expire.
+    pub(super) fn try_credit(&self, maximum: usize) -> Option<usize> {
         let state = self.state.lock().expect("terminal pacing poisoned");
-        !state.bypass
-            && state
-                .views
-                .values()
-                .any(|view| self.view_credit(view, state.seq, state.events) == Some(0))
+        if state.bypass {
+            return Some(maximum);
+        }
+        let mut credit = maximum;
+        for view in state.views.values() {
+            match self.view_credit(view, state.seq, state.events) {
+                None => {}
+                Some(0) => return None,
+                Some(remaining) => {
+                    credit = credit.min(usize::try_from(remaining).unwrap_or(usize::MAX));
+                }
+            }
+        }
+        Some(credit)
     }
 
     /// When the reader last stopped waiting for credit, in Unix milliseconds

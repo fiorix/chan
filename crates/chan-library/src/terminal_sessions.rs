@@ -6048,7 +6048,10 @@ impl Session {
     /// program has output pending it is not held, and a wait for credit
     /// would start the view's clock and mark the program's silence as a
     /// hold for the write queue. That byte is then admitted like any read,
-    /// so a view that has used its window still holds it.
+    /// so a view that has used its window still holds it. Such a reader
+    /// learns whether a view holds it and what it may read in one decision
+    /// that never waits, so a view that uses its credit after that cannot
+    /// hold it with nothing read; the read takes the credit it was given.
     fn paced_read(
         &self,
         reader: &mut (impl Read + ?Sized),
@@ -6059,18 +6062,19 @@ impl Session {
             #[cfg(any(test, feature = "test-util"))]
             fire_attach_seam(&self.id, AttachSeam::ReaderWaitingForProgress);
         };
-        if !polled && self.pacing.would_hold() {
+        if polled {
+            let credit = self.pacing.credit(buf.len(), on_wait);
+            return reader.read(&mut buf[..credit]);
+        }
+        let Some(credit) = self.pacing.try_credit(buf.len()) else {
             let read = reader.read(&mut buf[..1])?;
             if read > 0 {
                 self.pacing.credit(read, on_wait);
             }
             return Ok(read);
-        }
+        };
         #[cfg(any(test, feature = "test-util"))]
-        if !polled {
-            fire_attach_seam(&self.id, AttachSeam::ReaderFoundNoHold);
-        }
-        let credit = self.pacing.credit(buf.len(), on_wait);
+        fire_attach_seam(&self.id, AttachSeam::ReaderFoundNoHold);
         reader.read(&mut buf[..credit])
     }
 
