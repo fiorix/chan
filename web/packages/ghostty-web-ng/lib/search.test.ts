@@ -2519,6 +2519,31 @@ describe('the cost model', () => {
     expect(stepBudgetAfterRestart(term, search, 10_000)).toBe(SCAN_MS);
   });
 
+  test('a frame that starts with found results unplaced places them and scans no further', async () => {
+    // Ten matches a line, so a scan step finds more than one batch places.
+    const { term } = await create(paged(10, 300), COLS, 10, 60_000);
+    batchPerFrame();
+    const read = vi.mocked(VtSearch.prototype.readMatches);
+    const step = vi.mocked(VtSearch.prototype.step);
+    const search = searchOf(term);
+    search.find('needle');
+    let draining = 0;
+    for (let i = 0; search.state.partial; i++) {
+      if (i > 1000) throw new Error('search did not complete');
+      // Nothing runs the scan between frames, so the last read says what
+      // the next frame starts with.
+      const last = read.mock.results.at(-1)?.value;
+      const steps = step.mock.calls.length;
+      frame();
+      if (last && last.next < last.total) {
+        draining++;
+        expect(step.mock.calls.length, `frame ${i} scans with results unplaced`).toBe(steps);
+      }
+    }
+    expect(draining, 'the frames that start with results unplaced').toBeGreaterThan(1);
+    expect(search.state.total).toBe(3_000);
+  });
+
   test('small feeds of a complete scan that take long raise the check its next feed predicts', async () => {
     // 50,000 matches at 200 columns: with 4,700 rows more held a feed's
     // check is assumed at about 10.9 ms and a completing unit's at about
