@@ -7,7 +7,9 @@
 // and, when bytes were lost, the recovery suffix for the program's screen.
 // The core keeps the view's alternate screen while the program is on it, or
 // leaves it when the program did, with none of the modes the program turned
-// off while the socket was down.
+// off while the socket was down. A socket that ends inside such a replay
+// leaves the view part way through it, and the redial after it resumes from
+// there.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -55,6 +57,9 @@ const LOST_ALT_SUFFIX =
 const LOST_PLAIN_SUFFIX =
   "\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" +
   "\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
+/// What a dial that resumes no view gets while its program is on the
+/// alternate screen, ahead of the modes it has on.
+const ALT_SCREEN_ATTACH_PRELUDE = "\x1b[?1049h\x1b[2J\x1b[H";
 /// How long the stand-in waits for an acknowledgement before it looks again,
 /// and how many times it looks before it gives up on the view.
 const CREDIT_STEP_MS = 50;
@@ -99,19 +104,26 @@ async function viewOnTheAlternateScreen() {
 
 /// The socket ends with no exit before it, as a stall close or a network
 /// drop leaves it, and the tab redials after its backoff.
-async function redialed(socket: TerminalSocket) {
+async function redialed(socket: TerminalSocket, cursor = ATTACHED_AT + SHOWN.length) {
+  const next = await closedAndRedialed(socket);
+  expect(dialed(next), "the redial echoes the view's cursor and generation").toEqual({
+    session: SESSION, since: String(cursor), generation: String(GENERATION), ack: "1",
+  });
+  next.onopen?.();
+  return next;
+}
+
+async function closedAndRedialed(socket: TerminalSocket) {
   const before = TerminalSocket.all.length;
   socket.close();
   await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
   expect(TerminalSocket.all).toHaveLength(before + 1);
-  const next = TerminalSocket.all.at(-1)!;
-  const dial = new URL(next.url, "http://localhost").searchParams;
-  expect(
-    [dial.get("session"), dial.get("since"), dial.get("generation"), dial.get("ack")],
-    "the redial echoes the view's cursor and generation",
-  ).toEqual([SESSION, String(ATTACHED_AT + SHOWN.length), String(GENERATION), "1"]);
-  next.onopen?.();
-  return next;
+  return TerminalSocket.all.at(-1)!;
+}
+
+function dialed(socket: TerminalSocket) {
+  const dial = new URL(socket.url, "http://localhost").searchParams;
+  return { session: dial.get("session"), since: dial.get("since"), generation: dial.get("generation"), ack: dial.get("ack") };
 }
 
 function acks(socket: TerminalSocket) {
@@ -209,5 +221,198 @@ describe("a redial of the live session on the alternate screen", () => {
     expect(acks(next).at(-1), "the suffix is not a stream byte").toEqual({
       type: "ack", generation: GENERATION, seq: end,
     });
+  });
+});
+
+/// The cursor a redial of the alternate-screen fixture echoes.
+const VIEW_AT = ATTACHED_AT + SHOWN.length;
+/// A program redrawing one row of its alternate screen, a window's quarter.
+const REDRAWN = "\x1b[12;1Hredrawn ".repeat(ACK_WINDOW / 64);
+const MOUSE_OFF = "\x1b[?1000l";
+const AFTER_RESET = "\x1b[13;1Hafter the reset";
+
+/// What a program wrote after the view's cursor `at`, and what the server
+/// holds of it: its ring starts at `ringStart`, past `at` once bytes were
+/// lost. The program ends with every tracked mode off, on its alternate
+/// screen or not.
+type Program = { at: number; written: string; ringStart: number; alternate: boolean };
+type Answer = { frame: ReturnType<typeof session>; replay: string; after: string };
+
+/// What the server sends the dial `socket` made (`get_or_create_for_ws`,
+/// `attach_resuming_with_progress` and `send_attach_prelude`): a non-zero
+/// cursor the live generation proves gets the stream from that cursor, from
+/// the ring's start when the ring has moved past it with the recovery suffix
+/// after; any other dial gets the whole ring on the normal screen, or no
+/// replay and the attach prelude on the alternate one, and no mode, since
+/// none is on.
+function served(socket: TerminalSocket, program: Program): Answer {
+  expect(program.ringStart, "fixture: the stand-in's ring starts at or past the view").toBeGreaterThanOrEqual(program.at);
+  const { since, generation } = dialed(socket);
+  const end = program.at + program.written.length;
+  const from = (position: number) => program.written.slice(position - program.at);
+  const cursor = Number(since);
+  if (generation === String(GENERATION) && cursor > 0) {
+    const start = Math.max(cursor, program.ringStart);
+    const missed = Math.max(0, program.ringStart - cursor);
+    const suffix = missed === 0 ? "" : program.alternate ? LOST_ALT_SUFFIX : LOST_PLAIN_SUFFIX;
+    return { frame: session(end, missed, end - start), replay: from(start), after: suffix };
+  }
+  if (program.alternate) return { frame: session(end, 0, 0), replay: "", after: ALT_SCREEN_ATTACH_PRELUDE };
+  const ring = from(program.ringStart);
+  return { frame: session(end, program.ringStart, ring.length), replay: ring, after: "" };
+}
+
+/// Send `answer` on `socket`: the session frame, the replay in frames of a
+/// quarter window, what follows the replay, and `ready`. With `cutAfter` the
+/// socket stops once that many replay bytes are out, inside its replay.
+async function deliver(socket: TerminalSocket, answer: Answer, cutAfter?: number) {
+  await receive(socket, answer.frame);
+  const sent = cutAfter ?? answer.replay.length;
+  for (let at = 0; at < sent; at += ACK_WINDOW / 4) {
+    await output(socket, answer.replay.slice(at, Math.min(sent, at + ACK_WINDOW / 4)));
+  }
+  if (cutAfter !== undefined) return;
+  if (answer.after) await output(socket, answer.after);
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+}
+
+/// The socket ends inside its replay, and the tab dials again.
+async function redialedAfterCut(socket: TerminalSocket) {
+  const next = await closedAndRedialed(socket);
+  next.onopen?.();
+  return next;
+}
+
+function screen(term: Parameters<typeof ghosttyMode>[0]) {
+  return {
+    alternate: ghosttyAlternateScreen(term),
+    mode1000: ghosttyMode(term, 1000),
+    tracking: ghosttyMouseTracking(term),
+  };
+}
+
+/// A tab on the normal screen whose shell turned bracketed paste on.
+async function viewOnTheNormalScreen() {
+  const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+  const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  socket.onopen?.();
+  await receive(socket, session(ATTACHED_AT, 0, 0));
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  await output(socket, "\x1b[?2004h$ ");
+  expect(ghosttyAlternateScreen(term), "fixture: the normal screen").toBe(false);
+  expect(ghosttyMode(term, 2004), "fixture: the shell's bracketed paste").toBe(true);
+  return { term, socket, cursor: ATTACHED_AT + "\x1b[?2004h$ ".length };
+}
+
+describe("a redial after a socket ended inside a replay that continued the view", () => {
+  test("resumes from the byte the view parsed, inside a sequence, so the rest drops the mode", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    const program = { at: VIEW_AT, written: REDRAWN + MOUSE_OFF + AFTER_RESET, ringStart: VIEW_AT, alternate: true };
+    // The socket ends part way through the mouse reset.
+    const cut = REDRAWN.length + "\x1b[?10".length;
+    await deliver(second, served(second, program), cut);
+    expect(ghosttyMode(term, 1000), "fixture: the reset was not parsed").toBe(true);
+    const third = await redialedAfterCut(second);
+    await deliver(third, served(third, program));
+    expect(screen(term), "the program's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+    expect(ghosttyLineText(term, 0), "no attach prelude cleared the screen the view kept").toContain(KEPT);
+    expect(ghosttyLineText(term, 12), "the rest of the replay drew on it").toContain("after the reset");
+    expect(dialed(third), "the redial echoes the position the view parsed and the generation").toEqual({
+      session: SESSION, since: String(VIEW_AT + cut), generation: String(GENERATION), ack: "1",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: VIEW_AT + program.written.length });
+  });
+
+  test("whose rest the ring dropped gets the recovery suffix", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    const written = REDRAWN + MOUSE_OFF + AFTER_RESET;
+    const cut = REDRAWN.length / 2;
+    await deliver(second, served(second, { at: VIEW_AT, written, ringStart: VIEW_AT, alternate: true }), cut);
+    // While the tab redials, the ring moves past the mouse reset.
+    const program = { at: VIEW_AT, written, ringStart: VIEW_AT + REDRAWN.length + MOUSE_OFF.length, alternate: true };
+    const third = await redialedAfterCut(second);
+    const answer = served(third, program);
+    await deliver(third, answer);
+    expect(screen(term), "the program's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+    expect(ghosttyLineText(term, 0), "no attach prelude cleared the screen the view kept").toContain(KEPT);
+    expect(ghosttyLineText(term, 12), "the ring drew on it").toContain("after the reset");
+    expect(dialed(third), "the redial echoes the position the view parsed and the generation").toEqual({
+      session: SESSION, since: String(VIEW_AT + cut), generation: String(GENERATION), ack: "1",
+    });
+    expect(answer.frame.missed_bytes, "fixture: the bytes after the cut were lost").toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: VIEW_AT + written.length });
+  });
+
+  test("that missed bytes and ended before its suffix asks for them again, so the suffix comes", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    // The ring moved past the mouse reset while the socket was down.
+    const ring = REDRAWN + "\x1b[13;1Hring end";
+    const program = { at: VIEW_AT, written: MOUSE_OFF + ring, ringStart: VIEW_AT + MOUSE_OFF.length, alternate: true };
+    const lossy = served(second, program);
+    expect(lossy.frame.missed_bytes, "fixture: the reset was lost").toBe(MOUSE_OFF.length);
+    await deliver(second, lossy, REDRAWN.length / 2);
+    expect(ghosttyMode(term, 1000), "fixture: the suffix was not parsed").toBe(true);
+    const third = await redialedAfterCut(second);
+    await deliver(third, served(third, program));
+    expect(screen(term), "the program's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+    expect(ghosttyLineText(term, 0), "no attach prelude cleared the screen the view kept").toContain(KEPT);
+    expect(ghosttyLineText(term, 12), "the ring drew on it").toContain("ring end");
+    expect(dialed(third), "the redial echoes the cursor the lost bytes start at").toEqual({
+      session: SESSION, since: String(VIEW_AT), generation: String(GENERATION), ack: "1",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: VIEW_AT + program.written.length });
+  });
+
+  test("that missed bytes writes no line and no notice of them twice on the normal screen", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    const pasteOff = "\x1b[?2004l";
+    const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}\r\n`).join("");
+    const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
+    await deliver(second, served(second, program), lines.indexOf("line 21"));
+    expect(ghosttyMode(term, 2004), "fixture: the suffix was not parsed").toBe(true);
+    const third = await redialedAfterCut(second);
+    await deliver(third, served(third, program));
+    const buffer = term.buffer.normal;
+    const rows = Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+    const counts = Array.from({ length: 40 }, (_, i) => rows.filter((row) => row === `line ${i + 1}`).length);
+    expect(counts, "every ring line once").toEqual(Array(40).fill(1));
+    expect(rows.filter((row) => row.includes("terminal replay missed")), "one notice of the loss").toHaveLength(1);
+    expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+    expect(dialed(third).since, "the redial echoes the cursor the lost bytes start at").toBe(String(cursor));
+  });
+
+  test("of a recovery on the live socket resumes from the byte the view parsed", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const program = { at: VIEW_AT, written: REDRAWN + MOUSE_OFF + AFTER_RESET, ringStart: VIEW_AT, alternate: true };
+    // The server recovers the socket's stream: a session frame of the same
+    // session and generation, and the raw delta from the socket's cursor.
+    const recovery = {
+      frame: session(VIEW_AT + program.written.length, 0, program.written.length), replay: program.written, after: "",
+    };
+    const cut = REDRAWN.length + "\x1b[?10".length;
+    await deliver(socket, recovery, cut);
+    expect(ghosttyMode(term, 1000), "fixture: the reset was not parsed").toBe(true);
+    const next = await redialedAfterCut(socket);
+    await deliver(next, served(next, program));
+    expect(screen(term), "the program's alternate screen with no mouse tracking").toEqual({
+      alternate: true, mode1000: false, tracking: false,
+    });
+    expect(ghosttyLineText(term, 0), "no attach prelude cleared the screen the view kept").toContain(KEPT);
+    expect(ghosttyLineText(term, 12), "the rest of the delta drew on it").toContain("after the reset");
+    expect(dialed(next).since, "the redial echoes the position the view parsed").toBe(String(VIEW_AT + cut));
   });
 });
