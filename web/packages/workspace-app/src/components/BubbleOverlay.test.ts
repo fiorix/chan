@@ -758,10 +758,52 @@ describe("a link in a survey's body", () => {
     const card = await linkedSurvey(`Read [the notes](${URL}) or [the other](${other}).`);
     await clickOn(bodyLink(card, 0));
     expect(dropDowns(), "the first link's drop-down").toEqual([[["OPEN", URL]]]);
+    const first = document.querySelector(".md-bubble");
     await clickOn(bodyLink(card, 0));
     expect(dropDowns(), "a second click keeps it").toEqual([[["OPEN", URL]]]);
+    expect(document.querySelector(".md-bubble"), "the same drop-down, not one shown again").toBe(first);
     await clickOn(bodyLink(card, 1));
     expect(dropDowns(), "a click on the other link moves it there").toEqual([[["OPEN", other]]]);
+  });
+
+  test("Cmd with a click on a link whose drop-down is open opens it once and closes the drop-down", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    await clickOn(bodyLink(card), { metaKey: true });
+    expect(open, "the modified click opens the URL once").toHaveBeenCalledTimes(1);
+    expect(dropDowns(), "and closes the drop-down").toEqual([]);
+  });
+
+  test("Enter while an input method composes leaves the drop-down open and opens nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    keyAt(document.activeElement ?? card, "Enter", { isComposing: true });
+    await settle();
+    expect(open, "a composing Enter is the input method's").not.toHaveBeenCalled();
+    expect(dropDowns(), "the drop-down stays").toEqual([[["OPEN", URL]]]);
+  });
+
+  // Focus can reach a body link outside the focused pane (a script,
+  // assistive technology), and Enter on it makes the engine's click with no
+  // press that would focus the pane first.
+  test("a click on a body link while the survey does not own the keyboard is cancelled and shows nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    layout.nodes.other = { kind: "leaf", id: "other", tabs: [terminalTab({ id: "t2" })], activeTabId: "t2" };
+    setActivePane("other");
+    await settle();
+    const link = bodyLink(card);
+    link.focus();
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 0 });
+    link.dispatchEvent(click);
+    await settle();
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "no drop-down where the survey does not own the keyboard").toEqual([]);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
   });
 
   test("Escape with the drop-down open closes it and answers nothing; a second Escape dismisses the survey", async () => {
