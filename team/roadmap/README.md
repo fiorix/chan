@@ -86,7 +86,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [the Windows claim's installed readings][winclaimread] | kit ready | measure |
 | [the TLS rows' Windows readings][tlswin] | kit ready | measure |
-| [the wake fix unread on macOS][wakemac] | read in part | measure |
+| [the wake fix unread on macOS][wakemac] | read | closed |
 
 ### v0.137.0
 
