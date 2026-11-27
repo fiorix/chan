@@ -2161,6 +2161,41 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(3, 0)]);
   });
 
+  // A narrowing resize while the alternate screen shows reflows the primary
+  // screen: the set-aside pair's start, the last cells of a row still
+  // marked wrapped, moves to the next row, and its end stays on the row
+  // above.
+  test('a set-aside active match that a resize leaves ending on a row above its start is lost at the switch back', async () => {
+    const { term } = await create(`needle 0\r\nr1\r\n${'x'.repeat(37)}needle\r\nneedle 4\r\nr5`);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(2, 37, 3, 2)]);
+    const start = term.core!.trackCell(2, 37)!;
+    const end = term.core!.trackCell(3, 2)!;
+    term.write('\x1b[4;6r\x1b[6;1H\n\x1b[?1049h');
+    settle(search);
+    term.resize(37, 6);
+    settle(search);
+    term.write('\x1b[?1049l');
+    const moved = { start: start.point(), end: end.point() };
+    start.free();
+    end.free();
+    expect(moved, 'not exercised: the core no longer reflows the pair to end on a row above its start here; ' +
+      'after a core update, find a resize that does, or this case guards nothing').toEqual({
+      start: { row: 3, col: 0 }, end: { row: 2, col: 2 },
+    });
+    expect(active(term), 'find shows no active match at the switch back').toBeUndefined();
+    expect(activeText(term), 'Copy reads nothing of it').toBeUndefined();
+    search.step('needle', 'older');
+    expect(active(term), 'older from no active match lands on the newest').toEqual([range(3, 3)]);
+    expect(activeText(term)).toBe('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 2, partial: false });
+    expect(active(term)).toEqual([range(3, 3)]);
+  });
+
   test('a predicted expensive feed restarts the scan and preserves the kept match', async () => {
     const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(20_000), 200, 5, 60_000);
     const search = searchOf(term);
