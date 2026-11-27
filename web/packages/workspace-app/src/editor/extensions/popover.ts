@@ -12,6 +12,20 @@
 // host element in the editor, which neither of those offer. The
 // helper consolidates viewport placement so each picker shares it.
 
+/// The box `host` is drawn in. An image map's area has no box of its own
+/// (an engine lays out none for it, so its rect is all zeros); it is drawn
+/// in the image whose `usemap` names its map, which anchors the popover in
+/// its place.
+function anchorBox(host: Element): DOMRect {
+  if (host instanceof HTMLAreaElement) {
+    const map = host.closest("map");
+    const names = [map?.name, map?.id].filter(Boolean).map((name) => `#${name}`);
+    const image = [...host.ownerDocument.images].find((img) => names.includes(img.getAttribute("usemap") ?? ""));
+    if (image) return image.getBoundingClientRect();
+  }
+  return host.getBoundingClientRect();
+}
+
 /// Position `popover` relative to `host`, preferring below.
 ///
 /// Call AFTER `popover` is appended to `document.body` and has
@@ -27,7 +41,7 @@ export function positionPopover(host: Element, popover: HTMLElement): void {
   const popH = popover.offsetHeight || 200;
   const popW = popover.offsetWidth || 320;
 
-  const hostRect = host.getBoundingClientRect();
+  const hostRect = anchorBox(host);
   const viewportH =
     typeof window !== "undefined" && window.visualViewport
       ? window.visualViewport.height
