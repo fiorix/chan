@@ -245,6 +245,18 @@ function terminalArea(target: HTMLElement): HTMLElement {
   return target.querySelector<HTMLElement>(".terminal-host")!;
 }
 
+type TabStop = { attribute: string | null; tabIndex: number };
+
+/// The terminal's area and its one input as a Tab walk reads them: by the
+/// tabindex attribute and by `tabIndex`.
+function tabStops(target: HTMLElement): { host: TabStop; input: TabStop } {
+  const host = terminalArea(target);
+  const inputs = host.querySelectorAll("textarea");
+  expect(inputs, "one terminal input in its area").toHaveLength(1);
+  const stop = (el: HTMLElement): TabStop => ({ attribute: el.getAttribute("tabindex"), tabIndex: el.tabIndex });
+  return { host: stop(host), input: stop(inputs[0]!) };
+}
+
 /// The ResizeObservers watching the terminal's area: start() wires one per
 /// terminal it opens.
 function areaWatchers(p: Page, target: HTMLElement): number {
@@ -645,6 +657,54 @@ describe("a terminal whose view fails after the core loads", () => {
     expect(loadError(target), "the error is gone").toBeNull();
     expect(terminalArea(target).querySelectorAll("canvas"), "one terminal in its area").toHaveLength(1);
     expect(areaWatchers(page, target), "wired once").toBe(1);
+    expect(takeShownLoadFailures(), "one error shown").toBe(1);
+  });
+
+  test("Retry in a pane that is no longer the active one opens the new terminal out of the Tab order", async () => {
+    serveCore();
+    page = await openPage();
+    // As above: the area watcher refuses the host once, after the first
+    // widget opened in it.
+    const Watcher = globalThis.ResizeObserver;
+    let refused = 0;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class extends Watcher {
+        observe(target: Element) {
+          if (refused === 0 && target instanceof HTMLElement && target.classList.contains("terminal-host")) {
+            refused += 1;
+            throw new Error("the area watcher refused the host");
+          }
+          super.observe(target);
+        }
+      },
+    );
+    const [tab] = page.harness.seatTerminals([page.harness.terminalTab()]);
+    const { target, props } = page.place(tab!, { active: true, focused: true });
+    const error = await shownLoadError(target);
+    expect(refused, "the first terminal opened and its wiring failed once").toBe(1);
+    expect(terminalArea(target).getAttribute("tabindex"), "the terminal that failed left its area in the Tab order")
+      .toBe("0");
+
+    // Another pane becomes the active one while the error is shown, and the
+    // error's Retry, which stays in the Tab order, is pressed from the
+    // keyboard there.
+    props.focused = false;
+    page.svelte.flushSync();
+    action(error, "Retry").click();
+    await vi.waitFor(() => expect(page!.harness.TerminalSocket.all, "the retry dialed its PTY").toHaveLength(1));
+    expect(loadError(target), "the error is gone").toBeNull();
+    expect(tabStops(target), "the new terminal, in a pane that is not active, is out of the Tab order").toEqual({
+      host: { attribute: "-1", tabIndex: -1 },
+      input: { attribute: "-1", tabIndex: -1 },
+    });
+
+    props.focused = true;
+    page.svelte.flushSync();
+    expect(tabStops(target), "its pane made active again puts the new terminal in the Tab order").toEqual({
+      host: { attribute: "0", tabIndex: 0 },
+      input: { attribute: "0", tabIndex: 0 },
+    });
     expect(takeShownLoadFailures(), "one error shown").toBe(1);
   });
 });
