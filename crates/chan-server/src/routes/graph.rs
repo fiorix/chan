@@ -4454,6 +4454,54 @@ mod tests {
         assert_eq!(backlinks_answers(&app).await, backlinks_pinned());
     }
 
+    // Over the listing cap, and with the directories-only walk over its
+    // bound too, each target's backlinks are the ones pinned under the cap.
+    // A plain link to a file the index does not hold names it by its stored
+    // spelling and needs no file set to land; a bare wikilink to a file in
+    // the linking note's folder, below it or in its parent, the `.txt` form
+    // of an extensionless link, and an exact spelling that comes before an
+    // indexed `.md` form each need the files on disk.
+    #[tokio::test]
+    async fn backlinks_over_the_listing_cap_are_the_answers_under_it() {
+        let app = backlinks_route_app();
+        let workspace = backlinks_fixture_read(&app).await;
+        let limit = over_the_listing_cap(&workspace);
+        let over = backlinks_answers(&app).await;
+        let directories = super::tree_walks::lower_directory_walk(workspace.root(), 1);
+        assert_eq!(
+            walk_directories(&workspace, 1),
+            None,
+            "fixture: the directories are not over the lowered bound"
+        );
+        let over_both = backlinks_answers(&app).await;
+        drop(directories);
+        drop(limit);
+
+        let pinned = backlinks_pinned();
+        let legs = [
+            ("over the cap", over),
+            ("with the directories over the cap too", over_both),
+        ];
+        let counts = |answers: &std::collections::BTreeMap<String, Vec<Backlink>>| {
+            answers
+                .iter()
+                .map(|(target, answer)| (target.clone(), answer.len()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let counted: std::collections::BTreeMap<_, _> = legs
+            .iter()
+            .map(|(when, answers)| (*when, counts(answers)))
+            .collect();
+        let expected: std::collections::BTreeMap<_, _> = legs
+            .iter()
+            .map(|(when, _)| (*when, counts(&pinned)))
+            .collect();
+        assert_eq!(counted, expected, "the backlinks per target");
+        for (when, answers) in legs {
+            assert_eq!(answers, pinned, "{when}");
+        }
+    }
+
     // Over the listing cap one graph load reads each node's class at most
     // once, and looks up on disk only the link targets the walks cannot
     // answer for. The tree layer merges every walked folder and joins each
