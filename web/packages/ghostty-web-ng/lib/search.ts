@@ -233,10 +233,12 @@ export class SearchOwner {
       this.#highlightActive();
       if (kind === 'resize' && this.#keptOnScreen) this.#viewport.reveal(range.startRow);
     } else {
-      const lost = this.#kept !== null;
       this.#forget();
       if (switched && !alternate) this.#unpark();
-      if (switched || kind === 'resize' || lost) this.#waiting = this.#waiting.filter(step => step.newest);
+      // A press waiting on a match a write loses, by pruning or by leaving
+      // its end before its start, applies from no active match, as one that
+      // waited its second does.
+      if (switched || kind === 'resize') this.#waiting = this.#waiting.filter(step => step.newest);
     }
     this.#schedule();
     this.#publish();
