@@ -1947,11 +1947,13 @@
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         // The screen the program had at the replay's first byte, which the
         // server names on an attach that reconciles a loss, when the view
-        // takes the replay from that byte. A replay that repeats bytes the
-        // view parsed starts where those bytes left the view, on the screen
-        // it already shows, so it gets no switch.
+        // missed the bytes before that byte. A replay that starts at or
+        // before the byte the view parsed goes on from the view's own
+        // parser, on the screen those bytes left it: it gets no switch,
+        // which would also end a sequence the view holds there, such as a
+        // switch split across two reads that the replay finishes.
         const replayScreen =
-          continuingReplay === null || continuingReplay.parsed <= continuingReplay.start
+          continuingReplay === null || continuingReplay.parsed < continuingReplay.start
             ? replayScreenOf(frame.replay_screen)
             : null;
         screenBeforeReplay = resetBeforeReplay ? replayScreen : null;

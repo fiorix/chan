@@ -818,6 +818,30 @@ describe("a reconciling answer that names its replay's start screen", () => {
     expect(dialed(next).since, "the cursor counts no switch").toBe(String(end));
   });
 
+  test("a re-ask whose ring starts at the byte the view parsed, inside a switch split across reads, writes no switch", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    // A lossy answer on the program's alternate screen, cut where two reads
+    // split the program's exit: the view's core holds its first half.
+    const ring = "\x1b[5;1Hframe\x1b[?1049lafter the switch\r\n$ ";
+    const lost = 40;
+    const start = VIEW_AT + lost;
+    const end = start + ring.length;
+    const cut = ring.indexOf("\x1b[?1049l") + "\x1b[?10".length;
+    await deliver(second, { frame: session(end, lost, ring.length, "alternate"), replay: ring, after: LOST_PLAIN_SUFFIX }, cut);
+    expect(ghosttyAlternateScreen(term), "fixture: the exit's first half held").toBe(true);
+    // The ring has moved to start at the byte the view parsed up to; the
+    // server reads the carried exit as made there.
+    const third = await redialedAfterCut(second);
+    expect(dialed(third).since, "fixture: a re-ask from the loss").toBe(String(VIEW_AT));
+    const rest = ring.slice(cut);
+    await deliver(third, { frame: session(end, start + cut - VIEW_AT, rest.length, "normal"), replay: rest, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the exit the view's core finished").toBe(false);
+    const normal = rows(term.buffer.normal);
+    expect(normal, "the tail on the normal screen").toContain("after the switch");
+    expect(normal.filter((row) => row.includes("49l")), "no half of the exit printed as text").toEqual([]);
+  });
+
   test("a recovery whose loss is shorter than the switch moves neither the cursor nor the replay position", async () => {
     const { term, socket } = await viewOnTheAlternateScreen();
     // The program left its alternate screen: one byte past that exit, the
