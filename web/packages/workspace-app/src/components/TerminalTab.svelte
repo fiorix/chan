@@ -1719,7 +1719,10 @@
         // Advance the server byte cursor only for LIVE output: replay chunks
         // (between the `session` and `ready` frames) reconstruct history up to
         // the prelude `seq` we already adopted, so counting them would double.
-        if (!attachReplayActive) receivedSeq += bytes.length;
+        // Bytes ahead of this dial's first session frame (a stale
+        // generation's reset) are no stream bytes either: a socket that ends
+        // before that frame leaves the cursor where the view's stream is.
+        if (dialSawSession && !attachReplayActive) receivedSeq += bytes.length;
         let written = bytes;
         const replay = attachReplayActive ? continuingReplay : null;
         if (replay) {

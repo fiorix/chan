@@ -707,3 +707,58 @@ describe("a redial whose answer does not continue the view", () => {
     expect(ghosttyMode(term, 1000), "the continuing answer keeps the program's mouse tracking").toBe(true);
   });
 });
+
+describe("bytes ahead of a dial's session frame", () => {
+  /// The socket ends before its session frame, and the tab dials again
+  /// after the backoff, doubled since no frame proved the session.
+  async function redialedBeforeItsFrame(socket: TerminalSocket) {
+    const before = TerminalSocket.all.length;
+    socket.close();
+    await vi.advanceTimersByTimeAsync(2 * WS_RECONNECT_BACKOFF_MIN_MS);
+    expect(TerminalSocket.all).toHaveLength(before + 1);
+    const next = TerminalSocket.all.at(-1)!;
+    next.onopen?.();
+    return next;
+  }
+
+  function normalRows(term: Parameters<typeof ghosttyMode>[0]) {
+    const buffer = term.buffer.normal;
+    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+  }
+
+  test("are no stream bytes: a redial cut after them echoes the view's cursor, so its replay keeps every ring byte and the suffix", async () => {
+    const { term, socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    // Bytes ahead of the session frame, here a normal-screen switch, and the
+    // socket ends before the frame.
+    const ahead = "\x18\x1b7\x1b[?1049;1047;47l";
+    await output(second, ahead);
+    const third = await redialedBeforeItsFrame(second);
+    expect(dialed(third), "the redial echoes the view's cursor and generation").toEqual({
+      session: SESSION, since: String(cursor), generation: String(GENERATION), ack: "1",
+    });
+    // The shell turned bracketed paste off and printed, and the ring moved
+    // past the reset: a loss shorter than the bytes ahead of the frame.
+    const pasteOff = "\x1b[?2004l";
+    const lines = "012\r\n" + Array.from({ length: 8 }, (_, i) => `line ${i + 1}\r\n`).join("");
+    const program = { at: cursor, written: pasteOff + lines, ringStart: cursor + pasteOff.length, alternate: false };
+    expect(pasteOff.length, "fixture: the loss is shorter than the bytes ahead").toBeLessThan(ahead.length);
+    await deliver(third, served(third, program));
+    expect(ghosttyMode(term, 2004), "no bracketed paste whose reset was lost").toBe(false);
+    expect(normalRows(term), "the ring's first line").toContain("012");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: cursor + program.written.length });
+  });
+
+  test("a stale generation's reset is no stream byte: a redial cut after it echoes the cursor the dial before it echoed", async () => {
+    const { socket, cursor } = await viewOnTheNormalScreen();
+    const second = await redialed(socket, cursor);
+    // The session restarted while the socket was down: its reset comes ahead
+    // of the new life's session frame, and the socket ends between the two.
+    await output(second, "\x1bc");
+    const third = await redialedBeforeItsFrame(second);
+    expect(dialed(third), "the redial echoes the same cursor and generation").toEqual({
+      session: SESSION, since: String(cursor), generation: String(GENERATION), ack: "1",
+    });
+  });
+});
