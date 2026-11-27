@@ -98,7 +98,7 @@ const COUNT = `(() => {
   return { total, opaque, ink, bg: [br, bgg, bb],
     quarters: opaque, width: c.width, height: c.height,
     scaleX: t.a, scaleY: t.d, ratio: window.devicePixelRatio,
-    visibility: document.visibilityState, focused: document.hasFocus() });
+    visibility: document.visibilityState, focused: document.hasFocus() };
 })()`;
 const MEASURE = COUNT;
 // Reset and measure in one synchronous expression: the frame loop paints
