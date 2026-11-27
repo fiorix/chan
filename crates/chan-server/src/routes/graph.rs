@@ -38,7 +38,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
     normalize_graph_edges, resolve_link_target as resolve_link_dst, CocomoSummary, EdgeKind,
-    FileClass, PathClass, PathPermission, ReportFileBucket, ReportFileStats, WorkspacePath,
+    FileClass, LinkSpellings, PathClass, PathPermission, ReportFileBucket, ReportFileStats,
+    WorkspacePath,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2848,33 +2849,22 @@ where
 {
     let graph = workspace.graph()?;
 
-    // chan-workspace stores the verbatim authored target on each link
-    // edge ("./img.png", "attachments/pic.png", "../foo/x.md"), so
-    // its SQL backlinks(dst=?) query misses every source-relative
-    // reference. We mirror api_graph's resolution: walk all
-    // outgoing edges, resolve link dsts against the workspace's file
-    // set, then keep the ones that land on `path`. Slightly more
-    // expensive than the SQL filter, but on the same order as the
-    // graph load the inspector just ran.
+    // The index stores a link's target normalized by its spelling alone
+    // (a wikilink made workspace-rooted, a Markdown link joined to its
+    // note's folder), and resolution can still move it: a
+    // source-relative wikilink, an extensionless one, a percent-encoded
+    // one. So the SQL backlinks(dst=?) query would miss links. Every
+    // link of every indexed file is resolved as a graph load resolves
+    // it, against the indexed files and every file the whole-tree
+    // listing lists, and kept when it lands on `path`. Neither set is
+    // built: a link none of whose spellings is `path` is skipped
+    // unread, and for the others each spelling up to `path` is looked
+    // up, in the index first and then on the disk, once per call. The
+    // answer is the one a complete listing gives, under the listing cap
+    // or over it.
     let files = graph.files()?;
-    // Same resolver universe as `api_graph`: graph files + every
-    // regular on-disk file. Without this, `[link](LICENSE)` from a
-    // README would not show up in LICENSE's backlinks because the
-    // resolver couldn't tell that "LICENSE" was a real file. Over the
-    // listing cap, or when the walk fails, the graph files stand alone.
-    let disk_files: std::collections::BTreeSet<String> =
-        match workspace.list_tree_filtered_unified() {
-            Ok(entries) => entries
-                .into_iter()
-                .filter(|e| !e.is_dir)
-                .map(|e| e.path)
-                .collect(),
-            Err(_) => std::collections::BTreeSet::new(),
-        };
-    let mut file_set: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
-    for f in &disk_files {
-        file_set.insert(f.as_str());
-    }
+    let indexed: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let mut listed = workspace.listed_files();
 
     let mut out: Vec<ApiBacklinkEdge> = Vec::new();
     for f in &files {
@@ -2883,11 +2873,13 @@ where
             if !matches!(e.kind, EdgeKind::Link) {
                 continue;
             }
-            let resolved = resolve_link_dst(&e.src, &e.dst, &file_set);
-            if resolved == path {
+            let lands = LinkSpellings::new(&e.src, &e.dst).resolves_to(path, |spelling| {
+                indexed.contains(spelling) || listed.lists(spelling)
+            });
+            if lands {
                 let edge = ApiBacklinkEdge {
                     src: e.src,
-                    dst: resolved,
+                    dst: path.to_string(),
                     kind: edge_kind_tag(e.kind),
                     anchor: e.anchor,
                 };
@@ -4149,12 +4141,11 @@ mod tests {
     /// through the symlinked `alias` before `notes/alias/leaf`) and
     /// `[[notes/sub]]` (the folder before the note `notes/sub.md`).
     ///
-    /// Two of the differences the per-target lookup's doc comment names
-    /// are not made here, as no test can count on them: a wrong-case
-    /// spelling on a case-folding volume (`[[license]]`, which the walk's
-    /// set holds no file for and a stat there finds), and a file inside a
-    /// mount point inside the root (which the walk does not descend into
-    /// and a stat finds; a mount needs privileges).
+    /// Two things the walk leaves out are not made here, as no test of the
+    /// route can count on them: a wrong-case spelling on a case-folding
+    /// volume (`[[license]]`, which a stat there finds) and a file below a
+    /// folder on another device (a mount needs privileges). The workspace's
+    /// own tests of `ListedFiles` read both.
     fn backlinks_route_app() -> GraphRouteApp {
         let cfg = tempfile::TempDir::new().unwrap();
         let outer = tempfile::TempDir::new().unwrap();
@@ -4581,6 +4572,50 @@ mod tests {
         assert_eq!(walked(1), none, "a graph load's whole-tree listings");
         assert_eq!(walked(2), none, "a graph load's directories-only walks");
         assert_eq!(walked(0), none, "the workspace's whole-tree walks");
+    }
+
+    // A backlinks call reads from the disk only the spellings that decide
+    // whether a link lands on its path, each once, in either form of the
+    // route. A link none of whose spellings is the path reads nothing; a
+    // spelling the index holds is not read; the spellings before the path
+    // are read, and none after it once the path names no file and is not
+    // the link's decoded target. `LICENSE` is spelled by two links, and
+    // read once.
+    #[tokio::test]
+    async fn a_backlinks_call_reads_only_the_spellings_that_decide() {
+        use chan_workspace::workspace::listing_limit_test_hooks::listed_file_reads;
+
+        let app = backlinks_route_app();
+        let workspace = backlinks_fixture_read(&app).await;
+        let mut reads = std::collections::BTreeMap::new();
+        for target in ["LICENSE", "notes/sub/up.log", "docs/leaf.md"] {
+            for form in ["", "?stream=1"] {
+                let before = listed_file_reads(&workspace);
+                graph_route_body(&app, &format!("/api/backlinks/{target}{form}")).await;
+                let read: std::collections::BTreeMap<String, usize> = listed_file_reads(&workspace)
+                    .into_iter()
+                    .map(|(path, n)| {
+                        let earlier = before.get(&path).copied().unwrap_or(0);
+                        (path, n - earlier)
+                    })
+                    .filter(|(_, n)| *n > 0)
+                    .collect();
+                reads.insert((target, form), read);
+            }
+        }
+        let expected = |paths: &[&str]| -> std::collections::BTreeMap<String, usize> {
+            paths.iter().map(|path| (path.to_string(), 1)).collect()
+        };
+        let mut pinned = std::collections::BTreeMap::new();
+        for form in ["", "?stream=1"] {
+            pinned.insert(("LICENSE", form), expected(&["LICENSE"]));
+            pinned.insert(
+                ("notes/sub/up.log", form),
+                expected(&["notes/sub/up.log", "up.log", "up.log.md", "up.log.txt"]),
+            );
+            pinned.insert(("docs/leaf.md", form), expected(&["docs", "docs/leaf"]));
+        }
+        assert_eq!(reads, pinned);
     }
 
     // Over the listing cap one graph load reads each node's class at most
