@@ -1505,6 +1505,61 @@ async fn a_redial_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_past_a_lost_full_reset_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(SCREEN_RING, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // While the socket is down the program resets the terminal, as
+    // `reset` does, which leaves the alternate screen and turns every mode
+    // off; it writes past the ring and exits, and the shell prints its
+    // prompt. The ring moves past the reset, so the replay holds
+    // normal-screen output only.
+    let lost = b"\x1bc";
+    let filler = b"filler\r\n".repeat(SCREEN_RING / 4 / 8);
+    let tail = b"probe exited\r\n$ ";
+    let (session, before, after) = redial_past(
+        &rig,
+        shown,
+        &[lost, &filler, &filler, &filler, &filler, tail],
+    )
+    .await;
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        (lost.len() + filler.len()) as u64,
+        "fixture: the ring moved past the reset"
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert_eq!(
+        String::from_utf8_lossy(&after[..replay]),
+        String::from_utf8_lossy(&[filler.repeat(3), tail.to_vec()].concat()),
+        "fixture: the replay is the retained output, unchanged"
+    );
+    assert_eq!(
+        replay_screen(&session),
+        Some("normal"),
+        "the session frame names the normal screen, which the program's reset selected \
+         inside the missed span"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "the recovery suffix follows the replay and reasserts no mode the reset turned off"
+    );
+    let screens = drawn_after_frame(shown, &session, &before, &after);
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(tail),
+        "a view that takes the named screen draws the program's last line and the prompt on \
+         the normal screen: it ends {:?}",
+        last(&screens.normal, 32)
+    );
+    assert_redial_holds_the_program_state(shown, &after, false, &[], "a redial past a full reset");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redial_past_a_lost_exit_names_the_normal_screen_before_a_redundant_one() {
     let _gate = pty_test_lock();
     let rig = Rig::new(SCREEN_RING, "while IFS= read -r line; do :; done").await;
@@ -1863,20 +1918,23 @@ async fn a_fresh_dial_past_an_overflowed_ring_names_no_replay_screen() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
-    let _gate = pty_test_lock();
-    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+/// Show a live view of `rig` `shown`, then block its socket's send and,
+/// while the socket stays up, let the program write `lost`, flood past the
+/// ring and write `tail`. Returns everything the view parsed before the
+/// recovery (`shown` and the blocked frame), the recovery's session frame,
+/// and its bytes before and after that frame, read to Ready.
+async fn live_recovery_past(
+    rig: &Rig,
+    shown: &[u8],
+    lost: &[u8],
+    tail: &[u8],
+) -> (Vec<u8>, Value, Vec<u8>, Vec<u8>) {
     let (mut client, _initial) = rig.attach().await;
-    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
     rig.output(shown);
     assert_eq!(next_binary(&mut client).await, shown);
-    // The socket stays up while its send blocks; the program leaves its
-    // alternate screen and floods past the ring meanwhile.
     let _pending = rig.block_output().await;
-    rig.output(b"\x1b[?1000l\x1b[?1049l");
+    rig.output(lost);
     rig.flood();
-    let tail = b"probe exited\r\n$ ";
     rig.output(tail);
     finish_blocked_frame(&mut client).await;
     let (mut session, mut before, mut after) = (None, Vec::new(), Vec::new());
@@ -1905,13 +1963,26 @@ async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_norma
         before.is_empty(),
         "the live recovery sends no byte ahead of its session frame"
     );
+    let parsed = [shown, &vec![b'B'; BLOCKED_BYTES]].concat();
+    (parsed, session, before, after)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // The socket stays up while its send blocks; the program leaves its
+    // alternate screen and floods past the ring meanwhile.
+    let tail = b"probe exited\r\n$ ";
+    let (shown, session, before, after) =
+        live_recovery_past(&rig, shown, b"\x1b[?1000l\x1b[?1049l", tail).await;
     assert_eq!(
         replay_screen(&session),
         Some("normal"),
         "the live recovery's session frame names the normal screen the program selected \
          while the view was behind"
     );
-    let shown = [&shown[..], &vec![b'B'; BLOCKED_BYTES]].concat();
     let screens = drawn_after_frame(&shown, &session, &before, &after);
     assert!(
         !screens.alternate_shown,
@@ -1921,6 +1992,50 @@ async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_norma
         screens.normal.ends_with(tail),
         "the retained tail is drawn on the normal screen: it ends {:?}",
         last(&screens.normal, 32)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_live_recovery_past_a_lost_full_reset_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // The socket stays up while its send blocks; the program resets the
+    // terminal, as `reset` does, and floods past the ring meanwhile.
+    let tail = b"probe exited\r\n$ ";
+    let (shown, session, before, after) = live_recovery_past(&rig, shown, b"\x1bc", tail).await;
+    let replay = number(&session, "replay_bytes") as usize;
+    assert!(
+        after.len() >= replay && after[..replay].ends_with(tail),
+        "fixture: the replay ends with the retained tail"
+    );
+    assert_eq!(
+        replay_screen(&session),
+        Some("normal"),
+        "the live recovery's session frame names the normal screen the program's reset \
+         selected while the view was behind"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "the recovery suffix follows the replay and reasserts no mode the reset turned off"
+    );
+    let screens = drawn_after_frame(&shown, &session, &before, &after);
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(tail),
+        "the retained tail is drawn on the normal screen: it ends {:?}",
+        last(&screens.normal, 32)
+    );
+    assert_redial_holds_the_program_state(
+        &shown,
+        &after,
+        false,
+        &[],
+        "a live recovery past a full reset",
     );
 }
 
