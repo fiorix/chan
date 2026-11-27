@@ -251,6 +251,9 @@
 </script>
 
 {#if active && shown}
+  <!-- A pointer target only, so it takes no tabindex: the card is the
+       survey's focusable surface and answers its keys. -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div
     bind:this={overlay}
     class="survey-overlay"
