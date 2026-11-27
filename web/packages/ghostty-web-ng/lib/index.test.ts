@@ -108,6 +108,7 @@ describe('the public surface', () => {
       'selectAll',
       'selectLines',
       'setSelection',
+      'setSequentiallyFocusable',
       'setTheme',
       'write',
       'writeln',

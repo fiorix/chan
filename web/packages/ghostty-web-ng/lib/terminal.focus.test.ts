@@ -198,3 +198,111 @@ describe('synchronous terminal focus', () => {
     expect(document.activeElement).toBe(input);
   });
 });
+
+const tabIndexes = (host: HTMLElement) =>
+  [host.getAttribute('tabindex'), host.querySelector('textarea')?.getAttribute('tabindex')];
+
+// Every tabindex the host and its input held while attached during run(),
+// oldest first: each mutation record's old value, then the value at the end.
+// The input's first value is the one it was attached with.
+function heldTabIndexes(host: HTMLElement, run: () => void) {
+  const observer = new MutationObserver(() => {});
+  observer.observe(host, { subtree: true, attributes: true, attributeFilter: ['tabindex'], attributeOldValue: true });
+  run();
+  const records = observer.takeRecords();
+  observer.disconnect();
+  const held = (element: Element) =>
+    [...records.filter((record) => record.target === element).map((record) => record.oldValue), element.getAttribute('tabindex')];
+  return { host: held(host), input: held(host.querySelector('textarea')!) };
+}
+
+describe('sequential focus navigation', () => {
+  test('false takes the host and the input out of the Tab order and true puts them back', async () => {
+    const { term, host, textarea } = await open();
+    expect(tabIndexes(host), 'unused, both are in the Tab order').toEqual(['0', '0']);
+    term.setSequentiallyFocusable(false);
+    expect(tabIndexes(host)).toEqual(['-1', '-1']);
+    expect([host.tabIndex, textarea.tabIndex]).toEqual([-1, -1]);
+    term.setSequentiallyFocusable(true);
+    expect(tabIndexes(host)).toEqual(['0', '0']);
+
+    const embedder = document.createElement('div');
+    embedder.setAttribute('tabindex', '-1');
+    document.body.append(embedder);
+    (await terminal()).open(embedder);
+    expect(tabIndexes(embedder), 'unused, the host keeps the tabindex it was given').toEqual(['-1', '0']);
+  });
+
+  test('a value asked before open() is applied by open() with no moment in the Tab order, and none after disposal', async () => {
+    const term = await terminal();
+    term.setSequentiallyFocusable(true);
+    term.setSequentiallyFocusable(false);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const held = heldTabIndexes(host, () => term.open(host));
+    expect(held.input, 'the input is attached out of the Tab order').toEqual(['-1']);
+    expect(tabIndexes(host)).toEqual(['-1', '-1']);
+
+    term.dispose();
+    expect(() => term.setSequentiallyFocusable(true)).not.toThrow();
+    expect(host.getAttribute('tabindex'), 'nothing is written after disposal').toBe('-1');
+  });
+
+  test('taking a terminal out or in moves no focus, and focus() and a press or tap still give it the keyboard', async () => {
+    const { term, host, textarea } = await open();
+    term.focus();
+    term.setSequentiallyFocusable(false);
+    expect(document.activeElement, 'the focused host keeps focus').toBe(host);
+    textarea.focus();
+    term.setSequentiallyFocusable(true);
+    term.setSequentiallyFocusable(false);
+    expect(document.activeElement, 'the focused input keeps focus').toBe(textarea);
+    const input = field();
+    term.setSequentiallyFocusable(true);
+    term.setSequentiallyFocusable(false);
+    expect(document.activeElement, 'focus outside stays put').toBe(input);
+
+    expect(tabIndexes(host)).toEqual(['-1', '-1']);
+    term.focus();
+    expect(document.activeElement).toBe(host);
+    input.focus();
+    const canvas = host.querySelector('canvas')!;
+    canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+    expect(host.contains(document.activeElement), 'a press gives it the keyboard').toBe(true);
+    input.focus();
+    canvas.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true }));
+    expect(document.activeElement, 'a tap gives it the keyboard').toBe(textarea);
+  });
+
+  test('a terminal opened where a disposed one was applies its own value to its new input', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const first = await terminal();
+    first.setSequentiallyFocusable(false);
+    first.open(host);
+    first.dispose();
+    expect(host.getAttribute('tabindex'), 'the disposed terminal left the host out').toBe('-1');
+
+    const second = await terminal();
+    second.setSequentiallyFocusable(true);
+    second.open(host);
+    expect(tabIndexes(host)).toEqual(['0', '0']);
+    second.dispose();
+
+    const third = await terminal();
+    third.setSequentiallyFocusable(false);
+    const held = heldTabIndexes(host, () => third.open(host));
+    expect(held.input).toEqual(['-1']);
+    expect(tabIndexes(host)).toEqual(['-1', '-1']);
+  });
+
+  test("open() asked out puts no '0' on the host, from its own default or the input handler's", async () => {
+    const term = await terminal();
+    term.setSequentiallyFocusable(false);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const held = heldTabIndexes(host, () => term.open(host));
+    expect(held.host).not.toContain('0');
+    expect(held.host.at(-1)).toBe('-1');
+  });
+});
