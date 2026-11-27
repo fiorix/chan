@@ -957,19 +957,12 @@ pub(crate) fn invalidate_native<R: tauri::Runtime>(
     state: &Arc<crate::AppState>,
     gateway: &str,
 ) {
-    let ids = state.invalidate_gateway_native(gateway);
-    let any = !ids.is_empty();
-    for id in ids {
+    for id in state.invalidate_gateway_native(gateway) {
         state.devservers.remove(&id);
         state.devserver_feed.forget(&id);
         stop_selected(app, state, &id);
     }
-    if any {
-        if let Some(embedded) = state.embedded() {
-            embedded.signal_library_change();
-        }
-        let _ = tauri::Emitter::emit(app, crate::serve::SERVES_CHANGED, ());
-    }
+    crate::refresh_launcher(app, state);
 }
 
 #[derive(Clone)]
@@ -1954,6 +1947,7 @@ mod tests {
         fabric.suspend();
         let ticket = fabric.resume_ticket();
         fabric.settled_gateway(&gw.id).await.unwrap();
+        while signal_rx.try_recv().is_ok() {}
         reconcile_saved(&state, &gw.id).unwrap();
         fabric.settled_gateway(&gw.id).await.unwrap();
         assert!(fabric.resume_gateway(&gw.id, ticket));
@@ -1978,6 +1972,83 @@ mod tests {
             client.get(&u2).send().await.unwrap().text().await.unwrap(),
             "p2"
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_saved_recovery_with_no_connected_devservers_refreshes_launcher() {
+        use tauri::{Listener, Manager};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let wg_dir = store.lock().unwrap().wireguard_dir();
+        let key = crate::wireguard_keys::generate(&wg_dir, "gw-no-ds").unwrap();
+        let p1 = start_loopback_peer(&key.public_key, "p1").await;
+        let gw = enrolled_gateway_with_peers("gw-no-ds", &key, &[("p1", &p1)]);
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(gw.clone());
+            guard.save(&cfg).unwrap();
+        }
+
+        let state = Arc::new(crate::AppState::with_store(store));
+        let lib_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(lib_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        let notify = embedded.library_change_notify();
+        assert!(state.embedded.set(embedded).is_ok());
+
+        let fabric = fabric().await;
+        assert!(state
+            .gateway_manager
+            .fabric
+            .set(Arc::clone(&fabric))
+            .is_ok());
+
+        let app = tauri::test::mock_app();
+        app.manage(Arc::clone(&state));
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = signal_tx.send(());
+        });
+        let app_for_invalidate = app.handle().clone();
+        let _ = state
+            .gateway_manager
+            .transport_invalidate
+            .set(Arc::new(move |id| {
+                let state = app_for_invalidate.state::<Arc<crate::AppState>>();
+                invalidate_native(&app_for_invalidate, &state, id);
+            }));
+
+        reconcile_saved(&state, &gw.id).unwrap();
+        fabric.settled_gateway(&gw.id).await.unwrap();
+        assert!(state.invalidate_gateway_native(&gw.id).is_empty());
+
+        fabric
+            .shut_down_ingress_for_test(&gw.id, "gw-no-ds/p1")
+            .await;
+        assert_eq!(fabric.view(&gw.id).0.as_deref(), Some(STOPPED));
+        assert!(fabric.changes_routes(&gw.id, &prepare(&gw), true));
+
+        while signal_rx.try_recv().is_ok() {}
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        reconcile_saved(&state, &gw.id).unwrap();
+        fabric.settled_gateway(&gw.id).await.unwrap();
+
+        assert!(signal_rx.try_recv().is_ok());
+        tokio::time::timeout(Duration::from_secs(2), notified)
+            .await
+            .expect("recovery with zero connected devservers fires library_change_notify");
+        assert_ne!(fabric.view(&gw.id).0.as_deref(), Some(STOPPED));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.p1.example.test")
+            .is_ok());
     }
 
     #[tokio::test]

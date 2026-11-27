@@ -559,7 +559,7 @@ pub fn ios_entry() {
 
 /// Re-push the launcher feed and tell the webview the serve set
 /// changed, the pair every devserver state change ends with.
-fn refresh_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &AppState) {
+pub(crate) fn refresh_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &AppState) {
     if let Some(embedded) = state.embedded() {
         embedded.signal_library_change();
     }
