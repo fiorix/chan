@@ -432,3 +432,108 @@ fn a_switch_after_a_full_reset_in_the_same_read_stands() {
         "the alternate screen takes no replay"
     );
 }
+
+// The terminal core executes a C0 control inside a CSI and ignores a DEL
+// there, and the sequence goes on to its final byte; CAN and SUB cancel it,
+// and ESC cancels it and starts the next. These cases hold the tracker to
+// that reading, so a view and its session agree on the screen and the
+// modes.
+macro_rules! a_switch_across_a_control_test {
+    ($leaves:ident, $resets:ident, $control:literal) => {
+        #[test]
+        fn $leaves() {
+            let session = test_session_with_ring(1024);
+            session.record_output(b"normal-screen sentinel\r\n\x1b[?1049hframe");
+            assert!(
+                session.in_alt_screen.load(Ordering::Relaxed),
+                "fixture: the program is on the alternate screen"
+            );
+            session.record_output(concat!("\x1b[?10", $control, "49lplain").as_bytes());
+            let attached = session.attach(Some(0));
+            assert!(
+                !attached.alt_screen,
+                "DECRST 1049 with {:?} inside it selects the normal screen",
+                $control
+            );
+            assert!(
+                contains_subslice(&attached.replay.concat(), b"normal-screen sentinel"),
+                "normal-screen reattach retains its replay"
+            );
+        }
+
+        #[test]
+        fn $resets() {
+            let session = test_session_with_ring(1024);
+            session.record_output(b"\x1b[?1049h\x1b[?1000h");
+            assert_eq!(
+                modes_on(&session),
+                vec![1000],
+                "fixture: the program turned mouse tracking on"
+            );
+            session.record_output(concat!("\x1b[?10", $control, "00l").as_bytes());
+            assert_eq!(
+                modes_on(&session),
+                Vec::<u16>::new(),
+                "DECRST 1000 with {:?} inside it turns mouse tracking off",
+                $control
+            );
+            assert!(
+                session.attach(Some(0)).mode_reassert.is_empty(),
+                "a mode the program turned off is not reasserted"
+            );
+        }
+    };
+}
+
+a_switch_across_a_control_test!(
+    a_switch_with_a_del_inside_it_leaves_the_alternate_screen,
+    a_mode_reset_with_a_del_inside_it_turns_the_mode_off,
+    "\x7f"
+);
+a_switch_across_a_control_test!(
+    a_switch_with_a_cr_inside_it_leaves_the_alternate_screen,
+    a_mode_reset_with_a_cr_inside_it_turns_the_mode_off,
+    "\r"
+);
+
+macro_rules! a_cancelled_switch_test {
+    ($name:ident, $control:literal) => {
+        #[test]
+        fn $name() {
+            let session = test_session_with_ring(1024);
+            session.record_output(b"normal-screen sentinel\r\n\x1b[?1049h\x1b[?1000hframe");
+            session.record_output(
+                concat!("\x1b[?10", $control, "49l\x1b[?10", $control, "00l").as_bytes(),
+            );
+            assert_eq!(
+                (
+                    session.in_alt_screen.load(Ordering::Relaxed),
+                    modes_on(&session)
+                ),
+                (true, vec![1000]),
+                "(alternate screen, modes on): {:?} cancels the switch and the reset, and \
+                 their digits are text",
+                $control
+            );
+        }
+    };
+}
+
+a_cancelled_switch_test!(a_can_inside_a_switch_cancels_it, "\x18");
+a_cancelled_switch_test!(a_sub_inside_a_switch_cancels_it, "\x1a");
+
+#[test]
+fn an_escape_inside_a_switch_cancels_it_and_starts_the_next() {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"normal-screen sentinel\r\n\x1b[?1049h\x1b[?1000hframe");
+    session.record_output(b"\x1b[?10\x1b[?1049l\x1b[?10\x1b[?1000l");
+    assert_eq!(
+        (
+            session.in_alt_screen.load(Ordering::Relaxed),
+            modes_on(&session)
+        ),
+        (false, Vec::new()),
+        "(alternate screen, modes on): the escape cancels each partial CSI and the \
+         sequence it starts switches and resets"
+    );
+}
