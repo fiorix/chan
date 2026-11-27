@@ -177,49 +177,49 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-overlay")).toBeNull();
   });
 
-  test("a survey body shows a wikilink as typed", async () => {
-    surveyState.windowWide = { spec: spec({ bodyMarkdown: "Open [[note|alias]] now" }), busy: false };
+  async function surveyBody(bodyMarkdown: string): Promise<HTMLElement> {
+    surveyState.windowWide = { spec: spec({ bodyMarkdown }), busy: false };
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
     await tick();
+    const body = target.querySelector<HTMLElement>(".survey-body");
+    expect(body).not.toBeNull();
+    return body!;
+  }
 
-    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open [[note|alias]] now");
+  test("a survey body shows a wikilink's label", async () => {
+    expect((await surveyBody("Open [[note]] now")).textContent?.trim()).toBe("Open note now");
   });
 
-  test("a survey body shows the links of a frontmatter-looking block as typed", async () => {
-    surveyState.windowWide = { spec: spec({ bodyMarkdown: '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]' }), busy: false };
-    const target = document.createElement("div");
-    document.body.append(target);
-    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
-    await tick();
+  test("a survey body shows an aliased wikilink's alias", async () => {
+    expect((await surveyBody("Open [[note|alias]] now")).textContent?.trim()).toBe("Open alias now");
+  });
 
-    const text = target.querySelector(".survey-body")?.textContent ?? "";
-    expect(text).toContain('up: "[[Projects/Parent]]"');
-    expect(text).toContain("See [[a]]");
+  test.each([
+    "Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?",
+    'if [[ "$a" == "$b" || -z "$c" ]]; then',
+  ])("a survey body shows a shell test as typed: %s", async (source) => {
+    expect((await surveyBody(source)).textContent?.trim()).toBe(source);
+  });
+
+  test("a survey body skips the frontmatter rule", async () => {
+    const text = (await surveyBody('---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]')).textContent ?? "";
+    expect(text).toContain('up: "Parent"');
+    expect(text).toContain("See a");
   });
 
   test("a survey body leaves inline code and fenced code as typed", async () => {
-    surveyState.windowWide = { spec: spec({ bodyMarkdown: "Type `[[note]]` here\n\n```text\n[[note]]\n```" }), busy: false };
-    const target = document.createElement("div");
-    document.body.append(target);
-    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
-    await tick();
-
-    expect(target.querySelector(".survey-body p code")?.textContent).toBe("[[note]]");
-    expect(target.querySelector(".survey-body pre code")?.textContent).toBe("[[note]]\n");
+    const body = await surveyBody("Type `[[note]]` here\n\n```text\n[[note]]\n```");
+    expect(body.querySelector("p code")?.textContent).toBe("[[note]]");
+    expect(body.querySelector("pre code")?.textContent).toBe("[[note]]\n");
   });
 
-  test("a survey body keeps a markup-carrying wikilink's brackets and sanitizes its markup", async () => {
+  test("a survey body gives a markup-carrying label no element", async () => {
     const label = '<img src=x onerror="alert(1)">';
-    surveyState.windowWide = { spec: spec({ bodyMarkdown: `Open [[note|${label}]] now` }), busy: false };
-    const target = document.createElement("div");
-    document.body.append(target);
-    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
-    await tick();
-
-    expect(target.querySelector(".survey-body [onerror]")).toBeNull();
-    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open [[note|]] now");
+    const body = await surveyBody(`Open [[note|${label}]] now`);
+    expect(body.querySelector("img")).toBeNull();
+    expect(body.textContent?.trim()).toBe(`Open ${label} now`);
   });
 
   test("renders the body + numbered options for a window-wide survey", async () => {

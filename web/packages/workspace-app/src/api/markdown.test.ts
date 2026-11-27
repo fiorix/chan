@@ -142,6 +142,67 @@ describe("wikilink labels", () => {
   });
 });
 
+// Strict labels serve prose with no note behind it, a survey body, where
+// double brackets are as likely a shell test as a link.
+describe("strict wikilink labels", () => {
+  function strict(source: string): HTMLElement {
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdownWithBreaks(source, { wikilinks: "strict" });
+    return root;
+  }
+
+  test.each([
+    ["Open [[note]] now", "Open note now"],
+    ["Open [[note|alias]] now", "Open alias now"],
+    ["Open [[folder/note.md#heading]] now", "Open note now"],
+  ])("labels a plain link: %s", (source, label) => {
+    expect(strict(source).textContent?.trim()).toBe(label);
+  });
+
+  test.each([
+    "Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?",
+    'if [[ "$a" == "$b" || -z "$c" ]]; then',
+    "Use [[ $x =~ ^v#1 ]] here",
+    "Padded [[ note ]] here",
+  ])("leaves a body that opens with whitespace as typed: %s", (source) => {
+    expect(strict(source).textContent?.trim()).toBe(source);
+  });
+
+  test.each([
+    "Matrix [[1, 2], [3, 4]] here",
+    "Open [[note|a [b] c]] now",
+  ])("leaves a body that holds a bracket as typed: %s", (source) => {
+    expect(strict(source).textContent?.trim()).toBe(source);
+  });
+
+  test("labels a plain link beside bracket text it leaves as typed", () => {
+    expect(strict("Run [[ -f a.txt ]] and [[1], [2]], then open [[note|alias]]").textContent?.trim())
+      .toBe("Run [[ -f a.txt ]] and [[1], [2]], then open alias");
+  });
+
+  test("leaves inline code and fenced code as typed", () => {
+    const root = strict("Type `[[note]]` here\n\n```text\n[[note]]\n```\n");
+    expect(root.querySelector("p code")?.textContent).toBe("[[note]]");
+    expect(root.querySelector("pre code")?.textContent).toBe("[[note]]\n");
+  });
+
+  test("keeps a markup-carrying label literal and element-free", () => {
+    const label = '<img src=x onerror="alert(1)">';
+    const root = strict(`Open [[note|${label}]] now`);
+    expect(root.querySelector("img")).toBeNull();
+    expect(root.textContent?.trim()).toBe(`Open ${label} now`);
+  });
+
+  test("the other label passes keep the editor's reading of a padded link and a bracket in an alias", () => {
+    const source = "[[ note ]] and [[note|a [b] c]]";
+    for (const html of [renderMarkdown(source, { wikilinks: true }), renderMarkdownWithBreaks(source, { wikilinks: true }), renderMarkdownInline(source, { wikilinks: true })]) {
+      const root = document.createElement("div");
+      root.innerHTML = html;
+      expect(root.textContent?.trim()).toBe("note and a [b] c");
+    }
+  });
+});
+
 describe("survey body line breaks", () => {
   test("renderMarkdown collapses a single newline (global breaks:false soft-break)", () => {
     const html = renderMarkdown("line one\nline two");
