@@ -10,7 +10,7 @@
 
 # Upstream semver may carry a -rcN prerelease; RPM's Version grammar
 # reserves '-', so it maps to '~' (which sorts before the final release).
-%global upstream_version 0.134.0
+%global upstream_version 0.135.0
 
 Name:           chan
 Version:        %(echo %{upstream_version} | tr - '~')
@@ -80,6 +80,9 @@ install -Dm644 packaging/distros/shared/chan-devserver.service \
 %{_userunitdir}/chan-devserver.service
 
 %changelog
+* Fri Nov 27 2026 Alexandre Fiori <fiorix@gmail.com> - 0.135.0-1
+- Update to 0.135.0.
+
 * Tue Nov 24 2026 Alexandre Fiori <fiorix@gmail.com> - 0.134.0-1
 - Update to 0.134.0.
 

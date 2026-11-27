@@ -9,7 +9,7 @@
 # and conflicts with the chan package instead of depending on it.
 
 %global debug_package %{nil}
-%global upstream_version 0.134.0
+%global upstream_version 0.135.0
 
 Name:           chan-desktop
 Version:        %(echo %{upstream_version} | tr - '~')
@@ -118,6 +118,9 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/chan-term.desktop
 %{_userunitdir}/chan-devserver.service
 
 %changelog
+* Fri Nov 27 2026 Alexandre Fiori <fiorix@gmail.com> - 0.135.0-1
+- Update to 0.135.0.
+
 * Tue Nov 24 2026 Alexandre Fiori <fiorix@gmail.com> - 0.134.0-1
 - Update to 0.134.0.
 

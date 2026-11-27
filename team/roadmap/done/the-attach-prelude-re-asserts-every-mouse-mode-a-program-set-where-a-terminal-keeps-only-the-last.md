@@ -44,7 +44,7 @@ The owner accepted this row by survey at 2026-11-17T09:50Z, answering the first 
 
 ## Deferred by the owner, 2026-11-23
 
-With xterm.js leaving chan ([its row](../v0.135.0/chan-carries-xterm-js-as-a-second-terminal-backend.md)), option (a) would repair no shipped client and would make a reattached Ghostty terminal differ from the live one after a partial reset (`dev/team-ghostty-web-ng-plan-review.md`, change 8). The owner answered the survey on 2026-11-23 with "Defer, measure core state in M1 (recommended)": nothing is built here for now. The vendored core's effective mouse state, with two tracking modes set, after a partial reset and with two encodings set, is measured and recorded in this row, and the owner then chooses option (b) or (c) on that reading.
+With xterm.js leaving chan ([its row](../done/chan-carries-xterm-js-as-a-second-terminal-backend.md)), option (a) would repair no shipped client and would make a reattached Ghostty terminal differ from the live one after a partial reset (`dev/team-ghostty-web-ng-plan-review.md`, change 8). The owner answered the survey on 2026-11-23 with "Defer, measure core state in M1 (recommended)": nothing is built here for now. The vendored core's effective mouse state, with two tracking modes set, after a partial reset and with two encodings set, is measured and recorded in this row, and the owner then chooses option (b) or (c) on that reading.
 
 ## The core's mouse state, read 2026-11-23
 
