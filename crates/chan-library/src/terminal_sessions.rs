@@ -9742,6 +9742,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_restored_ring_reads_the_switches_its_capacity_cut() {
+        // The bytes cut to fit the ring leave the alternate screen, and the
+        // bytes kept enter it again.
+        let cut = [b"\x1b[?1049l".as_slice(), &[b'a'; 92]].concat();
+        let kept = [b"BETWEEN_TUIS\r\n\x1b[?1049h".as_slice(), &[b't'; 42]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), true);
+        assert_eq!(
+            ring.snapshot_since(None).0.concat(),
+            kept,
+            "fixture: the ring keeps the last 64 bytes"
+        );
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "the switch the cut took says which screen the kept bytes start on"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_whose_capacity_cut_a_switch_counts_it_as_made() {
+        let cut = [&[b'a'; 95][..], b"\x1b[?10"].concat();
+        let kept = [b"49lBETWEEN_TUIS\r\n\x1b[?1049h".as_slice(), &[b't'; 39]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), true);
+        let (replay, _) = ring.snapshot_since(None);
+        assert_eq!(
+            replay.concat(),
+            kept,
+            "fixture: the ring starts inside the switch"
+        );
+        let mark = ring.start_screen().expect("the ring holds bytes");
+        assert_eq!(
+            replay_start_screen(mark, &replay),
+            Some(false),
+            "a switch the capacity cut began counts as made at the ring's first byte, as one \
+             the live ring's start cut does"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_lossy_generation_passes_the_previous_one_and_the_clock_and_never_repeats() {
@@ -16643,6 +16682,53 @@ mod tests {
             assert_eq!(
                 String::from_utf8_lossy(&after.mode_reassert),
                 "\x1b[?1000h\x1b[?1006h"
+            );
+        }
+
+        // A restore that ends where its previous process did carries on the
+        // sequence that process's last read began, so the first read after
+        // it finishes the switch and the mode reset in that sequence.
+        #[test]
+        fn an_exact_restore_finishes_the_sequence_its_last_read_began() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(64, 8, 600)));
+            store.serve(&registry);
+            let id = "restored-inside-a-sequence";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(b"\x1b[?1049h\x1b[?1000htui\x1b[?1000;10");
+            store.changed();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Arc::new(Registry::new(test_config(64, 8, 600)));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let viewer = next.attach(id, None).unwrap();
+            assert!(
+                viewer.alt_screen,
+                "fixture: restored on the alternate screen"
+            );
+            let cursor = viewer.seq;
+            assert!(next.inject_output(id, b"49l"));
+            assert!(next.inject_output(id, &[b'n'; 64]));
+            let recovered = viewer.replay_from(cursor);
+            assert!(
+                recovered.missed_bytes > 0,
+                "fixture: the ring moved past the read that ends the sequence"
+            );
+            assert!(
+                !recovered.alt_screen,
+                "the first read after the restore ends the switch to the normal screen"
+            );
+            assert_eq!(
+                recovered.replay_screen,
+                Some(TerminalScreen::Normal),
+                "the read after it starts on the normal screen"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&next.attach(id, Some(0)).unwrap().mode_reassert),
+                "",
+                "the same read ends the mouse mode"
             );
         }
 
