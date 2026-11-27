@@ -1749,8 +1749,13 @@
           const beforeReplay = keyboardProtocolBeforeReplay;
           // RIS resets the observed keyboard state too. Its write callback
           // runs once the observer has read it, before the replay is written.
+          // It restores each screen's flags, while the screen they apply to
+          // stays the main one RIS left the view on; a replay that starts on
+          // the alternate screen switches the protocol there with the view.
           writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
-            if (protocol && beforeReplay) copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            if (!protocol || !beforeReplay) return;
+            copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            protocol.kitty.screen = "main";
           });
           switchToReplayScreen(screenBeforeReplay);
           screenBeforeReplay = null;

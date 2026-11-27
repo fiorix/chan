@@ -920,6 +920,52 @@ describe("a reconciling answer that names its replay's start screen", () => {
     expect(ghosttyLineText(term, 4), "the replay drew on it").toContain("restored frame");
   });
 
+  /// A view on its program's alternate screen with kitty keyboard flags
+  /// pushed there, whose redial is cut inside a replay that continued it, so
+  /// the next answer, in another generation, goes on a reset screen.
+  async function kittyViewCutBeforeAResetReplay() {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const first = TerminalSocket.all.at(-1)!;
+    first.onopen?.();
+    await receive(first, session(ATTACHED_AT, 0, 0));
+    await receive(first, READY);
+    const shown = "\x1b[?1049h\x1b[>8u\x1b[1;1Halt tui";
+    await output(first, shown);
+    expect(tab!.keyboardProtocol?.kitty, "fixture: kitty flags on the alternate screen").toMatchObject({
+      screen: "alternate", alternateFlags: 8, mainFlags: 0,
+    });
+    const at = ATTACHED_AT + shown.length;
+    const second = await redialed(first, at);
+    await deliver(second, { frame: session(at + REDRAWN.length, 0, REDRAWN.length), replay: REDRAWN, after: "" }, REDRAWN.length / 2);
+    return { tab: tab!, term, third: await redialedAfterCut(second) };
+  }
+
+  test("a reset replay that starts on the normal screen keeps the keyboard protocol on the screen the reset left", async () => {
+    const { tab, term, third } = await kittyViewCutBeforeAResetReplay();
+    // The shell pushes kitty flags on its normal screen.
+    const replay = "\x1b[>8u$ ";
+    const frame = { ...session(500, 20, replay.length, "normal"), generation: GENERATION + 1 };
+    await deliver(third, { frame, replay, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen").toBe(false);
+    expect(tab.keyboardProtocol?.kitty, "the shell's flags on the main screen's stack").toMatchObject({ screen: "main", mainFlags: 8 });
+    pressInGhostty(term, { key: "Enter", code: "Enter", ctrlKey: true });
+    expect(sentFrames(third).filter((frame) => frame.type === "input").map((frame) => frame.data), "Ctrl+Enter in kitty's encoding")
+      .toEqual(["\x1b[13;5u"]);
+  });
+
+  test("a reset replay that starts on the alternate screen switches the keyboard protocol back to it", async () => {
+    const { tab, term, third } = await kittyViewCutBeforeAResetReplay();
+    // The program pushes other flags on its alternate screen.
+    const replay = "\x1b[>1u\x1b[1;1Hframe";
+    const frame = { ...session(500, 20, replay.length, "alternate"), generation: GENERATION + 1 };
+    await deliver(third, { frame, replay, after: LOST_ALT_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the alternate screen").toBe(true);
+    expect(tab.keyboardProtocol?.kitty, "the program's flags on the alternate screen's stack").toMatchObject({
+      screen: "alternate", alternateFlags: 1, mainFlags: 0,
+    });
+  });
+
   test("an answer that names no start screen draws the replay on the view's own screen, as it always did", async () => {
     const { term, socket } = await viewOnTheAlternateScreen();
     const next = await redialed(socket);
