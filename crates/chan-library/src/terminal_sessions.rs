@@ -197,7 +197,8 @@ pub const ALT_SCREEN_ATTACH_PRELUDE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
 /// set sequences are gone and the fresh terminal comes up at defaults: arrows
 /// stop navigating (DECCKM) and the wheel/clicks stop reaching the program
 /// (mouse). We track the set currently on (scanned from PTY output by
-/// [`Session::update_private_modes`]) and re-assert it in the attach prelude.
+/// [`Session::update_screen_and_modes`]) and re-assert it in the attach
+/// prelude.
 /// Screen-rendering modes
 /// (autowrap, cursor visibility) are deliberately NOT tracked: the program's
 /// post-attach redraw re-establishes them. Alt-screen (1049/1047/47) is NOT
@@ -256,11 +257,12 @@ fn passed_over_in_an_escape(byte: u8) -> bool {
 const CSI_MAX_PARAMS: usize = 24;
 
 /// Where the output scan stands inside a sequence it reads: none, or an
-/// escape or private-mode CSI begun and not finished. The trackers carry
-/// it from one read to the next in place of the sequence's bytes, so they
-/// finish a sequence the terminal core finishes across any number of reads
-/// at any length, and what each tracker and each ring chunk's mark carries
-/// is this value: 52 bytes, with no allocation.
+/// escape or private-mode CSI begun and not finished. The session carries
+/// it from one read to the next in place of the sequence's bytes, for the
+/// screen tracker and the mode tracker alike, so they finish a sequence
+/// the terminal core finishes across any number of reads at any length,
+/// and what the session and each ring chunk's mark carry is this value:
+/// 52 bytes, with no allocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum OpenSequence {
     /// No sequence the scan reads is open.
@@ -294,43 +296,57 @@ struct Params {
 
 impl OpenSequence {
     fn is_open(&self) -> bool {
-        *self != Self::None
+        !matches!(self, Self::None)
     }
 
     /// Read `byte` as the terminal core reads it here, passing each change
-    /// the byte finishes to `change`.
-    fn step(&mut self, byte: u8, mut change: impl FnMut(ModeChange)) {
-        *self = match (*self, byte) {
+    /// the byte finishes to `change`. The state changes in place, so a
+    /// byte that adds to the parameters copies none of them.
+    fn step(&mut self, byte: u8, change: &mut impl FnMut(ModeChange)) {
+        match byte {
             // ESC ends any sequence and begins another; CAN and SUB end it.
-            (_, 0x1b) => Self::Escape,
-            (_, 0x18 | 0x1a) | (Self::None, _) => Self::None,
-            (open, byte) if passed_over_in_an_escape(byte) => open,
-            (Self::Escape, b'c') => {
-                change(ModeChange::Reset);
-                Self::None
-            }
-            (Self::Escape, b'[') => Self::Csi,
-            (Self::Csi, b'?') => Self::Params(Params::default()),
-            (Self::Params(mut params), digit @ b'0'..=b'9') => {
-                params.value = params
-                    .value
-                    .saturating_mul(10)
-                    .saturating_add(u16::from(digit - b'0'));
-                params.digits = true;
-                Self::Params(params)
-            }
-            (Self::Params(mut params), b';') => {
-                params.finish();
-                Self::Params(params)
-            }
-            (Self::Params(params), final_byte @ (b'h' | b'l')) => {
-                params.apply(final_byte == b'h', &mut change);
-                Self::None
-            }
-            // Any other byte ends the sequence as one this scan reads: an
-            // intermediate, another final, a colon, or a byte past 0x7f.
-            _ => Self::None,
-        };
+            0x1b => *self = Self::Escape,
+            0x18 | 0x1a => *self = Self::None,
+            byte if passed_over_in_an_escape(byte) => {}
+            byte => match self {
+                Self::None => {}
+                Self::Escape => {
+                    *self = match byte {
+                        b'c' => {
+                            change(ModeChange::Reset);
+                            Self::None
+                        }
+                        b'[' => Self::Csi,
+                        _ => Self::None,
+                    }
+                }
+                Self::Csi => {
+                    *self = if byte == b'?' {
+                        Self::Params(Params::default())
+                    } else {
+                        Self::None
+                    }
+                }
+                Self::Params(params) => match byte {
+                    b'0'..=b'9' => {
+                        params.value = params
+                            .value
+                            .saturating_mul(10)
+                            .saturating_add(u16::from(byte - b'0'));
+                        params.digits = true;
+                    }
+                    b';' => params.finish(),
+                    b'h' | b'l' => {
+                        params.apply(byte == b'h', change);
+                        *self = Self::None;
+                    }
+                    // Any other byte ends the sequence as one this scan
+                    // reads: an intermediate, another final, a colon, or a
+                    // byte past 0x7f.
+                    _ => *self = Self::None,
+                },
+            },
+        }
     }
 }
 
@@ -439,11 +455,24 @@ fn scan_private_mode_sequences(
     mut change: impl FnMut(ModeChange, bool),
 ) -> bool {
     let mut carried = open.is_open();
-    for &byte in bytes {
+    let mut rest = bytes;
+    while let Some((&byte, after)) = rest.split_first() {
         // Every sequence the scan reads begins at an ESC, which ends the
-        // carried one.
+        // carried one. Outside a sequence no other byte does anything, so
+        // the scan goes straight to the next ESC and costs per output byte
+        // about what a search for that byte does.
+        if !open.is_open() {
+            let Some(at) = memchr::memchr(0x1b, rest) else {
+                break;
+            };
+            carried = false;
+            *open = OpenSequence::Escape;
+            rest = &rest[at + 1..];
+            continue;
+        }
         carried &= byte != 0x1b;
-        open.step(byte, |found| change(found, carried));
+        open.step(byte, &mut |found| change(found, carried));
+        rest = after;
     }
     carried && open.is_open()
 }
@@ -5258,17 +5287,15 @@ struct Session {
     focus_epoch: AtomicU64,
     bytes_since_focus: AtomicU64,
     in_alt_screen: AtomicBool,
-    /// The screen switch or full reset the output so far left open, which
-    /// the next read may finish.
-    alt_screen_tail: Mutex<OpenSequence>,
+    /// The screen switch, private-mode CSI or full reset the output so far
+    /// left open, which the next read may finish. One parse state serves
+    /// the screen tracker and the mode tracker, which read the same bytes.
+    output_tail: Mutex<OpenSequence>,
     /// The [`TRACKED_PRIVATE_MODES`] the live program currently has ON, scanned
-    /// from PTY output by [`Session::update_private_modes`] and re-asserted on
-    /// reattach (see [`Session::attach`]) so a fresh client whose terminal came
-    /// up at defaults regains the program's key/mouse modes.
+    /// from PTY output by [`Session::update_screen_and_modes`] and re-asserted
+    /// on reattach (see [`Session::attach`]) so a fresh client whose terminal
+    /// came up at defaults regains the program's key/mouse modes.
     private_modes: Mutex<BTreeSet<u16>>,
-    /// The private-mode CSI or full reset the output so far left open
-    /// (mirrors `alt_screen_tail`).
-    private_mode_tail: Mutex<OpenSequence>,
     /// Millis of the most recent unanswered [`DSR_CURSOR_QUERY`] seen in PTY
     /// output, or 0 when none is pending. Armed by
     /// [`Session::note_dsr_query`], consumed by
@@ -5278,8 +5305,7 @@ struct Session {
     /// INTO the PTY. Compared against `dsr_query_at` so the library only
     /// answers a query nobody else did.
     reply_forwarded_at: AtomicI64,
-    /// Carry for a [`DSR_CURSOR_QUERY`] split across PTY reads (mirrors
-    /// `alt_screen_tail`).
+    /// Carry for a [`DSR_CURSOR_QUERY`] split across PTY reads.
     dsr_tail: Mutex<Vec<u8>>,
     /// This session's broadcast toggle, synced from the SPA via the
     /// `set-broadcast` WS frame on toggle and on (re)connect. Gates the
@@ -5606,9 +5632,8 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(OpenSequence::None),
+            output_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -6050,9 +6075,8 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
-            alt_screen_tail: Mutex::new(open_sequence),
+            output_tail: Mutex::new(open_sequence),
             private_modes: Mutex::new(state.private_modes),
-            private_mode_tail: Mutex::new(open_sequence),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -6993,9 +7017,8 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(OpenSequence::None),
+            output_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -7747,8 +7770,7 @@ impl Session {
         let mut output = self.output.lock().expect("terminal output poisoned");
         // The attach's screen/mode suffix and the ring frontier describe the
         // same committed bytes, including a live recovery after output loss.
-        let (screen, alt_screen_changed) = self.update_alt_screen(bytes);
-        let private_modes_changed = self.update_private_modes(bytes);
+        let (screen, state_changed) = self.update_screen_and_modes(bytes);
         if !self.is_tmux_pane() && !self.closed.load(Ordering::Relaxed) && !output.program_ended {
             if output.program.feed(bytes, foreground) {
                 output.program_dirty = true;
@@ -7775,14 +7797,14 @@ impl Session {
         let ring = &mut output.ring;
         // The ring file carries the state these bytes leave beside them.
         #[cfg(target_os = "linux")]
-        if alt_screen_changed || private_modes_changed {
+        if state_changed {
             ring.push_with_state(bytes, screen, &self.terminal_state());
         } else {
             ring.push(bytes, screen);
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (alt_screen_changed, private_modes_changed);
+            let _ = state_changed;
             ring.push(bytes, screen);
         }
         // The tab activity dot trips on the same visible text, for the same
@@ -8059,76 +8081,66 @@ impl Session {
         Some(DSR_CURSOR_REPORT)
     }
 
-    /// Track the alternate screen from PTY output: where the tracker stood
-    /// at `bytes`' first byte, and whether they carried a transition. A full
-    /// reset is one, to the normal screen.
-    fn update_alt_screen(&self, bytes: &[u8]) -> (ScreenMark, bool) {
+    /// Track the alternate screen and the live [`TRACKED_PRIVATE_MODES`] set
+    /// from PTY output, in one scan of DEC private-mode CSIs (`ESC [ ?
+    /// <;-joined decimal params> (h|l)`) and full resets (`ESC c`). `h` adds
+    /// each tracked param to the set and `l` removes it; a switch selects
+    /// its screen; a reset selects the normal screen and turns every mode
+    /// off, in output order with the changes around it. Non-`h`/`l` finals
+    /// (a DECRQM `$p` query, a report, ...) change nothing. Sequences can
+    /// carry several modes at once (htop emits `\e[?1006;1000h`), and one
+    /// split across reads is carried in `output_tail`.
+    ///
+    /// Returns where the screen tracker stood at `bytes`' first byte, and
+    /// whether `bytes` hold a screen switch, a set or reset of a tracked
+    /// mode, or a full reset.
+    fn update_screen_and_modes(&self, bytes: &[u8]) -> (ScreenMark, bool) {
         let mut tail = self
-            .alt_screen_tail
+            .output_tail
             .lock()
-            .expect("terminal alt-screen tail poisoned");
+            .expect("terminal output tail poisoned");
         let mark = ScreenMark {
             alt_screen: Some(self.in_alt_screen.load(Ordering::Relaxed)),
             partial: *tail,
         };
         let mut last_transition = None;
+        let mut mode_changes: Vec<ModeChange> = Vec::new();
         scan_private_modes(&mut tail, bytes, |change| {
             if let Some(on) = change.screen() {
                 last_transition = Some(on);
             }
-        });
-        if let Some(on) = last_transition {
-            self.in_alt_screen.store(on, Ordering::Relaxed);
-            tracing::debug!(session = %self.id, alt_screen = on, "alt_screen selected");
-        }
-        (mark, last_transition.is_some())
-    }
-
-    /// Track the live [`TRACKED_PRIVATE_MODES`] set by parsing DEC private-mode
-    /// CSIs -- `ESC [ ? <;-joined decimal params> (h|l)` -- out of PTY output.
-    /// `h` adds each tracked param to the set, `l` removes it; a sequence split
-    /// across reads is carried in `private_mode_tail`. Non-`h`/`l` finals (a
-    /// DECRQM `$p` query, a report, …) are skipped without toggling. Sequences
-    /// can carry several modes at once (htop emits `\e[?1006;1000h`). A full
-    /// reset (`ESC c`) turns every mode off, in output order with the
-    /// changes around it. True when `bytes` set or reset a tracked mode or
-    /// hold a full reset.
-    fn update_private_modes(&self, bytes: &[u8]) -> bool {
-        let mut tail = self
-            .private_mode_tail
-            .lock()
-            .expect("terminal private-mode tail poisoned");
-        let mut changes: Vec<ModeChange> = Vec::new();
-        scan_private_modes(&mut tail, bytes, |change| {
             let tracked = match change {
                 ModeChange::Mode(mode, _) => TRACKED_PRIVATE_MODES.contains(&mode),
                 ModeChange::Reset => true,
             };
             if tracked {
-                changes.push(change);
+                mode_changes.push(change);
             }
         });
         drop(tail);
 
-        if changes.is_empty() {
-            return false;
+        if let Some(on) = last_transition {
+            self.in_alt_screen.store(on, Ordering::Relaxed);
+            tracing::debug!(session = %self.id, alt_screen = on, "alt_screen selected");
         }
-        let mut modes = self
-            .private_modes
-            .lock()
-            .expect("terminal private modes poisoned");
-        for change in changes {
-            match change {
-                ModeChange::Mode(mode, true) => {
-                    modes.insert(mode);
+        if !mode_changes.is_empty() {
+            let mut modes = self
+                .private_modes
+                .lock()
+                .expect("terminal private modes poisoned");
+            for change in &mode_changes {
+                match *change {
+                    ModeChange::Mode(mode, true) => {
+                        modes.insert(mode);
+                    }
+                    ModeChange::Mode(mode, false) => {
+                        modes.remove(&mode);
+                    }
+                    ModeChange::Reset => modes.clear(),
                 }
-                ModeChange::Mode(mode, false) => {
-                    modes.remove(&mode);
-                }
-                ModeChange::Reset => modes.clear(),
             }
         }
-        true
+        (mark, last_transition.is_some() || !mode_changes.is_empty())
     }
 
     /// The alternate-screen flag and private modes as the output so far left
@@ -9123,9 +9135,8 @@ mod tests {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(OpenSequence::None),
+            output_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
