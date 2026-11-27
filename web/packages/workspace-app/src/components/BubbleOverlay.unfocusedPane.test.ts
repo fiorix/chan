@@ -402,3 +402,22 @@ describe("a press on a survey's overlay beside its card", () => {
     expect(document.activeElement, "the option takes the keyboard").toBe(option);
   });
 });
+
+describe("a style element in its body", () => {
+  test("restyles nothing outside the card: the focused pane stays visible", async () => {
+    const card = await surveyOverUnfocusedPane({
+      ...SURVEY,
+      bodyMarkdown: `A note.\n\n<style>.pane[data-pane-id="${BOTTOM}"]{visibility:hidden}</style>\n\nAfter.`,
+    });
+    try {
+      expect(card.querySelector(".survey-body")?.textContent, "the body renders the content beside it").toContain("After.");
+      expect.soft(card.querySelector("style"), "the card holds no style element").toBeNull();
+      expect.soft(getComputedStyle(pane(BOTTOM)).visibility, "the focused pane stays visible").toBe("visible");
+    } finally {
+      // jsdom leaves a style element's sheet applied after an ancestor of it
+      // is removed, where a browser drops it, so the element itself goes
+      // before the app unmounts and the later mounts start unstyled.
+      for (const style of card.querySelectorAll("style")) style.remove();
+    }
+  });
+});

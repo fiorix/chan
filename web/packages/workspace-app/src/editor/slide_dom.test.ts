@@ -107,6 +107,20 @@ describe("renderSlideMarkdown", () => {
     expect(root.querySelectorAll(".chan-slide-blank-line")).toHaveLength(0);
     expect(root.querySelector("pre")?.textContent).toContain("```\na\n\n\nb");
   });
+
+  // A slide shows in the outline, the preview and an export page, each in
+  // the app's own document.
+  test("a style element in a slide restyles nothing outside it", () => {
+    const outside = document.body.appendChild(document.createElement("p"));
+    outside.id = "outside-the-slide";
+    const root = mount(
+      renderSlideMarkdown("# Slide\n\n<style>#outside-the-slide{visibility:hidden}</style>\n\nafter\n"),
+    );
+    expect(root.textContent, "the slide renders the content beside it").toContain("after");
+    expect.soft(root.querySelector("style"), "the slide holds no style element").toBeNull();
+    expect.soft(root.textContent, "none of its rules as text").not.toContain("visibility");
+    expect.soft(getComputedStyle(outside).visibility, "the page outside the slide keeps its look").toBe("visible");
+  });
 });
 
 describe("renderSlideDiagrams completion", () => {

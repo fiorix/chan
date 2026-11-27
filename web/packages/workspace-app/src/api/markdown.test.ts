@@ -167,3 +167,44 @@ describe("markdown iframe embeds", () => {
     expect(html).not.toContain("<iframe");
   });
 });
+
+describe("style elements", () => {
+  // The renderers' HTML enters the app's own document, where a `<style>`
+  // element's rules reach every element, so none of them keeps one unless
+  // asked to.
+  const RULE = "#outside-the-render{visibility:hidden}";
+  const RENDERERS: Array<[string, (source: string) => string]> = [
+    ["renderMarkdown", (source) => renderMarkdown(source)],
+    ["renderMarkdown with wikilink labels", (source) => renderMarkdown(source, { wikilinks: true })],
+    ["renderMarkdownWithBreaks", renderMarkdownWithBreaks],
+    ["renderMarkdownInline", renderMarkdownInline],
+  ];
+  const SPELLINGS: Array<[string, string]> = [
+    ["after other content", `Text first.\n\n<style>${RULE}</style>\n\nafter`],
+    ["after text on its line", `Text first <style>${RULE}</style> after`],
+    ["inside an inline svg after other content", `Text first <svg><style>${RULE}</style></svg> after`],
+    ["inside an inline svg leading the body", `<svg><style>${RULE}</style></svg> after`],
+    ["after a hard line break leading the body", `  \n<style>${RULE}</style>\n\nafter`],
+    ["leading the body", `<style>${RULE}</style>\n\nafter`],
+  ];
+
+  function parsed(html: string): DocumentFragment {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    return template.content;
+  }
+
+  describe.each(RENDERERS)("%s", (_, render) => {
+    test.each(SPELLINGS)("drops a style element %s, with its rules", (_, source) => {
+      const html = parsed(render(source));
+      expect(html.textContent, "the content beside it renders").toContain("after");
+      expect.soft(html.querySelector("style"), "no style element").toBeNull();
+      expect.soft(html.textContent, "none of its rules as text").not.toContain("visibility");
+    });
+  });
+
+  test.each(SPELLINGS.slice(0, 3))("renderMarkdown asked to keep style elements keeps one %s", (_, source) => {
+    const html = parsed(renderMarkdown(source, { keepStyleElements: true }));
+    expect(html.querySelector("style")?.textContent).toBe(RULE);
+  });
+});
