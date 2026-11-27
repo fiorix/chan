@@ -468,6 +468,8 @@ describe("a press on a survey's overlay beside its card", () => {
 
   // Only a press on the overlay itself is held: one on the card or in it
   // keeps its default, as here an option takes the keyboard from the card.
+  // A pressed option takes it in Chrome and WebKitGTK; WebKit for macOS
+  // focuses no button on a press, where the default left alone still holds.
   test("leaves a press inside the card its own default", async () => {
     const card = await surveyOverUnfocusedPane();
     setActivePane(TOP);
