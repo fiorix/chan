@@ -62,8 +62,9 @@ function renderWikiLabels(input: string): string {
 // allowlist (embed.ts). The hook is the backstop: it drops any iframe
 // -- including a raw `<iframe>` in user markdown -- whose src is not an
 // allowlisted embed origin, and forces the protective attributes on the
-// ones that survive. `ADD_TAGS`/`ADD_ATTR` are passed per-call
-// (SANITIZE_OPTS) so other DOMPurify callers keep stripping iframes.
+// ones that survive. `ADD_TAGS`/`ADD_ATTR` are passed per call
+// (EMBED_OPTS, which SANITIZE_OPTS extends) so other DOMPurify callers
+// keep stripping iframes.
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.nodeName !== "IFRAME") return;
   const el = node as Element;
