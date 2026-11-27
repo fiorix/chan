@@ -89,8 +89,8 @@ pub use graph::{
     NodeKind, Tag,
 };
 pub use graph_normalize::{
-    normalize_graph_edges, resolve_link_target, GraphNormalization, MentionContactResolution,
-    MentionContactResolver,
+    normalize_graph_edges, resolve_link_target, GraphNormalization, LinkSpellings,
+    MentionContactResolution, MentionContactResolver,
 };
 pub use index::{
     BuildOptions, BuildSummary, Chunking, Hit, IndexConfig, IndexOpenOptions, IndexStats,

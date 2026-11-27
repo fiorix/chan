@@ -123,32 +123,96 @@ pub fn resolve_link_target<T>(src: &str, target: &str, files: &BTreeSet<T>) -> S
 where
     T: Borrow<str> + Ord,
 {
-    let decoded = percent_decode_str(target).decode_utf8_lossy().into_owned();
-    let stripped = decoded.trim_start_matches('/');
+    LinkSpellings::new(src, target).resolve(|path| files.contains(path))
+}
 
-    let mut candidates = vec![stripped.to_string()];
-    let mut base = Path::new(src).parent();
-    while let Some(dir) = base {
-        if !dir.as_os_str().is_empty() {
-            if let Some(normalized) = normalize_workspace_rel(&dir.join(stripped)) {
-                candidates.push(normalized);
+/// The suffixes each candidate of a link is tried with, in order.
+const FORM_SUFFIXES: [&str; 3] = ["", ".md", ".txt"];
+
+/// The spellings a link target resolves through, in the order
+/// [`resolve_link_target`] tries them, for a caller that asks whether a
+/// spelling names a file one spelling at a time instead of holding every
+/// file in a set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpellings {
+    /// The target percent-decoded, answered when no spelling names a file.
+    decoded: String,
+    /// The workspace-rooted target, then the target joined to the source's
+    /// directory and to each directory above it.
+    candidates: Vec<String>,
+}
+
+impl LinkSpellings {
+    /// The spellings of `target` as the link in the file `src` stores it.
+    pub fn new(src: &str, target: &str) -> Self {
+        let decoded = percent_decode_str(target).decode_utf8_lossy().into_owned();
+        let stripped = decoded.trim_start_matches('/');
+
+        let mut candidates = vec![stripped.to_string()];
+        let mut base = Path::new(src).parent();
+        while let Some(dir) = base {
+            if !dir.as_os_str().is_empty() {
+                if let Some(normalized) = normalize_workspace_rel(&dir.join(stripped)) {
+                    candidates.push(normalized);
+                }
             }
+            base = dir.parent();
         }
-        base = dir.parent();
+        Self {
+            decoded,
+            candidates,
+        }
     }
 
-    for candidate in &candidates {
-        for path in [
-            candidate.clone(),
-            format!("{candidate}.md"),
-            format!("{candidate}.txt"),
-        ] {
-            if files.contains(path.as_str()) {
-                return path;
+    /// The first spelling that `is_file` accepts, asking in resolution
+    /// order and stopping there, or the decoded target when it accepts none.
+    pub fn resolve(self, mut is_file: impl FnMut(&str) -> bool) -> String {
+        for candidate in &self.candidates {
+            for path in FORM_SUFFIXES.map(|suffix| format!("{candidate}{suffix}")) {
+                if is_file(&path) {
+                    return path;
+                }
             }
         }
+        self.decoded
     }
-    decoded
+
+    /// Whether [`resolve`](Self::resolve) with the same `is_file` answers
+    /// `path`, asking `is_file` of as few spellings as that takes.
+    ///
+    /// A link whose spellings and decoded target all differ from `path`
+    /// cannot answer it, and `is_file` is not asked at all. Otherwise it is
+    /// asked in resolution order, of the spellings before `path` and of
+    /// `path`; past `path` only when `path` names no file and is the decoded
+    /// target, since only then can the link still answer it. `is_file` must
+    /// give one answer per spelling.
+    pub fn resolves_to(&self, path: &str, mut is_file: impl FnMut(&str) -> bool) -> bool {
+        if !self.may_name(path) {
+            return false;
+        }
+        for candidate in &self.candidates {
+            for spelling in FORM_SUFFIXES.map(|suffix| format!("{candidate}{suffix}")) {
+                if is_file(&spelling) {
+                    return spelling == path;
+                }
+                if spelling == path && self.decoded != path {
+                    return false;
+                }
+            }
+        }
+        self.decoded == path
+    }
+
+    /// Whether `path` is one of the spellings or the decoded target, read
+    /// from the strings alone.
+    fn may_name(&self, path: &str) -> bool {
+        self.decoded == path
+            || self.candidates.iter().any(|candidate| {
+                FORM_SUFFIXES
+                    .iter()
+                    .any(|suffix| path.strip_suffix(suffix) == Some(candidate.as_str()))
+            })
+    }
 }
 
 fn normalize_workspace_rel(path: &Path) -> Option<String> {
@@ -236,6 +300,101 @@ mod tests {
         assert_eq!(
             normalized.referenced_contact_paths,
             BTreeSet::from(["contacts/alice.md".to_string()])
+        );
+    }
+
+    /// What `resolves_to(path)` answers when `files` are the files, and the
+    /// spellings it asks of them, in order.
+    fn asked(spellings: &LinkSpellings, path: &str, files: &[&str]) -> (bool, Vec<String>) {
+        let mut asked = Vec::new();
+        let answer = spellings.resolves_to(path, |spelling| {
+            asked.push(spelling.to_string());
+            files.contains(&spelling)
+        });
+        (answer, asked)
+    }
+
+    #[test]
+    fn link_spellings_resolve_to_what_resolve_answers() {
+        let cases: [(&str, &str, &[&str]); 12] = [
+            ("notes/sub/deep.md", "beside.log", &["notes/sub/beside.log"]),
+            ("notes/sub/deep.md", "up.log", &["notes/up.log", "up.log"]),
+            ("notes/sub/deep.md", "up.log", &["notes/up.log"]),
+            ("notes/a.md", "todo", &["todo.txt"]),
+            ("top.md", "docs/leaf", &["docs/leaf", "docs/leaf.md"]),
+            ("top.md", "docs/leaf", &["docs/leaf.md"]),
+            ("notes/a.md", "my%20note.md", &["notes/my note.md"]),
+            ("notes/a.md", "/LICENSE", &[]),
+            ("notes/a.md", "/LICENSE", &["LICENSE"]),
+            ("notes/a.md", "%2e%2e/outside.log", &["outside.log"]),
+            ("a/b/c.md", "../x", &["a/x", "x"]),
+            ("notes/a.md", "gone.log", &[]),
+        ];
+        for (src, target, files) in cases {
+            let spellings = LinkSpellings::new(src, target);
+            let resolved = spellings.clone().resolve(|path| files.contains(&path));
+            assert_eq!(
+                resolved,
+                resolve_link_target(src, target, &files.iter().copied().collect::<BTreeSet<_>>()),
+                "{src} links {target} with {files:?}"
+            );
+            let mut probes: Vec<String> = spellings
+                .candidates
+                .iter()
+                .flat_map(|candidate| FORM_SUFFIXES.map(|suffix| format!("{candidate}{suffix}")))
+                .collect();
+            probes.push(spellings.decoded.clone());
+            probes.push("unrelated.md".to_string());
+            for probe in probes {
+                assert_eq!(
+                    asked(&spellings, &probe, files).0,
+                    resolved == probe,
+                    "{src} links {target} with {files:?}: resolves to {probe}?"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn link_spellings_ask_only_the_spellings_that_decide() {
+        let spellings = LinkSpellings::new("notes/sub/deep.md", "up.log");
+        let tried = [
+            "up.log",
+            "up.log.md",
+            "up.log.txt",
+            "notes/sub/up.log",
+            "notes/sub/up.log.md",
+            "notes/sub/up.log.txt",
+            "notes/up.log",
+            "notes/up.log.md",
+            "notes/up.log.txt",
+        ]
+        .map(String::from);
+
+        assert_eq!(
+            asked(&spellings, "docs/up.log", &["notes/up.log"]),
+            (false, vec![]),
+            "a path no spelling names asks nothing"
+        );
+        assert_eq!(
+            asked(&spellings, "notes/sub/up.log", &["notes/up.log"]),
+            (false, tried[..4].to_vec()),
+            "a spelling that names no file, and is not the decoded target, asks none past it"
+        );
+        assert_eq!(
+            asked(&spellings, "notes/up.log", &["notes/up.log"]),
+            (true, tried[..7].to_vec()),
+            "the spellings before the one that names a file are asked first"
+        );
+        assert_eq!(
+            asked(&spellings, "up.log", &[]),
+            (true, tried.to_vec()),
+            "the decoded target is answered when no spelling names a file"
+        );
+        assert_eq!(
+            asked(&spellings, "up.log", &["notes/up.log"]),
+            (false, tried[..7].to_vec()),
+            "past the decoded target, a later spelling that names a file decides"
         );
     }
 }
