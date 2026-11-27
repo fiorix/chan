@@ -845,6 +845,18 @@
     sendFocusState();
   });
 
+  // The terminal is a stop of the page's Tab walk only while it is the
+  // active pane's shown tab, so a walk from the active pane never lands in
+  // another pane's terminal and types into it while that pane stays
+  // inactive. A press still gives it the keyboard: it makes the pane active,
+  // and script focus needs no place in the Tab order. `focused` is read
+  // before the widget is asked, since `term` is not reactive and is null
+  // until start() opens one, which takes the value as it is built.
+  $effect(() => {
+    const sequentiallyFocusable = focused;
+    term?.setSequentiallyFocusable(sequentiallyFocusable);
+  });
+
   // A split rebuilds this terminal's pane and a move names another; either way
   // the element is docked into a new layer with its renderer and socket
   // intact (terminalDock.svelte.ts). The new host has a size of its own, so
@@ -1468,6 +1480,10 @@
     // InputHandler can report it, so SGR wheel-over-TUI reporting
     // never fires upstream (clicks do work). See handleGhosttyWheel.
     term.attachCustomWheelEventHandler(handleGhosttyWheel);
+    // Given before open() so that a terminal opening outside the active pane,
+    // a retried one among them, never enters the Tab order; the effect on
+    // `focused` keeps it from then on.
+    ghosttyTerm.setSequentiallyFocusable(focused);
     // The widget's open() does not take the keyboard; a terminal in the
     // focused pane is focused once start() has wired it, below.
     term.open(host);

@@ -635,8 +635,8 @@ describe("a ghostty terminal opening in a background pane", () => {
     document.body.append(field);
     field.focus();
     try {
-      const { target } = await mountGhostty({ focused: false });
-      expect(target.querySelector(".terminal-host")?.getAttribute("tabindex"), "the host opened focusable").toBe("0");
+      const { target, term } = await mountGhostty({ focused: false });
+      expect(term.element, "the terminal opened in its host").toBe(target.querySelector(".terminal-host"));
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(document.activeElement).toBe(field);
     } finally {
