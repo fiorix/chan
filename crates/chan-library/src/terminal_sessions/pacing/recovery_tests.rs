@@ -191,6 +191,140 @@ fn a_dial_without_a_live_generation_cursor_keeps_its_resume() {
 }
 
 #[test]
+fn a_resume_past_a_lost_switch_names_the_screen_its_replay_starts_on() {
+    for alt_screen in [false, true] {
+        let session = test_session_with_ring(32);
+        let viewer = session.clone().attach(None);
+        session.record_output(if alt_screen { b"$ " } else { b"\x1b[?1049h" });
+        let cursor = session.clone().attach(None).seq;
+        // The switch the view never parsed is evicted, and the ring keeps
+        // only output drawn on the screen it selected.
+        session.record_output(if alt_screen {
+            b"\x1b[?1049h"
+        } else {
+            b"\x1b[?1049l"
+        });
+        session.record_output(&[b'x'; 20]);
+        session.record_output(&[b'y'; 20]);
+        let screen = Some(TerminalScreen::of(alt_screen));
+        let live = viewer.replay_from(cursor);
+        assert!(live.missed_bytes > 0, "fixture: the switch was evicted");
+        assert_eq!(
+            live.replay_screen, screen,
+            "a live recovery names the screen its replay starts on"
+        );
+        if !alt_screen {
+            assert_eq!(
+                session.clone().attach(Some(cursor)).replay_screen,
+                screen,
+                "a resume that lost bytes names the screen a live recovery names"
+            );
+        }
+        assert_eq!(
+            session.clone().attach(Some(0)).replay_screen,
+            None,
+            "a fresh view dialed at 0 never parsed the lost span"
+        );
+        let end = session.clone().attach(None).seq;
+        assert_eq!(
+            session.clone().attach(Some(end)).replay_screen,
+            None,
+            "a resume that misses nothing names no screen"
+        );
+    }
+}
+
+#[test]
+fn a_replay_whose_first_write_switches_screens_names_the_screen_of_its_first_byte() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(b"\x1b[?1049l");
+    session.record_output(&[b'f'; 20]);
+    session.record_output(b"between\r\n\x1b[?1049htui2 frame");
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        String::from_utf8_lossy(&live.replay.concat()),
+        "between\r\n\x1b[?1049htui2 frame",
+        "fixture: the ring keeps the last write alone"
+    );
+    assert!(
+        live.alt_screen,
+        "fixture: the write ends on the alternate screen"
+    );
+    assert_eq!(
+        live.replay_screen,
+        Some(TerminalScreen::Normal),
+        "the screen of the write's first byte, before its own switch"
+    );
+}
+
+#[test]
+fn a_switch_the_ring_start_cut_counts_as_made() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(&[b'f'; 20]);
+    // Two reads split the switch to the normal screen, and the ring keeps
+    // only the second: a view parses its rest as text.
+    session.record_output(b"\x1b[?10");
+    session.record_output(b"49lBETWEEN_TUIS\r\n\x1b[?1049htui2");
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        String::from_utf8_lossy(&live.replay.concat()),
+        "49lBETWEEN_TUIS\r\n\x1b[?1049htui2",
+        "fixture: the ring starts inside the switch"
+    );
+    assert_eq!(
+        live.replay_screen,
+        Some(TerminalScreen::Normal),
+        "the screen the cut switch selects, not the one before it or after the next"
+    );
+}
+
+#[test]
+fn a_switch_carried_into_the_ring_ends_with_its_own_sequence() {
+    let session = test_session_with_ring(64);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(&[b'f'; 40]);
+    session.record_output(b"\x1b[?10");
+    // The ring starts inside a switch to the normal screen, and its two
+    // writes split another one, back to the alternate screen.
+    session.record_output(&[b"49l".as_slice(), &[b'x'; 52], b"\x1b[?10"].concat());
+    session.record_output(b"49h");
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        live.replay.len(),
+        2,
+        "fixture: the ring keeps the two writes"
+    );
+    assert!(
+        live.replay[0].starts_with(b"49l"),
+        "fixture: the ring starts inside the first switch"
+    );
+    assert_eq!(
+        live.replay_screen,
+        Some(TerminalScreen::Normal),
+        "the carried switch ends in the first write; the next is the program's own"
+    );
+}
+
+#[test]
+fn a_lossy_attach_on_an_empty_ring_names_the_screen_it_ends_on() {
+    let session = test_session_with_ring(32);
+    let attached = session.clone().attach(Some(5));
+    assert!(
+        attached.missed_bytes > 0 && attached.replay.is_empty(),
+        "fixture: a cursor past an empty ring"
+    );
+    assert_eq!(attached.replay_screen, Some(TerminalScreen::Normal));
+}
+
+#[test]
 fn fresh_attach_keeps_the_enables_only_prelude() {
     let session = test_session_with_ring(1024);
     session.record_output(b"\x1b[?1049;1000h");

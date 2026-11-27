@@ -83,7 +83,7 @@ use redraw::force_redraw_with_wobble;
 #[cfg(test)]
 use redraw::redraw_wobble_size;
 pub use request_status::{ChanRequestStatus, ChanStatusLease};
-use ring::RingBuffer;
+use ring::{RingBuffer, ScreenMark};
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
 pub use terminal_program::ProgramReading;
@@ -227,9 +227,66 @@ fn is_screen_switch(mode: u16) -> bool {
     matches!(mode, 47 | 1047 | 1049)
 }
 
+/// One of a terminal's two screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalScreen {
+    /// The screen whose lines scroll into history.
+    Normal,
+    /// The screen a full-screen program draws on.
+    Alternate,
+}
+
+impl TerminalScreen {
+    fn of(alt_screen: bool) -> Self {
+        if alt_screen {
+            Self::Alternate
+        } else {
+            Self::Normal
+        }
+    }
+}
+
+/// The screen a view must show to draw `replay`, which starts at the ring's
+/// first byte, where the tracker's mark is `mark`. A switch the tracker
+/// carried into that byte counts as made: the ring dropped its start, so a
+/// view reads the rest of it as text, and every byte the replay draws comes
+/// after it. `None` where the mark cannot tell.
+fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
+    if mark.partial.is_empty() {
+        return mark.alt_screen;
+    }
+    let mut tail = mark.partial.clone();
+    let mut alt_screen = mark.alt_screen;
+    for chunk in replay {
+        let open = tail.len() + chunk.len();
+        scan_private_mode_sequences(&mut tail, chunk, |mode, on, at| {
+            if at == 0 && is_screen_switch(mode) {
+                alt_screen = Some(on);
+            }
+        });
+        // Only a sequence still open keeps every byte from its start.
+        if tail.len() != open {
+            break;
+        }
+    }
+    alt_screen
+}
+
 /// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
 /// reads. This recognizes private-mode toggles, not the full terminal grammar.
 fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
+    scan_private_mode_sequences(tail, bytes, |mode, on, _| change(mode, on));
+}
+
+/// [`scan_private_modes`], also passing where each change's sequence starts
+/// in `tail` followed by `bytes`: 0 for the sequence `tail` holds the start
+/// of.
+fn scan_private_mode_sequences(
+    tail: &mut Vec<u8>,
+    bytes: &[u8],
+    mut change: impl FnMut(u16, bool, usize),
+) {
     let mut scan = Vec::with_capacity(tail.len() + bytes.len());
     scan.extend_from_slice(tail);
     scan.extend_from_slice(bytes);
@@ -265,7 +322,7 @@ fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u
         if final_byte == b'h' || final_byte == b'l' {
             for param in scan[i + 3..j].split(|&b| b == b';') {
                 if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
-                    change(mode, final_byte == b'h');
+                    change(mode, final_byte == b'h', i);
                 }
             }
         }
@@ -1749,6 +1806,17 @@ pub struct AttachHandle {
     /// delta carries every mode change. Any other attach, a fresh view's
     /// included, re-asserts enabled input modes.
     pub mode_reassert: Vec<u8>,
+    /// The screen the program had at the replay's first byte, for an attach
+    /// whose [`Self::mode_reassert`] is the lost-tail reconciliation: a
+    /// redial and a live socket's recovery alike. The missed span can hold
+    /// the program's switch away from the screen the view still shows, so a
+    /// view that shows the other one switches before the replay; the server
+    /// sends no switch. A switch the replay's first bytes finish counts as
+    /// made there, since the view never sees its start. `None` for every
+    /// other attach, and where the ring cannot tell: a ring restored from
+    /// the fd store keeps no screen for its bytes before their first switch,
+    /// when they make one.
+    pub replay_screen: Option<TerminalScreen>,
     /// The replay continues the client's own screen from its cursor, as a
     /// live recovery does: the raw delta, alternate-screen bytes included,
     /// so the view is neither cleared nor moved onto a fresh alternate
@@ -6224,6 +6292,7 @@ impl Session {
             missed_bytes,
             seq,
             mode_reassert,
+            replay_screen,
             initial_program_status,
             program_status_rx,
             initial_program,
@@ -6267,6 +6336,17 @@ impl Session {
             } else {
                 self.private_mode_prelude()
             };
+            // A reconciling attach misses bytes, so its replay starts at the
+            // ring's first byte; an empty ring starts where it ends.
+            let replay_screen = if reconciles {
+                match ring.start_screen() {
+                    Some(mark) => replay_start_screen(mark, &replay),
+                    None => Some(alt_screen),
+                }
+                .map(TerminalScreen::of)
+            } else {
+                None
+            };
             let sent_seq = ring
                 .end_seq()
                 .saturating_sub(replay.iter().map(|chunk| chunk.len() as u64).sum::<u64>());
@@ -6287,6 +6367,7 @@ impl Session {
                 missed_bytes,
                 ring.end_seq(),
                 mode_reassert,
+                replay_screen,
                 initial_program_status,
                 program_status_rx,
                 initial_program,
@@ -6322,6 +6403,7 @@ impl Session {
             alt_screen,
             exit,
             mode_reassert,
+            replay_screen,
             continues_view: matches!(resume, Resume::Live(_)),
             stale_generation: matches!(resume, Resume::OtherLife),
         }
@@ -7538,7 +7620,7 @@ impl Session {
         let mut output = self.output.lock().expect("terminal output poisoned");
         // The attach's screen/mode suffix and the ring frontier describe the
         // same committed bytes, including a live recovery after output loss.
-        let alt_screen_changed = self.update_alt_screen(bytes);
+        let (screen, alt_screen_changed) = self.update_alt_screen(bytes);
         let private_modes_changed = self.update_private_modes(bytes);
         if !self.is_tmux_pane() && !self.closed.load(Ordering::Relaxed) && !output.program_ended {
             if output.program.feed(bytes, foreground) {
@@ -7567,14 +7649,14 @@ impl Session {
         // The ring file carries the state these bytes leave beside them.
         #[cfg(target_os = "linux")]
         if alt_screen_changed || private_modes_changed {
-            ring.push_with_state(bytes, &self.terminal_state());
+            ring.push_with_state(bytes, screen, &self.terminal_state());
         } else {
-            ring.push(bytes);
+            ring.push(bytes, screen);
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (alt_screen_changed, private_modes_changed);
-            ring.push(bytes);
+            ring.push(bytes, screen);
         }
         // The tab activity dot trips on the same visible text, for the same
         // reason.
@@ -7850,13 +7932,17 @@ impl Session {
         Some(DSR_CURSOR_REPORT)
     }
 
-    /// Track the alternate screen from PTY output; true when `bytes` carried
-    /// a transition.
-    fn update_alt_screen(&self, bytes: &[u8]) -> bool {
+    /// Track the alternate screen from PTY output: where the tracker stood
+    /// at `bytes`' first byte, and whether they carried a transition.
+    fn update_alt_screen(&self, bytes: &[u8]) -> (ScreenMark, bool) {
         let mut tail = self
             .alt_screen_tail
             .lock()
             .expect("terminal alt-screen tail poisoned");
+        let mark = ScreenMark {
+            alt_screen: Some(self.in_alt_screen.load(Ordering::Relaxed)),
+            partial: tail.clone(),
+        };
         let mut last_transition = None;
         scan_private_modes(&mut tail, bytes, |mode, on| {
             if is_screen_switch(mode) {
@@ -7867,7 +7953,7 @@ impl Session {
             self.in_alt_screen.store(on, Ordering::Relaxed);
             tracing::debug!(session = %self.id, alt_screen = on, "alt_screen selected");
         }
-        last_transition.is_some()
+        (mark, last_transition.is_some())
     }
 
     /// Track the live [`TRACKED_PRIVATE_MODES`] set by parsing DEC private-mode
@@ -8122,7 +8208,7 @@ fn restored_ring(
         sealed,
     } = source;
     let from_manifest = |state: TerminalState| RestoredRing {
-        ring: RingBuffer::new_with_replay(capacity, seq, tail),
+        ring: RingBuffer::new_with_replay(capacity, seq, tail, state.alt_screen),
         state,
         behind: !sealed,
         program_status_eligible: false,
@@ -8142,9 +8228,9 @@ fn restored_ring(
     };
     let reason = match file.read() {
         Ok((end, bytes)) if end >= seq => {
-            let mut ring = RingBuffer::new_with_replay(capacity, end, &bytes);
             // A file in the stateless format leaves the state to the manifest.
             let state = file.terminal_state().unwrap_or(state);
+            let mut ring = RingBuffer::new_with_replay(capacity, end, &bytes, state.alt_screen);
             let behind = file.stopped();
             let program_status_eligible = sealed && !behind && end == seq;
             if behind {
@@ -9557,11 +9643,92 @@ mod tests {
     #[test]
     fn ring_overflow_reports_missed_bytes() {
         let mut ring = RingBuffer::new(5);
-        ring.push(b"abc");
-        ring.push(b"def");
+        ring.push(b"abc", ScreenMark::default());
+        ring.push(b"def", ScreenMark::default());
         let (replay, missed) = ring.snapshot_since(Some(0));
         assert_eq!(missed, 3);
         assert_eq!(replay.concat(), b"def");
+    }
+
+    fn start_alt_screen(ring: &RingBuffer) -> Option<Option<bool>> {
+        ring.start_screen().map(|mark| mark.alt_screen)
+    }
+
+    #[test]
+    fn an_oversized_write_marks_the_screen_where_the_ring_cuts_it() {
+        let mut ring = RingBuffer::new(16);
+        let on = |alt_screen| ScreenMark {
+            alt_screen: Some(alt_screen),
+            partial: Vec::new(),
+        };
+        ring.push(
+            &[b"\x1b[?1049h".as_slice(), &[b'x'; 20]].concat(),
+            on(false),
+        );
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(true)),
+            "the bytes the ring drops switch to the alternate screen"
+        );
+        // A cut inside a switch leaves it begun at the ring's first byte.
+        ring.push(
+            &[[b'x'; 10].as_slice(), b"\x1b[?1049l", &[b'y'; 10]].concat(),
+            on(true),
+        );
+        let mark = ring.start_screen().expect("a held chunk").clone();
+        assert_eq!(
+            (mark.alt_screen, mark.partial.as_slice()),
+            (Some(true), b"\x1b[".as_slice()),
+            "the mark holds the switch the cut began"
+        );
+        let (replay, _) = ring.snapshot_since(None);
+        assert_eq!(
+            replay_start_screen(&mark, &replay),
+            Some(false),
+            "a switch the cut began counts as made at the ring's first byte"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_that_switches_no_screen_starts_on_the_screen_it_leaves() {
+        for alt_screen in [false, true] {
+            let ring = RingBuffer::new_with_replay(1024, 40, b"$ ls\r\nfile\r\n", alt_screen);
+            assert_eq!(start_alt_screen(&ring), Some(Some(alt_screen)));
+        }
+    }
+
+    #[test]
+    fn a_restored_ring_knows_no_screen_before_its_first_switch() {
+        let read = PTY_READ_BYTES;
+        let replay = [
+            vec![b'a'; read],
+            b"\x1b[?1049h".to_vec(),
+            vec![b'b'; read - 8],
+            vec![b'c'; read],
+        ]
+        .concat();
+        let mut ring = RingBuffer::new_with_replay(3 * read, replay.len() as u64, &replay, true);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "nothing says which screen the bytes before the first switch were on"
+        );
+        let alt = ScreenMark {
+            alt_screen: Some(true),
+            partial: Vec::new(),
+        };
+        ring.push(&vec![b'd'; read], alt.clone());
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "the read that holds the switch starts before it"
+        );
+        ring.push(&vec![b'e'; read], alt);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(true)),
+            "past the first switch, the switches tell"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -9582,7 +9749,7 @@ mod tests {
 
     #[test]
     fn restored_ring_replays_preserved_history_without_false_missed_bytes() {
-        let ring = RingBuffer::new_with_replay(1024, 6, b"abcdef");
+        let ring = RingBuffer::new_with_replay(1024, 6, b"abcdef", false);
 
         let (replay, missed) = ring.snapshot_since(Some(0));
 
@@ -9593,7 +9760,7 @@ mod tests {
 
     #[test]
     fn restored_ring_keeps_sequence_coordinates_when_replay_is_truncated() {
-        let ring = RingBuffer::new_with_replay(4, 10, b"abcdef");
+        let ring = RingBuffer::new_with_replay(4, 10, b"abcdef", false);
 
         let (replay, missed) = ring.snapshot_since(Some(0));
 
@@ -9607,10 +9774,10 @@ mod tests {
         let cap = 4 * PTY_READ_BYTES;
         let replay: Vec<u8> = (0..cap).map(|i| (i % 251) as u8).collect();
         let end = replay.len() as u64;
-        let mut ring = RingBuffer::new_with_replay(cap, end, &replay);
+        let mut ring = RingBuffer::new_with_replay(cap, end, &replay, false);
         let inside_window = end - cap as u64 / 2;
 
-        ring.push(b"x");
+        ring.push(b"x", ScreenMark::default());
 
         let (tail, missed) = ring.snapshot_since(Some(inside_window));
         assert_eq!(missed, 0, "one push past capacity evicts one read's worth");
@@ -9625,7 +9792,7 @@ mod tests {
         let replay: Vec<u8> = (0..2 * PTY_READ_BYTES).map(|i| (i % 251) as u8).collect();
         let end = replay.len() as u64;
 
-        let ring = RingBuffer::new_with_replay(cap, end, &replay);
+        let ring = RingBuffer::new_with_replay(cap, end, &replay, false);
 
         let (tail, missed) = ring.snapshot_since(Some(0));
         assert_eq!(missed, end - cap as u64);
@@ -9634,7 +9801,7 @@ mod tests {
 
     #[test]
     fn restored_ring_without_replay_reports_pre_import_bytes_as_missed() {
-        let ring = RingBuffer::new_with_replay(1024, 552, b"");
+        let ring = RingBuffer::new_with_replay(1024, 552, b"", false);
 
         let (replay, missed) = ring.snapshot_since(Some(0));
 
@@ -11178,7 +11345,8 @@ mod tests {
             entry.replay, b"before\nraced\n",
             "the tail holds the raced read"
         );
-        let restored = RingBuffer::new_with_replay(1024, entry.meta.seq, &entry.replay);
+        let restored =
+            RingBuffer::new_with_replay(1024, entry.meta.seq, &entry.replay, entry.meta.alt_screen);
         let (resumed, missed) = restored.snapshot_since(Some(client_cursor));
         assert_eq!(missed, 0);
         assert_eq!(
