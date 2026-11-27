@@ -71,7 +71,7 @@ wait_for_line() {
     return 1
 }
 
-if ! cargo build --manifest-path "$REPO/Cargo.toml" --locked -p chan-wireguard --example wg-peer >"$WORK/build-wg-peer.log" 2>&1; then
+if ! (cd "$REPO" && cargo build --manifest-path "$REPO/Cargo.toml" --locked -p chan-wireguard --example wg-peer) >"$WORK/build-wg-peer.log" 2>&1; then
     echo "verdict tier2 wg-peer-build 2 PREREQ failed to build wg-peer example" >&2
     cat "$WORK/build-wg-peer.log" >&2
     exit 2
@@ -149,11 +149,14 @@ node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" wg-e2e.in
     "$WORK/peer-p1.log" "$WORK/peer-p2.log"
 
 HARNESS_RC=0
-CHAN_IOS_E2E_MOCK_ORIGIN="$MOCK_ORIGIN" \
-CHAN_IOS_E2E_CLIENT_PRIV="$CLIENT_PRIV" \
-CHAN_IOS_E2E_PROBE_RED="$PROBE_RED" \
-    cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness \
-    -- --ignored live_wg_peer_matrix --nocapture >"$WORK/harness.log" 2>&1 || HARNESS_RC="$?"
+(
+    cd "$REPO"
+    CHAN_IOS_E2E_MOCK_ORIGIN="$MOCK_ORIGIN" \
+    CHAN_IOS_E2E_CLIENT_PRIV="$CLIENT_PRIV" \
+    CHAN_IOS_E2E_PROBE_RED="$PROBE_RED" \
+        cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness \
+        -- --ignored live_wg_peer_matrix --nocapture
+) >"$WORK/harness.log" 2>&1 || HARNESS_RC="$?"
 
 if [ "$PROBE_RED" = 1 ]; then
     if [ "$HARNESS_RC" -ne 0 ]; then

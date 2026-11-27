@@ -201,13 +201,20 @@ process.exit(anyFail ? 1 : 0);
     return "$parse_rc"
 }
 
+run_cargo_verdict() {
+    local tier="$1"
+    local name="$2"
+    shift 2
+    run_cmd_verdict "$tier" "$name" bash -c 'cd "$1" && shift && exec cargo "$@"' _ "$REPO" "$@"
+}
+
 run_self_test() {
     echo "=== E2E Self-Test Mode ($SHA) ==="
     run_cmd_verdict self-test e2e-check make -C "$REPO" e2e-check
     run_cmd_verdict self-test shell-check make -C "$REPO" shell-check
     run_cmd_verdict self-test ios-check make -C "$REPO" ios-check
     run_cmd_verdict self-test ios-lint make -C "$REPO" ios-lint
-    run_cmd_verdict self-test ios-e2e-harness cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
+    run_cargo_verdict self-test ios-e2e-harness test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
     run_cmd_verdict self-test ios-unit-tests make -C "$REPO" ios-test
     run_cmd_verdict self-test node-unit-tests node --test "$SCRIPT_DIR"/*.test.mjs
     run_stream_verdicts "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
@@ -276,7 +283,7 @@ run_probe_red() {
 
 run_tier1() {
     echo "=== Tier 1: Isolated Feature Happy Paths ($SHA) ==="
-    run_cmd_verdict tier1 rust-ios-e2e-harness cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
+    run_cargo_verdict tier1 rust-ios-e2e-harness test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
     run_cmd_verdict tier1 node-harness-tests node --test "$SCRIPT_DIR"/*.test.mjs
     run_cmd_verdict tier1 f9-ios-check-aarch64 make -C "$REPO" ios-check
     run_cmd_verdict tier1 f9-ios-lint-clippy make -C "$REPO" ios-lint
@@ -310,7 +317,7 @@ run_tier4() {
     fi
     run_stream_verdicts "$SCRIPT_DIR/run-simulator-smoke.sh" "${sim_args[@]}"
     run_cmd_verdict tier4 scenario-s2-wireguard-enroll-and-proxy "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
-    run_cmd_verdict tier4 scenario-s6-adversarial-boundaries cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
+    run_cargo_verdict tier4 scenario-s6-adversarial-boundaries test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
 }
 
 case "$MODE" in

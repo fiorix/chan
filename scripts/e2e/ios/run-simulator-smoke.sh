@@ -199,7 +199,7 @@ if ! xcrun simctl install "$UDID" "$APP_PATH" >"$WORK/install.log" 2>&1; then
 fi
 
 # Start mock-gateway with wg-peer launcher so Chan.app's real generated public key gets admitted.
-if ! cargo build --manifest-path "$REPO/Cargo.toml" --locked -p chan-wireguard --example wg-peer >"$WORK/wg-peer-build.log" 2>&1; then
+if ! (cd "$REPO" && cargo build --manifest-path "$REPO/Cargo.toml" --locked -p chan-wireguard --example wg-peer) >"$WORK/wg-peer-build.log" 2>&1; then
     echo "verdict tier4 sim-wg-peer 2 PREREQ failed to build wg-peer"
     exit 2
 fi

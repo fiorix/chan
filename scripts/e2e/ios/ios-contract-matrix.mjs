@@ -63,7 +63,7 @@ function runCargoTests(extraArgs) {
     const res = spawnSync(
         "cargo",
         ["test", "--manifest-path", join(repoRoot, "Cargo.toml"), "-p", "chan-ios", ...extraArgs, "--", "--color=never"],
-        { encoding: "utf8", timeout: 300_000, maxBuffer: 16 * 1024 * 1024 },
+        { cwd: repoRoot, encoding: "utf8", timeout: 300_000, maxBuffer: 16 * 1024 * 1024 },
     );
     if (res.error) {
         if (res.error.code === "ENOENT") {
