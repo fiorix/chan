@@ -199,11 +199,13 @@ async function main() {
   // differ between the baseline and a full repaint of the same screen (the
   // cursor, a prompt line painted late) and stays half the floor, so a
   // read inside it keeps marks in every quarter, about ten times what a
-  // cursor-only repaint leaves. The band bounds quarters, not rows: one
-  // text row is about 1.4 percent of a quarter's samples on the desktop's
-  // page, so a repaint short of one row in a quarter still holds. A HELD
-  // says every quarter came back within the band at a transform of 2, not
-  // that every row did.
+  // cursor-only repaint leaves. The band bounds quarters, not rows. On the
+  // desktop's page one text row is about 1.4 percent of a quarter's
+  // samples, so a repaint short of one text row in a quarter still holds;
+  // each of the two rows of zeros this driver prints is about 2.3 percent,
+  // so a repaint short of one of those does not hold and reads
+  // inconclusive. A HELD says every quarter came back within the band at a
+  // transform of 2, not that every row did.
   const FLOOR = 0.04;
   const BAND = 0.02;
   const floorOf = (total) => Math.ceil(total * FLOOR);
