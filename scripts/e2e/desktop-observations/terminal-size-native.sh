@@ -52,9 +52,9 @@ dpkg-query -W libwebkit2gtk-4.1-0 > "$output/engine-package.txt"
 ldd "$CHAN_DESKTOP_BIN" > "$output/desktop-ldd.txt"
 "$CHAN_DESKTOP_BIN" --version > "$output/desktop-version.txt"
 obs_log "window $xid is visible on $DISPLAY; engine $(cat "$output/engine-package.txt")"
-set +e
+# The ERR trap fires under `set +e` too: only obs_verdict lets the
+# driver's own status, a fault among them, reach obs_judge.
+obs_verdict
 node "$HERE/terminal-size-native.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output" "${driver_args[@]}"
 verdict=$?
-set -e
-obs_verdict
 obs_judge "$verdict" "native terminal size reader found a fault"
