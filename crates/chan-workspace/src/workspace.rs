@@ -33,6 +33,10 @@ use crate::{Report, ReportScope};
 
 pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
 
+#[path = "workspace_listed_files.rs"]
+mod listed_files;
+pub use listed_files::ListedFiles;
+
 /// Canonical editable-content threshold. It caps new `write_text` content,
 /// buffered editor opens, and incremental indexing; the server reports this
 /// same value as `max_editable_bytes` so those paths cannot disagree.
@@ -852,8 +856,8 @@ pub mod subtree_test_hooks {
 #[doc(hidden)]
 pub mod listing_limit_test_hooks {
     use super::Workspace;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
     type Limits = LazyLock<Mutex<HashMap<PathBuf, usize>>>;
@@ -912,6 +916,33 @@ pub mod listing_limit_test_hooks {
             .lock()
             .unwrap()
             .entry(workspace.paths.graph_dir.clone())
+            .or_default() += 1;
+    }
+
+    type PathReads = HashMap<PathBuf, BTreeMap<String, usize>>;
+
+    static LISTED_FILE_READS: LazyLock<Mutex<PathReads>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// How many times a [`super::ListedFiles`] of `workspace` has read each
+    /// path from the disk, a path it was asked about or a directory above
+    /// one, each counted as its lstat is made.
+    pub fn listed_file_reads(workspace: &Workspace) -> BTreeMap<String, usize> {
+        LISTED_FILE_READS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn record_listed_file_read(key: &Path, rel: &str) {
+        *LISTED_FILE_READS
+            .lock()
+            .unwrap()
+            .entry(key.to_path_buf())
+            .or_default()
+            .entry(rel.to_owned())
             .or_default() += 1;
     }
 
@@ -2364,6 +2395,13 @@ impl Workspace {
     /// answers false.
     pub fn parent_lists_name(&self, rel: &str) -> bool {
         ListedNames::new(self.fs.dir()).lists(rel) == Some(true)
+    }
+
+    /// Per-path answers to whether [`Self::list_tree_filtered_unified`]
+    /// lists a path as a file, read from the disk with no walk; see
+    /// [`ListedFiles`] for what each answer reads.
+    pub fn listed_files(&self) -> ListedFiles {
+        ListedFiles::new(self)
     }
 
     /// Stat the path using `lstat` semantics (so a symlink reports
