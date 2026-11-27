@@ -296,6 +296,60 @@ describe('sequential focus navigation', () => {
     expect(tabIndexes(host)).toEqual(['-1', '-1']);
   });
 
+  test('disposal takes the tabindex the widget wrote, so the next unused terminal opens in the Tab order', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const out = await terminal();
+    out.setSequentiallyFocusable(false);
+    out.open(host);
+    out.dispose();
+    expect(host.hasAttribute('tabindex'), 'a value asked before open() goes with the terminal').toBe(false);
+
+    const unused = await terminal();
+    unused.open(host);
+    expect(tabIndexes(host)).toEqual(['0', '0']);
+    unused.dispose();
+    expect(host.hasAttribute('tabindex'), "open()'s own '0' goes with the terminal").toBe(false);
+  });
+
+  test("disposal keeps an embedder's tabindex the widget never wrote and takes one it wrote over", async () => {
+    const host = document.createElement('div');
+    host.setAttribute('tabindex', '-1');
+    document.body.append(host);
+    const unused = await terminal();
+    unused.open(host);
+    unused.dispose();
+    expect(host.getAttribute('tabindex'), "the embedder's value stays").toBe('-1');
+
+    const later = await terminal();
+    later.open(host);
+    later.setSequentiallyFocusable(true);
+    expect(tabIndexes(host)).toEqual(['0', '0']);
+    later.dispose();
+    expect(host.hasAttribute('tabindex'), 'a value written after open() goes with the terminal').toBe(false);
+
+    host.setAttribute('tabindex', '0');
+    const asked = await terminal();
+    asked.setSequentiallyFocusable(false);
+    asked.open(host);
+    expect(tabIndexes(host), "a value asked before open() replaces the embedder's").toEqual(['-1', '-1']);
+    asked.dispose();
+    expect(host.hasAttribute('tabindex'), 'and goes with the terminal').toBe(false);
+  });
+
+  test('an open() that fails takes the tabindex it wrote', async () => {
+    const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+    vi.spyOn(ghostty, 'createTerminal').mockImplementation(() => {
+      throw new Error('no memory for the terminal');
+    });
+    const term = new Terminal({ ghostty, cols: 40, rows: 6, cursorBlink: false, smoothScrollDuration: 0 });
+    terminals.push(term);
+    const host = document.createElement('div');
+    document.body.append(host);
+    expect(() => term.open(host)).toThrow('no memory for the terminal');
+    expect(host.hasAttribute('tabindex')).toBe(false);
+  });
+
   test("open() asked out puts no '0' on the host, from its own default or the input handler's", async () => {
     const term = await terminal();
     term.setSequentiallyFocusable(false);
