@@ -8029,7 +8029,10 @@ impl Session {
         // without touching any saved slot or the alternate screen's contents,
         // and the guest suite exercises exactly that switch; the core also
         // honors ?47h (shown by the app's recovery tests on the core), which
-        // the product does not use.
+        // the product does not use. The normal-screen DECSC overwrites the
+        // program's own saved cursor, so a restore the program sends later
+        // returns to where the replay ended; the server cannot tell which
+        // screen the view shows, and without it ?1049l can jump the cursor.
         let mut out = if alt_screen {
             b"\x18\x1b[?1047h".to_vec()
         } else {
