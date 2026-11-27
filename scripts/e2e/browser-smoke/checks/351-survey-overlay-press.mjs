@@ -12,11 +12,17 @@
 // - focused: a click on the card's title first makes A the focused pane
 //   with the keyboard on the card; the same press keeps it there, and a 2
 //   answers the same way.
+// - at-large: as focused, then a press on A's tab strip itself, beside its
+//   tabs, lands on an element no engine focuses and drops the keyboard to
+//   the page with A still focused; the same press beside the card gives
+//   the keyboard to the card, and a 2 answers the same way.
 //
 // Where the overlay leaves the press its default, Chrome blurs the card and
 // the keyboard falls to <body>, where the 2 answers nothing: each leg then
 // fails on "after the press beside the card the keyboard is on BODY." and on
-// "the 2 left the survey unanswered".
+// "the 2 left the survey unanswered". Where the overlay cancels the default
+// but the card does not take the keyboard after the press, the at-large leg
+// fails on the same two lines and the other legs pass.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -33,7 +39,7 @@ const bytes = (file, offset = 0) => existsSync(file)
   ? [...readFileSync(file).subarray(offset)].map((byte) => byte.toString(16).padStart(2, "0"))
   : [];
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const LEGS = ["unfocused", "focused"];
+const LEGS = ["unfocused", "focused", "at-large"];
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -94,6 +100,24 @@ async function pointBesideCard(page, tab) {
       onOverlay: element === overlay,
       inTerminal: x >= h.left && x <= h.right && y >= h.top && y <= h.bottom,
     };
+  }, terminalSelector(tab));
+}
+
+/// A point on A's tab strip itself, beside its tabs, its dead zone and its
+/// actions (the strip's own padding), with what the page hit-tests there.
+async function pointOnStrip(page, tab) {
+  return page.evaluate((selector) => {
+    const strip = document.querySelector(selector)?.closest(".pane")?.querySelector(".tabs");
+    if (!strip) return { x: null, y: null, hit: "no tab strip in A's pane", onStrip: false };
+    const r = strip.getBoundingClientRect();
+    const rows = [Math.ceil(r.top) + 1, Math.round(r.top + r.height / 2), Math.floor(r.bottom) - 2];
+    for (const y of rows) {
+      for (let x = Math.ceil(r.left) + 1; x < r.right - 1; x += 2) {
+        const element = document.elementFromPoint(x, y);
+        if (element === strip) return { x, y, hit: `${element.tagName}.${element.className}`, onStrip: true };
+      }
+    }
+    return { x: null, y: null, hit: "no point on A's strip lands on the strip itself", onStrip: false };
   }, terminalSelector(tab));
 }
 
@@ -163,11 +187,21 @@ async function runSurvey(ctx, directory, save) {
       if (result.appeared.focusedPane !== result.appeared.awayPane || result.appeared.keyboard !== "away") {
         throw new Error(`the survey's arrival over pane A left pane ${result.appeared.focusedPane} focused with the keyboard on ${result.appeared.keyboard}, expected B's terminal`);
       }
-      if (kind === "focused") {
+      if (kind === "focused" || kind === "at-large") {
         await page.click(`${terminalSelector(target.tab)} .survey-title`);
         result.afterTitle = await until("a click on the card's title makes A the focused pane with the keyboard on the card", async () => {
           const current = await read();
           return current.focusedPane === current.targetPane && current.keyboard === "survey" ? current : null;
+        });
+      }
+      if (kind === "at-large") {
+        result.strip = await pointOnStrip(page, target.tab);
+        if (!result.strip.onStrip) throw new Error(`the press on A's strip has no point: ${result.strip.hit}`);
+        await page.mouse.click(result.strip.x, result.strip.y);
+        await settle(page);
+        result.afterStrip = await until("a press on A's strip takes the keyboard off the card with A still focused", async () => {
+          const current = await read();
+          return current.focusedPane === current.targetPane && current.keyboard !== "survey" ? current : null;
         });
       }
       const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
