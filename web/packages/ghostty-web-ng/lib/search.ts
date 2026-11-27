@@ -751,10 +751,18 @@ export class SearchOwner {
     return this.#kept ? this.#trackedRange() : null;
   }
 
+  // The active match where its tracked cells now are; null once either is
+  // gone, or once output has moved one and not the other so that the end
+  // precedes the start, which loses the match as pruning one of its cells
+  // does. A line feed at the bottom of a scroll region whose top row is a
+  // wrapped match's second row drops that row, and the core moves the end's
+  // cell to the row above at its own column.
   #trackedRange(): MatchRange | null {
     const start = this.#keptStart?.point();
     const end = this.#keptEnd?.point();
-    return start && end ? { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col } : null;
+    if (!start || !end) return null;
+    const range = { startRow: start.row, startCol: start.col, endRow: end.row, endCol: end.col };
+    return forward(range) ? range : null;
   }
 
   #retrack(cell: TerminalCoreTrackedCell | null, row: number, col: number): TerminalCoreTrackedCell | null {
@@ -818,7 +826,8 @@ function searchStyles(theme: ITheme): Styles {
 // Whether `range` ends at or after its start. At some sizes the core lists
 // a match wrapped across a page boundary on the screen as a range whose end
 // lies rows above its start; the owner reads that entry as one the core
-// cannot place, so find neither counts, paints, steps to nor keeps it.
+// cannot place, so find neither counts, paints, steps to nor keeps it. An
+// active match whose tracked cells output leaves so is lost.
 function forward(range: MatchRange): boolean {
   return range.endRow > range.startRow || (range.endRow === range.startRow && range.endCol >= range.startCol);
 }
