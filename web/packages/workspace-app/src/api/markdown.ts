@@ -74,11 +74,28 @@ function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): Wi
   return spans;
 }
 
-function renderWikiLabels(input: string, inline: boolean, frontmatter: boolean): string {
+/// Whether a wikilink body is plainly a link, for prose with no note behind
+/// it. A shell conditional always has a blank after its `[[`, which the
+/// shell reads as a word of its own, and the link syntax has no escape for
+/// a bracket, so a body that opens with whitespace or holds a bracket is a
+/// shell test or a nested array, not a link chan's pickers write.
+function isPlainLinkBody(body: string): boolean {
+  return !/^\s/.test(body) && !/[[\]]/.test(body);
+}
+
+function renderWikiLabels(
+  input: string,
+  inline: boolean,
+  frontmatter: boolean,
+  isLink: (body: string) => boolean = () => true,
+): string {
   let output = "";
   let end = 0;
   for (const span of wikiLinkSpans(input, inline, frontmatter)) {
-    const { label } = parseWikiBody(input.slice(span.from + 2, span.to - 2));
+    const body = input.slice(span.from + 2, span.to - 2);
+    // A span left out stays in the source as typed, up to the next label.
+    if (!isLink(body)) continue;
+    const { label } = parseWikiBody(body);
     // Character references keep every label literal to marked, including
     // emphasis and URL syntax. The span preserves the inline boundary
     // even for an empty alias; it carries no export-control attributes.
@@ -165,9 +182,16 @@ export function renderMarkdown(
 /// per-call options merge over the instance defaults, so `gfm` stays on.
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
 /// labels; a call without the option keeps the authored syntax.
-export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean } = {}): string {
+/// `{ wikilinks: "strict" }` labels only a plain link and keeps as typed a
+/// `[[...]]` whose body opens with whitespace or holds a bracket: for prose
+/// with no note behind it, such as a survey body, where double brackets
+/// are as likely a shell test as a link.
+export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean | "strict" } = {}): string {
   const source = input ?? "";
-  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false, false) : source, {
+  const labelled = opts.wikilinks
+    ? renderWikiLabels(source, false, false, opts.wikilinks === "strict" ? isPlainLinkBody : undefined)
+    : source;
+  const raw = marked.parse(labelled, {
     async: false,
     breaks: true,
     gfm: true,

@@ -387,8 +387,10 @@
       <!-- renderMarkdownWithBreaks is DOMPurify-sanitized (web/packages/workspace-app/src/api/markdown.ts),
            so {@html} is safe for the agent-supplied body. `breaks: true` so a
            single authored newline renders as a line break (survey bodies are
-           hand-written multi-line prompts). -->
-      <div class="survey-body" bind:this={body}>{@html renderMarkdownWithBreaks(active.bodyMarkdown)}</div>
+           hand-written multi-line prompts). Strict wikilink labels: a body is
+           an agent's prose about code, so a shell test's brackets read as
+           typed while a plain link shows its label. -->
+      <div class="survey-body" bind:this={body}>{@html renderMarkdownWithBreaks(active.bodyMarkdown, { wikilinks: "strict" })}</div>
       <ul class="survey-options">
         {#each active.options as option, i (i)}
           <li>
