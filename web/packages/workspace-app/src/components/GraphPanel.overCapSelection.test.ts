@@ -16,6 +16,7 @@
 // `yieldRunawayMicrotasks` makes such a loop yield and counts it, and every
 // wait of a case reads the count and the clock.
 
+import { mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("./GraphCanvas.svelte", async () =>
@@ -34,6 +35,7 @@ import {
   canvas,
   fsg,
   g,
+  GRAPH_PANE,
   graphServer,
   graphTab,
   installGraphDom,
@@ -49,7 +51,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { parentDir } from "../state/format";
 import { closeTabMenu } from "../state/tabMenu.svelte";
-import { layout, type GraphTab } from "../state/tabs.svelte";
+import { layout, type GraphTab, type LeafNode } from "../state/tabs.svelte";
 
 installGraphDom();
 
@@ -78,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   closeTabMenu();
   unmountGraphPanels();
+  for (const app of shownPanels.splice(0)) unmount(app);
   timers.release();
   const yielded = microtasks.yielded;
   microtasks.release();
@@ -132,6 +135,34 @@ function state(tab: GraphTab): { selected: string | null; pending: string | null
 /// A graph tab as its opener makes it, which always opens the root.
 function openerTab(over: Partial<GraphTab>): GraphTab {
   return graphTab({ expanded: { "": true }, ...over });
+}
+
+const shownPanels: Array<Record<string, unknown>> = [];
+
+/// A graph tab as its opener makes it, mounted shown, with `show` to hide and
+/// show it as its pane does when another of its tabs is chosen.
+async function openShowable(over: Partial<GraphTab>): Promise<{ tab: GraphTab; show: (shown: boolean) => void }> {
+  const made = openerTab(over);
+  layout.nodes = { [GRAPH_PANE]: { kind: "leaf", id: GRAPH_PANE, tabs: [made], activeTabId: made.id } };
+  layout.rootId = GRAPH_PANE;
+  layout.activePaneId = GRAPH_PANE;
+  const pane = layout.nodes[GRAPH_PANE] as LeafNode;
+  const tab = pane.tabs[0] as GraphTab;
+  const target = document.createElement("div");
+  document.body.append(target);
+  shownPanels.push(
+    mount(GraphPanel, {
+      target,
+      props: {
+        tab,
+        get active() {
+          return pane.activeTabId === made.id;
+        },
+      },
+    }) as Record<string, unknown>,
+  );
+  await settle();
+  return { tab, show: (shown) => (pane.activeTabId = shown ? made.id : "another-tab") };
 }
 
 async function open(select: string): Promise<GraphTab> {
@@ -422,5 +453,67 @@ describe.each(["folders", "depth"] as const)("over the listing cap (%s)", (tree)
     expect(state(tab)).toEqual({ selected: null, pending: null, opened: [""] });
     await settle(30);
     expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 2, a: 0 });
+  });
+
+  // A restored tab whose folder a is closed with 130 folders opened below it
+  // that sort ahead of a/zz, the file's folder. A step of the level reads
+  // takes at most 64 folders, parents first: opening the chain reads a and 63
+  // of them, the next step 64 more and not a/zz, the one after the last three
+  // and a/zz.
+  const SIBLINGS = Array.from({ length: 130 }, (_, i) => `a/f${String(i).padStart(3, "0")}`);
+
+  async function openPastSiblings(select: string): Promise<GraphTab> {
+    serve(tree, { dirs: [...SIBLINGS, "a/zz"], files: ["a/zz/x.rs"] });
+    const expanded = Object.fromEntries(["", ...SIBLINGS].map((dir) => [dir, true]));
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      openerTab({ pendingSelectId: select, selectedNodeId: select, expanded }),
+    );
+    await settle(30);
+    return tab;
+  }
+
+  test("a chain folder a step of the level reads left out is asked at the next step, and the file is selected", async () => {
+    const tab = await openPastSiblings("a/zz/x.rs");
+    expect(state(tab).selected).toBe("a/zz/x.rs");
+    expect(state(tab).pending).toBeNull();
+    expect(tab.expanded["a/zz"]).toBe(true);
+    expect(levelReads("a/zz"), "the file's folder").toBe(1);
+    expect(reads().length, "the root, a, the 130 folders below it and a/zz, each once").toBe(133);
+    expect(new Set(reads()).size).toBe(133);
+  });
+
+  test("a chain folder a step left out is dropped only once a step that took it settles without the file", async () => {
+    const tab = await openPastSiblings("a/zz/gone.rs");
+    expect(state(tab).selected).toBeNull();
+    expect(state(tab).pending).toBeNull();
+    expect(levelReads("a/zz"), "the file's folder").toBe(1);
+    expect(reads().length).toBe(133);
+    await settle(30);
+    expect(reads().length, "nothing more is read").toBe(133);
+  });
+
+  // A tab shown long enough to take the window's answer and to begin its
+  // first whole fetch, and hidden while that fetch is in flight: the fetch
+  // lands in the hidden tab, whose graph is then whole.
+  test("a hidden tab keeps the selection pending and reads nothing for it until it is shown", async () => {
+    serve(tree);
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((resolve) => (release = resolve));
+    const { tab, show } = await openShowable({ pendingSelectId: "a/x.rs" });
+    await settle(30);
+    expect(graphData.tree, "the answer is in").toBe(tree);
+    show(false);
+    await settle();
+    graphServer.fsGate = null;
+    release();
+    await settle(30);
+    expect(state(tab), "hidden").toEqual({ selected: null, pending: "a/x.rs", opened: [""] });
+    expect(reads(), "hidden").toEqual([""]);
+    show(true);
+    await settle(30);
+    expect(state(tab)).toEqual({ selected: "a/x.rs", pending: null, opened: ["", "a"] });
+    expect(reads()).toEqual(["", "a"]);
   });
 });
