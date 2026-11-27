@@ -1,6 +1,6 @@
 # A program in a chan terminal cannot register how to resume itself (OSC 7577)
 
-Status: accepted for v0.136.0 by the owner on 2026-11-27, as an early item of the cycle ("including dev/osc-7577-program-resume-plan.md as an early item"); not started. The default of the setting, on or off, is open with the owner (section 16).
+Status: accepted for v0.136.0 by the owner on 2026-11-27, as an early item of the cycle ("including dev/osc-7577-program-resume-plan.md as an early item"); not started. The default of the setting, on or off, is open with the owner (section 16). Moved to v0.137.0 by the owner the same day, with the three other large rows ("let's do 1-11 for v0.136, and then 12-15 to v0.137").
 
 Record: the implementation plan below was prepared on 2026-11-26 in the development tree (`dev/osc-7577-program-resume-plan.md`) and is this row, copied whole with its links re-based. Its investigation read `main` at `3a34491ceeb70bc5b38e07f56495371582837eeb` and the terminal migration branch `v0135/int` at `2845363e388ce65bb30f8da77892a33fc5eb5356`; both are evidence snapshots. The migration shipped in v0.135.0. Of the files section 2 cites, `crates/chan-library/src/terminal_sessions.rs` changed between that snapshot and the v0.135.0 release commit (the replay's start screen and the lost tail's recovery); the others did not (`git diff --stat`). Work package A reads the baseline again before anything is built.
 
