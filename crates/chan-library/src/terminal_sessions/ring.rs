@@ -17,11 +17,11 @@ use std::sync::Arc;
 pub(super) struct ScreenMark {
     /// Whether the output before the chunk had selected the alternate
     /// screen. `None` where a restored ring cannot tell: its bytes switch
-    /// screens after the chunk, and nothing before it says which screen
-    /// they started on.
+    /// screens or reset the terminal after the chunk, and nothing before it
+    /// says which screen they started on.
     pub(super) alt_screen: Option<bool>,
-    /// A switch the tracker had begun and not finished before the chunk,
-    /// which the chunk's first bytes may finish.
+    /// A switch or a full reset the tracker had begun and not finished
+    /// before the chunk, which the chunk's first bytes may finish.
     pub(super) partial: Vec<u8>,
 }
 
@@ -30,8 +30,8 @@ impl ScreenMark {
     pub(super) fn after(&self, bytes: &[u8]) -> Self {
         let mut partial = self.partial.clone();
         let mut alt_screen = self.alt_screen;
-        super::scan_private_modes(&mut partial, bytes, |mode, on| {
-            if super::is_screen_switch(mode) {
+        super::scan_private_modes(&mut partial, bytes, |change| {
+            if let Some(on) = change.screen() {
                 alt_screen = Some(on);
             }
         });
@@ -109,7 +109,9 @@ impl RingBuffer {
         // the first push past capacity. Nothing records the screen these
         // bytes, the cut ones included, start on. From their first switch on,
         // the switches tell; up to it, the screen they leave is the one they
-        // start on only when they make no switch at all.
+        // start on only when they make no switch at all. A full reset tells
+        // as a switch to the normal screen does: it leaves that screen
+        // whichever one the bytes before it were on.
         let mut chunks = Vec::new();
         for chunk in replay.chunks(super::PTY_READ_BYTES) {
             let next = screen.after(chunk);

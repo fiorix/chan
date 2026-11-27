@@ -220,11 +220,43 @@ const BRACKETED_PASTE_MODE: u16 = 2004;
 /// Upper bound on a carried partial private-mode CSI (`\e[?<params>(h|l)`) split
 /// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
 /// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
+/// An escape that may still end in a full reset is carried under the same
+/// bound, so a reset split across reads after 64 or more C0 controls
+/// following its ESC is missed.
 const PRIVATE_MODE_TAIL_CAP: usize = 64;
 
 /// The private modes that switch between the normal and alternate screens.
 fn is_screen_switch(mode: u16) -> bool {
     matches!(mode, 47 | 1047 | 1049)
+}
+
+/// A change to the screen or the private modes that the output scan reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeChange {
+    /// A DECSET (`true`) or DECRST (`false`) of one private mode.
+    Mode(u16, bool),
+    /// A full reset (RIS, `ESC c`): the normal screen and every mode off.
+    Reset,
+}
+
+impl ModeChange {
+    /// The screen this change selects, `true` for the alternate one; `None`
+    /// when it selects neither.
+    fn screen(self) -> Option<bool> {
+        match self {
+            Self::Mode(mode, on) if is_screen_switch(mode) => Some(on),
+            Self::Mode(..) => None,
+            Self::Reset => Some(false),
+        }
+    }
+}
+
+/// A byte the terminal core passes over between an ESC and the byte that
+/// ends its escape: a C0 control it executes there, or DEL, which it
+/// ignores. CAN and SUB cancel the escape and ESC starts a new one, so they
+/// are not among them.
+fn passed_over_in_an_escape(byte: u8) -> bool {
+    matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f)
 }
 
 /// One of a terminal's two screens.
@@ -248,10 +280,13 @@ impl TerminalScreen {
 }
 
 /// The screen a view must show to draw `replay`, which starts at the ring's
-/// first byte, where the tracker's mark is `mark`. A switch the tracker
-/// carried into that byte counts as made: the ring dropped its start, so a
-/// view reads the rest of it as text, and every byte the replay draws comes
-/// after it. `None` where the mark cannot tell.
+/// first byte, where the tracker's mark is `mark`. A switch or a full reset
+/// the tracker carried into that byte counts as made: the ring dropped its
+/// start, so a view reads the rest of it as text, and every byte the replay
+/// draws comes after it. A reset is carried from its ESC, with any C0
+/// control the terminal passes over after it, so one the ring cut before
+/// its `c` selects the normal screen here. `None` where the mark cannot
+/// tell.
 fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
     if mark.partial.is_empty() {
         return mark.alt_screen;
@@ -260,9 +295,11 @@ fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
     let mut alt_screen = mark.alt_screen;
     for chunk in replay {
         let open = tail.len() + chunk.len();
-        scan_private_mode_sequences(&mut tail, chunk, |mode, on, at| {
-            if at == 0 && is_screen_switch(mode) {
-                alt_screen = Some(on);
+        scan_private_mode_sequences(&mut tail, chunk, |change, at| {
+            if at == 0 {
+                if let Some(on) = change.screen() {
+                    alt_screen = Some(on);
+                }
             }
         });
         // Only a sequence still open keeps every byte from its start.
@@ -273,14 +310,17 @@ fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
     alt_screen
 }
 
-/// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
-/// reads. This recognizes private-mode toggles, not the full terminal grammar.
-/// It does not follow a reset (`ESC c`), nor a sequence a terminal finishes
-/// across a C0 control or DEL inside it, which this scan ends there (CAN, SUB
-/// and ESC end it in both), so after either the screen and modes read here
+/// Scan ordered DECSET/DECRST parameters and full resets (RIS), carrying a
+/// bounded partial sequence across reads. This recognizes private-mode
+/// toggles and the reset, not the full terminal grammar. A reset is read as
+/// the terminal core reads it: `c` after any ESC, the one that ends an OSC
+/// or DCS string included, with any C0 control but CAN and SUB, or a DEL,
+/// between them. The scan does not follow a sequence a terminal finishes
+/// across a C0 control or DEL inside a CSI, which this scan ends there (CAN,
+/// SUB and ESC end it in both), so after one the screen and modes read here
 /// can differ from the view's.
-fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
-    scan_private_mode_sequences(tail, bytes, |mode, on, _| change(mode, on));
+fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(ModeChange)) {
+    scan_private_mode_sequences(tail, bytes, |found, _| change(found));
 }
 
 /// [`scan_private_modes`], also passing where each change's sequence starts
@@ -289,7 +329,7 @@ fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u
 fn scan_private_mode_sequences(
     tail: &mut Vec<u8>,
     bytes: &[u8],
-    mut change: impl FnMut(u16, bool, usize),
+    mut change: impl FnMut(ModeChange, usize),
 ) {
     let mut scan = Vec::with_capacity(tail.len() + bytes.len());
     scan.extend_from_slice(tail);
@@ -301,6 +341,23 @@ fn scan_private_mode_sequences(
     while i < n {
         if scan[i] != 0x1b {
             i += 1;
+            continue;
+        }
+        // RIS. The escape is carried while only bytes the terminal passes
+        // over follow its ESC, since the next read may bring its `c`.
+        let mut end = i + 1;
+        while end < n && passed_over_in_an_escape(scan[end]) {
+            end += 1;
+        }
+        if end == n {
+            if n - i <= PRIVATE_MODE_TAIL_CAP {
+                tail.extend_from_slice(&scan[i..]);
+            }
+            break;
+        }
+        if scan[end] == b'c' {
+            change(ModeChange::Reset, i);
+            i = end + 1;
             continue;
         }
         // Only a true prefix of `ESC [ ?` can still become a private-mode
@@ -330,7 +387,7 @@ fn scan_private_mode_sequences(
         if final_byte == b'h' || final_byte == b'l' {
             for param in scan[i + 3..j].split(|&b| b == b';') {
                 if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
-                    change(mode, final_byte == b'h', i);
+                    change(ModeChange::Mode(mode, final_byte == b'h'), i);
                 }
             }
         }
@@ -1819,11 +1876,11 @@ pub struct AttachHandle {
     /// redial and a live socket's recovery alike. The missed span can hold
     /// the program's switch away from the screen the view still shows, so a
     /// view that shows the other one switches before the replay; the server
-    /// sends no switch. A switch the replay's first bytes finish counts as
-    /// made there, since the view never sees its start. `None` for every
-    /// other attach, and where the ring cannot tell: a ring restored from
-    /// the fd store keeps no screen for its bytes before their first switch,
-    /// when they make one.
+    /// sends no switch. A switch or a full reset the replay's first bytes
+    /// finish counts as made there, since the view never sees its start.
+    /// `None` for every other attach, and where the ring cannot tell: a ring
+    /// restored from the fd store keeps no screen for its bytes before their
+    /// first switch or reset, when they make one.
     pub replay_screen: Option<TerminalScreen>,
     /// The replay continues the client's own screen from its cursor, as a
     /// live recovery does: the raw delta, alternate-screen bytes included,
@@ -5149,14 +5206,16 @@ struct Session {
     focus_epoch: AtomicU64,
     bytes_since_focus: AtomicU64,
     in_alt_screen: AtomicBool,
+    /// Carry for a screen switch or a full reset split across PTY reads,
+    /// bounded by [`PRIVATE_MODE_TAIL_CAP`].
     alt_screen_tail: Mutex<Vec<u8>>,
     /// The [`TRACKED_PRIVATE_MODES`] the live program currently has ON, scanned
     /// from PTY output by [`Session::update_private_modes`] and re-asserted on
     /// reattach (see [`Session::attach`]) so a fresh client whose terminal came
     /// up at defaults regains the program's key/mouse modes.
     private_modes: Mutex<BTreeSet<u16>>,
-    /// Carry for a private-mode CSI split across PTY reads (mirrors
-    /// `alt_screen_tail`, bounded by [`PRIVATE_MODE_TAIL_CAP`]).
+    /// Carry for a private-mode CSI or a full reset split across PTY reads
+    /// (mirrors `alt_screen_tail`, bounded by [`PRIVATE_MODE_TAIL_CAP`]).
     private_mode_tail: Mutex<Vec<u8>>,
     /// Millis of the most recent unanswered [`DSR_CURSOR_QUERY`] seen in PTY
     /// output, or 0 when none is pending. Armed by
@@ -7949,7 +8008,8 @@ impl Session {
     }
 
     /// Track the alternate screen from PTY output: where the tracker stood
-    /// at `bytes`' first byte, and whether they carried a transition.
+    /// at `bytes`' first byte, and whether they carried a transition. A full
+    /// reset is one, to the normal screen.
     fn update_alt_screen(&self, bytes: &[u8]) -> (ScreenMark, bool) {
         let mut tail = self
             .alt_screen_tail
@@ -7960,8 +8020,8 @@ impl Session {
             partial: tail.clone(),
         };
         let mut last_transition = None;
-        scan_private_modes(&mut tail, bytes, |mode, on| {
-            if is_screen_switch(mode) {
+        scan_private_modes(&mut tail, bytes, |change| {
+            if let Some(on) = change.screen() {
                 last_transition = Some(on);
             }
         });
@@ -7977,17 +8037,23 @@ impl Session {
     /// `h` adds each tracked param to the set, `l` removes it; a sequence split
     /// across reads is carried in `private_mode_tail`. Non-`h`/`l` finals (a
     /// DECRQM `$p` query, a report, …) are skipped without toggling. Sequences
-    /// can carry several modes at once (htop emits `\e[?1006;1000h`). True
-    /// when `bytes` set or reset a tracked mode.
+    /// can carry several modes at once (htop emits `\e[?1006;1000h`). A full
+    /// reset (`ESC c`) turns every mode off, in output order with the
+    /// changes around it. True when `bytes` set or reset a tracked mode or
+    /// hold a full reset.
     fn update_private_modes(&self, bytes: &[u8]) -> bool {
         let mut tail = self
             .private_mode_tail
             .lock()
             .expect("terminal private-mode tail poisoned");
-        let mut changes: Vec<(u16, bool)> = Vec::new();
-        scan_private_modes(&mut tail, bytes, |mode, on| {
-            if TRACKED_PRIVATE_MODES.contains(&mode) {
-                changes.push((mode, on));
+        let mut changes: Vec<ModeChange> = Vec::new();
+        scan_private_modes(&mut tail, bytes, |change| {
+            let tracked = match change {
+                ModeChange::Mode(mode, _) => TRACKED_PRIVATE_MODES.contains(&mode),
+                ModeChange::Reset => true,
+            };
+            if tracked {
+                changes.push(change);
             }
         });
         drop(tail);
@@ -7999,11 +8065,15 @@ impl Session {
             .private_modes
             .lock()
             .expect("terminal private modes poisoned");
-        for (mode, on) in changes {
-            if on {
-                modes.insert(mode);
-            } else {
-                modes.remove(&mode);
+        for change in changes {
+            match change {
+                ModeChange::Mode(mode, true) => {
+                    modes.insert(mode);
+                }
+                ModeChange::Mode(mode, false) => {
+                    modes.remove(&mode);
+                }
+                ModeChange::Reset => modes.clear(),
             }
         }
         true
