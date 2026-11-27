@@ -277,9 +277,7 @@
     if (linkMenu?.link === link) return;
     closeLinkMenu();
     const handle = openLinkBubble({
-      // The shell reads only the box and containment every element has, so
-      // an SVG or MathML link anchors it as an HTML one does.
-      host: link as HTMLElement,
+      host: link,
       url: href,
       onOpenLink: opensPaths ? openPath : undefined,
       onDismiss: () => {

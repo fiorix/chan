@@ -20,7 +20,7 @@
 /// append to the body.
 ///
 /// `popover` must already have `position: absolute` set.
-export function positionPopover(host: HTMLElement, popover: HTMLElement): void {
+export function positionPopover(host: Element, popover: HTMLElement): void {
   // Force layout to read accurate offset dimensions; on first
   // call the popover may have empty content + we still want a
   // reasonable estimate.
@@ -76,7 +76,7 @@ export function positionPopover(host: HTMLElement, popover: HTMLElement): void {
 /// stays visible above the iOS soft keyboard; otherwise fall back
 /// to the standard window resize event.
 export function watchViewport(
-  host: HTMLElement,
+  host: Element,
   popover: HTMLElement,
 ): () => void {
   const onChange = () => positionPopover(host, popover);

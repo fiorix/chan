@@ -104,7 +104,7 @@ export function openRowTarget(hit: OpenRow, openPath?: OpenPath): void {
 
 export interface LinkBubbleOpts {
   /// The element the drop-down sits under: the pressed link.
-  host: HTMLElement;
+  host: Element;
   /// The link's target as written.
   url: string;
   /// Opens a workspace path; without it a path link gets no drop-down.

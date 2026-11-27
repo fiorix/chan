@@ -1,6 +1,6 @@
 // Caret-anchored host element for openBubbleShell.
 //
-// openBubbleShell from editor/bubble.ts takes an `host: HTMLElement` to
+// openBubbleShell from editor/bubble.ts takes a `host` element to
 // position the popover under. CM6 doesn't expose a caret DOM node we
 // can use directly (the caret is a CSS-painted line over `.cm-content`,
 // not its own element), so we build a 1x1 invisible div positioned at

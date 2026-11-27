@@ -25,9 +25,11 @@
 import { positionPopover, watchViewport } from "./extensions/popover";
 
 export interface BubbleShellOpts {
-  /// Anchor element. Pass the caret-anchor shim so the wrap sits
+  /// Anchor element, which the shell reads only for its box and for
+  /// containment, so any element anchors it, an SVG or MathML one too.
+  /// The editor's bubbles pass the caret-anchor shim so the wrap sits
   /// under the cursor.
-  host: HTMLElement;
+  host: Element;
   /// Type-specific class applied to the wrap so each adapter can
   /// own its layout / colors (e.g. `md-wiki-bubble`,
   /// `md-tag-bubble`). The base `md-bubble` class is also applied
