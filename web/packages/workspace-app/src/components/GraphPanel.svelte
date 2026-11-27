@@ -2199,14 +2199,70 @@
     });
   });
 
+  /// The read a pending selection asked for its folder chain
+  /// (`readsFolderChain`): the spine's patches as queued once it asked,
+  /// until they settle. Plain; `chainSettled` runs the pending selection's
+  /// effect again once they have.
+  let chainRead: Promise<void> | null = null;
+  let chainSettled = $state(0);
+  /// The folders of the chain a read was asked for, each asked once.
+  const chainAsked = new Set<string>();
+
+  /// Whether a pending selection the whole drawn graph does not hold waits
+  /// for the levels of the folders down to it. An answer of the whole tree
+  /// holds every file, so under one it never does. An answer over the
+  /// listing cap can hold a file's folders without the file: the folders
+  /// down to it are opened and their levels read by the rule of
+  /// `loadOpenedChildren`, shallowest first, and the selection waits while
+  /// one is still to come. It stops waiting once a folder of the chain is
+  /// no directory in its parent's level as read, once one's read failed for
+  /// good, once a read asked for one settled without its level, and once
+  /// the file's own level is read without it. A tag's, mention's or
+  /// language's id names no folder below the root, whose level is read
+  /// before the graph is whole, so it waits for nothing.
+  function readsFolderChain(path: string): boolean {
+    const read = spineRead;
+    if ((kept ?? taken)?.tree == null || read === null || spineError !== null) return false;
+    const chain = openedForPath(parentDir(path));
+    for (const dir of Object.keys(chain).sort(byDepth)) {
+      if (read.held.has(dir)) continue;
+      // The level above it was read: the root's always is, and each folder
+      // above it was passed.
+      if (!isFsDirectoryNode(read.nodes.get(dir))) return false;
+      const failure = spineFailures.get(dir);
+      if (failure !== undefined) return failure.status !== "failed";
+      if (chainRead !== null) return true;
+      if (chainAsked.has(dir)) return false;
+      chainAsked.add(dir);
+      if (Object.keys(chain).some((d) => !expandedDirs[d])) graphState.expanded = { ...expandedDirs, ...chain };
+      loadOpenedChildren(true);
+      const asked = spinePatches;
+      chainRead = asked;
+      const settled = (): void => {
+        chainRead = null;
+        chainSettled += 1;
+      };
+      void asked.then(settled, settled);
+      return true;
+    }
+    // Read and not drawn yet: the level's publication draws it.
+    return read.nodes.has(path);
+  }
+
   // A selection waiting on the graph (`pendingSelectId`: an opener's, or the
   // one a reload or a moved tab restores) lands as soon as the drawn graph
-  // holds its node, and is dropped when the whole graph does not hold it. A
-  // tag, mention or language is known only to the index, so it waits out a
-  // gated answer for the graph the window fetches once the index is ready.
+  // holds its node, and is dropped when the whole graph does not hold it,
+  // over the listing cap only once the levels of the folders down to it are
+  // read (`readsFolderChain`). A tag, mention or language is known only to
+  // the index, so it waits out a gated answer for the graph the window
+  // fetches once the index is ready.
   $effect(() => {
     const byId = nodeById;
     const whole = graphWhole;
+    // A selection waiting on its folders decides again when the read asked
+    // for them settles and when one's read fails or is retried.
+    void chainSettled;
+    void spineFailures;
     untrack(() => {
       const pending = graphState.pendingSelectId;
       if (pending !== null) {
@@ -2217,7 +2273,7 @@
           // the tab's saved visibility.
           if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
           graphState.pendingSelectId = null;
-        } else if (whole) {
+        } else if (whole && !readsFolderChain(pending)) {
           graphState.pendingSelectId = null;
         }
       }
