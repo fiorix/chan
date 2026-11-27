@@ -2205,7 +2205,8 @@
   /// effect again once they have.
   let chainRead: Promise<void> | null = null;
   let chainSettled = $state(0);
-  /// The folders of the chain a read was asked for, each asked once.
+  /// The folders of the chain a step of the level reads took (`spineAsked`
+  /// holds them once the step is asked for), each taken once.
   const chainAsked = new Set<string>();
 
   /// Whether a pending selection the whole drawn graph does not hold waits
@@ -2216,10 +2217,14 @@
   /// `loadOpenedChildren`, shallowest first, and the selection waits while
   /// one is still to come. It stops waiting once a folder of the chain is
   /// no directory in its parent's level as read, once one's read failed for
-  /// good, once a read asked for one settled without its level, and once
-  /// the file's own level is read without it. A tag's, mention's or
-  /// language's id names no folder below the root, whose level is read
-  /// before the graph is whole, so it waits for nothing.
+  /// good, once a step that took one settled without its level, and once
+  /// the file's own level is read without it. A step reads at most
+  /// OPENED_CHILDREN_READS_PER_STEP folders, so one it left out, behind as
+  /// many opened folders ahead of it, is asked for again once it settles. A
+  /// hidden tab fetches nothing: there the selection waits with nothing
+  /// asked, and the chain is opened and read once the tab is shown. A tag's,
+  /// mention's or language's id names no folder below the root, whose level
+  /// is read before the graph is whole, so it waits for nothing.
   function readsFolderChain(path: string): boolean {
     const read = spineRead;
     if ((kept ?? taken)?.tree == null || read === null || spineError !== null) return false;
@@ -2233,9 +2238,10 @@
       if (failure !== undefined) return failure.status !== "failed";
       if (chainRead !== null) return true;
       if (chainAsked.has(dir)) return false;
-      chainAsked.add(dir);
+      if (!visible) return true;
       if (Object.keys(chain).some((d) => !expandedDirs[d])) graphState.expanded = { ...expandedDirs, ...chain };
       loadOpenedChildren(true);
+      if (spineAsked.has(dir)) chainAsked.add(dir);
       const asked = spinePatches;
       chainRead = asked;
       const settled = (): void => {
@@ -2260,9 +2266,11 @@
     const byId = nodeById;
     const whole = graphWhole;
     // A selection waiting on its folders decides again when the read asked
-    // for them settles and when one's read fails or is retried.
+    // for them settles, when one's read fails or is retried, and when the
+    // tab is shown, since a hidden one asks for nothing.
     void chainSettled;
     void spineFailures;
+    void visible;
     untrack(() => {
       const pending = graphState.pendingSelectId;
       if (pending !== null) {
