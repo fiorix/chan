@@ -287,6 +287,17 @@ pub fn is_workspace_webview_label(label: &str) -> bool {
         || label.starts_with("lib-")
 }
 
+/// The URL of a local window's page: its serving tenant's shell on the
+/// embedded loopback server at `addr`, with the record's token for the page to
+/// take. The window's build and its system-browser copy both start from this
+/// string.
+fn local_window_url(addr: SocketAddr, record: &WindowRecord) -> String {
+    format!(
+        "http://{addr}{}/index.html?t={}",
+        record.prefix, record.token
+    )
+}
+
 /// Open (or rebuild-in-place at the same label) a native window for a
 /// library-minted local window `record`, driven by the window watcher (the
 /// SOLE caller). The Tauri label is the composite native key
@@ -302,10 +313,7 @@ pub(crate) fn open_watched_local_window(
     completion: WindowBuildCompletion,
 ) -> Result<(), String> {
     let label = crate::window_watcher::native_label(record);
-    let url = format!(
-        "http://{addr}{}/index.html?t={}",
-        record.prefix, record.token
-    );
+    let url = local_window_url(addr, record);
     let title = watched_window_base_title(record, None);
     let kind = watched_window_kind(record);
     build_workspace_window_with_completion(
@@ -1443,10 +1451,7 @@ pub(crate) fn browser_window_url<R: Runtime>(
     record: &WindowRecord,
 ) -> Result<tauri::Url, String> {
     let label = crate::window_watcher::native_label(record);
-    let url = format!(
-        "http://{addr}{}/index.html?t={}",
-        record.prefix, record.token
-    );
+    let url = local_window_url(addr, record);
     let kind = watched_window_kind(record);
     workspace_window_target_url(
         app,

@@ -4602,7 +4602,7 @@ fn devserver_card_for_window(feed: &DevserverFeed, label: &str) -> Result<Option
 /// in the chord handler) doesn't lock the dev affordance away.
 #[tauri::command]
 fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> Result<(), String> {
-    if reload_devserver_window_from_feed(state.inner(), window.label())? {
+    if route_window_reload(state.inner(), window.label())? {
         return Ok(());
     }
     // Tauri 2's `WebviewWindow::eval` runs JS inside the webview;
@@ -4610,6 +4610,13 @@ fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> R
     window
         .eval("window.location.reload()")
         .map_err(|e| format!("reloading window: {e}"))
+}
+
+/// Hand a Reload of the window `label` to the window watcher that owns it.
+/// `Ok(true)` when a watcher took it; `Ok(false)` leaves the Reload to the
+/// page's own `location.reload()`.
+fn route_window_reload(state: &Arc<AppState>, label: &str) -> Result<bool, String> {
+    reload_devserver_window_from_feed(state, label)
 }
 
 /// Ask the connection's watcher to retarget this existing native window from
