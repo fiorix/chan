@@ -163,6 +163,7 @@
     type GhosttyKit,
   } from "../terminal/backend";
   import { freshShellResetSequence, trackedModesOffSequence } from "../terminal/freshShellReset";
+  import { replayScreenOf, replayScreenSwitch, type ReplayScreen } from "../terminal/replayScreen";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
@@ -346,6 +347,9 @@
         missed_bytes?: number;
         /// Ring bytes before the alternate-screen and mode preludes; absent on older servers.
         replay_bytes?: number;
+        /// The screen the program had at the replay's first byte, "normal" or
+        /// "alternate". Present only on an attach that reconciles a loss.
+        replay_screen?: string;
         /// Unacknowledged output the server allows this socket. Present only
         /// when this client dialed with `ack` and the server supports it.
         ack_window?: number;
@@ -1641,6 +1645,9 @@
     // one on a reattach carries a replay of history the PTY already had.
     let dialSawSession = false;
     let resetBeforeReplay = false;
+    // The screen the replay starts on, switched to after the reset that a
+    // reset replay starts with.
+    let screenBeforeReplay: ReplayScreen | null = null;
     pendingPromptSeed = reattaching ? "" : (tab.seedInput ?? "");
     promptSeedSent = false;
     // On a live socket reconnect the terminal still shows the screen it had
@@ -1719,7 +1726,10 @@
         // Advance the server byte cursor only for LIVE output: replay chunks
         // (between the `session` and `ready` frames) reconstruct history up to
         // the prelude `seq` we already adopted, so counting them would double.
-        if (!attachReplayActive) receivedSeq += bytes.length;
+        // Bytes ahead of this dial's first session frame (a stale
+        // generation's reset) are no stream bytes either: a socket that ends
+        // before that frame leaves the cursor where the view's stream is.
+        if (dialSawSession && !attachReplayActive) receivedSeq += bytes.length;
         let written = bytes;
         const replay = attachReplayActive ? continuingReplay : null;
         if (replay) {
@@ -1739,12 +1749,20 @@
           const beforeReplay = keyboardProtocolBeforeReplay;
           // RIS resets the observed keyboard state too. Its write callback
           // runs once the observer has read it, before the replay is written.
+          // It restores each screen's flags, while the screen they apply to
+          // stays the main one RIS left the view on; a replay that starts on
+          // the alternate screen switches the protocol there with the view.
           writeParsedPtyOutput(new TextEncoder().encode("\x1bc"), "replay", () => {
-            if (protocol && beforeReplay) copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            if (!protocol || !beforeReplay) return;
+            copyTerminalKeyboardProtocolState(beforeReplay, protocol);
+            protocol.kitty.screen = "main";
           });
-          if (missedBytes > 0) {
-            writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
-          }
+          noticeAndReplayScreen(screenBeforeReplay, () => {
+            if (missedBytes > 0) {
+              writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
+            }
+          });
+          screenBeforeReplay = null;
         }
         writePtyOutput(written, attachPtyWriteOrigin());
         recordOutputActivity();
@@ -1928,14 +1946,28 @@
             : Math.max(0, Math.floor(frame.missed_bytes ?? 0));
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
-        if (missedBytes > 0 && !resetBeforeReplay) {
+        // The screen the program had at the replay's first byte, which the
+        // server names on an attach that reconciles a loss, when the view
+        // missed the bytes before that byte. A replay that starts at or
+        // before the byte the view parsed goes on from the view's own
+        // parser, on the screen those bytes left it: it gets no switch,
+        // which would also end a sequence the view holds there, such as a
+        // switch split across two reads that the replay finishes.
+        const replayScreen =
+          continuingReplay === null || continuingReplay.parsed < continuingReplay.start
+            ? replayScreenOf(frame.replay_screen)
+            : null;
+        screenBeforeReplay = resetBeforeReplay ? replayScreen : null;
+        if (!resetBeforeReplay) {
           // The lost bytes can end inside a sequence whose rest never comes.
           // CAN on the output path ends it in the core and in every stream
           // observer, as the server's own recovery suffix does after the
           // replay, so neither this line nor the replay is read as part of
           // it. A reset replay starts with RIS, which ends it too.
-          writePtyOutput(Uint8Array.of(0x18), "replay");
-          writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
+          if (missedBytes > 0) writePtyOutput(Uint8Array.of(0x18), "replay");
+          noticeAndReplayScreen(replayScreen, () => {
+            if (missedBytes > 0) writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
+          });
         }
         // A replacement socket has attached to the same session: what waited
         // for it goes now, unless a wake since its dial has it under a probe
@@ -2344,6 +2376,27 @@
       return;
     }
     ptyWrites.write(termWriter, bytes, origin, onComplete);
+  }
+
+  /// Take the view to the screen a reconciling replay starts on, if it is
+  /// not there. The switch is the tab's own write, like the tracked-mode
+  /// reset: it moves no stream cursor, acknowledgement or replay position.
+  function switchToReplayScreen(to: ReplayScreen | null): void {
+    const t = term;
+    if (!t || to === null) return;
+    const alternate = t.buffer.active === t.buffer.alternate;
+    const bytes = replayScreenSwitch({ alternate, mode1049: t.getMode(1049, false) }, to);
+    if (bytes) writeParsedPtyOutput(new TextEncoder().encode(bytes), "replay");
+  }
+
+  /// Write the loss notice and the switch to the replay's screen in the order
+  /// that leaves the notice on the normal screen: after a switch there, and
+  /// before a switch to the alternate screen, whose program paints over
+  /// what it finds.
+  function noticeAndReplayScreen(to: ReplayScreen | null, notice: () => void): void {
+    if (to === "alternate") notice();
+    switchToReplayScreen(to);
+    if (to !== "alternate") notice();
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
