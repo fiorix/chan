@@ -873,7 +873,7 @@ describe("a reconciling answer that names its replay's start screen", () => {
     expect(normal.some((row) => row.includes("frame")), "no frame on the normal screen").toBe(false);
   });
 
-  test("a redial whose replay enters the alternate screen and later leaves it puts the shell's tail below the view's cursor line", async () => {
+  test("a redial whose replay enters the alternate screen and later leaves it puts the loss notice and the shell's tail below the view's cursor line", async () => {
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;
@@ -890,14 +890,17 @@ describe("a reconciling answer that names its replay's start screen", () => {
     // A program entered its alternate screen in the lost span; the replay
     // holds its frame, its exit and the shell's tail.
     const lost = "\x1b[?1049h".length;
-    const replay = "\x1b[5;1Hframe one\x1b[?1049l\r\nback\r\n$ ";
+    const replay = "\x1b[5;1Hframe one\x1b[?1049lback\r\n$ ";
     const end = cursor + lost + replay.length;
     await deliver(next, { frame: session(end, lost, replay.length, "alternate"), replay, after: LOST_PLAIN_SUFFIX });
     expect(ghosttyAlternateScreen(term), "the normal screen the program left for").toBe(false);
+    // The notice goes on the normal screen ahead of the switch, where the
+    // program does not paint over it, and the program's exit returns below
+    // it.
     expect(
-      rows(term.buffer.normal).slice(0, 8),
-      "the tail on the line below the prompt the view's cursor stood on, not over the older save's line or the top",
-    ).toEqual(["one", "two", "three", "four", "five", "$", "back", "$"]);
+      rows(term.buffer.normal).slice(0, 9),
+      "the notice and tail below the prompt the view's cursor stood on, not over the older save's line or the top",
+    ).toEqual(["one", "two", "three", "four", "five", "$", "terminal replay missed 8 bytes", "back", "$"]);
   });
 
   test("a re-ask after a cut inside a sequence, past a switch in its replay, writes no switch and no literal text", async () => {

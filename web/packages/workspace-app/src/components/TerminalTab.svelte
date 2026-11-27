@@ -1757,11 +1757,12 @@
             copyTerminalKeyboardProtocolState(beforeReplay, protocol);
             protocol.kitty.screen = "main";
           });
-          switchToReplayScreen(screenBeforeReplay);
+          noticeAndReplayScreen(screenBeforeReplay, () => {
+            if (missedBytes > 0) {
+              writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
+            }
+          });
           screenBeforeReplay = null;
-          if (missedBytes > 0) {
-            writeParsedPtyOutput(new TextEncoder().encode(`\r\nterminal replay missed ${missedBytes} bytes\r\n`), "replay");
-          }
         }
         writePtyOutput(written, attachPtyWriteOrigin());
         recordOutputActivity();
@@ -1964,9 +1965,9 @@
           // replay, so neither this line nor the replay is read as part of
           // it. A reset replay starts with RIS, which ends it too.
           if (missedBytes > 0) writePtyOutput(Uint8Array.of(0x18), "replay");
-          // The notice goes on the replay's screen, with the replay.
-          switchToReplayScreen(replayScreen);
-          if (missedBytes > 0) writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
+          noticeAndReplayScreen(replayScreen, () => {
+            if (missedBytes > 0) writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
+          });
         }
         // A replacement socket has attached to the same session: what waited
         // for it goes now, unless a wake since its dial has it under a probe
@@ -2386,6 +2387,16 @@
     const alternate = t.buffer.active === t.buffer.alternate;
     const bytes = replayScreenSwitch({ alternate, mode1049: t.getMode(1049, false) }, to);
     if (bytes) writeParsedPtyOutput(new TextEncoder().encode(bytes), "replay");
+  }
+
+  /// Write the loss notice and the switch to the replay's screen in the order
+  /// that leaves the notice on the normal screen: after a switch there, and
+  /// before a switch to the alternate screen, whose program paints over
+  /// what it finds.
+  function noticeAndReplayScreen(to: ReplayScreen | null, notice: () => void): void {
+    if (to === "alternate") notice();
+    switchToReplayScreen(to);
+    if (to !== "alternate") notice();
   }
 
   /// A line chan prints in the terminal itself: a replay gap, the session
