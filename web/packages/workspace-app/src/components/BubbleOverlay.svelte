@@ -14,6 +14,7 @@
      the window-wide fallback (a centered modal over the whole window), mounted
      once at the App root for surveys with no resolvable target. -->
 <script lang="ts">
+  import { tick } from "svelte";
   import { renderMarkdownWithBreaks } from "../api/markdown";
   import {
     surveyFor,
@@ -205,14 +206,25 @@
   // The overlay covers its terminal, or the window, around the card, so a
   // press outside the card lands on the overlay itself, which no element
   // focuses: the press's default would blur the card and drop the keyboard
-  // to the page, where an answer key answers nothing. Cancelling it keeps
-  // the keyboard on the card, which a terminal's survey takes by the focus
-  // effect once its pane makes itself the focused one on the same press. A
-  // press on the card or in it keeps its default, so a body link or a
+  // to the page, where an answer key answers nothing. Cancelling it leaves
+  // the keyboard where it was. Once the press's handlers have run, a
+  // terminal's pane making itself the focused one among them, the card
+  // takes the keyboard wherever its survey owns it, unless an element in
+  // the card holds it already: from the page, or from a control outside
+  // the card, it comes to the card, so an answer key typed next answers.
+  // A press on the card or in it keeps its default, so a body link or a
   // button takes focus and the body's text can be selected. A press of any
   // button is held, since the pane makes itself the focused one on any.
   function holdKeyboardOnCard(e: MouseEvent): void {
-    if (e.target === e.currentTarget) e.preventDefault();
+    if (e.target !== e.currentTarget) return;
+    e.preventDefault();
+    // Svelte runs every `onmousedown` the press reaches from one delegated
+    // listener, so `tick` resolves after all of them, with the state they
+    // changed applied.
+    void tick().then(() => {
+      if (!ownsKeyboard() || !mayFocus(card)) return;
+      if (!card?.contains(document.activeElement)) card?.focus({ preventScroll: true });
+    });
   }
 
   // Number keys 1..N pick an option; F follows up; X or Escape dismisses. F
