@@ -251,21 +251,21 @@ async function main() {
   // blur and no hide another X window took the minimize; with no focus and
   // no return to visible the product was never asked to repaint; with them
   // only before the first blur or hide, the page was the other window.
+  // refocusGap names what a read's events lack, or null when they show it.
   const AWAY = ["blur", "hidden"];
   const BACK = ["focus", "visible"];
-  const sawRefocus = (read, detail) => {
+  const refocusGap = (read) => {
     const order = read.events?.order;
-    if (!Array.isArray(order)) throw new Incomplete(`the page lost its event counter: ${detail}`);
+    if (!Array.isArray(order)) return "the page lost its event counter";
     const away = order.findIndex((name) => AWAY.includes(name));
-    if (away < 0) {
-      throw new Incomplete(`the page under test saw neither a blur nor a hide after the reset: ${detail}`);
-    }
+    if (away < 0) return "the page under test saw neither a blur nor a hide after the reset";
     if (!order.some((name) => BACK.includes(name))) {
-      throw new Incomplete(`the refocus reached the page under test as neither a focus nor a return to visible: ${detail}`);
+      return "the refocus reached the page under test as neither a focus nor a return to visible";
     }
     if (!order.some((name, i) => i > away && BACK.includes(name))) {
-      throw new Incomplete(`the page under test saw a focus or a return to visible only before its first blur or hide: ${detail}`);
+      return "the page under test saw a focus or a return to visible only before its first blur or hide";
     }
+    return null;
   };
   // The paint a tree without the transform repair leaves: the transform
   // back at 1 and the page drawn at half size into the top-left quarter, so
@@ -275,25 +275,29 @@ async function main() {
     && m.scaleX === 1 && m.scaleY === 1
     && m.marks[0] >= floorOf(m.total[0])
     && m.marks.every((q, i) => i === 0 || q <= bandOf(m.total[i]));
-  // Only this wait is a product fault, and only when its last read is the
-  // half-scale paint: every earlier wait is an instrument fault, thrown as
-  // Incomplete by the poll itself, and a miss of another shape (no
-  // repaint, a short or partial one, a transform left at 2) says the run
-  // cannot tell the repair's effect.
+  // A read holds only when its events show the refocus too, so a repaint
+  // that lands before the refocus reaches the page waits for it; what the
+  // events lack is said only at the bound's end, on the last read. Only
+  // this wait is a product fault, and only when that last read shows the
+  // refocus and is the half-scale paint: every earlier wait is an
+  // instrument fault, thrown as Incomplete by the poll itself, and a miss
+  // of another shape (no repaint, a short or partial one, half-scale
+  // pixels under a transform of 2) says the run cannot tell the repair's
+  // effect.
   const after = await poll(async () => evaluate(MEASURE),
     (m) => m.width === baseline.width && m.height === baseline.height
-      && m.scaleX === 2 && m.scaleY === 2 && near(m, baseline),
+      && m.scaleX === 2 && m.scaleY === 2 && near(m, baseline) && refocusGap(m) === null,
     "the terminal did not repaint at full scale after the refocus", 10000, "fault").catch((error) => {
     if (!(error instanceof Fault)) throw error;
     save("after.json", error.value);
-    sawRefocus(error.value, error.message);
+    const gap = refocusGap(error.value);
+    if (gap) throw new Incomplete(`${gap}: last ${JSON.stringify(error.value)}`);
     if (!halfScale(error.value)) {
       throw new Incomplete(`the read after the refocus is neither a full-scale repaint nor the half-scale paint: last ${JSON.stringify(error.value)}`);
     }
     throw error;
   });
   save("after.json", after);
-  sawRefocus(after, `last ${JSON.stringify(after)}`);
   run("import", ["-window", args.xid, join(args.output, "after.png")], "screenshot after", 30000);
   let tree = null;
   try {
