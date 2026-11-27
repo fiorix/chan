@@ -2501,24 +2501,53 @@ struct CoreReading {
     modes: Vec<u16>,
 }
 
+/// A recorded stream a test model reads differently from the terminal core.
+struct KnownDifference<R: 'static> {
+    /// The recorded stream's name.
+    name: &'static str,
+    /// What the model reads after it today.
+    model: R,
+    /// Why the two differ.
+    why: &'static str,
+}
+
+/// Every tracked mode but [`MODE_THE_CORE_LACKS`].
+const EVERY_MODE: [u16; 11] = [1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
+
 /// The recorded streams `parsed_modes` reads differently from the terminal
-/// core, by name, each with why: the session tracker's known differences,
-/// for the same reasons. The table test fails when one of them agrees, so
-/// the list stays true.
-const PARSED_MODES_KNOWN_DIFFERENCES: &[(&str, &str)] = &[
-    ("DECSTR with every tracked mode on", DECSTR),
-    (
-        "DECSTR on the alternate screen with every tracked mode on",
-        DECSTR,
-    ),
-    ("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI),
+/// core, each with its reading today, whether the alternate screen is
+/// active and the tracked modes on, and why: the session tracker's known
+/// differences, for the same reasons. The table test fails when one of
+/// them agrees with the core and when the model reads one otherwise than
+/// listed, so the list stays true and a change to how the model reads a
+/// listed stream is seen.
+const PARSED_MODES_KNOWN_DIFFERENCES: &[KnownDifference<(bool, &[u16])>] = &[
+    KnownDifference {
+        name: "DECSTR with every tracked mode on",
+        model: (false, &EVERY_MODE),
+        why: DECSTR,
+    },
+    KnownDifference {
+        name: "DECSTR on the alternate screen with every tracked mode on",
+        model: (true, &EVERY_MODE),
+        why: DECSTR,
+    },
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
+        model: (true, &[1000]),
+        why: UTF8_INSIDE_A_CSI,
+    },
 ];
 
 /// The recorded streams `drawn_screens` reads differently from the terminal
-/// core. It reads the screen and no mode, and the core's soft reset leaves
-/// the screen as it is, so the DECSTR streams are not among them.
-const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[(&str, &str)] =
-    &[("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI)];
+/// core, each with whether it shows the alternate screen today and why. It
+/// reads the screen and no mode, and the core's soft reset leaves the
+/// screen as it is, so the DECSTR streams are not among them.
+const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[KnownDifference<bool>] = &[KnownDifference {
+    name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
+    model: true,
+    why: UTF8_INSIDE_A_CSI,
+}];
 
 const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
                       off in the core; the model does not read it";
@@ -2562,10 +2591,24 @@ fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
         "the core reads mode {MODE_THE_CORE_LACKS} on, so the table can no longer leave it \
          out: {read_on:?}"
     );
-    for (name, _) in PARSED_MODES_KNOWN_DIFFERENCES
+    // Each model's known differences, with the reading listed for each
+    // as the table prints it.
+    let parsed_known: Vec<(&str, String, &str)> = PARSED_MODES_KNOWN_DIFFERENCES
         .iter()
-        .chain(DRAWN_SCREENS_KNOWN_DIFFERENCES)
-    {
+        .map(|known| {
+            let (alternate, modes) = known.model;
+            (
+                known.name,
+                screen_reading(alternate, Some(modes)),
+                known.why,
+            )
+        })
+        .collect();
+    let drawn_known: Vec<(&str, String, &str)> = DRAWN_SCREENS_KNOWN_DIFFERENCES
+        .iter()
+        .map(|known| (known.name, screen_reading(known.model, None), known.why))
+        .collect();
+    for (name, _, _) in parsed_known.iter().chain(&drawn_known) {
         assert!(
             fixture.cases.iter().any(|case| case.name == *name),
             "the known difference {name:?} names no recorded stream"
@@ -2594,31 +2637,37 @@ fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
                 "parsed_modes",
                 (alternate, &modes) == (case.core.alternate, &case.core.modes),
                 &parsed,
-                PARSED_MODES_KNOWN_DIFFERENCES,
+                &parsed_known,
             ),
             (
                 "drawn_screens",
                 shown == case.core.alternate,
                 &drawn,
-                DRAWN_SCREENS_KNOWN_DIFFERENCES,
+                &drawn_known,
             ),
         ] {
             let known = known_differences
                 .iter()
-                .find(|(name, _)| *name == case.name)
-                .map(|(_, why)| *why);
+                .find(|(name, _, _)| *name == case.name)
+                .map(|(_, listed, why)| (listed, *why));
             verdicts.push(match (same, known) {
                 (true, None) => "same     ",
-                (false, Some(_)) => "known    ",
                 (false, None) => "DIFFERENT",
                 (true, Some(_)) => "AGREES   ",
+                (false, Some((listed, _))) if listed == read => "known    ",
+                (false, Some(_)) => "MOVED    ",
             });
             match (same, known) {
                 (false, None) => {
                     unexpected.push(format!("{}: core {core}, {model} {read}", case.name))
                 }
-                (true, Some(why)) => unexpected.push(format!(
+                (true, Some((_, why))) => unexpected.push(format!(
                     "{}: listed as a known difference of {model} ({why}), but both read {read}",
+                    case.name
+                )),
+                (false, Some((listed, why))) if listed != read => unexpected.push(format!(
+                    "{}: listed as a known difference of {model} ({why}) read as {listed}, \
+                     but it reads {read} (core {core})",
                     case.name
                 )),
                 _ => {}
@@ -2632,7 +2681,8 @@ fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
     assert!(
         unexpected.is_empty(),
         "{} readings of {} streams by the test models differ from the terminal core's, or \
-         are listed as known differences and agree with it:\n{}",
+         are listed as known differences and agree with it or read otherwise than \
+         listed:\n{}",
         unexpected.len(),
         fixture.cases.len(),
         unexpected.join("\n")

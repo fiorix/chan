@@ -714,21 +714,44 @@ impl std::fmt::Display for ScreenReading {
     }
 }
 
+/// A recorded stream the tracker reads differently from the terminal core.
+struct KnownDifference {
+    /// The recorded stream's name.
+    name: &'static str,
+    /// What the tracker reads after it today: whether the alternate screen
+    /// is active, and the tracked modes on, [`MODE_THE_CORE_LACKS`] left
+    /// out.
+    tracker: (bool, &'static [u16]),
+    /// Why the two differ.
+    why: &'static str,
+}
+
+/// Every tracked mode but [`MODE_THE_CORE_LACKS`].
+const EVERY_MODE: [u16; 11] = [1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
+
 /// The recorded streams the tracker reads differently from the terminal
-/// core, by name, each with why. None is a switch, a mode change or a reset
-/// the tracker follows. The table test fails when one of them agrees, so
-/// the list stays true.
-const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
-    ("DECSTR with every tracked mode on", DECSTR),
-    (
-        "DECSTR on the alternate screen with every tracked mode on",
-        DECSTR,
-    ),
-    (
-        "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
-        "the core skips a UTF-8 character inside a CSI and finishes the CSI; the tracker ends \
-         a CSI at any byte above 0x7f",
-    ),
+/// core, each with the reading the tracker gives today and why. None is a
+/// switch, a mode change or a reset the tracker follows. The table test
+/// fails when one of them agrees with the core and when the tracker reads
+/// one otherwise than listed, so the list stays true and a change to how
+/// the tracker reads a listed stream is seen.
+const KNOWN_DIFFERENCES: &[KnownDifference] = &[
+    KnownDifference {
+        name: "DECSTR with every tracked mode on",
+        tracker: (false, &EVERY_MODE),
+        why: DECSTR,
+    },
+    KnownDifference {
+        name: "DECSTR on the alternate screen with every tracked mode on",
+        tracker: (true, &EVERY_MODE),
+        why: DECSTR,
+    },
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
+        tracker: (true, &[1000]),
+        why: "the core skips a UTF-8 character inside a CSI and finishes the CSI; the tracker \
+              ends a CSI at any byte above 0x7f",
+    },
 ];
 
 const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
@@ -765,10 +788,11 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
         "the core reads mode {MODE_THE_CORE_LACKS} on, so the table can no longer leave it \
          out: {read_on:?}"
     );
-    for (name, _) in KNOWN_DIFFERENCES {
+    for known in KNOWN_DIFFERENCES {
         assert!(
-            fixture.cases.iter().any(|case| case.name == *name),
-            "the known difference {name:?} names no recorded stream"
+            fixture.cases.iter().any(|case| case.name == known.name),
+            "the known difference {:?} names no recorded stream",
+            known.name
         );
     }
     let mut unexpected = Vec::new();
@@ -793,13 +817,21 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
         let same = tracker == case.core;
         let known = KNOWN_DIFFERENCES
             .iter()
-            .find(|(name, _)| *name == case.name)
-            .map(|(_, why)| *why);
-        let verdict = match (same, known) {
+            .find(|known| known.name == case.name)
+            .map(|known| {
+                let (alternate, modes) = known.tracker;
+                let listed = ScreenReading {
+                    alternate,
+                    modes: modes.to_vec(),
+                };
+                (listed, known.why)
+            });
+        let verdict = match (same, &known) {
             (true, None) => "same     ",
-            (false, Some(_)) => "known    ",
             (false, None) => "DIFFERENT",
             (true, Some(_)) => "AGREES   ",
+            (false, Some((listed, _))) if *listed == tracker => "known    ",
+            (false, Some(_)) => "MOVED    ",
         };
         println!(
             "{verdict} | core {} | tracker {tracker} | {}",
@@ -810,9 +842,14 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
                 "{}: core {}, tracker {tracker}",
                 case.name, case.core
             )),
-            (true, Some(why)) => unexpected.push(format!(
+            (true, Some((_, why))) => unexpected.push(format!(
                 "{}: listed as a known difference ({why}), but both read {tracker}",
                 case.name
+            )),
+            (false, Some((listed, why))) if listed != tracker => unexpected.push(format!(
+                "{}: listed as a known difference ({why}) the tracker reads as {listed}, but \
+                 it reads {tracker} (core {})",
+                case.name, case.core
             )),
             _ => {}
         }
@@ -820,7 +857,7 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
     assert!(
         unexpected.is_empty(),
         "{} of {} streams read differently by the tracker and the terminal core, or listed \
-         as known differences and read alike:\n{}",
+         as known differences and read alike or otherwise than listed:\n{}",
         unexpected.len(),
         fixture.cases.len(),
         unexpected.join("\n")
