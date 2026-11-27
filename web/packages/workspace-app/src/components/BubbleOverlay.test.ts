@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import { api } from "../api/client";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
+import { overlayStack, promptState, setCoverBlocking } from "../state/store.svelte";
 import { surveyState } from "../state/survey.svelte";
 import { activeTabInPane, layout, setActivePane, tabFocusPulse, type LeafNode } from "../state/tabs.svelte";
 import { press, release } from "../__tests__/pressFocus";
@@ -512,11 +514,24 @@ describe("the survey card's keys", () => {
 describe("a link in a survey's body", () => {
   const URL = "https://chan.app/notes";
 
-  async function linkedSurvey(bodyMarkdown: string): Promise<HTMLElement> {
-    surveyState.byTab = { t1: { spec: spec({ bodyMarkdown }), busy: false } };
+  // The owners a case raises over the survey: an overlay, a dialog, the
+  // Computers launcher, a cover over the window.
+  afterEach(() => {
+    overlayStack.ids = [];
+    promptState.open = false;
+    setCoverBlocking("reconnect", false);
+    document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+  });
+
+  /// A survey over terminal t1, or the window-wide one with `tabId` null,
+  /// whose body is `bodyMarkdown`; returns its card once it holds the
+  /// keyboard.
+  async function linkedSurvey(bodyMarkdown: string, tabId: string | null = "t1"): Promise<HTMLElement> {
+    if (tabId === null) surveyState.windowWide = { spec: spec({ bodyMarkdown }), busy: false };
+    else surveyState.byTab = { [tabId]: { spec: spec({ bodyMarkdown }), busy: false } };
     const target = document.createElement("div");
     document.body.append(target);
-    mounted.push(mount(BubbleOverlay, { target, props: { tabId: "t1" } }));
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId } }));
     await settle();
     const card = target.querySelector<HTMLElement>(".survey-card")!;
     expect(document.activeElement, "the card takes the keyboard as it shows").toBe(card);
@@ -865,5 +880,248 @@ describe("a link in a survey's body", () => {
     await settle();
     expect(dropDowns(), "the drop-down closes").toEqual([]);
     expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  // The keyboard's owner decides whether the survey holds its keys, not
+  // the focused pane alone: whatever takes the keyboard over the survey
+  // takes the drop-down with it, so Enter at the card opens nothing once
+  // that owner lets go.
+  test.each([
+    ["a window-wide survey shows over the window", () => {
+      surveyState.windowWide = { spec: spec({ surveyId: "wide-1", bodyMarkdown: "Window-wide" }), busy: false };
+    }, () => {
+      surveyState.windowWide = null;
+    }],
+    ["Search opens over the panes", () => {
+      overlayStack.ids = ["search"];
+    }, () => {
+      overlayStack.ids = [];
+    }],
+    ["the command deck opens", () => {
+      overlayStack.ids = ["launcher"];
+    }, () => {
+      overlayStack.ids = [];
+    }],
+    ["Settings opens", () => {
+      overlayStack.ids = ["settings"];
+    }, () => {
+      overlayStack.ids = [];
+    }],
+    ["a dialog opens", () => {
+      promptState.open = true;
+    }, () => {
+      promptState.open = false;
+    }],
+    ["the Computers launcher shows over the window", () => {
+      document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    }, () => {
+      document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    }],
+    ["a cover rises over the window", () => {
+      setCoverBlocking("reconnect", true);
+    }, () => {
+      setCoverBlocking("reconnect", false);
+    }],
+  ])("the drop-down closes when %s, and Enter at the card opens nothing after", async (_when, arrive, leave) => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    arrive();
+    await settle();
+    expect(dropDowns(), "the survey no longer holds the keyboard, so its drop-down closes").toEqual([]);
+    leave();
+    await settle();
+    card.focus();
+    const enter = keyAt(card, "Enter");
+    await settle();
+    expect(open, "Enter at the card opens nothing once the owner above lets go").not.toHaveBeenCalled();
+    expect(enter.defaultPrevented, "and the key is not taken").toBe(false);
+  });
+
+  test.each([
+    ["the Computers launcher shows over the window", () => {
+      document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    }],
+    ["a cover rises over the window", () => {
+      setCoverBlocking("reconnect", true);
+    }],
+  ])("a window-wide survey's drop-down closes when %s", async (_when, arrive) => {
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`, null);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    arrive();
+    await settle();
+    expect(dropDowns(), "the survey no longer holds the keyboard, so its drop-down closes").toEqual([]);
+  });
+
+  // Focus can reach a body link under an overlay (a script, assistive
+  // technology), and Enter on it makes the engine's click.
+  test("a click on a body link while an overlay holds the keyboard is cancelled and shows nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    overlayStack.ids = ["search"];
+    await settle();
+    const link = bodyLink(card);
+    link.focus();
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 0 });
+    link.dispatchEvent(click);
+    await settle();
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "no drop-down where the survey does not hold the keyboard").toEqual([]);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  // The drop-down never takes the keyboard: a press anywhere in it, not
+  // only on its row or its copy button, leaves the keyboard where it was.
+  test.each([
+    ["footer", ".md-bubble .md-bubble-status"],
+    ["list beside its row", ".md-bubble .md-bubble-list"],
+    ["frame", ".md-bubble"],
+  ])("a press on the drop-down's %s keeps it and the keyboard, so 1 then answers", async (_where, selector) => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    const held = document.activeElement;
+    expect(card.contains(held), "precondition: the keyboard is in the card").toBe(true);
+    const at = document.querySelector<HTMLElement>(selector);
+    expect(at, "precondition: the drop-down shows").not.toBeNull();
+    const down = await press(at!);
+    release(at!);
+    await settle();
+    expect(
+      { cancelled: down.defaultPrevented, keyboardStays: document.activeElement === held, dropDowns: dropDowns().length },
+      "the press is cancelled, so the keyboard and the drop-down stay",
+    ).toEqual({ cancelled: true, keyboardStays: true, dropDowns: 1 });
+    keyAt(document.activeElement ?? card, "1");
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  // The editor's drop-down closes when the caret leaves its link; the
+  // card's closes when the keyboard moves to another control in the card,
+  // so Enter there is that control's.
+  test.each([
+    ["an answer", (card: HTMLElement) => card.querySelector<HTMLElement>(".survey-option")!],
+    ["Follow up", (card: HTMLElement) => card.querySelector<HTMLElement>(".survey-followup")!],
+    ["Dismiss", (card: HTMLElement) => card.querySelector<HTMLElement>(".survey-dismiss")!],
+    ["another body link", (card: HTMLElement) => bodyLink(card, 1)],
+  ])("the drop-down closes when the keyboard moves to %s, and Enter there is that control's", async (_to, control) => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) or [the other](https://chan.app/other).`);
+    await clickOn(bodyLink(card, 0));
+    expect(dropDowns(), "the click shows the first link's drop-down").toEqual([[["OPEN", URL]]]);
+    const to = control(card);
+    to.focus();
+    expect(document.activeElement, "precondition: the keyboard moved, as Tab moves it").toBe(to);
+    await settle();
+    expect(dropDowns(), "the keyboard left the link, so the drop-down closes").toEqual([]);
+    const enter = keyAt(to, "Enter");
+    await settle();
+    expect(
+      { opened: open.mock.calls.length, enterTaken: enter.defaultPrevented },
+      "nothing opens and the key keeps its default, the control's activation",
+    ).toEqual({ opened: 0, enterTaken: false });
+  });
+
+  test.each(["the card", "the drop-down's own link"])("the keyboard moving onto %s keeps the drop-down", async (onto) => {
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    const shown = document.querySelector(".md-bubble");
+    expect(shown, "the click shows the drop-down").not.toBeNull();
+    card.focus();
+    if (onto === "the drop-down's own link") bodyLink(card).focus();
+    await settle();
+    expect(document.querySelector(".md-bubble"), "the same drop-down stays").toBe(shown);
+  });
+
+  // The drop-down's target is the nearest element an engine follows as a
+  // link. An element that only carries an href is none, though its click
+  // is still cancelled.
+  test("a click on an image inside an SVG link shows the link's target, not the image's source", async () => {
+    const card = await linkedSurvey(
+      `An SVG: <svg width="20" height="20"><a href="${URL}"><image href="https://example.com/i.png" width="10" height="10"/></a></svg>`,
+    );
+    const image = card.querySelector(".survey-body image");
+    expect(image, "the body renders the image in the link").not.toBeNull();
+    const click = await clickOn(image!);
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "the link's row, not the image's").toEqual([[["OPEN", URL]]]);
+  });
+
+  test.each([
+    ["an SVG image that is no link", `<svg width="20" height="20"><image href="https://example.com/i.png" width="10" height="10"/></svg>`, "image"],
+    ["a span that carries an href", `<span href="${URL}">not a link</span>`, "span"],
+  ])("a click on %s is cancelled and shows nothing", async (_what, html, pressed) => {
+    const card = await linkedSurvey(`Here: ${html}`);
+    const at = card.querySelector(`.survey-body ${pressed}`);
+    expect(at?.hasAttribute("href"), "the body renders the element with its href").toBe(true);
+    const click = await clickOn(at!);
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "no drop-down").toEqual([]);
+  });
+
+  test.each([
+    ["Escape", (card: HTMLElement) => {
+      keyAt(document.activeElement ?? card, "Escape");
+    }],
+    ["Enter", (card: HTMLElement) => {
+      keyAt(document.activeElement ?? card, "Enter");
+    }],
+    ["a press beside the link", async (card: HTMLElement) => {
+      await clickOn(card.querySelector(".survey-body p")!);
+    }],
+  ])("a link whose drop-down %s closed shows it again when clicked", async (_closer, close) => {
+    opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    await close(card);
+    await settle();
+    expect(dropDowns(), "the drop-down closes").toEqual([]);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "a later click shows it again").toEqual([[["OPEN", URL]]]);
+  });
+
+  test("a scroll inside the body closes the drop-down", async () => {
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.\n\n\`\`\`\nlong line\n\`\`\`\n`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    const pre = card.querySelector(".survey-body pre");
+    expect(pre, "the body renders a code block, which scrolls a long line").not.toBeNull();
+    pre!.dispatchEvent(new Event("scroll"));
+    await settle();
+    expect(dropDowns(), "the link moved under its drop-down, so it closes").toEqual([]);
+  });
+
+  test("a listener between the body and the app's root that stops the click leaves the link's click cancelled", async () => {
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    const stop = (e: Event) => e.stopPropagation();
+    card.addEventListener("click", stop);
+    try {
+      const click = await clickOn(bodyLink(card));
+      expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+      expect(dropDowns(), "and shows the drop-down").toEqual([[["OPEN", URL]]]);
+    } finally {
+      card.removeEventListener("click", stop);
+    }
+  });
+
+  // An image map's area has no box of its own, so the drop-down sits under
+  // the image that uses its map.
+  test("an image map's area shows its drop-down under its image", async () => {
+    const card = await linkedSurvey(
+      `A map: <img src="https://example.com/i.png" usemap="#m" width="120" height="60"><map name="m"><area href="${URL}" shape="rect" coords="0,0,9,9"></map>`,
+    );
+    const image = card.querySelector<HTMLImageElement>(".survey-body img[usemap='#m']");
+    const area = card.querySelector(".survey-body map[name='m'] area");
+    expect({ image: Boolean(image), area: Boolean(area) }, "the body renders the image and its map").toEqual({ image: true, area: true });
+    image!.getBoundingClientRect = () =>
+      ({ x: 40, y: 100, left: 40, top: 100, right: 160, bottom: 160, width: 120, height: 60, toJSON: () => ({}) }) as DOMRect;
+    await clickOn(area!);
+    const wrap = document.querySelector<HTMLElement>(".md-bubble");
+    expect(wrap, "the click shows the drop-down").not.toBeNull();
+    expect({ top: wrap!.style.top, left: wrap!.style.left }, "8px under the image, at its left edge").toEqual({ top: "168px", left: "40px" });
   });
 });
