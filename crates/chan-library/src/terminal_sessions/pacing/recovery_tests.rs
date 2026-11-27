@@ -337,6 +337,144 @@ fn a_mode_change_the_ring_start_cut_keeps_the_screen_it_was_made_on() {
 }
 
 #[test]
+fn a_replay_that_starts_after_a_full_reset_names_the_normal_screen() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    // The program's RIS and its next frame are evicted, and the ring keeps
+    // only output drawn after them.
+    session.record_output(b"\x1bc");
+    session.record_output(&[b'x'; 20]);
+    session.record_output(&[b'y'; 20]);
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        live.replay.concat(),
+        [b'y'; 20],
+        "fixture: the ring keeps the last write alone"
+    );
+    assert_eq!(
+        (
+            live.replay_screen,
+            live.alt_screen,
+            String::from_utf8_lossy(&live.mode_reassert).into_owned()
+        ),
+        (
+            Some(TerminalScreen::Normal),
+            false,
+            "\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\
+             \x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l"
+                .to_owned()
+        ),
+        "(replay screen, alternate screen, recovery suffix): RIS selects the normal \
+         screen and turns every tracked mode off"
+    );
+}
+
+#[test]
+fn a_full_reset_the_ring_start_cut_counts_as_made() {
+    // The core passes over a C0 control between RIS's ESC and its `c`, so
+    // a cut there leaves the reset as begun as one right after the ESC.
+    for start in [b"\x1b".as_slice(), b"\x1b\r"] {
+        let session = test_session_with_ring(32);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h\x1b[?1000h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        // Two reads split the program's RIS, and the ring keeps only the
+        // second: a view parses its rest as text.
+        session.record_output(&[b"zz".as_slice(), start].concat());
+        session.record_output(&[b"cBETWEEN_TUIS\r\n".as_slice(), &[b'y'; 15]].concat());
+        let live = viewer.replay_from(cursor);
+        assert!(
+            live.replay.concat().starts_with(b"cBETWEEN_TUIS"),
+            "fixture: the ring starts inside the reset begun by {start:?}"
+        );
+        assert_eq!(
+            (live.replay_screen, live.alt_screen),
+            (Some(TerminalScreen::Normal), false),
+            "(replay screen, alternate screen): the reset begun by {start:?} that the ring's \
+             start cut selects the normal screen"
+        );
+    }
+}
+
+#[test]
+fn a_switch_with_a_control_inside_it_the_ring_start_cut_counts_as_made() {
+    // The core passes over a C0 control or a DEL inside a switch, so a cut
+    // after one leaves the switch begun at the ring's first byte.
+    let cuts: [(&[u8], &[u8]); 4] = [
+        (b"\x1b\r", b"[?1049l"),
+        (b"\x1b[\r", b"?1049l"),
+        (b"\x1b[?10\r", b"49l"),
+        (b"\x1b[?10\x7f", b"49l"),
+    ];
+    for (begun, rest) in cuts {
+        let session = test_session_with_ring(32);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        // Two reads split the switch to the normal screen after the
+        // control, and the ring keeps only the second: a view parses its
+        // rest as text.
+        session.record_output(begun);
+        let mut last = [rest, b"BETWEEN\r\n\x1b[?1049h".as_slice()].concat();
+        last.resize(31, b'y');
+        session.record_output(&last);
+        let live = viewer.replay_from(cursor);
+        assert_eq!(
+            live.replay.concat(),
+            last,
+            "fixture: the ring starts inside the switch begun by {begun:?}"
+        );
+        assert_eq!(
+            live.replay_screen,
+            Some(TerminalScreen::Normal),
+            "the screen the switch begun by {begun:?} selects, not the one before it or after \
+             the next"
+        );
+    }
+}
+
+#[test]
+fn a_long_switch_the_ring_start_cut_counts_as_made() {
+    // A switch of 24 parameters, or one padded past them, is carried
+    // whatever its length, so a ring whose start cut it a hundred bytes in
+    // still counts it as made.
+    let cuts = [
+        format!("\x1b[?1000;{}10", "1007;".repeat(22)).into_bytes(),
+        [b"\x1b[?".as_slice(), &[b'0'; 120], b"10"].concat(),
+        [b"\x1b[?10".as_slice(), &[b'\r'; 120]].concat(),
+    ];
+    for begun in &cuts {
+        let session = test_session_with_ring(256);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        session.record_output(begun);
+        let mut last = b"49lBETWEEN_TUIS\r\n".to_vec();
+        last.resize(250, b'y');
+        session.record_output(&last);
+        let live = viewer.replay_from(cursor);
+        assert_eq!(
+            live.replay.concat(),
+            last,
+            "fixture: the ring starts inside the switch, {} bytes in",
+            begun.len()
+        );
+        assert_eq!(
+            (live.replay_screen, live.alt_screen),
+            (Some(TerminalScreen::Normal), false),
+            "(replay screen, alternate screen): the switch the ring's start cut {} bytes in \
+             selects the normal screen",
+            begun.len()
+        );
+    }
+}
+
+#[test]
 fn a_switch_carried_into_the_ring_ends_with_its_own_sequence() {
     let session = test_session_with_ring(64);
     let viewer = session.clone().attach(None);
@@ -452,14 +590,21 @@ fn missed_tail_mouse_enables_follow_every_competing_reset() {
             assert!(recovered.missed_bytes > 0, "fixture must require recovery");
             let mut last_protocol = None;
             let mut last_encoding = None;
-            scan_private_modes(&mut Vec::new(), &recovered.mode_reassert, |mode, on| {
-                if [9, 1000, 1002, 1003].contains(&mode) {
-                    last_protocol = Some((mode, on));
-                }
-                if [1006, 1016].contains(&mode) {
-                    last_encoding = Some((mode, on));
-                }
-            });
+            scan_private_modes(
+                &mut OpenSequence::None,
+                &recovered.mode_reassert,
+                |change| {
+                    let ModeChange::Mode(mode, on) = change else {
+                        return;
+                    };
+                    if [9, 1000, 1002, 1003].contains(&mode) {
+                        last_protocol = Some((mode, on));
+                    }
+                    if [1006, 1016].contains(&mode) {
+                        last_encoding = Some((mode, on));
+                    }
+                },
+            );
             assert_eq!(
                 last_protocol,
                 Some((protocol, true)),

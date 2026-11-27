@@ -217,14 +217,151 @@ const TRACKED_PRIVATE_MODES: &[u16] = &[
     BRACKETED_PASTE_MODE,
 ];
 const BRACKETED_PASTE_MODE: u16 = 2004;
-/// Upper bound on a carried partial private-mode CSI (`\e[?<params>(h|l)`) split
-/// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
-/// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
-const PRIVATE_MODE_TAIL_CAP: usize = 64;
-
 /// The private modes that switch between the normal and alternate screens.
 fn is_screen_switch(mode: u16) -> bool {
     matches!(mode, 47 | 1047 | 1049)
+}
+
+/// A change to the screen or the private modes that the output scan reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeChange {
+    /// A DECSET (`true`) or DECRST (`false`) of one private mode.
+    Mode(u16, bool),
+    /// A full reset (RIS, `ESC c`): the normal screen and every mode off.
+    Reset,
+}
+
+impl ModeChange {
+    /// The screen this change selects, `true` for the alternate one; `None`
+    /// when it selects neither.
+    fn screen(self) -> Option<bool> {
+        match self {
+            Self::Mode(mode, on) if is_screen_switch(mode) => Some(on),
+            Self::Mode(..) => None,
+            Self::Reset => Some(false),
+        }
+    }
+}
+
+/// A byte the terminal core passes over between an ESC and the byte that
+/// ends its escape: a C0 control it executes there, or DEL, which it
+/// ignores. CAN and SUB cancel the escape and ESC starts a new one, so they
+/// are not among them.
+fn passed_over_in_an_escape(byte: u8) -> bool {
+    matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f)
+}
+
+/// The most parameters the terminal core keeps for one CSI. It drops a
+/// sequence with more whole, at its final byte; an empty parameter counts.
+const CSI_MAX_PARAMS: usize = 24;
+
+/// Where the output scan stands inside a sequence it reads: none, or an
+/// escape or private-mode CSI begun and not finished. The trackers carry
+/// it from one read to the next in place of the sequence's bytes, so they
+/// finish a sequence the terminal core finishes across any number of reads
+/// at any length, and what each tracker and each ring chunk's mark carries
+/// is this value: 52 bytes, with no allocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OpenSequence {
+    /// No sequence the scan reads is open.
+    #[default]
+    None,
+    /// After an ESC: a `c` next is a full reset and a `[` begins a CSI.
+    Escape,
+    /// After `ESC [`: a `?` next makes it a private-mode CSI.
+    Csi,
+    /// Among a private-mode CSI's parameters.
+    Params(Params),
+}
+
+/// The parameters of a private-mode CSI read so far, as the core keeps
+/// them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Params {
+    /// The parameters a `;` finished, the first `count` of them; an empty
+    /// one is 0.
+    finished: [u16; CSI_MAX_PARAMS],
+    /// How many parameters a `;` finished. At [`CSI_MAX_PARAMS`] the
+    /// sequence has more than the core keeps.
+    count: u8,
+    /// The parameter being read, saturating at `u16::MAX` as the core's
+    /// does.
+    value: u16,
+    /// Whether the parameter being read has a digit. A last parameter
+    /// without one is not a parameter, as in the core.
+    digits: bool,
+}
+
+impl OpenSequence {
+    fn is_open(&self) -> bool {
+        *self != Self::None
+    }
+
+    /// Read `byte` as the terminal core reads it here, passing each change
+    /// the byte finishes to `change`.
+    fn step(&mut self, byte: u8, mut change: impl FnMut(ModeChange)) {
+        *self = match (*self, byte) {
+            // ESC ends any sequence and begins another; CAN and SUB end it.
+            (_, 0x1b) => Self::Escape,
+            (_, 0x18 | 0x1a) | (Self::None, _) => Self::None,
+            (open, byte) if passed_over_in_an_escape(byte) => open,
+            (Self::Escape, b'c') => {
+                change(ModeChange::Reset);
+                Self::None
+            }
+            (Self::Escape, b'[') => Self::Csi,
+            (Self::Csi, b'?') => Self::Params(Params::default()),
+            (Self::Params(mut params), digit @ b'0'..=b'9') => {
+                params.value = params
+                    .value
+                    .saturating_mul(10)
+                    .saturating_add(u16::from(digit - b'0'));
+                params.digits = true;
+                Self::Params(params)
+            }
+            (Self::Params(mut params), b';') => {
+                params.finish();
+                Self::Params(params)
+            }
+            (Self::Params(params), final_byte @ (b'h' | b'l')) => {
+                params.apply(final_byte == b'h', &mut change);
+                Self::None
+            }
+            // Any other byte ends the sequence as one this scan reads: an
+            // intermediate, another final, a colon, or a byte past 0x7f.
+            _ => Self::None,
+        };
+    }
+}
+
+impl Params {
+    /// Finish the parameter being read, at a `;`. Past the last parameter
+    /// the core keeps it ignores a `;`, and the count stays at
+    /// [`CSI_MAX_PARAMS`], where the sequence is dropped.
+    fn finish(&mut self) {
+        if let Some(slot) = self.finished.get_mut(usize::from(self.count)) {
+            *slot = self.value;
+            self.count += 1;
+        }
+        self.value = 0;
+        self.digits = false;
+    }
+
+    /// Pass each parameter to `change` as a DECSET (`on`) or a DECRST, in
+    /// order, unless there are more than the core keeps.
+    fn apply(&self, on: bool, change: &mut impl FnMut(ModeChange)) {
+        if usize::from(self.count) == CSI_MAX_PARAMS {
+            return;
+        }
+        let last = self.digits.then_some(self.value);
+        for mode in self.finished[..usize::from(self.count)]
+            .iter()
+            .copied()
+            .chain(last)
+        {
+            change(ModeChange::Mode(mode, on));
+        }
+    }
 }
 
 /// One of a terminal's two screens.
@@ -248,95 +385,67 @@ impl TerminalScreen {
 }
 
 /// The screen a view must show to draw `replay`, which starts at the ring's
-/// first byte, where the tracker's mark is `mark`. A switch the tracker
-/// carried into that byte counts as made: the ring dropped its start, so a
-/// view reads the rest of it as text, and every byte the replay draws comes
-/// after it. `None` where the mark cannot tell.
+/// first byte, where the tracker's mark is `mark`. A switch or a full reset
+/// the tracker carried into that byte counts as made: the ring dropped its
+/// start, so a view reads the rest of it as text, and every byte the replay
+/// draws comes after it. A reset is carried from its ESC, past any C0
+/// control the terminal passes over after it, so one the ring cut before
+/// its `c` selects the normal screen here. `None` where the mark cannot
+/// tell.
 fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
-    if mark.partial.is_empty() {
-        return mark.alt_screen;
-    }
-    let mut tail = mark.partial.clone();
+    let mut open = mark.partial;
     let mut alt_screen = mark.alt_screen;
+    if !open.is_open() {
+        return alt_screen;
+    }
     for chunk in replay {
-        let open = tail.len() + chunk.len();
-        scan_private_mode_sequences(&mut tail, chunk, |mode, on, at| {
-            if at == 0 && is_screen_switch(mode) {
-                alt_screen = Some(on);
+        let still_open = scan_private_mode_sequences(&mut open, chunk, |change, carried| {
+            if carried {
+                if let Some(on) = change.screen() {
+                    alt_screen = Some(on);
+                }
             }
         });
-        // Only a sequence still open keeps every byte from its start.
-        if tail.len() != open {
+        // Only the carried sequence can change the start screen.
+        if !still_open {
             break;
         }
     }
     alt_screen
 }
 
-/// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
-/// reads. This recognizes private-mode toggles, not the full terminal grammar.
-/// It does not follow a reset (`ESC c`), nor a sequence a terminal finishes
-/// across a C0 control or DEL inside it, which this scan ends there (CAN, SUB
-/// and ESC end it in both), so after either the screen and modes read here
-/// can differ from the view's.
-fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
-    scan_private_mode_sequences(tail, bytes, |mode, on, _| change(mode, on));
+/// Scan ordered DECSET/DECRST parameters and full resets (RIS) in `bytes`,
+/// from `open`, the sequence the output before them left open, and leave
+/// in `open` the one they leave open. This recognizes private-mode toggles
+/// and the reset, not the full terminal grammar, and reads both as the
+/// terminal core reads them. The core passes over a C0 control but CAN and
+/// SUB, or a DEL, anywhere inside an escape or a CSI: between ESC and `c`
+/// or `[`, between `[` and `?`, and among the parameters. CAN and SUB end
+/// the sequence there, and ESC ends it and begins another. A reset is `c`
+/// after any ESC, the one that ends an OSC or DCS string included. A
+/// sequence with more than [`CSI_MAX_PARAMS`] parameters is dropped whole,
+/// and one of fewer is finished whatever its length and however the reads
+/// split it.
+fn scan_private_modes(open: &mut OpenSequence, bytes: &[u8], mut change: impl FnMut(ModeChange)) {
+    scan_private_mode_sequences(open, bytes, |found, _| change(found));
 }
 
-/// [`scan_private_modes`], also passing where each change's sequence starts
-/// in `tail` followed by `bytes`: 0 for the sequence `tail` holds the start
-/// of. `tail` only ever holds a sequence's start, never a byte before it.
+/// [`scan_private_modes`], also passing with each change whether its
+/// sequence is the one `open` held when the scan began. True when that
+/// sequence is still open after `bytes`.
 fn scan_private_mode_sequences(
-    tail: &mut Vec<u8>,
+    open: &mut OpenSequence,
     bytes: &[u8],
-    mut change: impl FnMut(u16, bool, usize),
-) {
-    let mut scan = Vec::with_capacity(tail.len() + bytes.len());
-    scan.extend_from_slice(tail);
-    scan.extend_from_slice(bytes);
-    tail.clear();
-
-    let n = scan.len();
-    let mut i = 0;
-    while i < n {
-        if scan[i] != 0x1b {
-            i += 1;
-            continue;
-        }
-        // Only a true prefix of `ESC [ ?` can still become a private-mode
-        // CSI next read. Carrying anything else, such as a bare ESC before
-        // the one that starts a sequence, would place that start after the
-        // carried bytes' first.
-        let head = &scan[i..n.min(i + 3)];
-        if !b"\x1b[?".starts_with(head) {
-            i += 1;
-            continue;
-        }
-        if head.len() < 3 {
-            tail.extend_from_slice(head);
-            break;
-        }
-        let mut j = i + 3;
-        while j < n && (scan[j].is_ascii_digit() || scan[j] == b';') {
-            j += 1;
-        }
-        if j == n {
-            if n - i <= PRIVATE_MODE_TAIL_CAP {
-                tail.extend_from_slice(&scan[i..]);
-            }
-            break;
-        }
-        let final_byte = scan[j];
-        if final_byte == b'h' || final_byte == b'l' {
-            for param in scan[i + 3..j].split(|&b| b == b';') {
-                if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
-                    change(mode, final_byte == b'h', i);
-                }
-            }
-        }
-        // ESC cancels an unfinished CSI and may start the next one itself.
-        i = if final_byte == 0x1b { j } else { j + 1 };
+    mut change: impl FnMut(ModeChange, bool),
+) -> bool {
+    let mut carried = open.is_open();
+    for &byte in bytes {
+        // Every sequence the scan reads begins at an ESC, which ends the
+        // carried one.
+        carried &= byte != 0x1b;
+        open.step(byte, |found| change(found, carried));
     }
+    carried && open.is_open()
 }
 
 /// A DSR cursor-position query. Something has to answer this or the PTY stalls:
@@ -1819,11 +1928,11 @@ pub struct AttachHandle {
     /// redial and a live socket's recovery alike. The missed span can hold
     /// the program's switch away from the screen the view still shows, so a
     /// view that shows the other one switches before the replay; the server
-    /// sends no switch. A switch the replay's first bytes finish counts as
-    /// made there, since the view never sees its start. `None` for every
-    /// other attach, and where the ring cannot tell: a ring restored from
-    /// the fd store keeps no screen for its bytes before their first switch,
-    /// when they make one.
+    /// sends no switch. A switch or a full reset the replay's first bytes
+    /// finish counts as made there, since the view never sees its start.
+    /// `None` for every other attach, and where the ring cannot tell: a ring
+    /// restored from the fd store keeps no screen for its bytes before their
+    /// first switch or reset, when they make one.
     pub replay_screen: Option<TerminalScreen>,
     /// The replay continues the client's own screen from its cursor, as a
     /// live recovery does: the raw delta, alternate-screen bytes included,
@@ -5149,15 +5258,17 @@ struct Session {
     focus_epoch: AtomicU64,
     bytes_since_focus: AtomicU64,
     in_alt_screen: AtomicBool,
-    alt_screen_tail: Mutex<Vec<u8>>,
+    /// The screen switch or full reset the output so far left open, which
+    /// the next read may finish.
+    alt_screen_tail: Mutex<OpenSequence>,
     /// The [`TRACKED_PRIVATE_MODES`] the live program currently has ON, scanned
     /// from PTY output by [`Session::update_private_modes`] and re-asserted on
     /// reattach (see [`Session::attach`]) so a fresh client whose terminal came
     /// up at defaults regains the program's key/mouse modes.
     private_modes: Mutex<BTreeSet<u16>>,
-    /// Carry for a private-mode CSI split across PTY reads (mirrors
-    /// `alt_screen_tail`, bounded by [`PRIVATE_MODE_TAIL_CAP`]).
-    private_mode_tail: Mutex<Vec<u8>>,
+    /// The private-mode CSI or full reset the output so far left open
+    /// (mirrors `alt_screen_tail`).
+    private_mode_tail: Mutex<OpenSequence>,
     /// Millis of the most recent unanswered [`DSR_CURSOR_QUERY`] seen in PTY
     /// output, or 0 when none is pending. Armed by
     /// [`Session::note_dsr_query`], consumed by
@@ -5495,9 +5606,9 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(Vec::new()),
+            alt_screen_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(Vec::new()),
+            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -5829,7 +5940,7 @@ impl Session {
         // process's output, so the trackers carry on the sequence its last
         // read began. One that may end behind it cannot tell what followed.
         let open_sequence = if behind {
-            Vec::new()
+            OpenSequence::None
         } else {
             ring.open_sequence()
         };
@@ -5939,7 +6050,7 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
-            alt_screen_tail: Mutex::new(open_sequence.clone()),
+            alt_screen_tail: Mutex::new(open_sequence),
             private_modes: Mutex::new(state.private_modes),
             private_mode_tail: Mutex::new(open_sequence),
             dsr_query_at: AtomicI64::new(0),
@@ -6882,9 +6993,9 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(Vec::new()),
+            alt_screen_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(Vec::new()),
+            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -7949,7 +8060,8 @@ impl Session {
     }
 
     /// Track the alternate screen from PTY output: where the tracker stood
-    /// at `bytes`' first byte, and whether they carried a transition.
+    /// at `bytes`' first byte, and whether they carried a transition. A full
+    /// reset is one, to the normal screen.
     fn update_alt_screen(&self, bytes: &[u8]) -> (ScreenMark, bool) {
         let mut tail = self
             .alt_screen_tail
@@ -7957,11 +8069,11 @@ impl Session {
             .expect("terminal alt-screen tail poisoned");
         let mark = ScreenMark {
             alt_screen: Some(self.in_alt_screen.load(Ordering::Relaxed)),
-            partial: tail.clone(),
+            partial: *tail,
         };
         let mut last_transition = None;
-        scan_private_modes(&mut tail, bytes, |mode, on| {
-            if is_screen_switch(mode) {
+        scan_private_modes(&mut tail, bytes, |change| {
+            if let Some(on) = change.screen() {
                 last_transition = Some(on);
             }
         });
@@ -7977,17 +8089,23 @@ impl Session {
     /// `h` adds each tracked param to the set, `l` removes it; a sequence split
     /// across reads is carried in `private_mode_tail`. Non-`h`/`l` finals (a
     /// DECRQM `$p` query, a report, …) are skipped without toggling. Sequences
-    /// can carry several modes at once (htop emits `\e[?1006;1000h`). True
-    /// when `bytes` set or reset a tracked mode.
+    /// can carry several modes at once (htop emits `\e[?1006;1000h`). A full
+    /// reset (`ESC c`) turns every mode off, in output order with the
+    /// changes around it. True when `bytes` set or reset a tracked mode or
+    /// hold a full reset.
     fn update_private_modes(&self, bytes: &[u8]) -> bool {
         let mut tail = self
             .private_mode_tail
             .lock()
             .expect("terminal private-mode tail poisoned");
-        let mut changes: Vec<(u16, bool)> = Vec::new();
-        scan_private_modes(&mut tail, bytes, |mode, on| {
-            if TRACKED_PRIVATE_MODES.contains(&mode) {
-                changes.push((mode, on));
+        let mut changes: Vec<ModeChange> = Vec::new();
+        scan_private_modes(&mut tail, bytes, |change| {
+            let tracked = match change {
+                ModeChange::Mode(mode, _) => TRACKED_PRIVATE_MODES.contains(&mode),
+                ModeChange::Reset => true,
+            };
+            if tracked {
+                changes.push(change);
             }
         });
         drop(tail);
@@ -7999,11 +8117,15 @@ impl Session {
             .private_modes
             .lock()
             .expect("terminal private modes poisoned");
-        for (mode, on) in changes {
-            if on {
-                modes.insert(mode);
-            } else {
-                modes.remove(&mode);
+        for change in changes {
+            match change {
+                ModeChange::Mode(mode, true) => {
+                    modes.insert(mode);
+                }
+                ModeChange::Mode(mode, false) => {
+                    modes.remove(&mode);
+                }
+                ModeChange::Reset => modes.clear(),
             }
         }
         true
@@ -9001,9 +9123,9 @@ mod tests {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
-            alt_screen_tail: Mutex::new(Vec::new()),
+            alt_screen_tail: Mutex::new(OpenSequence::None),
             private_modes: Mutex::new(BTreeSet::new()),
-            private_mode_tail: Mutex::new(Vec::new()),
+            private_mode_tail: Mutex::new(OpenSequence::None),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -9678,7 +9800,7 @@ mod tests {
         let mut ring = RingBuffer::new(16);
         let on = |alt_screen| ScreenMark {
             alt_screen: Some(alt_screen),
-            partial: Vec::new(),
+            partial: OpenSequence::None,
         };
         ring.push(
             &[b"\x1b[?1049h".as_slice(), &[b'x'; 20]].concat(),
@@ -9696,8 +9818,8 @@ mod tests {
         );
         let mark = ring.start_screen().expect("a held chunk").clone();
         assert_eq!(
-            (mark.alt_screen, mark.partial.as_slice()),
-            (Some(true), b"\x1b[".as_slice()),
+            (mark.alt_screen, mark.partial),
+            (Some(true), OpenSequence::Csi),
             "the mark holds the switch the cut began"
         );
         let (replay, _) = ring.snapshot_since(None);
@@ -9706,6 +9828,129 @@ mod tests {
             Some(false),
             "a switch the cut began counts as made at the ring's first byte"
         );
+    }
+
+    #[test]
+    fn an_oversized_write_marks_a_full_reset_where_the_ring_cuts_it() {
+        let alt = ScreenMark {
+            alt_screen: Some(true),
+            partial: OpenSequence::None,
+        };
+        // The bytes the ring drops hold the program's RIS whole.
+        let mut ring = RingBuffer::new(16);
+        ring.push(&[b"xx\x1bc".as_slice(), &[b'y'; 16]].concat(), alt.clone());
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "the bytes the ring drops reset the terminal to the normal screen"
+        );
+        // A cut between RIS's ESC and its `c`, also with a C0 control the
+        // core passes over between them, leaves the reset begun at the
+        // ring's first byte.
+        for start in [b"\x1b".as_slice(), b"\x1b\r"] {
+            let mut ring = RingBuffer::new(16);
+            ring.push(
+                &[b"xx".as_slice(), start, b"c", &[b'y'; 15]].concat(),
+                alt.clone(),
+            );
+            let mark = ring.start_screen().expect("a held chunk").clone();
+            assert_eq!(
+                (mark.alt_screen, mark.partial),
+                (Some(true), OpenSequence::Escape),
+                "the mark holds the reset the cut began"
+            );
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay_start_screen(&mark, &replay),
+                Some(false),
+                "a reset the cut began after {start:?} counts as made at the ring's first byte"
+            );
+        }
+    }
+
+    // Every ring chunk keeps the tracker's mark at its first byte, so what
+    // the mark carries for an open sequence is bounded by its type: no
+    // allocation, whatever the sequence's length, and a fixed size.
+    #[test]
+    fn a_chunk_mark_carries_no_allocation_and_a_fixed_size() {
+        assert!(
+            !std::mem::needs_drop::<ScreenMark>(),
+            "a chunk's mark owns no allocation"
+        );
+        assert!(
+            std::mem::size_of::<ScreenMark>() <= 64,
+            "a chunk's mark is {} bytes",
+            std::mem::size_of::<ScreenMark>()
+        );
+    }
+
+    /// The start of a switch to the normal screen of 24 parameters,
+    /// `?1000;1007;...;1049l`, cut before its last `49l` and 120 bytes long.
+    fn a_long_switch_begun() -> Vec<u8> {
+        format!("\x1b[?1000;{}10", "1007;".repeat(22)).into_bytes()
+    }
+
+    #[test]
+    fn an_oversized_write_marks_a_switch_with_a_control_where_the_ring_cuts_it() {
+        let alt = ScreenMark {
+            alt_screen: Some(true),
+            ..ScreenMark::default()
+        };
+        // A cut after a C0 control or a DEL the core passes over inside a
+        // switch, or 120 bytes into a switch of 24 parameters, leaves the
+        // switch begun at the ring's first byte.
+        let long = a_long_switch_begun();
+        let cuts: [&[u8]; 5] = [
+            b"\x1b\r[?10",
+            b"\x1b[\r?10",
+            b"\x1b[?10\r",
+            b"\x1b[?10\x7f",
+            &long,
+        ];
+        for begun in cuts {
+            let mut ring = RingBuffer::new(16);
+            ring.push(
+                &[b"xx".as_slice(), begun, b"49l", &[b'y'; 13]].concat(),
+                alt.clone(),
+            );
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay.concat(),
+                [b"49l".as_slice(), &[b'y'; 13]].concat(),
+                "fixture: the ring cuts after {:?}",
+                String::from_utf8_lossy(begun)
+            );
+            let mark = ring.start_screen().expect("a held chunk");
+            assert_eq!(
+                replay_start_screen(mark, &replay),
+                Some(false),
+                "a switch the cut began with {:?} counts as made at the ring's first byte",
+                String::from_utf8_lossy(begun)
+            );
+        }
+    }
+
+    #[test]
+    fn a_restored_ring_whose_capacity_cut_a_switch_with_a_control_counts_it_as_made() {
+        for begun in [b"\x1b[?10\r".to_vec(), a_long_switch_begun()] {
+            let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 90], &begun].concat();
+            let mut kept = b"49lBETWEEN_TUIS\r\n".to_vec();
+            kept.resize(64, b't');
+            let ring = RingBuffer::new_with_replay(64, 1000, &[cut, kept.clone()].concat(), false);
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay.concat(),
+                kept,
+                "fixture: the ring starts inside the switch"
+            );
+            let mark = ring.start_screen().expect("the ring holds bytes");
+            assert_eq!(
+                replay_start_screen(mark, &replay),
+                Some(false),
+                "a switch the capacity cut began with {:?} counts as made at the ring's first byte",
+                String::from_utf8_lossy(&begun)
+            );
+        }
     }
 
     #[test]
@@ -9734,7 +9979,7 @@ mod tests {
         );
         let alt = ScreenMark {
             alt_screen: Some(true),
-            partial: Vec::new(),
+            partial: OpenSequence::None,
         };
         ring.push(&vec![b'd'; read], alt.clone());
         assert_eq!(
@@ -9786,6 +10031,81 @@ mod tests {
             Some(false),
             "a switch the capacity cut began counts as made at the ring's first byte, as one \
              the live ring's start cut does"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_reads_a_full_reset_its_capacity_cut() {
+        // The bytes cut to fit the ring enter the alternate screen and then
+        // reset the terminal, and the bytes kept are drawn after the reset.
+        let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 90], b"\x1bc"].concat();
+        let kept = [b"BETWEEN_TUIS\r\n".as_slice(), &[b't'; 50]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), false);
+        assert_eq!(
+            ring.snapshot_since(None).0.concat(),
+            kept,
+            "fixture: the ring keeps the last 64 bytes"
+        );
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "the reset the cut took says the kept bytes start on the normal screen"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_whose_capacity_cut_a_full_reset_counts_it_as_made() {
+        let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 91], b"\x1b"].concat();
+        let kept = [b"cBETWEEN_TUIS\r\n".as_slice(), &[b't'; 49]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), false);
+        let (replay, _) = ring.snapshot_since(None);
+        assert_eq!(
+            replay.concat(),
+            kept,
+            "fixture: the ring starts inside the reset"
+        );
+        let mark = ring.start_screen().expect("the ring holds bytes");
+        assert_eq!(
+            replay_start_screen(mark, &replay),
+            Some(false),
+            "a reset the capacity cut began counts as made at the ring's first byte, as a \
+             switch does"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_knows_no_screen_before_its_first_full_reset() {
+        // The restored bytes switch no screen, but a full reset ends them on
+        // the normal screen whichever screen they began on.
+        let read = PTY_READ_BYTES;
+        let replay = [
+            vec![b'a'; read],
+            b"\x1bc".to_vec(),
+            vec![b'b'; read - 2],
+            vec![b'c'; read],
+        ]
+        .concat();
+        let mut ring = RingBuffer::new_with_replay(3 * read, replay.len() as u64, &replay, false);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "nothing says which screen the bytes before the reset were on"
+        );
+        let normal = ScreenMark {
+            alt_screen: Some(false),
+            partial: OpenSequence::None,
+        };
+        ring.push(&vec![b'd'; read], normal.clone());
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "the read that holds the reset starts before it"
+        );
+        ring.push(&vec![b'e'; read], normal);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "past the reset, the reset tells"
         );
     }
 
@@ -16740,6 +17060,41 @@ mod tests {
             );
         }
 
+        // A restore carries on an open sequence of any length: here a switch
+        // of 24 parameters whose last read left 120 bytes of it open.
+        #[test]
+        fn an_exact_restore_finishes_a_long_sequence_its_last_read_began() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(1024, 8, 600)));
+            store.serve(&registry);
+            let id = "restored-inside-a-long-sequence";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(b"\x1b[?1049h\x1b[?1000htui");
+            session.record_output(&a_long_switch_begun());
+            store.changed();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Arc::new(Registry::new(test_config(1024, 8, 600)));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(
+                next.attach(id, None).unwrap().alt_screen,
+                "fixture: restored on the alternate screen"
+            );
+            assert!(next.inject_output(id, b"49l"));
+            let attached = next.attach(id, Some(0)).unwrap();
+            assert_eq!(
+                (
+                    attached.alt_screen,
+                    String::from_utf8_lossy(&attached.mode_reassert).into_owned()
+                ),
+                (false, String::new()),
+                "(alternate screen, mode reassert): the first read after the restore ends the \
+                 switch and the mouse mode"
+            );
+        }
+
         // A restore that may end behind its previous process cannot tell
         // what followed the sequence its tail leaves open, so it carries
         // none: the first read after it starts no sequence there.
@@ -16994,6 +17349,48 @@ mod tests {
                     alt_screen, !holds_the_exit,
                     "killed after {writes} writes of the push: the file ends at {end} with \
                      alt_screen {alt_screen}"
+                );
+            }
+        }
+
+        // A full reset changes the screen and the modes like a switch and a
+        // mode reset do, so the push that holds it, or the one that finishes
+        // it, writes the state it leaves. A file left with the program's
+        // alternate screen and mouse tracking would bring both back to a
+        // view after a restore.
+        #[test]
+        fn a_full_reset_leaves_its_state_in_the_ring_file() {
+            let reads: [&[&[u8]]; 2] = [&[b"\x1bc$ "], &[b"\x1b", b"c$ "]];
+            for (n, reads) in reads.into_iter().enumerate() {
+                let store = StoreSim::default();
+                let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+                store.serve(&registry);
+                let id = format!("reset-{n}");
+                let (session, _pair) = parked_session_without_a_child(&registry, &id);
+                session.record_output(b"$ vim notes\r\n\x1b[?1049h\x1b[?1000hvim's screen");
+                let ring = fdstore_ring_fd_name(&id, None);
+                assert_eq!(
+                    store.stored_ring(&ring).0.terminal_state(),
+                    Some(TerminalState {
+                        alt_screen: true,
+                        private_modes: [1000].into(),
+                    }),
+                    "fixture: the file holds the program's screen and mouse mode"
+                );
+                for read in reads {
+                    session.record_output(read);
+                }
+                assert_eq!(
+                    store.stored_ring(&ring).0.terminal_state(),
+                    Some(TerminalState {
+                        alt_screen: false,
+                        private_modes: BTreeSet::new(),
+                    }),
+                    "RIS in the reads {:?} leaves the normal screen and no mode on",
+                    reads
+                        .iter()
+                        .map(|read| String::from_utf8_lossy(read))
+                        .collect::<Vec<_>>()
                 );
             }
         }

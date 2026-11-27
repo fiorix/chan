@@ -1505,6 +1505,61 @@ async fn a_redial_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_past_a_lost_full_reset_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(SCREEN_RING, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // While the socket is down the program resets the terminal, as
+    // `reset` does, which leaves the alternate screen and turns every mode
+    // off; it writes past the ring and exits, and the shell prints its
+    // prompt. The ring moves past the reset, so the replay holds
+    // normal-screen output only.
+    let lost = b"\x1bc";
+    let filler = b"filler\r\n".repeat(SCREEN_RING / 4 / 8);
+    let tail = b"probe exited\r\n$ ";
+    let (session, before, after) = redial_past(
+        &rig,
+        shown,
+        &[lost, &filler, &filler, &filler, &filler, tail],
+    )
+    .await;
+    assert_eq!(
+        number(&session, "missed_bytes"),
+        (lost.len() + filler.len()) as u64,
+        "fixture: the ring moved past the reset"
+    );
+    let replay = number(&session, "replay_bytes") as usize;
+    assert_eq!(
+        String::from_utf8_lossy(&after[..replay]),
+        String::from_utf8_lossy(&[filler.repeat(3), tail.to_vec()].concat()),
+        "fixture: the replay is the retained output, unchanged"
+    );
+    assert_eq!(
+        replay_screen(&session),
+        Some("normal"),
+        "the session frame names the normal screen, which the program's reset selected \
+         inside the missed span"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "the recovery suffix follows the replay and reasserts no mode the reset turned off"
+    );
+    let screens = drawn_after_frame(shown, &session, &before, &after);
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(tail),
+        "a view that takes the named screen draws the program's last line and the prompt on \
+         the normal screen: it ends {:?}",
+        last(&screens.normal, 32)
+    );
+    assert_redial_holds_the_program_state(shown, &after, false, &[], "a redial past a full reset");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redial_past_a_lost_exit_names_the_normal_screen_before_a_redundant_one() {
     let _gate = pty_test_lock();
     let rig = Rig::new(SCREEN_RING, "while IFS= read -r line; do :; done").await;
@@ -1863,20 +1918,23 @@ async fn a_fresh_dial_past_an_overflowed_ring_names_no_replay_screen() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
-    let _gate = pty_test_lock();
-    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+/// Show a live view of `rig` `shown`, then block its socket's send and,
+/// while the socket stays up, let the program write `lost`, flood past the
+/// ring and write `tail`. Returns everything the view parsed before the
+/// recovery (`shown` and the blocked frame), the recovery's session frame,
+/// and its bytes before and after that frame, read to Ready.
+async fn live_recovery_past(
+    rig: &Rig,
+    shown: &[u8],
+    lost: &[u8],
+    tail: &[u8],
+) -> (Vec<u8>, Value, Vec<u8>, Vec<u8>) {
     let (mut client, _initial) = rig.attach().await;
-    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
     rig.output(shown);
     assert_eq!(next_binary(&mut client).await, shown);
-    // The socket stays up while its send blocks; the program leaves its
-    // alternate screen and floods past the ring meanwhile.
     let _pending = rig.block_output().await;
-    rig.output(b"\x1b[?1000l\x1b[?1049l");
+    rig.output(lost);
     rig.flood();
-    let tail = b"probe exited\r\n$ ";
     rig.output(tail);
     finish_blocked_frame(&mut client).await;
     let (mut session, mut before, mut after) = (None, Vec::new(), Vec::new());
@@ -1905,13 +1963,26 @@ async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_norma
         before.is_empty(),
         "the live recovery sends no byte ahead of its session frame"
     );
+    let parsed = [shown, &vec![b'B'; BLOCKED_BYTES]].concat();
+    (parsed, session, before, after)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // The socket stays up while its send blocks; the program leaves its
+    // alternate screen and floods past the ring meanwhile.
+    let tail = b"probe exited\r\n$ ";
+    let (shown, session, before, after) =
+        live_recovery_past(&rig, shown, b"\x1b[?1000l\x1b[?1049l", tail).await;
     assert_eq!(
         replay_screen(&session),
         Some("normal"),
         "the live recovery's session frame names the normal screen the program selected \
          while the view was behind"
     );
-    let shown = [&shown[..], &vec![b'B'; BLOCKED_BYTES]].concat();
     let screens = drawn_after_frame(&shown, &session, &before, &after);
     assert!(
         !screens.alternate_shown,
@@ -1921,6 +1992,50 @@ async fn a_lossy_live_recovery_past_a_lost_alternate_screen_exit_names_the_norma
         screens.normal.ends_with(tail),
         "the retained tail is drawn on the normal screen: it ends {:?}",
         last(&screens.normal, 32)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossy_live_recovery_past_a_lost_full_reset_names_the_normal_screen() {
+    let _gate = pty_test_lock();
+    let rig = Rig::new(16 * 1024, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    // The socket stays up while its send blocks; the program resets the
+    // terminal, as `reset` does, and floods past the ring meanwhile.
+    let tail = b"probe exited\r\n$ ";
+    let (shown, session, before, after) = live_recovery_past(&rig, shown, b"\x1bc", tail).await;
+    let replay = number(&session, "replay_bytes") as usize;
+    assert!(
+        after.len() >= replay && after[..replay].ends_with(tail),
+        "fixture: the replay ends with the retained tail"
+    );
+    assert_eq!(
+        replay_screen(&session),
+        Some("normal"),
+        "the live recovery's session frame names the normal screen the program's reset \
+         selected while the view was behind"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "the recovery suffix follows the replay and reasserts no mode the reset turned off"
+    );
+    let screens = drawn_after_frame(&shown, &session, &before, &after);
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(tail),
+        "the retained tail is drawn on the normal screen: it ends {:?}",
+        last(&screens.normal, 32)
+    );
+    assert_redial_holds_the_program_state(
+        &shown,
+        &after,
+        false,
+        &[],
+        "a live recovery past a full reset",
     );
 }
 
@@ -2089,55 +2204,135 @@ async fn a_restart_overtakes_a_redial_at(seam: AttachSeam) {
     );
 }
 
+/// The most parameters the terminal core keeps for one CSI. It drops a
+/// sequence with more whole, at its final byte; an empty parameter counts.
+const CORE_CSI_MAX_PARAMS: usize = 24;
+
+/// What a byte of a terminal's output does, as far as the test models read
+/// it.
+enum Parsed {
+    /// The byte lands on the screen shown: a printed byte, a CR or an LF.
+    Drawn(u8),
+    /// A full reset (RIS, `ESC c`).
+    Reset,
+    /// A DECSET (`true`) or DECRST of these private modes, in order.
+    Modes(bool, Vec<u16>),
+}
+
+/// Where a parse stands between two bytes.
+enum ParseState {
+    Ground,
+    /// After an ESC: a `c` next is a full reset and a `[` begins a CSI.
+    Escape,
+    /// After `ESC [`, with the parameter and intermediate bytes so far.
+    Csi(Vec<u8>),
+}
+
+/// Read `bytes` as the terminal core reads them, as far as the screens and
+/// the private modes go, and pass what each byte does to `each`. ESC ends
+/// any sequence and begins another, and CAN or SUB ends it. Any other C0
+/// control acts where it stands, inside an escape or a CSI too, and the
+/// sequence goes on after it; of those, the models follow a CR or an LF,
+/// which lands on the screen shown. DEL does nothing. A CSI is a DECSET or
+/// DECRST when its bytes are `?`, digits and semicolons, then `h` or `l`,
+/// and it has at most [`CORE_CSI_MAX_PARAMS`] parameters. Any other CSI
+/// does nothing the models read, and any other escape ends at its first
+/// byte. A byte above 0x7f ends a CSI unfinished and is read as text, where
+/// the core skips a whole UTF-8 character and goes on.
+fn parse_output(bytes: &[u8], mut each: impl FnMut(Parsed)) {
+    let mut state = ParseState::Ground;
+    for &byte in bytes {
+        state = match (state, byte) {
+            (_, 0x1b) => ParseState::Escape,
+            (_, 0x18 | 0x1a) => ParseState::Ground,
+            (state, 0x7f) => state,
+            (state, control @ 0x00..=0x1f) => {
+                if matches!(control, b'\r' | b'\n') {
+                    each(Parsed::Drawn(control));
+                }
+                state
+            }
+            (ParseState::Ground, byte) => {
+                each(Parsed::Drawn(byte));
+                ParseState::Ground
+            }
+            (ParseState::Escape, b'c') => {
+                each(Parsed::Reset);
+                ParseState::Ground
+            }
+            (ParseState::Escape, b'[') => ParseState::Csi(Vec::new()),
+            (ParseState::Escape, _) => ParseState::Ground,
+            (ParseState::Csi(mut csi), byte @ 0x20..=0x3f) => {
+                csi.push(byte);
+                ParseState::Csi(csi)
+            }
+            (ParseState::Csi(csi), final_byte @ 0x40..=0x7e) => {
+                if let Some((on, modes)) = private_modes(&csi, final_byte) {
+                    each(Parsed::Modes(on, modes));
+                }
+                ParseState::Ground
+            }
+            (ParseState::Csi(_), byte) => {
+                each(Parsed::Drawn(byte));
+                ParseState::Ground
+            }
+        };
+    }
+}
+
+/// The DECSET (`true`) or DECRST a CSI makes and the modes it names, from
+/// `csi`, its bytes between `[` and its final byte, and `final_byte`; `None`
+/// for any other CSI, and for one with more parameters than the core keeps.
+/// A parameter that is empty or above 65535 names no mode.
+fn private_modes(csi: &[u8], final_byte: u8) -> Option<(bool, Vec<u16>)> {
+    let on = match final_byte {
+        b'h' => true,
+        b'l' => false,
+        _ => return None,
+    };
+    let params = csi.strip_prefix(b"?")?;
+    if !params
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || *byte == b';')
+    {
+        return None;
+    }
+    let params = params.split(|byte| *byte == b';');
+    if params.clone().count() > CORE_CSI_MAX_PARAMS {
+        return None;
+    }
+    let modes = params
+        .filter_map(|param| std::str::from_utf8(param).ok()?.parse().ok())
+        .collect();
+    Some((on, modes))
+}
+
+/// Whether DEC private mode `mode` switches the screen.
+fn switches_screen(mode: u16) -> bool {
+    matches!(mode, 47 | 1047 | 1049)
+}
+
 /// What a terminal holds after parsing `bytes` of the state a redial must
 /// not leave stale: whether it is on the alternate screen, and which other
-/// DEC private modes are on. CAN, an escape or the end cuts a partial
-/// sequence short, a final other than `h` or `l` (a DECRQM query) changes
-/// nothing, and RIS resets the terminal, as in the client's core.
+/// DEC private modes are on, read by [`parse_output`]. A full reset shows
+/// the normal screen and turns every mode off.
 fn parsed_modes(bytes: &[u8]) -> (bool, BTreeSet<u16>) {
     let (mut alt_screen, mut modes) = (false, BTreeSet::new());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at..].starts_with(b"\x1bc") {
-            (alt_screen, modes) = (false, BTreeSet::new());
-            at += 2;
-            continue;
-        }
-        if !bytes[at..].starts_with(b"\x1b[?") {
-            at += 1;
-            continue;
-        }
-        let start = at + 3;
-        let end = start
-            + bytes[start..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
-                .count();
-        at = end;
-        let on = match bytes.get(end) {
-            Some(b'h') => true,
-            Some(b'l') => false,
-            _ => continue,
-        };
-        at = end + 1;
-        for param in bytes[start..end].split(|byte| *byte == b';') {
-            let Some(mode) = std::str::from_utf8(param)
-                .ok()
-                .and_then(|param| param.parse::<u16>().ok())
-            else {
-                continue;
-            };
-            match mode {
-                47 | 1047 | 1049 => alt_screen = on,
-                _ if on => {
+    parse_output(bytes, |parsed| match parsed {
+        Parsed::Drawn(_) => {}
+        Parsed::Reset => (alt_screen, modes) = (false, BTreeSet::new()),
+        Parsed::Modes(on, changed) => {
+            for mode in changed {
+                if switches_screen(mode) {
+                    alt_screen = on;
+                } else if on {
                     modes.insert(mode);
-                }
-                _ => {
+                } else {
                     modes.remove(&mode);
                 }
             }
         }
-    }
+    });
     (alt_screen, modes)
 }
 
@@ -2163,6 +2358,27 @@ fn parsed_modes_reads_switches_cut_sequences_queries_and_resets() {
     );
 }
 
+#[test]
+fn parsed_modes_reads_a_switch_and_a_reset_across_a_del_or_a_cr_inside_them() {
+    let read: Vec<_> = [("DEL", "\x7f"), ("CR", "\r")]
+        .into_iter()
+        .map(|(name, control)| {
+            let bytes = format!("\x1b[?1049h\x1b[?1000h\x1b[?10{control}49l\x1b[?10{control}00l");
+            (name, parsed_modes(bytes.as_bytes()))
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("DEL", (false, BTreeSet::new())),
+            ("CR", (false, BTreeSet::new()))
+        ],
+        "(alternate screen, modes on): the core ignores a DEL and executes a CR inside a \
+         CSI, which goes on to its final, so each DECRST leaves the alternate screen or \
+         turns its mode off"
+    );
+}
+
 /// The text a terminal draws on each of its screens as it parses a stream,
 /// in the order it lands there, and the screen it shows at the end.
 #[derive(Debug, Default)]
@@ -2172,66 +2388,23 @@ struct DrawnScreens {
     alternate_shown: bool,
 }
 
-/// Follow the screen switches in `bytes` (47, 1047 and 1049) and put every
-/// printed byte, CR and LF included, on the screen shown when it arrives.
-/// Escapes print nothing, CAN or an escape cuts a partial CSI short, a
-/// switch takes only digits and semicolons after its `?`, and RIS clears
-/// both screens and shows the normal one. Cursor motion and erases are not
-/// followed: the redial tests read where output lands, not the grid it
-/// makes.
+/// Follow the screen switches in `bytes` (47, 1047 and 1049), read by
+/// [`parse_output`], and put every printed byte, CR and LF included, on the
+/// screen shown when it arrives; RIS clears both screens and shows the
+/// normal one. Cursor motion and erases are not followed: the redial tests
+/// read where output lands, not the grid it makes.
 fn drawn_screens(bytes: &[u8]) -> DrawnScreens {
     let mut screens = DrawnScreens::default();
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            0x1b if bytes.get(at + 1) == Some(&b'[') => {
-                let start = at + 2;
-                let end = start
-                    + bytes[start..]
-                        .iter()
-                        .take_while(|byte| (0x20..=0x3f).contains(*byte))
-                        .count();
-                at = end;
-                let Some(&last) = bytes.get(end).filter(|byte| (0x40..=0x7e).contains(*byte))
-                else {
-                    continue;
-                };
-                at = end + 1;
-                let Some(params) = bytes[start..end].strip_prefix(b"?") else {
-                    continue;
-                };
-                if !matches!(last, b'h' | b'l') {
-                    continue;
-                }
-                let switches = params
-                    .iter()
-                    .all(|byte| byte.is_ascii_digit() || *byte == b';')
-                    && params
-                        .split(|byte| *byte == b';')
-                        .any(|param| matches!(param, b"47" | b"1047" | b"1049"));
-                if switches {
-                    screens.alternate_shown = last == b'h';
-                }
+    parse_output(bytes, |parsed| match parsed {
+        Parsed::Drawn(byte) if screens.alternate_shown => screens.alternate.push(byte),
+        Parsed::Drawn(byte) => screens.normal.push(byte),
+        Parsed::Reset => screens = DrawnScreens::default(),
+        Parsed::Modes(on, modes) => {
+            if modes.into_iter().any(switches_screen) {
+                screens.alternate_shown = on;
             }
-            0x1b if bytes.get(at + 1) == Some(&b'c') => {
-                screens = DrawnScreens::default();
-                at += 2;
-            }
-            // An escape before another starts nothing: the second begins
-            // its own sequence.
-            0x1b if bytes.get(at + 1) == Some(&0x1b) => at += 1,
-            0x1b => at += 2,
-            byte if byte >= 0x20 || matches!(byte, b'\r' | b'\n') => {
-                if screens.alternate_shown {
-                    screens.alternate.push(byte);
-                } else {
-                    screens.normal.push(byte);
-                }
-                at += 1;
-            }
-            _ => at += 1,
         }
-    }
+    });
     screens
 }
 
@@ -2267,6 +2440,202 @@ fn drawn_screens_puts_text_on_the_screen_shown_when_it_arrives() {
         (screens.normal, screens.alternate, screens.alternate_shown),
         (b"plain".to_vec(), Vec::new(), false),
         "RIS clears both screens and shows the normal one"
+    );
+}
+
+#[test]
+fn drawn_screens_leaves_the_alternate_screen_across_a_del_or_a_cr_inside_the_switch() {
+    let drawn: Vec<_> = [("DEL", "\x7f"), ("CR", "\r")]
+        .into_iter()
+        .map(|(name, control)| {
+            let screens = drawn_screens(
+                format!("$ top\r\n\x1b[?1049hframe\x1b[?10{control}49lplain").as_bytes(),
+            );
+            let normal = String::from_utf8_lossy(&screens.normal).into_owned();
+            let alternate = String::from_utf8_lossy(&screens.alternate).into_owned();
+            (name, (normal, alternate, screens.alternate_shown))
+        })
+        .collect();
+    let left_after = |alternate: &str| {
+        (
+            String::from("$ top\r\nplain"),
+            String::from(alternate),
+            false,
+        )
+    };
+    assert_eq!(
+        drawn,
+        vec![("DEL", left_after("frame")), ("CR", left_after("frame\r"))],
+        "(normal, alternate, alternate shown): the core ignores a DEL inside the switch and \
+         executes a CR there on the screen still shown, then the switch completes and the \
+         text after it lands on the normal screen"
+    );
+}
+
+/// Byte streams with the vendored terminal core's reading of each, recorded
+/// from the core by `web/packages/workspace-app/src/terminal/coreScreenModes.test.ts`.
+/// chan-library holds the session's tracker to the same readings.
+const CORE_SCREEN_MODES: &str =
+    include_str!("../../../chan-library/tests/fixtures/core-screen-modes.json");
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModes {
+    /// The private modes each reading reports, when on.
+    tracked: Vec<u16>,
+    cases: Vec<CoreScreenModesCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModesCase {
+    name: String,
+    /// The PTY reads in order; each character is one byte.
+    chunks: Vec<String>,
+    core: CoreReading,
+}
+
+/// Whether the alternate screen is active, and the tracked modes on,
+/// ascending.
+#[derive(serde::Deserialize)]
+struct CoreReading {
+    alternate: bool,
+    modes: Vec<u16>,
+}
+
+/// The recorded streams `parsed_modes` reads differently from the terminal
+/// core, by name, each with why: the session tracker's known differences,
+/// for the same reasons. The table test fails when one of them agrees, so
+/// the list stays true.
+const PARSED_MODES_KNOWN_DIFFERENCES: &[(&str, &str)] = &[
+    ("DECSTR with every tracked mode on", DECSTR),
+    (
+        "DECSTR on the alternate screen with every tracked mode on",
+        DECSTR,
+    ),
+    ("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI),
+];
+
+/// The recorded streams `drawn_screens` reads differently from the terminal
+/// core. It reads the screen and no mode, and the core's soft reset leaves
+/// the screen as it is, so the DECSTR streams are not among them.
+const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[(&str, &str)] =
+    &[("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI)];
+
+const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
+                      off in the core; the model does not read it";
+
+const UTF8_INSIDE_A_CSI: &str = "the core skips a UTF-8 character inside a CSI and finishes \
+                                 the CSI; the model ends a CSI at any byte above 0x7f";
+
+/// Mouse highlight tracking, which `parsed_modes` follows as it follows
+/// every private mode and the core does not implement, so the core never
+/// reads it on. The table compares the model's modes without it, and fails
+/// if the core reads it on in any stream.
+const MODE_THE_CORE_LACKS: u16 = 1001;
+
+/// A reading as the table prints it.
+fn screen_reading(alternate: bool, modes: Option<&[u16]>) -> String {
+    let screen = if alternate { "alternate" } else { "normal" };
+    match modes {
+        Some(modes) => format!("{screen} {modes:?}"),
+        None => screen.to_owned(),
+    }
+}
+
+// The redial tests hold the server to what a view draws and which modes it
+// holds, as these models read the view's bytes. A model that reads a stream
+// otherwise than the view's core passes a redial the view gets wrong, or
+// fails one it gets right. Every case is read by both models, and each
+// reading that breaks that rule, or its model's known-differences list, is
+// reported together; the whole table is the test's output.
+#[test]
+fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
+    let fixture: CoreScreenModes =
+        serde_json::from_str(CORE_SCREEN_MODES).expect("the core reading fixture parses");
+    let read_on: Vec<&str> = fixture
+        .cases
+        .iter()
+        .filter(|case| case.core.modes.contains(&MODE_THE_CORE_LACKS))
+        .map(|case| case.name.as_str())
+        .collect();
+    assert!(
+        read_on.is_empty(),
+        "the core reads mode {MODE_THE_CORE_LACKS} on, so the table can no longer leave it \
+         out: {read_on:?}"
+    );
+    for (name, _) in PARSED_MODES_KNOWN_DIFFERENCES
+        .iter()
+        .chain(DRAWN_SCREENS_KNOWN_DIFFERENCES)
+    {
+        assert!(
+            fixture.cases.iter().any(|case| case.name == *name),
+            "the known difference {name:?} names no recorded stream"
+        );
+    }
+    let mut unexpected = Vec::new();
+    for case in &fixture.cases {
+        let stream: Vec<u8> = case
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.chars())
+            .map(|c| u8::try_from(c).unwrap_or_else(|_| panic!("{}: {c:?} is no byte", case.name)))
+            .collect();
+        let core = screen_reading(case.core.alternate, Some(&case.core.modes));
+        let (alternate, modes) = parsed_modes(&stream);
+        let modes: Vec<u16> = modes
+            .into_iter()
+            .filter(|mode| fixture.tracked.contains(mode) && *mode != MODE_THE_CORE_LACKS)
+            .collect();
+        let parsed = screen_reading(alternate, Some(&modes));
+        let shown = drawn_screens(&stream).alternate_shown;
+        let drawn = screen_reading(shown, None);
+        let mut verdicts = Vec::new();
+        for (model, same, read, known_differences) in [
+            (
+                "parsed_modes",
+                (alternate, &modes) == (case.core.alternate, &case.core.modes),
+                &parsed,
+                PARSED_MODES_KNOWN_DIFFERENCES,
+            ),
+            (
+                "drawn_screens",
+                shown == case.core.alternate,
+                &drawn,
+                DRAWN_SCREENS_KNOWN_DIFFERENCES,
+            ),
+        ] {
+            let known = known_differences
+                .iter()
+                .find(|(name, _)| *name == case.name)
+                .map(|(_, why)| *why);
+            verdicts.push(match (same, known) {
+                (true, None) => "same     ",
+                (false, Some(_)) => "known    ",
+                (false, None) => "DIFFERENT",
+                (true, Some(_)) => "AGREES   ",
+            });
+            match (same, known) {
+                (false, None) => {
+                    unexpected.push(format!("{}: core {core}, {model} {read}", case.name))
+                }
+                (true, Some(why)) => unexpected.push(format!(
+                    "{}: listed as a known difference of {model} ({why}), but both read {read}",
+                    case.name
+                )),
+                _ => {}
+            }
+        }
+        println!(
+            "{} {} | core {core} | parsed_modes {parsed} | drawn_screens {drawn} | {}",
+            verdicts[0], verdicts[1], case.name
+        );
+    }
+    assert!(
+        unexpected.is_empty(),
+        "{} readings of {} streams by the test models differ from the terminal core's, or \
+         are listed as known differences and agree with it:\n{}",
+        unexpected.len(),
+        fixture.cases.len(),
+        unexpected.join("\n")
     );
 }
 
