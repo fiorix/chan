@@ -4502,6 +4502,58 @@ mod tests {
         }
     }
 
+    // A backlinks call walks no tree, in either form of the route, under the
+    // listing cap or over it: neither the workspace's whole-tree walk,
+    // counted where the workspace takes it, nor either walk a graph load
+    // counts. A graph load moves the workspace's count by one, under the cap
+    // and over it, so the count sees a walk the route takes.
+    #[tokio::test]
+    async fn a_backlinks_call_walks_no_tree() {
+        use super::tree_walks::{taken, Walk};
+        use chan_workspace::workspace::listing_limit_test_hooks::tree_walks_taken;
+
+        let app = backlinks_route_app();
+        let workspace = backlinks_fixture_read(&app).await;
+        let root = workspace.root().to_path_buf();
+        let walks = || {
+            [
+                tree_walks_taken(&workspace),
+                taken(&root, Walk::Listing),
+                taken(&root, Walk::Directories),
+            ]
+        };
+        let mut graph_loads = std::collections::BTreeMap::new();
+        let mut calls = std::collections::BTreeMap::new();
+        for (when, over_cap) in [("under the cap", false), ("over the cap", true)] {
+            let limit = over_cap.then(|| over_the_listing_cap(&workspace));
+            let before = tree_walks_taken(&workspace);
+            graph_route_body(&app, "/api/graph").await;
+            graph_loads.insert(when, tree_walks_taken(&workspace) - before);
+            for uri in ["/api/backlinks/LICENSE", "/api/backlinks/LICENSE?stream=1"] {
+                let before = walks();
+                graph_route_body(&app, uri).await;
+                let after = walks();
+                calls.insert((when, uri), [0, 1, 2].map(|k| after[k] - before[k]));
+            }
+            drop(limit);
+        }
+        assert_eq!(
+            graph_loads,
+            [("over the cap", 1), ("under the cap", 1)].into(),
+            "fixture: the workspace's whole-tree walks of one graph load"
+        );
+        let walked = |k: usize| -> std::collections::BTreeMap<_, _> {
+            calls
+                .iter()
+                .map(|(call, taken)| (*call, taken[k]))
+                .collect()
+        };
+        let none: std::collections::BTreeMap<_, _> = calls.keys().map(|call| (*call, 0)).collect();
+        assert_eq!(walked(1), none, "a graph load's whole-tree listings");
+        assert_eq!(walked(2), none, "a graph load's directories-only walks");
+        assert_eq!(walked(0), none, "the workspace's whole-tree walks");
+    }
+
     // Over the listing cap one graph load reads each node's class at most
     // once, and looks up on disk only the link targets the walks cannot
     // answer for. The tree layer merges every walked folder and joins each

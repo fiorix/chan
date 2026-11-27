@@ -841,12 +841,13 @@ pub mod subtree_test_hooks {
 
 /// Lowered bounds on the full rebuild's listing and on the scoped
 /// whole-tree walk, so a test can cross either with a few files instead of
-/// half a million.
+/// half a million, and a count of the scoped whole-tree walks taken.
 ///
 /// Compiled for this crate's tests and for downstream test builds that
-/// enable `test-hooks`. A bound is keyed by the workspace's graph directory,
-/// so tests over separate workspaces do not interfere, and holds until the
-/// guard `lower` or `lower_tree_walk` returns is dropped.
+/// enable `test-hooks`. A bound or a count is keyed by the workspace's
+/// graph directory, so tests over separate workspaces do not interfere. A
+/// bound holds until the guard `lower` or `lower_tree_walk` returns is
+/// dropped.
 #[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod listing_limit_test_hooks {
@@ -859,6 +860,8 @@ pub mod listing_limit_test_hooks {
 
     static REBUILD_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
     static TREE_WALK_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TREE_WALKS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub struct LimitGuard(&'static Limits, PathBuf);
 
@@ -890,6 +893,26 @@ pub mod listing_limit_test_hooks {
 
     pub(super) fn tree_walk_limit(workspace: &Workspace) -> usize {
         limit_in(&TREE_WALK_LIMITS, workspace)
+    }
+
+    /// How many walks [`Workspace::list_tree_filtered_unified`] and its
+    /// cancelable form have taken of `workspace`, each counted as it starts,
+    /// so one that stops at the cap or fails counts too.
+    pub fn tree_walks_taken(workspace: &Workspace) -> usize {
+        TREE_WALKS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn record_tree_walk(workspace: &Workspace) {
+        *TREE_WALKS
+            .lock()
+            .unwrap()
+            .entry(workspace.paths.graph_dir.clone())
+            .or_default() += 1;
     }
 
     fn limit_in(limits: &Limits, workspace: &Workspace) -> usize {
@@ -2455,6 +2478,8 @@ impl Workspace {
         &self,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<TreeEntry>> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        listing_limit_test_hooks::record_tree_walk(self);
         let policy = self.scope_policy();
         #[cfg(any(test, feature = "test-hooks"))]
         let limit = listing_limit_test_hooks::tree_walk_limit(self);
