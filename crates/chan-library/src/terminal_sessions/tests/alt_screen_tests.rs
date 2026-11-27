@@ -730,11 +730,12 @@ struct KnownDifference {
 const EVERY_MODE: [u16; 11] = [1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
 
 /// The recorded streams the tracker reads differently from the terminal
-/// core, each with the reading the tracker gives today and why. None is a
-/// switch, a mode change or a reset the tracker follows. The table test
-/// fails when one of them agrees with the core and when the tracker reads
-/// one otherwise than listed, so the list stays true and a change to how
-/// the tracker reads a listed stream is seen.
+/// core, each with the reading the tracker gives today and why. They are
+/// the classes of difference measured so far, not a list known to be
+/// complete; none is a switch, a DECSET or DECRST, or a reset the tracker
+/// follows. The table test fails when one of them agrees with the core and
+/// when the tracker reads one otherwise than listed, so the list stays
+/// true and a change to how the tracker reads a listed stream is seen.
 const KNOWN_DIFFERENCES: &[KnownDifference] = &[
     KnownDifference {
         name: "DECSTR with every tracked mode on",
@@ -749,13 +750,67 @@ const KNOWN_DIFFERENCES: &[KnownDifference] = &[
     KnownDifference {
         name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
         tracker: (true, &[1000]),
-        why: "the core skips a UTF-8 character inside a CSI and finishes the CSI; the tracker \
-              ends a CSI at any byte above 0x7f",
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xa0 between ESC and c",
+        tracker: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xff between ESC and c",
+        tracker: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) between ESC and c",
+        tracker: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "0x9b after an ESC, then ?1049h",
+        tracker: (false, &[]),
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "0x9b after ESC [ ?10, then ?1049l",
+        tracker: (true, &[1000]),
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "XTRESTORE of mode 1000 saved on",
+        tracker: (false, &[]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of mode 1000 saved off",
+        tracker: (false, &[1000]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the alternate screen",
+        tracker: (false, &[]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the normal screen",
+        tracker: (true, &[]),
+        why: XTRESTORE,
     },
 ];
 
 const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
                       off in the core; the tracker does not read it";
+
+const HIGH_BYTE: &str = "the core passes over a byte of 0xa0 or above inside an escape or a CSI, \
+                         a UTF-8 character's included, and goes on with the sequence; the \
+                         tracker ends the sequence at any byte above 0x7f";
+
+const C1_CSI: &str = "the core takes 0x9b inside an escape or a CSI as the start of a CSI; the \
+                      tracker ends the sequence at it";
+
+const XTRESTORE: &str = "the core restores at XTRESTORE (CSI ? Pm r) the private mode XTSAVE \
+                         (CSI ? Pm s) saved, 1049's screen included; the tracker reads neither";
 
 /// Mouse highlight tracking, which the tracker follows and reasserts and
 /// the core does not implement (it reports the mode as unrecognized), so

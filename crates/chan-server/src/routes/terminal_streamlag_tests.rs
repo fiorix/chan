@@ -2237,8 +2237,13 @@ enum ParseState {
 /// DECRST when its bytes are `?`, digits and semicolons, then `h` or `l`,
 /// and it has at most [`CORE_CSI_MAX_PARAMS`] parameters. Any other CSI
 /// does nothing the models read, and any other escape ends at its first
-/// byte. A byte above 0x7f ends a CSI unfinished and is read as text, where
-/// the core skips a whole UTF-8 character and goes on.
+/// byte. Like the session's tracker, the models read some sequences
+/// otherwise than the core, which the table test lists by recorded stream:
+/// a byte above 0x7f ends an escape or a CSI unfinished and is read as
+/// text, where the core passes over a byte of 0xa0 or above and goes on,
+/// and takes 0x9b as the start of a CSI; and XTSAVE and XTRESTORE (`CSI ?
+/// Pm s` and `r`) do nothing here, where the core saves and restores the
+/// mode.
 fn parse_output(bytes: &[u8], mut each: impl FnMut(Parsed)) {
     let mut state = ParseState::Ground;
     for &byte in bytes {
@@ -2535,25 +2540,115 @@ const PARSED_MODES_KNOWN_DIFFERENCES: &[KnownDifference<(bool, &[u16])>] = &[
     KnownDifference {
         name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
         model: (true, &[1000]),
-        why: UTF8_INSIDE_A_CSI,
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xa0 between ESC and c",
+        model: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xff between ESC and c",
+        model: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) between ESC and c",
+        model: (true, &[1000]),
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "0x9b after an ESC, then ?1049h",
+        model: (false, &[]),
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "0x9b after ESC [ ?10, then ?1049l",
+        model: (true, &[1000]),
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "XTRESTORE of mode 1000 saved on",
+        model: (false, &[]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of mode 1000 saved off",
+        model: (false, &[1000]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the alternate screen",
+        model: (false, &[]),
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the normal screen",
+        model: (true, &[]),
+        why: XTRESTORE,
     },
 ];
 
 /// The recorded streams `drawn_screens` reads differently from the terminal
 /// core, each with whether it shows the alternate screen today and why. It
-/// reads the screen and no mode, and the core's soft reset leaves the
-/// screen as it is, so the DECSTR streams are not among them.
-const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[KnownDifference<bool>] = &[KnownDifference {
-    name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
-    model: true,
-    why: UTF8_INSIDE_A_CSI,
-}];
+/// reads the screen and no mode, so the streams that differ only in a mode
+/// (the DECSTR ones, which leave the screen as it is, and XTRESTORE of mode
+/// 1000) are not among them.
+const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[KnownDifference<bool>] = &[
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
+        model: true,
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xa0 between ESC and c",
+        model: true,
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a byte 0xff between ESC and c",
+        model: true,
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "a UTF-8 pair (0xc3 0xa9) between ESC and c",
+        model: true,
+        why: HIGH_BYTE,
+    },
+    KnownDifference {
+        name: "0x9b after an ESC, then ?1049h",
+        model: false,
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "0x9b after ESC [ ?10, then ?1049l",
+        model: true,
+        why: C1_CSI,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the alternate screen",
+        model: false,
+        why: XTRESTORE,
+    },
+    KnownDifference {
+        name: "XTRESTORE of 1049 saved on the normal screen",
+        model: true,
+        why: XTRESTORE,
+    },
+];
 
 const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
                       off in the core; the model does not read it";
 
-const UTF8_INSIDE_A_CSI: &str = "the core skips a UTF-8 character inside a CSI and finishes \
-                                 the CSI; the model ends a CSI at any byte above 0x7f";
+const HIGH_BYTE: &str = "the core passes over a byte of 0xa0 or above inside an escape or a CSI, \
+                         a UTF-8 character's included, and goes on with the sequence; the model \
+                         ends the sequence at any byte above 0x7f";
+
+const C1_CSI: &str = "the core takes 0x9b inside an escape or a CSI as the start of a CSI; the \
+                      model ends the sequence at it";
+
+const XTRESTORE: &str = "the core restores at XTRESTORE (CSI ? Pm r) the private mode XTSAVE \
+                         (CSI ? Pm s) saved, 1049's screen included; the model reads neither";
 
 /// Mouse highlight tracking, which `parsed_modes` follows as it follows
 /// every private mode and the core does not implement, so the core never
