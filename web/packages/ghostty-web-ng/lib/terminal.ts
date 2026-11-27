@@ -127,9 +127,10 @@ export class Terminal {
   // The tabindex setSequentiallyFocusable() asked for, held across open();
   // unset, open() keeps its defaults.
   #tabIndex?: '0' | '-1';
-  // Whether the host's tabindex is the widget's own write, which leaves with
-  // the terminal; an embedder's value the widget never overwrote stays.
-  #wroteHostTabIndex = false;
+  // The host tabindex the widget last wrote, which leaves with the terminal
+  // while the host still holds it; null when it wrote none. An embedder's
+  // value the widget never overwrote, or wrote over the widget's, stays.
+  #hostTabIndex: string | null = null;
 
   // Link detection system
   #linkDetector?: LinkDetector;
@@ -409,11 +410,11 @@ export class Terminal {
       const tabIndex = this.#tabIndex;
       if (tabIndex !== undefined) {
         parent.setAttribute('tabindex', tabIndex);
-        this.#wroteHostTabIndex = true;
+        this.#hostTabIndex = tabIndex;
       } else if (!parent.hasAttribute('tabindex')) {
         // Make parent focusable if it isn't already
         parent.setAttribute('tabindex', '0');
-        this.#wroteHostTabIndex = true;
+        this.#hostTabIndex = '0';
       }
 
       // Mark as contenteditable so browser extensions (Vimium, etc.) recognize
@@ -843,8 +844,8 @@ export class Terminal {
    * Take the terminal out of the page's sequential focus navigation (false)
    * or put it back (true): tabindex -1 or 0 on the host and on the hidden
    * input. Before open the value is held for open() to write; disposal takes
-   * it off the host, and after disposal the call does nothing. It moves no
-   * focus.
+   * it off the host while the host still holds it, and after disposal the
+   * call does nothing. It moves no focus.
    */
   setSequentiallyFocusable(focusable: boolean): void {
     if (this.#isDisposed) return;
@@ -852,7 +853,7 @@ export class Terminal {
     if (!this.#isOpen) return;
     this.element?.setAttribute('tabindex', this.#tabIndex);
     this.#textarea?.setAttribute('tabindex', this.#tabIndex);
-    this.#wroteHostTabIndex = true;
+    this.#hostTabIndex = this.#tabIndex;
   }
 
   /**
@@ -1376,16 +1377,17 @@ export class Terminal {
       this.element.removeEventListener('click', this.#handleClick);
 
       // Remove contenteditable and accessibility attributes added in open(),
-      // and a tabindex the widget wrote, so a host with no terminal behind it
-      // is no Tab stop.
+      // and the tabindex the widget last wrote while the host still holds
+      // it, so a host the widget made a Tab stop is none with no terminal
+      // behind it.
       this.element.removeAttribute('contenteditable');
       this.element.removeAttribute('role');
       this.element.removeAttribute('aria-label');
       this.element.removeAttribute('aria-multiline');
-      if (this.#wroteHostTabIndex) {
+      if (this.#hostTabIndex !== null && this.element.getAttribute('tabindex') === this.#hostTabIndex) {
         this.element.removeAttribute('tabindex');
-        this.#wroteHostTabIndex = false;
       }
+      this.#hostTabIndex = null;
     }
 
     // Clean up scrollbar timers

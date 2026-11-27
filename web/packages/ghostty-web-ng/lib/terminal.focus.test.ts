@@ -350,6 +350,57 @@ describe('sequential focus navigation', () => {
     expect(host.hasAttribute('tabindex')).toBe(false);
   });
 
+  test("disposal keeps a tabindex the embedder wrote after the widget's last write", async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const unused = await terminal();
+    unused.open(host);
+    expect(host.getAttribute('tabindex'), "open()'s own '0'").toBe('0');
+    host.setAttribute('tabindex', '-1');
+    unused.dispose();
+    expect(host.getAttribute('tabindex'), "the embedder's later value stays").toBe('-1');
+
+    host.removeAttribute('tabindex');
+    const asked = await terminal();
+    asked.open(host);
+    asked.setSequentiallyFocusable(false);
+    host.setAttribute('tabindex', '0');
+    asked.dispose();
+    expect(host.getAttribute('tabindex'), "the embedder's value written after the call stays").toBe('0');
+  });
+
+  test('a held value equal to the embedder\'s counts as the widget\'s write and goes with the terminal', async () => {
+    const host = document.createElement('div');
+    host.setAttribute('tabindex', '-1');
+    document.body.append(host);
+    const term = await terminal();
+    term.setSequentiallyFocusable(false);
+    term.open(host);
+    expect(tabIndexes(host)).toEqual(['-1', '-1']);
+    term.dispose();
+    expect(host.hasAttribute('tabindex')).toBe(false);
+  });
+
+  test('an open() retried after one that failed keeps the tabindex an embedder gave its new host', async () => {
+    const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+    vi.spyOn(ghostty, 'createTerminal').mockImplementation(() => {
+      throw new Error('no memory for the terminal');
+    });
+    const term = new Terminal({ ghostty, cols: 40, rows: 6, cursorBlink: false, smoothScrollDuration: 0 });
+    terminals.push(term);
+    const bare = document.createElement('div');
+    document.body.append(bare);
+    expect(() => term.open(bare)).toThrow('no memory for the terminal');
+    expect(bare.hasAttribute('tabindex'), "the failed open() took the '0' it wrote").toBe(false);
+    // The same value the failed open() wrote, so only the record's reset
+    // tells the embedder's from the widget's.
+    const host = document.createElement('div');
+    host.setAttribute('tabindex', '0');
+    document.body.append(host);
+    expect(() => term.open(host)).toThrow();
+    expect(host.getAttribute('tabindex'), "the embedder's value stays").toBe('0');
+  });
+
   test("open() asked out puts no '0' on the host, from its own default or the input handler's", async () => {
     const term = await terminal();
     term.setSequentiallyFocusable(false);
