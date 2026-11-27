@@ -238,24 +238,6 @@ fn an_interrupting_escape_can_start_an_alt_screen_csi_in_the_next_read() {
     );
 }
 
-/// A fresh session after `reads`, each one PTY read.
-fn session_after(reads: &[&[u8]]) -> Arc<Session> {
-    let session = test_session_with_ring(1024);
-    for read in reads {
-        session.record_output(read);
-    }
-    session
-}
-
-/// Whether the session is on the alternate screen, and its tracked modes
-/// on.
-fn reading(session: &Arc<Session>) -> (bool, Vec<u16>) {
-    (
-        session.in_alt_screen.load(Ordering::Relaxed),
-        modes_on(session),
-    )
-}
-
 /// `stream` in one read, then in two split at each byte after its first.
 fn every_split(stream: &[u8]) -> impl Iterator<Item = Vec<&[u8]>> {
     std::iter::once(vec![stream])
@@ -265,41 +247,15 @@ fn every_split(stream: &[u8]) -> impl Iterator<Item = Vec<&[u8]>> {
 // The terminal core keeps at most 24 parameters of a CSI: a grouped switch
 // or mode change that reaches a 25th is dropped whole, wherever the reads
 // split it, and the sequence after it is read as usual. An empty parameter
-// counts toward the 24, a leading or a trailing one included.
+// counts toward the 24, a leading or a trailing one included. These tests
+// read their streams and the core's reading of them from the fixture's
+// recorded families.
 #[test]
 fn a_grouped_switch_past_24_parameters_is_dropped_whole_or_split() {
-    let streams = [
-        // 32 parameters, the switch last.
-        format!("\x1b[?{}1;1049h", "0;".repeat(30)),
-        // 25 and 33 parameters, the switch first and last.
-        format!("\x1b[?1049;{}1000h", "1007;".repeat(23)),
-        format!("\x1b[?1000;{}1049h", "1007;".repeat(23)),
-        format!("\x1b[?1049;{}1000h", "1007;".repeat(31)),
-        // 24 parameters and an empty one, in the middle, first and last.
-        format!("\x1b[?1049;;{}1000h", "1007;".repeat(22)),
-        format!("\x1b[?;1049;{}1000h", "1007;".repeat(22)),
-        format!("\x1b[?1049;{}1000;h", "1007;".repeat(22)),
-    ];
-    for stream in &streams {
-        for reads in every_split(stream.as_bytes()) {
-            let session = session_after(&reads);
-            assert_eq!(
-                reading(&session),
-                (false, Vec::new()),
-                "(alternate screen, modes on): the core drops a sequence past 24 parameters, \
-                 here read as {:?}",
-                reads
-                    .iter()
-                    .map(|read| String::from_utf8_lossy(read))
-                    .collect::<Vec<_>>()
-            );
-            session.record_output(b"\x1b[?1049hframe");
-            assert!(
-                session.in_alt_screen.load(Ordering::Relaxed),
-                "the switch after the dropped sequence selects the alternate screen"
-            );
-        }
-    }
+    assert_tracker_reads_family("a grouped switch and mode change past 24 parameters");
+    assert_tracker_reads_family(
+        "a grouped switch and mode change past 24 parameters, then a switch",
+    );
 }
 
 // A grouped switch or mode change of up to 24 parameters is applied
@@ -307,62 +263,15 @@ fn a_grouped_switch_past_24_parameters_is_dropped_whole_or_split() {
 // it.
 #[test]
 fn a_grouped_switch_of_24_parameters_is_carried_across_any_read_boundary() {
-    let streams = [
-        format!("\x1b[?1049;{}1000h", "1007;".repeat(22)),
-        format!("\x1b[?1000;{}1049h", "1007;".repeat(22)),
-        // 23 parameters and an empty one, in the middle and last.
-        format!("\x1b[?1049;;{}1000h", "1007;".repeat(21)),
-        format!("\x1b[?1049;{}1000;h", "1007;".repeat(21)),
-    ];
-    for stream in &streams {
-        for reads in every_split(stream.as_bytes()) {
-            assert_eq!(
-                reading(&session_after(&reads)),
-                (true, vec![1000]),
-                "(alternate screen, modes on): 24 parameters, split after {} of {} bytes",
-                reads[0].len(),
-                stream.len()
-            );
-        }
-    }
+    assert_tracker_reads_family("a grouped switch and mode change of 24 parameters");
 }
 
 // The core keeps a parameter padded with zeros, or with C0 controls or
 // DELs it passes over inside the sequence, at any length, split or not.
 #[test]
 fn a_padded_switch_is_carried_across_any_read_boundary() {
-    let streams = [
-        [b"\x1b[?".as_slice(), &[b'0'; 300], b"1049h"].concat(),
-        [b"\x1b[?10".as_slice(), &[b'\r'; 300], b"49h"].concat(),
-        [b"\x1b[?10".as_slice(), &[0x7f; 300], b"49h"].concat(),
-    ];
-    for stream in &streams {
-        for reads in every_split(stream) {
-            assert_eq!(
-                reading(&session_after(&reads)),
-                (true, Vec::new()),
-                "(alternate screen, modes on): a switch padded with {:?}, split after {} of {} \
-                 bytes",
-                char::from(stream[5]),
-                reads[0].len(),
-                stream.len()
-            );
-        }
-    }
+    assert_tracker_reads_family("a switch padded with 300 zeros, CRs or DELs");
 }
-
-/// `?1049;1000l`, a switch to the normal screen that also turns mouse
-/// tracking off, cut at each position a control byte can stand in it: the
-/// bytes before the control and after it.
-const CONTROL_POSITIONS: [(&str, &str); 7] = [
-    ("\x1b", "[?1049;1000l"),
-    ("\x1b[", "?1049;1000l"),
-    ("\x1b[?", "1049;1000l"),
-    ("\x1b[?10", "49;1000l"),
-    ("\x1b[?1049", ";1000l"),
-    ("\x1b[?1049;", "1000l"),
-    ("\x1b[?1049;1000", "l"),
-];
 
 // The core passes over a C0 control, which it executes, or a DEL, which it
 // ignores, at any position inside an escape or a CSI, and the sequence goes
@@ -371,46 +280,22 @@ const CONTROL_POSITIONS: [(&str, &str); 7] = [
 // is text unless that ESC is the second byte.
 #[test]
 fn a_control_byte_anywhere_inside_a_switch_is_passed_over() {
-    let mut differing = Vec::new();
-    let mut read = 0;
-    for (before, after) in CONTROL_POSITIONS {
-        for control in (0x00..=0x1fu8).chain([0x7f]) {
-            let cancels = matches!(control, 0x18 | 0x1a) || (control == 0x1b && before != "\x1b");
-            let core = if cancels {
-                (true, vec![1000])
-            } else {
-                (false, Vec::new())
-            };
-            let (before, after) = (before.as_bytes(), after.as_bytes());
-            let splits = [
-                vec![[before, &[control], after].concat()],
-                vec![before.to_vec(), [&[control], after].concat()],
-                vec![[before, &[control]].concat(), after.to_vec()],
-            ];
-            for reads in splits {
-                let mut all = vec![b"\x1b[?1049h\x1b[?1000hframe".as_slice()];
-                all.extend(reads.iter().map(Vec::as_slice));
-                let tracker = reading(&session_after(&all));
-                read += 1;
-                if tracker != core {
-                    differing.push(format!(
-                        "{:?}: core {core:?}, tracker {tracker:?}",
-                        reads
-                            .iter()
-                            .map(|read| String::from_utf8_lossy(read))
-                            .collect::<Vec<_>>()
-                    ));
-                }
-            }
-        }
+    for family in [
+        "?1049;1000l with a C0 control or DEL inside it, at each position",
+        "?1049;1000l with CAN or SUB inside it, at each position",
+        "?1049;1000l with an ESC inside it, at each position after its ESC",
+        "?1049;1000l after a doubled ESC",
+    ] {
+        assert_tracker_reads_family(family);
     }
-    assert!(
-        differing.is_empty(),
-        "(alternate screen, modes on) after ?1049;1000l with a control inside it, {} of {read} \
-         differ from the core:\n{}",
-        differing.len(),
-        differing.join("\n")
-    );
+}
+
+// The same holds between the ESC and the `c` of a full reset, the rule
+// `passed_over_in_an_escape` states.
+#[test]
+fn a_control_byte_between_esc_and_c_is_passed_over() {
+    assert_tracker_reads_family("ESC c with a C0 control or DEL between ESC and c");
+    assert_tracker_reads_family("ESC c with CAN or SUB between ESC and c");
 }
 
 macro_rules! mouse_mode_tests {
@@ -686,6 +571,7 @@ const CORE_SCREEN_MODES: &str = include_str!("../../../tests/fixtures/core-scree
 struct CoreScreenModes {
     tracked: Vec<u16>,
     cases: Vec<CoreScreenModesCase>,
+    families: Vec<CoreScreenModesFamily>,
 }
 
 #[derive(serde::Deserialize)]
@@ -694,6 +580,93 @@ struct CoreScreenModesCase {
     /// The PTY reads in order; each character is one byte.
     chunks: Vec<String>,
     core: ScreenReading,
+}
+
+/// Streams the terminal core reads alike, each whole or split in two at any
+/// byte, between the same reads before and after it.
+#[derive(serde::Deserialize)]
+struct CoreScreenModesFamily {
+    name: String,
+    /// The PTY reads before each stream; each character is one byte.
+    before: Vec<String>,
+    streams: Vec<String>,
+    /// The PTY reads after each stream.
+    after: Vec<String>,
+    core: ScreenReading,
+}
+
+/// A fixture chunk's bytes: each character is one byte.
+fn fixture_bytes(name: &str, chunk: &str) -> Vec<u8> {
+    chunk
+        .chars()
+        .map(|c| u8::try_from(c).unwrap_or_else(|_| panic!("{name}: {c:?} is no byte")))
+        .collect()
+}
+
+/// What the session's tracker reads: whether the alternate screen is
+/// active, and the tracked modes on, [`MODE_THE_CORE_LACKS`] left out.
+fn tracker_reading(session: &Arc<Session>) -> ScreenReading {
+    ScreenReading {
+        alternate: session.in_alt_screen.load(Ordering::Relaxed),
+        modes: modes_on(session)
+            .into_iter()
+            .filter(|mode| *mode != MODE_THE_CORE_LACKS)
+            .collect(),
+    }
+}
+
+/// Hold the tracker to the core's recorded reading of the fixture's family
+/// `name`: each of its streams, in one read and in two split at each byte
+/// after its first, between the family's reads before and after it, on a
+/// fresh session.
+fn assert_tracker_reads_family(name: &str) {
+    let fixture: CoreScreenModes =
+        serde_json::from_str(CORE_SCREEN_MODES).expect("the core reading fixture parses");
+    let family = fixture
+        .families
+        .iter()
+        .find(|family| family.name == name)
+        .unwrap_or_else(|| panic!("the fixture records no family {name:?}"));
+    let reads_of = |chunks: &[String]| -> Vec<Vec<u8>> {
+        chunks
+            .iter()
+            .map(|chunk| fixture_bytes(name, chunk))
+            .collect()
+    };
+    let (before, after) = (reads_of(&family.before), reads_of(&family.after));
+    let mut differing = Vec::new();
+    let mut read = 0;
+    for stream in reads_of(&family.streams) {
+        for split in every_split(&stream) {
+            let session = test_session_with_ring(1024);
+            for chunk in before
+                .iter()
+                .map(Vec::as_slice)
+                .chain(split.iter().copied())
+                .chain(after.iter().map(Vec::as_slice))
+            {
+                session.record_output(chunk);
+            }
+            read += 1;
+            let tracker = tracker_reading(&session);
+            if tracker != family.core {
+                differing.push(format!(
+                    "{:?} split after {} of {} bytes: tracker {tracker}",
+                    String::from_utf8_lossy(&stream),
+                    split[0].len(),
+                    stream.len()
+                ));
+            }
+        }
+    }
+    assert!(read > 0, "{name}: the family holds no stream");
+    assert!(
+        differing.is_empty(),
+        "{name}: {} of {read} reads differ from the core's {}:\n{}",
+        differing.len(),
+        family.core,
+        differing.join("\n")
+    );
 }
 
 /// Whether the alternate screen is active, and the tracked modes on.
@@ -854,21 +827,9 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
     for case in &fixture.cases {
         let session = test_session_with_ring(4096);
         for chunk in &case.chunks {
-            let bytes: Vec<u8> = chunk
-                .chars()
-                .map(|c| {
-                    u8::try_from(c).unwrap_or_else(|_| panic!("{}: {c:?} is no byte", case.name))
-                })
-                .collect();
-            session.record_output(&bytes);
+            session.record_output(&fixture_bytes(&case.name, chunk));
         }
-        let tracker = ScreenReading {
-            alternate: session.in_alt_screen.load(Ordering::Relaxed),
-            modes: modes_on(&session)
-                .into_iter()
-                .filter(|mode| *mode != MODE_THE_CORE_LACKS)
-                .collect(),
-        };
+        let tracker = tracker_reading(&session);
         let same = tracker == case.core;
         let known = KNOWN_DIFFERENCES
             .iter()

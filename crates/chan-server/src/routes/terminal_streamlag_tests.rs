@@ -2488,6 +2488,19 @@ struct CoreScreenModes {
     /// The private modes each reading reports, when on.
     tracked: Vec<u16>,
     cases: Vec<CoreScreenModesCase>,
+    families: Vec<CoreScreenModesFamily>,
+}
+
+/// Streams the terminal core reads alike, each whole or split in two at any
+/// byte, between the same reads before and after it. The models read a
+/// stream whole, so the splits are the session tracker's to follow.
+#[derive(serde::Deserialize)]
+struct CoreScreenModesFamily {
+    name: String,
+    before: Vec<String>,
+    streams: Vec<String>,
+    after: Vec<String>,
+    core: CoreReading,
 }
 
 #[derive(serde::Deserialize)]
@@ -2668,9 +2681,12 @@ fn screen_reading(alternate: bool, modes: Option<&[u16]>) -> String {
 // The redial tests hold the server to what a view draws and which modes it
 // holds, as these models read the view's bytes. A model that reads a stream
 // otherwise than the view's core passes a redial the view gets wrong, or
-// fails one it gets right. Every case is read by both models, and each
-// reading that breaks that rule, or its model's known-differences list, is
-// reported together; the whole table is the test's output.
+// fails one it gets right. Every case and every stream of every family is
+// read by both models, and each reading that breaks that rule, or its
+// model's known-differences list, is reported together; the whole table is
+// the test's output. A family has no known differences: its rows are where
+// the models' grammar (the parameter count, the controls passed over) is
+// held to the core.
 #[test]
 fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
     let fixture: CoreScreenModes =
@@ -2773,13 +2789,66 @@ fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
             verdicts[0], verdicts[1], case.name
         );
     }
+    for family in &fixture.families {
+        let core = screen_reading(family.core.alternate, Some(&family.core.modes));
+        let mut differing = 0;
+        for (index, stream) in family.streams.iter().enumerate() {
+            let bytes: Vec<u8> = family
+                .before
+                .iter()
+                .chain([stream])
+                .chain(&family.after)
+                .flat_map(|chunk| chunk.chars())
+                .map(|c| {
+                    u8::try_from(c).unwrap_or_else(|_| panic!("{}: {c:?} is no byte", family.name))
+                })
+                .collect();
+            let (alternate, modes) = parsed_modes(&bytes);
+            let modes: Vec<u16> = modes
+                .into_iter()
+                .filter(|mode| fixture.tracked.contains(mode) && *mode != MODE_THE_CORE_LACKS)
+                .collect();
+            let shown = drawn_screens(&bytes).alternate_shown;
+            for (model, same, read) in [
+                (
+                    "parsed_modes",
+                    (alternate, &modes) == (family.core.alternate, &family.core.modes),
+                    screen_reading(alternate, Some(&modes)),
+                ),
+                (
+                    "drawn_screens",
+                    shown == family.core.alternate,
+                    screen_reading(shown, None),
+                ),
+            ] {
+                if !same {
+                    differing += 1;
+                    unexpected.push(format!(
+                        "{} (stream {index}): core {core}, {model} {read}",
+                        family.name
+                    ));
+                }
+            }
+        }
+        let verdict = if differing == 0 {
+            "same      same     "
+        } else {
+            "DIFFERENT DIFFERENT"
+        };
+        println!(
+            "{verdict} | core {core} | {} streams, {differing} readings differ | family: {}",
+            family.streams.len(),
+            family.name
+        );
+    }
     assert!(
         unexpected.is_empty(),
-        "{} readings of {} streams by the test models differ from the terminal core's, or \
-         are listed as known differences and agree with it or read otherwise than \
-         listed:\n{}",
+        "{} readings of {} cases and {} families by the test models differ from the terminal \
+         core's, or are listed as known differences and agree with it or read otherwise \
+         than listed:\n{}",
         unexpected.len(),
         fixture.cases.len(),
+        fixture.families.len(),
         unexpected.join("\n")
     );
 }
