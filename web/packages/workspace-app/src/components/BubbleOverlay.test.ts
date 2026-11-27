@@ -177,17 +177,17 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-overlay")).toBeNull();
   });
 
-  test("a survey body shows a wikilink as its label", async () => {
+  test("a survey body shows a wikilink as typed", async () => {
     surveyState.windowWide = { spec: spec({ bodyMarkdown: "Open [[note|alias]] now" }), busy: false };
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
     await tick();
 
-    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open alias now");
+    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open [[note|alias]] now");
   });
 
-  test("a survey body skips the frontmatter rule", async () => {
+  test("a survey body shows the links of a frontmatter-looking block as typed", async () => {
     surveyState.windowWide = { spec: spec({ bodyMarkdown: '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]' }), busy: false };
     const target = document.createElement("div");
     document.body.append(target);
@@ -195,8 +195,8 @@ describe("survey overlay", () => {
     await tick();
 
     const text = target.querySelector(".survey-body")?.textContent ?? "";
-    expect(text).toContain('up: "Parent"');
-    expect(text).toContain("See a");
+    expect(text).toContain('up: "[[Projects/Parent]]"');
+    expect(text).toContain("See [[a]]");
   });
 
   test("a survey body leaves inline code and fenced code as typed", async () => {
@@ -210,7 +210,7 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-body pre code")?.textContent).toBe("[[note]]\n");
   });
 
-  test("a survey body gives a markup-carrying label no element", async () => {
+  test("a survey body keeps a markup-carrying wikilink's brackets and sanitizes its markup", async () => {
     const label = '<img src=x onerror="alert(1)">';
     surveyState.windowWide = { spec: spec({ bodyMarkdown: `Open [[note|${label}]] now` }), busy: false };
     const target = document.createElement("div");
@@ -218,8 +218,8 @@ describe("survey overlay", () => {
     mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
     await tick();
 
-    expect(target.querySelector(".survey-body img")).toBeNull();
-    expect(target.querySelector(".survey-body")?.textContent).toContain(label);
+    expect(target.querySelector(".survey-body [onerror]")).toBeNull();
+    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open [[note|]] now");
   });
 
   test("renders the body + numbered options for a window-wide survey", async () => {

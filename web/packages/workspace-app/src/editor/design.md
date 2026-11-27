@@ -215,7 +215,7 @@ A Markdown file whose frontmatter declares a slides spec (an aspect ratio of 16:
 
 ## Wikilink labels
 
-Wikilink labels reach every renderer through `api/markdown.ts` and its DOMPurify boundary: slides and printable documents, Copy as HTML, the link preview, survey bodies and table cells each pass `{ wikilinks: true }` at their render call (whole documents also pass `{ frontmatter: true }` so metadata keeps its brackets), while a call without the option keeps the authored syntax. The editor's Markdown grammar identifies the links in the original source, and its label parser in `links.ts` trims an explicit alias or shows the last path component without its `.md` suffix, omitting heading and block anchors. Character references keep labels literal through the Markdown renderer, including markup and entities; inline code and fenced blocks keep their authored brackets.
+Wikilink labels reach the renderers through `api/markdown.ts` and its DOMPurify boundary: slides and printable documents, Copy as HTML, the link preview and table cells each pass `{ wikilinks: true }` at their render call (whole documents also pass `{ frontmatter: true }` so metadata keeps its brackets), while a call without the option keeps the authored syntax. A survey body is such a call: it is an agent's prose about code, where bracket text such as a shell test is not a link. The editor's Markdown grammar identifies the links in the original source, and its label parser in `links.ts` trims an explicit alias or shows the last path component without its `.md` suffix, omitting heading and block anchors. Character references keep labels literal through the Markdown renderer, including markup and entities; inline code and fenced blocks keep their authored brackets.
 
 ## PDF export
 

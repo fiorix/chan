@@ -388,7 +388,7 @@
            so {@html} is safe for the agent-supplied body. `breaks: true` so a
            single authored newline renders as a line break (survey bodies are
            hand-written multi-line prompts). -->
-      <div class="survey-body" bind:this={body}>{@html renderMarkdownWithBreaks(active.bodyMarkdown, { wikilinks: true })}</div>
+      <div class="survey-body" bind:this={body}>{@html renderMarkdownWithBreaks(active.bodyMarkdown)}</div>
       <ul class="survey-options">
         {#each active.options as option, i (i)}
           <li>
