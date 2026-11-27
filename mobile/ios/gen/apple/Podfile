@@ -1,7 +1,7 @@
 # Uncomment the next line to define a global platform for your project
 
 target 'chan-ios_iOS' do
-platform :ios, '15.0'
+platform :ios, '17.0'
   # Pods for chan-ios_iOS
 end
 

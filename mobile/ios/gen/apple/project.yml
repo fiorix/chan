@@ -2,7 +2,7 @@ name: chan-ios
 options:
   bundleIdPrefix: app.chan.ios
   deploymentTarget:
-    iOS: 15.0
+    iOS: 17.0
 fileGroups: [../../src]
 configs:
   debug: debug
@@ -53,8 +53,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.133.0
-        CFBundleVersion: "0.133.0"
+        CFBundleShortVersionString: 0.135.0
+        CFBundleVersion: "0.135.0"
     entitlements:
       path: chan-ios_iOS/chan-ios_iOS.entitlements
     scheme:
