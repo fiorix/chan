@@ -387,4 +387,18 @@ describe("a press on a survey's overlay beside its card", () => {
     expect(reply, "a 2 answers the survey's second option")
       .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
   });
+
+  // Only a press on the overlay itself is held: one on the card or in it
+  // keeps its default, as here an option takes the keyboard from the card.
+  test("leaves a press inside the card its own default", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    const option = card.querySelector<HTMLButtonElement>(".survey-option")!;
+
+    const down = await press(option);
+    expect(down.defaultPrevented, "the press on the option keeps its default").toBe(false);
+    expect(document.activeElement, "the option takes the keyboard").toBe(option);
+  });
 });
