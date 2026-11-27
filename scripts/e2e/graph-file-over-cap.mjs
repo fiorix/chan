@@ -25,9 +25,14 @@
 // opened folders (`ge`), the path Details names, the breadcrumb, the stat
 // line, the labels the canvas painted in its last frame (the canvas labels
 // only the selected node, its neighbours and the folders down to it, so the
-// file's name and its folders' names say whether the file and its folder
-// chain are drawn), and every `/api/fs-graph` and `/api/graph` request the
-// page made after the menu command, by path and page.
+// file's label and its folders' labels say whether the file and its folder
+// chain are drawn: a folder is labelled by its name and a slash, a file the
+// window's answer holds by its name without its extension, as the server
+// labels it, and a file only the tab's own level read holds by its name),
+// and every `/api/fs-graph` and `/api/graph` request the page made after the
+// menu command, by path and page. Over the whole leg it keeps apart the
+// page's uncaught errors, its console errors, and every response with a
+// status of 400 or above, by method, route, workspace path and status.
 //
 // A tab has settled when its loading note is gone, no graph or level read
 // has been in flight or started for 3 s, and two readings at least 3 s apart
@@ -67,8 +72,11 @@
 // Output, in the output directory: preconditions.json; per leg
 // <leg>-opened.png and <leg>-settled.png (the tab as it appeared and as it
 // settled, or <leg>-failed.png when the leg stopped short) and <leg>.json
-// (both readings, the requests, page errors); verdict.json. The last stdout
-// line is the verdict.
+// (both readings, the requests, `pageErrors`, `consoleErrors`, and
+// `failedResponses` with their set, `failedResponseSet`); verdict.json, which
+// carries per leg the page errors and the failed-response set, so a job can
+// compare one build's sets with another's. The last stdout line is the
+// verdict.
 //
 // Exit 0: both files landed. 1: the control landed and the subject did not;
 // the line names what the subject's tab selected instead.
@@ -419,6 +427,49 @@ function describe(href) {
   return null;
 }
 
+/// Every response with a status of 400 or above the page receives, in the
+/// order received: its method, its route (the URL's path below the window's
+/// own, `api/inspector`, or the whole URL without its query for another
+/// origin or path), the workspace path its `path` parameter names, its
+/// status, when it came, and whether the tab had been asked for by then. No
+/// other part of the query is kept, so no token is.
+function watchFailedResponses(page, windowUrl, requests) {
+  const base = new URL(".", windowUrl);
+  const entries = [];
+  const started = Date.now();
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status < 400) return;
+    let url;
+    try {
+      url = new URL(response.url());
+    } catch {
+      return;
+    }
+    const below = url.origin === base.origin && url.pathname.startsWith(base.pathname);
+    entries.push({
+      method: response.request().method(),
+      route: maskTokens(below ? url.pathname.slice(base.pathname.length) : `${url.origin}${url.pathname}`),
+      path: url.searchParams.has("path") ? maskTokens(url.searchParams.get("path")) : null,
+      status,
+      atMs: Date.now() - started,
+      afterOpen: requests.mark !== null,
+    });
+  });
+  return entries;
+}
+
+/// The failed responses as a set to compare across builds: one key per
+/// method, route, path and status, sorted, with how many times it came.
+function failedResponseSet(entries) {
+  const counts = new Map();
+  for (const entry of entries) {
+    const key = `${entry.method} ${entry.route}${entry.path === null ? "" : ` path=${entry.path}`} ${entry.status}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.keys()].sort().map((key) => ({ key, count: counts.get(key) }));
+}
+
 /// The level reads a tab made, by folder in the order first asked: how many
 /// times its level was read (first pages) and how many pages that took.
 function levelReads(entries) {
@@ -567,26 +618,48 @@ async function pressNewGraphHere(page, file) {
   if (!pressed) throw new Unavailable(`${file}'s row menu offers no "New graph here"`);
 }
 
+/// What of the file and its folder chain the canvas painted, by the label
+/// the canvas gives each: a folder its name and a slash; a file the window's
+/// answer holds its name without the extension, as the server's label is the
+/// file's stem; a file only the tab's own level read holds its whole name.
 function drawn(labels, file) {
   if (labels === null) return null;
-  const has = (p) => labels.includes(path.posix.basename(p));
-  return { file: has(file), chain: folderChain(file).map((dir) => ({ dir, painted: has(dir) })) };
+  const name = path.posix.basename(file);
+  const stem = path.posix.parse(name).name;
+  const fileLabel = [name, stem].find((label) => labels.includes(label)) ?? null;
+  return {
+    file: fileLabel !== null,
+    fileLabel,
+    chain: folderChain(file).map((dir) => {
+      const label = `${path.posix.basename(dir)}/`;
+      return { dir, label, painted: labels.includes(label) };
+    }),
+  };
 }
 
 async function runLeg(browser, inputs, leg, file) {
   const context = await browser.createBrowserContext();
   const record = { leg, file, windowId: `${NAME}-${leg}-${Date.now().toString(36)}` };
-  const errors = [];
+  const pageErrors = [];
+  const consoleErrors = [];
+  let failedResponses = [];
+  const keep = () => {
+    record.pageErrors = pageErrors;
+    record.consoleErrors = consoleErrors;
+    record.failedResponses = failedResponses;
+    record.failedResponseSet = failedResponseSet(failedResponses);
+  };
   let page = null;
   try {
     page = await context.newPage();
     await page.setViewport(VIEWPORT);
-    page.on("pageerror", (error) => errors.push(maskTokens(error.message)));
+    page.on("pageerror", (error) => pageErrors.push(maskTokens(error.message)));
     page.on("console", (message) => {
-      if (message.type() === "error") errors.push(maskTokens(message.text()));
+      if (message.type() === "error") consoleErrors.push(maskTokens(message.text()));
     });
     await page.evaluateOnNewDocument(installLabelTrace);
     const requests = new Requests(page);
+    failedResponses = watchFailedResponses(page, inputs.window, requests);
     const url = new URL(inputs.window);
     url.searchParams.set("w", record.windowId);
     url.hash = "";
@@ -620,7 +693,7 @@ async function runLeg(browser, inputs, leg, file) {
     record.levelReads = levelReads(requests.afterOpen());
     record.graphStreams = requests.afterOpen().filter((entry) => entry.route === "graph").length;
     record.requests = requests.entries;
-    record.errors = errors;
+    keep();
 
     const selected = reading.layout?.gn ?? null;
     const pending = reading.layout?.gp ?? null;
@@ -640,7 +713,7 @@ async function runLeg(browser, inputs, leg, file) {
     if (reading.error !== null) throw new Unavailable(`the graph tab opened from ${file} shows an error: ${reading.error}`);
     return record;
   } catch (error) {
-    record.errors = errors;
+    keep();
     record.failure = maskTokens(error.message);
     if (error instanceof Unavailable) record.unavailable = true;
     else record.error = maskTokens(error.stack ?? String(error));
@@ -668,14 +741,22 @@ function landedOn(record) {
 function summary(record) {
   const o = record.outcome;
   const reads = record.levelReads.map((row) => `${JSON.stringify(row.path)}x${row.reads}${row.pages > row.reads ? `/${row.pages}p` : ""}`);
-  const painted = record.drawn
-    ? `file ${record.drawn.file ? "painted" : "not painted"}, folders ${record.drawn.chain.filter((c) => c.painted).length}/${record.drawn.chain.length} painted`
-    : "labels not traced";
+  let painted = "labels not traced";
+  if (record.drawn) {
+    const unpainted = record.drawn.chain.filter((c) => !c.painted).map((c) => c.label);
+    painted =
+      `file ${record.drawn.file ? `painted as ${JSON.stringify(record.drawn.fileLabel)}` : "not painted"}, ` +
+      `folders ${record.drawn.chain.length - unpainted.length}/${record.drawn.chain.length} painted` +
+      (unpainted.length > 0 ? ` (not ${unpainted.join(" ")})` : "");
+  }
+  const failed = record.failedResponseSet.map(({ key, count }) => (count > 1 ? `${key} x${count}` : key));
   return (
     `${record.leg} ${record.file}: ${o.landed ? "LANDED" : "NOT LANDED"}; ` +
     `selected ${o.selected ?? "none"}, pending ${o.pending ?? "none"}, Details ${detailsText(o)}, ` +
     `opened [${o.opened.join(", ")}], level reads [${reads.join(", ")}], graph streams ${record.graphStreams}, ` +
-    `${painted}, ${record.settled ? "settled" : "NOT SETTLED"} after ${(record.waitedMs / 1000).toFixed(1)} s`
+    `${painted}, ${record.settled ? "settled" : "NOT SETTLED"} after ${(record.waitedMs / 1000).toFixed(1)} s; ` +
+    `page errors ${record.pageErrors.length}, console errors ${record.consoleErrors.length}, ` +
+    `failed responses [${failed.join(", ")}]`
   );
 }
 
@@ -758,7 +839,24 @@ async function main() {
   } else {
     verdict = { verdict: "pass", exit: 0, reason: `${inputs.subject} and ${inputs.control} landed selected with Details on them` };
   }
-  write(inputs.out, "verdict.json", { ...verdict, subject: inputs.subject, control: inputs.control, buildInfo: record.buildInfo, finished: new Date().toISOString() });
+  // What a job compares across builds, per leg: its uncaught page errors and
+  // its failed-response set.
+  const errorsOf = (leg) => {
+    const r = legs[leg] ?? {};
+    return {
+      pageErrors: r.pageErrors ?? null,
+      consoleErrors: r.consoleErrors?.length ?? null,
+      failedResponseSet: r.failedResponseSet ?? null,
+    };
+  };
+  write(inputs.out, "verdict.json", {
+    ...verdict,
+    subject: inputs.subject,
+    control: inputs.control,
+    legs: { subject: errorsOf("subject"), control: errorsOf("control") },
+    buildInfo: record.buildInfo,
+    finished: new Date().toISOString(),
+  });
   say(`verdict: ${verdict.verdict.toUpperCase()} (exit ${verdict.exit}): ${verdict.reason}`);
   return verdict.exit;
 }
