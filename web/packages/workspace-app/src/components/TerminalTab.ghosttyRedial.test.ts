@@ -76,7 +76,9 @@ afterEach(() => {
   resetTerminals();
 });
 
-function session(seq: number, missed: number, replay: number) {
+/// A session frame of the live session; `screen` is the replay's start
+/// screen, which the server names when the attach reconciles a loss.
+function session(seq: number, missed: number, replay: number, screen?: "normal" | "alternate") {
   return {
     type: "session",
     id: SESSION,
@@ -86,6 +88,7 @@ function session(seq: number, missed: number, replay: number) {
     replay_bytes: replay,
     ack_window: ACK_WINDOW,
     bytes_since_focus: 0,
+    ...(screen === undefined ? {} : { replay_screen: screen }),
   };
 }
 
@@ -760,5 +763,166 @@ describe("bytes ahead of a dial's session frame", () => {
     expect(dialed(third), "the redial echoes the same cursor and generation").toEqual({
       session: SESSION, since: String(cursor), generation: String(GENERATION), ack: "1",
     });
+  });
+});
+
+describe("a reconciling answer that names its replay's start screen", () => {
+  /// What a program printed on the normal screen after it left its
+  /// alternate one, the last of it the shell's prompt.
+  const TAIL = Array.from({ length: 30 }, (_, i) => `filler ${i + 1}\r\n`).join("") + "probe exited\r\n$ ";
+  /// The program's alternate-screen exit and its mouse reset, lost.
+  const LOST_EXIT = "\x1b[?1049l\x1b[?1000l";
+  const READY = { type: "ready", cols: 80, rows: 24 };
+
+  function rows(buffer: { length: number; getLine(i: number): { translateToString(trim?: boolean): string } | undefined }) {
+    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i)?.translateToString(true) ?? "");
+  }
+
+  /// The view after the program's exit and tail, on its normal screen.
+  function tailShown(term: Parameters<typeof ghosttyMode>[0]) {
+    const normal = rows(term.buffer.normal);
+    return {
+      ...screen(term),
+      exited: normal.includes("probe exited"),
+      filler: normal.filter((row) => row.startsWith("filler ")).length,
+      notices: normal.filter((row) => row.includes("terminal replay missed")).length,
+    };
+  }
+  const TAIL_SHOWN = { alternate: false, mode1000: false, tracking: false, exited: true, filler: 30, notices: 1 };
+
+  test("a redial past a lost alternate-screen exit shows the retained tail on the normal screen, every dead mode reset", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const next = await redialed(socket);
+    const end = VIEW_AT + LOST_EXIT.length + TAIL.length;
+    await deliver(next, { frame: session(end, LOST_EXIT.length, TAIL.length, "normal"), replay: TAIL, after: LOST_PLAIN_SUFFIX });
+    expect(tailShown(term)).toEqual(TAIL_SHOWN);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(next).at(-1), "the switch is no stream byte").toEqual({ type: "ack", generation: GENERATION, seq: end });
+  });
+
+  test("a live socket's recovery past a lost alternate-screen exit shows the retained tail on the normal screen, every dead mode reset", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    // The server recovers the socket's stream in band: a session frame of
+    // the same session and generation, the ring and the recovery suffix.
+    const end = VIEW_AT + LOST_EXIT.length + TAIL.length;
+    await deliver(socket, { frame: session(end, LOST_EXIT.length, TAIL.length, "normal"), replay: TAIL, after: LOST_PLAIN_SUFFIX });
+    expect(tailShown(term)).toEqual(TAIL_SHOWN);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(socket).at(-1), "the switch is no stream byte").toEqual({ type: "ack", generation: GENERATION, seq: end });
+    // A clean close after it: the redial echoes the stream's end.
+    const next = await closedAndRedialed(socket);
+    expect(dialed(next).since, "the cursor counts no switch").toBe(String(end));
+  });
+
+  test("a recovery whose loss is shorter than the switch moves neither the cursor nor the replay position", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    // The program left its alternate screen: one byte past that exit, the
+    // ring's start, is all that was lost of it.
+    const lost = "\x1b[?1049l".length;
+    const end = VIEW_AT + lost + TAIL.length;
+    await deliver(socket, { frame: session(end, lost, TAIL.length, "normal"), replay: TAIL, after: LOST_PLAIN_SUFFIX });
+    expect(rows(term.buffer.normal), "the ring's first line").toContain("filler 1");
+    const next = await closedAndRedialed(socket);
+    expect(dialed(next).since, "the cursor counts no switch").toBe(String(end));
+  });
+
+  test.each([
+    {
+      name: "leaves the alternate screen and later enters another",
+      view: viewOnTheAlternateScreen,
+      start: "normal" as const,
+      // The shell's lines on the normal screen, then a second program's
+      // frame on its own alternate screen.
+      replay: "between\r\n$ tui2\r\n\x1b[?1049h\x1b[5;1Hframe two",
+      after: LOST_ALT_SUFFIX,
+      normal: ["between", "$ tui2"],
+      alternate: "frame two",
+      ends: true,
+    },
+    {
+      name: "enters the alternate screen and later leaves it",
+      view: viewOnTheNormalScreen,
+      start: "alternate" as const,
+      // A program's frame on its alternate screen, its exit, and the shell.
+      replay: "\x1b[5;1Hframe one\x1b[?1049l\r\nback\r\n$ ",
+      after: LOST_PLAIN_SUFFIX,
+      normal: ["back"],
+      alternate: null,
+      ends: false,
+    },
+  ])("a redial whose replay $name draws each part on its own screen", async ({ view, start, replay, after, normal, alternate, ends }) => {
+    const opened = await view();
+    const { term, socket } = opened;
+    const cursor = "cursor" in opened && typeof opened.cursor === "number" ? opened.cursor : VIEW_AT;
+    const next = await redialed(socket, cursor);
+    const lost = 8;
+    const end = cursor + lost + replay.length;
+    await deliver(next, { frame: session(end, lost, replay.length, start), replay, after });
+    expect(ghosttyAlternateScreen(term), "the screen the program ends on").toBe(ends);
+    expect(ghosttyMode(term, 1000), "no mouse tracking from the dead program").toBe(false);
+    if (alternate) expect(ghosttyLineText(term, 4), "the frame on the alternate screen").toContain(alternate);
+    // The normal screen's rows read the screen shown, so a program still on
+    // its alternate screen leaves it first.
+    if (ends) await output(next, "\x1b[?1049l");
+    const normalRows = rows(term.buffer.normal);
+    for (const line of normal) expect(normalRows, "the normal screen's part").toContain(line);
+    expect(normalRows.some((row) => row.includes("frame")), "no frame on the normal screen").toBe(false);
+  });
+
+  test("a re-ask after a cut inside a sequence, past a switch in its replay, writes no switch and no literal text", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    const replay = "between\r\n$ tui2\r\n\x1b[?1049h\x1b[5;1H\x1b[1mframe\x1b[0m two";
+    const end = VIEW_AT + LOST_EXIT.length + replay.length;
+    const answer = { frame: session(end, LOST_EXIT.length, replay.length, "normal"), replay, after: LOST_ALT_SUFFIX };
+    // The socket ends inside the frame's bold sequence, on the alternate
+    // screen the replay entered.
+    const cut = replay.indexOf("\x1b[1m") + "\x1b[".length;
+    await deliver(second, answer, cut);
+    expect(ghosttyAlternateScreen(term), "fixture: the view is on the replay's alternate screen").toBe(true);
+    const third = await redialedAfterCut(second);
+    expect(dialed(third).since, "fixture: a re-ask from the loss").toBe(String(VIEW_AT));
+    // The ring has not moved: the replay repeats every byte the view parsed.
+    await deliver(third, answer);
+    expect(ghosttyAlternateScreen(term), "the program's alternate screen").toBe(true);
+    expect(ghosttyLineText(term, 4), "the frame on it").toContain("frame two");
+    const alternate = rows(term.buffer.alternate);
+    // The program leaves its alternate screen, so the normal screen's rows
+    // read that screen.
+    await output(third, "\x1b[?1049l");
+    const normal = rows(term.buffer.normal);
+    expect([...alternate, ...normal].filter((row) => row.includes("1mframe")), "no sequence printed as text").toEqual([]);
+    expect(normal.filter((row) => row === "between"), "the normal screen's line once").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(acks(third).at(-1)).toEqual({ type: "ack", generation: GENERATION, seq: end + "\x1b[?1049l".length });
+  });
+
+  test("an answer after a cut whose replay starts on a reset screen switches after the reset", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const second = await redialed(socket);
+    // A replay that continued the view, cut part way.
+    await deliver(second, { frame: session(VIEW_AT + REDRAWN.length, 0, REDRAWN.length), replay: REDRAWN, after: "" }, REDRAWN.length / 2);
+    const third = await redialedAfterCut(second);
+    // An answer in another generation does not continue the view, so its
+    // replay goes on a reset screen; the program is on its alternate screen
+    // at the replay's first byte.
+    const replay = "\x1b[5;1Hrestored frame";
+    const frame = { ...session(500, 10, replay.length, "alternate"), generation: GENERATION + 1 };
+    await deliver(third, { frame, replay, after: LOST_ALT_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the program's alternate screen").toBe(true);
+    expect(ghosttyLineText(term, 4), "the replay drew on it").toContain("restored frame");
+  });
+
+  test("an answer that names no start screen draws the replay on the view's own screen, as it always did", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const next = await redialed(socket);
+    const end = VIEW_AT + LOST_EXIT.length + TAIL.length;
+    await receive(next, session(end, LOST_EXIT.length, TAIL.length));
+    await output(next, TAIL);
+    expect(ghosttyAlternateScreen(term), "no switch ahead of the replay").toBe(true);
+    expect(rows(term.buffer.alternate), "the tail on the alternate screen").toContain("probe exited");
+    await output(next, LOST_PLAIN_SUFFIX);
+    await receive(next, READY);
+    expect(screen(term), "the suffix still leaves it, with no dead mode").toEqual({ alternate: false, mode1000: false, tracking: false });
   });
 });
