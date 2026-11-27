@@ -191,7 +191,7 @@ describe("a redial of the live session on the alternate screen", () => {
     // view kept stay in place.
     const ring = "\x1b[12;1Hredrawn ".repeat(Math.floor(ACK_WINDOW / 16));
     const end = ATTACHED_AT + SHOWN.length + lost + ring.length;
-    await receive(next, session(end, lost, ring.length));
+    await receive(next, session(end, lost, ring.length, "alternate"));
     await output(next, ring);
     await output(next, LOST_ALT_SUFFIX);
     await receive(next, { type: "ready", cols: 80, rows: 24 });
@@ -214,7 +214,7 @@ describe("a redial of the live session on the alternate screen", () => {
     const lost = "\x1b[?1049l\x1b[?1000l".length;
     const ring = "$ shell\r\n".repeat(64);
     const end = ATTACHED_AT + SHOWN.length + lost + ring.length;
-    await receive(next, session(end, lost, ring.length));
+    await receive(next, session(end, lost, ring.length, "normal"));
     await output(next, ring);
     await output(next, LOST_PLAIN_SUFFIX);
     await receive(next, { type: "ready", cols: 80, rows: 24 });
@@ -222,6 +222,9 @@ describe("a redial of the live session on the alternate screen", () => {
       { alternate: ghosttyAlternateScreen(term), mode1000: ghosttyMode(term, 1000), tracking: ghosttyMouseTracking(term) },
       "no alternate screen and no mouse tracking from the dead program",
     ).toEqual({ alternate: false, mode1000: false, tracking: false });
+    const normal = term.buffer.normal;
+    const rows = Array.from({ length: normal.length }, (_, i) => normal.getLine(i)?.translateToString(true) ?? "");
+    expect(rows.filter((row) => row === "$ shell"), "every ring line on the normal screen").toHaveLength(64);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(acks(next).at(-1), "the suffix is not a stream byte").toEqual({
       type: "ack", generation: GENERATION, seq: end,
@@ -239,7 +242,7 @@ const AFTER_RESET = "\x1b[13;1Hafter the reset";
 /// What a program wrote after the view's cursor `at`, and what the server
 /// holds of it: its ring starts at `ringStart`, past `at` once bytes were
 /// lost. The program ends with every tracked mode off, on its alternate
-/// screen or not.
+/// screen or not, the screen it had at the ring's start too.
 type Program = { at: number; written: string; ringStart: number; alternate: boolean };
 type Answer = { frame: ReturnType<typeof session>; replay: string; after: string };
 
@@ -249,9 +252,9 @@ type Answer = { frame: ReturnType<typeof session>; replay: string; after: string
 /// view, so the two change together: a non-zero
 /// cursor the live generation proves gets the stream from that cursor, from
 /// the ring's start when the ring has moved past it with the recovery suffix
-/// after; any other dial gets the whole ring on the normal screen, or no
-/// replay and the attach prelude on the alternate one, and no mode, since
-/// none is on.
+/// after and the replay's start screen in the session frame; any other dial
+/// gets the whole ring on the normal screen, or no replay and the attach
+/// prelude on the alternate one, and no mode, since none is on.
 function served(socket: TerminalSocket, program: Program): Answer {
   expect(program.ringStart, "fixture: the stand-in's ring starts at or past the view").toBeGreaterThanOrEqual(program.at);
   const { since, generation } = dialed(socket);
@@ -262,7 +265,8 @@ function served(socket: TerminalSocket, program: Program): Answer {
     const start = Math.max(cursor, program.ringStart);
     const missed = Math.max(0, program.ringStart - cursor);
     const suffix = missed === 0 ? "" : program.alternate ? LOST_ALT_SUFFIX : LOST_PLAIN_SUFFIX;
-    return { frame: session(end, missed, end - start), replay: from(start), after: suffix };
+    const screen = missed === 0 ? undefined : program.alternate ? "alternate" : "normal";
+    return { frame: session(end, missed, end - start, screen), replay: from(start), after: suffix };
   }
   if (program.alternate) return { frame: session(end, 0, 0), replay: "", after: ALT_SCREEN_ATTACH_PRELUDE };
   const ring = from(program.ringStart);
