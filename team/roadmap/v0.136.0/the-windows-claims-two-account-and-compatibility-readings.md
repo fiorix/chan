@@ -1,6 +1,6 @@
 # The Windows claim's two-account and compatibility readings
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit sealed at r4 and not run: its pre-read (job J39p) found both VM test accounts holding earlier installs, which the readings would delete, and the job waits for the owner's word on those two folders. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version"). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27, not built in v0.135.0.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit sealed at r4 and not run: its pre-read (job J39p) found both VM test accounts holding earlier installs, which the readings would delete, and the job waited for the owner's word on those two folders, which he gave on 2026-11-27 (the last section). Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version"). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27, not built in v0.135.0.
 
 Record before the move: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 
@@ -18,3 +18,7 @@ The claim row's acceptances 2 and 3, read on the Windows test VM with the instal
 
 1. The kit records the installed executable's hash from the package it installs, passes the silent switch bare, and runs its interactive tasks under an explicit execution policy; each fix shown by a control.
 2. The matrix and the uninstall reading run to their verdicts, with their raw records kept.
+
+## Decided, 2026-11-27: the two installs may go
+
+The question open since the pre-read of 2026-11-18, put to the owner on 2026-11-27: may the readings delete `C:\Users\chan\AppData\Local\chan\` and `C:\Users\ch.an\AppData\Local\chan\` whole, install, uninstall and re-register Chan for those accounts, and delete what is needed on the VM's disk for space. He answered: "5. of course, you can do anything with that windows vm - it's for our development and testing". Nothing on the Windows test VM waits for his word any more. By the preparation's reading the newest kit pins paths that no longer exist and builds its two packages on the VM, so a respelled kit, reviewed, comes before the reading.

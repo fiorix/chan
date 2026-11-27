@@ -44,3 +44,7 @@ Accepted by the owner on 2026-11-26 ("app and workspace recommendations are good
 ## Decided, 2026-11-27
 
 The owner chose option (a) on 2026-11-27 ("2. option a"), asked by the session that prepared the v0.136.0 round: no `<style>` element where the HTML enters the app's own document, kept where the caller's output leaves the app or is isolated. Which callers are which is acceptance 3's reading, made before the policy is set.
+
+## Decided, 2026-11-27: the exports forbid it too
+
+By the preparation's reading at `0672d1499` (not yet accepted by a build), the slide and document export renders its Markdown inside the app's own document while the export runs, and its output leaves as an image; nothing in a test, a fixture or a document relies on a `<style>` element in a deck or a document, though the export carries one to paper today. Asked whether option (a) forbids `<style>` for the exports too, so that the slide preview and the PDF agree and a deck's own `<style>` block stops styling its PDF, or keeps it for the exports only, the owner answered on 2026-11-27: "2. as recommended", the recommendation being to forbid it. Under option (a) the one caller that keeps a `<style>` element is Copy as HTML, whose HTML never enters the app's document. The release that ships this says in its changelog that a `<style>` block in a deck or a document no longer styles its preview or its PDF.

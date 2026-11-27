@@ -1,6 +1,6 @@
 # The TLS rows' Windows trust readings
 
-Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit for the self-update row sealed at r9 and not run; the model download's Windows trust reading waits for the owner's word on its model cache on the VM. Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version"). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27, not built in v0.135.0.
+Status: moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut"); its VM kit for the self-update row sealed at r9 and not run; the model download's Windows trust reading waited for the owner's word on its model cache on the VM, which he gave on 2026-11-27 (the last section). Moved to v0.134.0 by the owner on 2026-11-20 ("the carry items and the current items in v0.133 move to v0.134 roadmap"). Moved to v0.135.0 by the owner on 2026-11-23 ("all other roadmap items will move to next version"). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27, not built in v0.135.0.
 
 Record before the move: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 
@@ -14,3 +14,7 @@ Each row's Windows acceptance line, read on the Windows test VM from the Windows
 
 1. Both rows' Windows lines read, with the base trusting only the bundled roots, the tip trusting the system CA, and the tip refused without it, for each client.
 2. The macOS lines stay postponed unless the owner asks for them.
+
+## Decided, 2026-11-27: the model folder may be written
+
+The question open since the kit's first review, put to the owner on 2026-11-27: may the job write inside the `chan` account's installed Chan folder on the VM (create its `models` folder, fill and delete the model's folder there, and hold then delete one lock file). He answered "6. yes", and of the VM as a whole the same day: "you can do anything with that windows vm - it's for our development and testing". By the preparation's reading the kit needs a new revision that takes the release's zips in place of builds on the VM, reviewed before the reading, and this reading runs before the Windows claim's, whose uninstall would remove the folder it uses.

@@ -46,3 +46,9 @@ The owner accepted this row by survey at 2026-11-17T09:50Z, answering the first 
 - (ii) Table cells: label text (recommended, small, matches the exports) or a clickable pill (needs resolution, click handling and the read-only grid's press rule; medium).
 - (iii) The Link-label seam (`[see [[note]]](other.md)`): take here as a fifth contract (editor pill only) or leave recorded.
 A split is not needed: one cause family, four one-place changes.
+
+## Decided, 2026-11-27: survey bodies follow the later record
+
+Two records later than this row bear on contract 3, and neither was in it. In v0.132.0 a review of the built branch found that an agent's prose is rewritten in a survey wherever it holds double brackets (`Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?` shows `b.txt`), and the lead held that one surface until the owner ruled (`team/reports/decisions-Lead132.md`, ruling 61, in the v0.132.0 archive of the development tree). On 2026-11-20 the owner answered that open point "add these to one of the existing lanes before i set them up", which the planner of v0.133.0 read as: a survey body shows a wikilink as its label, bracket text that is not a link reads as typed, and the rendered result is shown to him before the row merges (`round/decisions.md` in the v0.133.0 archive). That lane never started.
+
+Told on 2026-11-27 that the v0.136.0 round would follow that later reading unless he objected, the owner answered "4. yes". Contract 3 reads: a survey body renders a wikilink as its label, and bracket text that is not a link reads as typed. Before the survey surface merges the round shows him four renderings, before and after: a real link, an aliased link, and the review's two shell cases. The other three places do not wait for it. If no rule separates a link from shell brackets, the survey surface stays as typed and the row says so.
