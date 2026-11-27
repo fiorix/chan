@@ -145,6 +145,28 @@ test("a link preview leaves wikilinks as authored", async () => {
   });
 });
 
+test("a previewed note's style element restyles nothing outside it", async () => {
+  const outside = document.body.appendChild(document.createElement("p"));
+  outside.id = "outside-the-preview";
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: "Text first.\n\n<style>#outside-the-preview{visibility:hidden}</style>\n\nafter",
+    mtime: null,
+    writable: true,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  open(anchor, "notes/a.md");
+
+  await vi.waitFor(() => {
+    expect(document.querySelector(".md-preview-md")?.textContent).toContain("after");
+  });
+  const md = document.querySelector(".md-preview-md")!;
+  expect.soft(md.querySelector("style"), "the preview holds no style element").toBeNull();
+  expect.soft(md.textContent, "none of its rules as text").not.toContain("visibility");
+  expect.soft(getComputedStyle(outside).visibility, "the page outside the preview keeps its look").toBe("visible");
+});
+
 describe("under a cover over the window", () => {
   test("Escape, Mod+Enter and a press on the cover reach no preview, which answers again when the cover lifts", async () => {
     click(pill("a.md"));

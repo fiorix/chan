@@ -113,6 +113,32 @@ describe("tableDecorations", () => {
     parent.remove();
   });
 
+  test("a style element in a cell restyles nothing outside it", () => {
+    const outside = document.body.appendChild(document.createElement("p"));
+    outside.id = "outside-the-table";
+    const { parent, view } = mountTable(
+      [
+        "before",
+        "",
+        "| Name | Note |",
+        "|------|------|",
+        "| Alice | first <style>#outside-the-table{visibility:hidden}</style> after |",
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    const cell = parent.querySelector(".cm-md-table td:last-child");
+    expect(cell?.textContent, "the cell renders the text beside it").toContain("after");
+    expect.soft(cell?.querySelector("style"), "the cell holds no style element").toBeNull();
+    expect.soft(cell?.textContent, "none of its rules as text").not.toContain("visibility");
+    expect.soft(getComputedStyle(outside).visibility, "the page outside the table keeps its look").toBe("visible");
+
+    view.destroy();
+    parent.remove();
+    outside.remove();
+  });
+
   test.each([
     {
       name: "two columns with a body at the document start and a tight heading",

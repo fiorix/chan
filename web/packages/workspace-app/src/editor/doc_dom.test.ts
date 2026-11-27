@@ -60,6 +60,24 @@ describe("buildDocDom", () => {
     expect(content.textContent).toContain("body text");
   });
 
+  // The export holds the document in the app's own document while it runs.
+  test("a style element in the document restyles nothing outside it", () => {
+    const outside = document.body.appendChild(document.createElement("p"));
+    outside.id = "outside-the-document";
+    const { root, content } = buildDocDom({
+      markdown: "# Title\n\n<style>#outside-the-document{visibility:hidden}</style>\n\nafter\n",
+      path: "notes/doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+    document.body.append(root);
+
+    expect(content.textContent, "the document renders the content beside it").toContain("after");
+    expect.soft(content.querySelector("style"), "the content holds no style element").toBeNull();
+    expect.soft(content.textContent, "none of its rules as text").not.toContain("visibility");
+    expect.soft(getComputedStyle(outside).visibility, "the page outside the document keeps its look").toBe("visible");
+  });
+
   test("hydrates mermaid fences through the slide renderer path", async () => {
     const { root, completion } = buildDocDom({
       markdown: "```mermaid\nflowchart LR\n  A --> B\n```\n",

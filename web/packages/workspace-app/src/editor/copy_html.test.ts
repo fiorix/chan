@@ -268,6 +268,23 @@ describe("handleClipboardCopy", () => {
     view.destroy();
   });
 
+  // The copied HTML leaves the app, so an author's style element goes with
+  // it: it is built in elements never connected to the app's document.
+  test("the copied HTML keeps a style element, on the copy event and through the native IPC", async () => {
+    const md = "text ![](./a.png)\n\n<style>p{color:red}</style>\n\nafter";
+    const view = viewWith(md, 0, md.length);
+    const ev = copyEvent();
+    expect(handleClipboardCopy(view, ev, ctx, false)).toBe(true);
+    const copied = new DOMParser().parseFromString(ev.store["text/html"]!, "text/html");
+    expect(copied.querySelector("[data-chan-doc] style")?.textContent, "the text/html flavour").toBe("p{color:red}");
+
+    await vi.waitFor(() => expect(writeClipboardHtml).toHaveBeenCalledTimes(1));
+    const [native] = writeClipboardHtml.mock.calls[0]!;
+    const written = new DOMParser().parseFromString(native, "text/html");
+    expect(written.querySelector("[data-chan-doc] style")?.textContent, "the native clipboard's HTML").toBe("p{color:red}");
+    view.destroy();
+  });
+
   test("cut deletes the selection when editable", () => {
     const md = "x ![](./a.png) y";
     const view = viewWith(md, 0, md.length, true);

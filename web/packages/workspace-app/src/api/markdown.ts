@@ -84,7 +84,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 
 // Per-call config that admits the embed iframe (tag + its attributes).
 // Scoped to renderMarkdown* so the global DOMPurify default is unchanged.
-const SANITIZE_OPTS: Config = {
+const EMBED_OPTS: Config = {
   ADD_TAGS: ["iframe"],
   ADD_ATTR: [
     "allow",
@@ -97,18 +97,29 @@ const SANITIZE_OPTS: Config = {
   ],
 };
 
+// The rendered HTML enters the app's own document, where a `<style>`
+// element's rules reach every element, not only the ones beside it, so the
+// renderers drop it. `FORBID_TAGS` drops every spelling DOMPurify would
+// otherwise keep (after other content, inside an inline SVG) with its
+// rules, since `style` is one of the tags whose content it removes too.
+const SANITIZE_OPTS: Config = { ...EMBED_OPTS, FORBID_TAGS: ["style"] };
+
 /// Render a markdown string to a sanitized HTML string suitable
 /// for `{@html ...}`. Synchronous (we use marked's sync `parse`
 /// and DOMPurify on the result) so callers can use it inline in
 /// templates without `await`.
 /// Slides and printable documents opt into editor wikilink labels; other
-/// callers keep the authored syntax.
-export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}): string {
+/// callers keep the authored syntax. `keepStyleElements` keeps a `<style>`
+/// element, for HTML that leaves the app without entering its document.
+export function renderMarkdown(
+  input: string,
+  opts: { wikilinks?: boolean; keepStyleElements?: boolean } = {},
+): string {
   // marked.parse can return Promise<string> if any extension is
   // async; we use no async extensions, so cast through unknown.
   const source = input ?? "";
   const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source) : source, { async: false }) as string;
-  return DOMPurify.sanitize(raw, SANITIZE_OPTS);
+  return DOMPurify.sanitize(raw, opts.keepStyleElements ? EMBED_OPTS : SANITIZE_OPTS);
 }
 
 /// Like `renderMarkdown` but with `breaks: true` so a SINGLE newline

@@ -178,7 +178,10 @@ function renderBody(
   fromPath: string | null,
 ): { body: HTMLDivElement; imgs: HTMLImageElement[] } {
   const body = document.createElement("div");
-  body.innerHTML = renderMarkdown(markdown);
+  // The HTML leaves the app, so an author's `<style>` element goes with it;
+  // `body` and the wrapper are never connected to the app's document, so
+  // its rules reach nothing here.
+  body.innerHTML = renderMarkdown(markdown, { keepStyleElements: true });
   const refs = findWorkspaceImageRefs(markdown);
   const imgs = Array.from(body.querySelectorAll("img")).filter((img) =>
     isWorkspaceImageSrc(img.getAttribute("src") ?? ""),
