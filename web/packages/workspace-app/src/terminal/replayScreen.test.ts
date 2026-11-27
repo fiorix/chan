@@ -80,6 +80,16 @@ describe("replayScreenSwitch", () => {
     expect(cursor(term), "the cursor where the view stood at the switch, not the older save").toEqual({ x: 4, y: 9 });
   });
 
+  test("starts every switch with CAN", () => {
+    const switches = [false, true].flatMap((alternate) =>
+      [false, true].flatMap((mode1049) =>
+        (["normal", "alternate"] as const).map((to) => replayScreenSwitch({ alternate, mode1049 }, to)),
+      ),
+    ).filter((bytes) => bytes !== "");
+    expect(switches.length, "fixture: each direction switches").toBeGreaterThanOrEqual(2);
+    expect(switches.filter((bytes) => !bytes.startsWith("\x18")), "a switch without CAN first").toEqual([]);
+  });
+
   test("ends a sequence the view was left inside before it switches", async () => {
     const term = await shell();
     term.write("\x1b[?1049h\x1b[?100");
