@@ -130,22 +130,31 @@ const RESET_AND_MEASURE = COUNT.replace(
   `const c = document.querySelector(".terminal-host > canvas"); ${ZERO_EVENTS} c.width = c.width;`,
 );
 
+// The bound is judged on its last attempt. When that attempt failed the
+// page may have changed since the last value read, so the outcome is
+// inconclusive whatever the earlier reads showed, and the error carries no
+// value for a caller to judge; otherwise the error carries that last,
+// fresh read.
 async function poll(read, accept, label, bound, timeoutKind) {
   const until = Date.now() + bound;
   let value;
-  let lastError = null;
+  let failure = null;
   do {
     try {
       value = await read();
+      failure = null;
     } catch (error) {
-      lastError = error;
+      failure = error;
       await sleep(300);
       continue;
     }
     if (accept(value)) return value;
     await sleep(300);
   } while (Date.now() < until);
-  const detail = lastError ? `read failed: ${lastError.message}; last value ${JSON.stringify(value)}` : `last ${JSON.stringify(value)}`;
+  if (failure) {
+    throw new Incomplete(`${label}: read failed: ${failure.message}; last value ${JSON.stringify(value)}`);
+  }
+  const detail = `last ${JSON.stringify(value)}`;
   const error = timeoutKind === "fault" ? new Fault(`${label}: ${detail}`) : new Incomplete(`${label}: ${detail}`);
   error.value = value;
   throw error;
