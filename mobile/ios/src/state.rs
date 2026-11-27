@@ -120,6 +120,14 @@ pub struct AppState {
     /// `None` until the first announcement; a window reads its first
     /// value through the command.
     pub terminal_background_opacity: Mutex<Option<u32>>,
+    /// Pending `show_computers_for_window` card id to emit once `"main"`
+    /// finishes loading the loopback launcher.
+    pub(crate) pending_show_card: Mutex<Option<Option<String>>>,
+    /// Last authenticated remote `(exact_origin, devserver_id)` navigated on
+    /// `"main"`, cleared when returning to the loopback launcher. Keeps
+    /// recovery commands working if the feed forgets the row before the user
+    /// taps Reconnect, Abandon, or Show in Computers.
+    pub(crate) last_remote_origin: Mutex<Option<(String, String)>>,
 }
 
 impl AppState {
@@ -149,6 +157,8 @@ impl AppState {
             buried_windows: Mutex::new(Vec::new()),
             silent_hides: Mutex::new(HashSet::new()),
             terminal_background_opacity: Mutex::new(None),
+            pending_show_card: Mutex::new(None),
+            last_remote_origin: Mutex::new(None),
         }
     }
 
@@ -360,6 +370,28 @@ impl DevserverFeed {
         snapshot: Arc<Mutex<DevserverWindowSnapshot>>,
     ) {
         self.windows.lock().unwrap().insert(id, snapshot);
+    }
+
+    /// Replace a connected devserver's cached window records in place while
+    /// preserving any `tmux_connections`. Returns whether the window list
+    /// changed.
+    pub(crate) fn replace_windows(
+        &self,
+        id: &str,
+        windows: Vec<chan_server::WindowRecord>,
+    ) -> bool {
+        let Some(snapshot) = self.windows.lock().unwrap().get(id).cloned() else {
+            return false;
+        };
+        if let Some(lib_id) = windows.first().map(|w| w.library_id.clone()) {
+            self.seed_library_id(id.to_string(), lib_id);
+        }
+        let mut snap = snapshot.lock().unwrap();
+        if snap.windows == windows {
+            return false;
+        }
+        snap.windows = windows;
+        true
     }
 
     /// Seed a devserver's remote `library_id` into the cache so `library_id_of`
@@ -742,5 +774,41 @@ mod tests {
         assert_eq!(feed.pane_color("lib-aa11"), None);
         assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-aa11"));
         assert_eq!(feed.os_of("gw:1"), Some(("linux".into(), None)));
+    }
+
+    #[test]
+    fn replace_windows_updates_snapshot_preserves_tmux_and_reports_change() {
+        let feed = DevserverFeed::default();
+        let initial = sample_window("lib-aa11", "w-1", "/notes");
+        let tmux = chan_server::TmuxConnectionRecord {
+            connection: "term-1".into(),
+            library_id: "lib-aa11".into(),
+            origin: chan_server::TmuxOrigin {
+                program: "tmux".into(),
+                command: None,
+                local: true,
+            },
+            version: "3.4".into(),
+            session: None,
+            windows: Vec::new(),
+            window_cap: 8,
+            errors: Vec::new(),
+            control_window: "w-ctrl".into(),
+        };
+        let snap = Arc::new(Mutex::new(DevserverWindowSnapshot {
+            windows: vec![initial.clone()],
+            tmux_connections: vec![tmux.clone()],
+        }));
+        feed.register_windows("gw:1".into(), Arc::clone(&snap));
+
+        let mut updated = sample_window("lib-bb22", "w-2", "/other");
+        updated.hidden = true;
+        assert!(feed.replace_windows("gw:1", vec![updated.clone()]));
+        assert!(!feed.replace_windows("gw:1", vec![updated.clone()]));
+        assert!(!feed.replace_windows("gw:unknown", vec![updated.clone()]));
+
+        assert_eq!(feed.windows(), vec![updated]);
+        assert_eq!(feed.tmux_connections(), vec![tmux]);
+        assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-bb22"));
     }
 }

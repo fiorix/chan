@@ -8,7 +8,7 @@
 //! and no terminal seeding, so an empty library opens
 //! the launcher and nothing else.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -25,10 +25,17 @@ use crate::{AppState, CHAN_IOS_BUILD_ID};
 /// the swipe ends for the life of the process.
 static BACK_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
-/// Whether the back gesture installed. Setup tries first; the first page
-/// load retries if the window was not enumerated yet. Both run on the
-/// main thread, so no race.
+/// Whether the back gesture installed on `"main"`'s `UIWindow`. Checked and
+/// set inside the `with_webview` main-thread closure so a windowless early
+/// call cannot mark installation done prematurely.
 static BACK_GESTURE_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Address of the `UIWindow` that already carries our recognizer, preventing
+/// duplicate attachment if setup and page load enqueue concurrent closures.
+static ATTACHED_UI_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+static BACK_GESTURE_TARGET: OnceLock<Retained<BackGestureTarget>> = OnceLock::new();
+static BACK_GESTURE_DELEGATE: OnceLock<Retained<BackGestureDelegate>> = OnceLock::new();
 
 /// Run the iOS app. Called once from the mobile entry point; drives the
 /// Tauri event loop until the process exits.
@@ -48,9 +55,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state)
-        .on_page_load(|_webview, payload| {
+        .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 ensure_back_gesture();
+                crate::on_main_page_load(webview, payload);
             }
         })
         .setup(move |app| {
@@ -222,17 +230,25 @@ pub fn run() {
     });
 }
 
-/// Install the native back affordance if it is not in place. Idempotent:
-/// setup calls it at window build and the first page load retries.
+/// Install the native back affordance on `"main"`'s `UIWindow` if it is not
+/// yet in place. Dispatches onto `"main"`'s `WKWebView` so `BACK_GESTURE_DONE`
+/// flips only after a non-null `UIWindow` receives the recognizer.
 fn ensure_back_gesture() {
     if BACK_GESTURE_DONE.load(Ordering::SeqCst) {
         return;
     }
-    if install_back_gesture() {
-        BACK_GESTURE_DONE.store(true, Ordering::SeqCst);
-        tracing::info!("iOS back gesture installed");
-    } else {
-        tracing::warn!("iOS back gesture found no window to attach to");
+    let Some(app) = BACK_APP.get() else {
+        tracing::warn!("iOS back gesture checked before app handle was stored");
+        return;
+    };
+    let Some(main) = app.get_webview_window("main") else {
+        tracing::warn!("iOS back gesture found no main webview window");
+        return;
+    };
+    if let Err(error) = main.with_webview(|wv| {
+        install_back_gesture_on_webview(wv.inner());
+    }) {
+        tracing::warn!(%error, "scheduling iOS back gesture on main webview failed");
     }
 }
 
@@ -251,23 +267,14 @@ fn back_to_computers(app: &tauri::AppHandle) {
         }
     };
     match window.url() {
-        Ok(current) if same_page(&current, &home) => return,
+        Ok(current) if crate::same_page(&current, &home) => return,
         // Unknown page: navigate home anyway; the gesture means back.
         Err(e) => tracing::warn!(error = %e, "back gesture cannot read the current page"),
         _ => {}
     }
-    if let Err(e) = crate::mobile_auth::mobile_back_to_computers(window, state.clone()) {
+    if let Err(e) = crate::mobile_auth::navigate_main_to_launcher(&window, state.inner()) {
         tracing::warn!(error = %e, "back-to-Computers navigation failed");
     }
-}
-
-/// Same page ignoring query and fragment, so a launcher showing its
-/// bearer token still reads as home.
-fn same_page(left: &url::Url, right: &url::Url) -> bool {
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.port() == right.port()
-        && left.path() == right.path()
 }
 
 define_class!(
@@ -310,75 +317,86 @@ impl BackGestureTarget {
     );
 }
 
-/// Attach a left-edge swipe recognizer to every scene window, navigating
-/// home through the back-to-Computers command when it ends. Reports
-/// whether any window took it. Main thread only (UIKit); every object is
-/// alive for the call (the application for the process, scenes and windows
-/// retained by it, each recognizer retained by its window once added, the
-/// gesture target intentionally leaked below).
-fn install_back_gesture() -> bool {
-    let target = BackGestureTarget::new();
-    // SAFETY: sharedApplication, connectedScenes, scene windows, and gesture
-    // recognizer attachment are main-thread-only and both callers (setup,
-    // page load) run there; every pointer is null-checked before use.
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; the delegate holds
+    // no ivars and implements no Drop.
+    #[unsafe(super(NSObject))]
+    struct BackGestureDelegate;
+
+    unsafe impl NSObjectProtocol for BackGestureDelegate {}
+
+    impl BackGestureDelegate {
+        /// Allow the left-edge recognizer to arbitrate simultaneously with
+        /// WKWebView's internal pan and scroll recognizers.
+        #[unsafe(method(gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:))]
+        fn should_recognize_simultaneously(
+            &self,
+            gesture_recognizer: *mut AnyObject,
+            other_gesture_recognizer: *mut AnyObject,
+        ) -> bool {
+            !gesture_recognizer.is_null() && !other_gesture_recognizer.is_null()
+        }
+    }
+);
+
+impl BackGestureDelegate {
+    extern_methods!(
+        // SAFETY: `new` allocates and runs NSObject's designated
+        // initializer; the delegate holds no ivars.
+        #[unsafe(method(new))]
+        fn new() -> Retained<Self>;
+    );
+}
+
+/// Attach the left-edge swipe recognizer to `"main"`'s owning `UIWindow`.
+/// Must run on the main thread inside `with_webview` so `[wk_webview window]`
+/// is valid and `BACK_GESTURE_DONE` reflects real attachment.
+fn install_back_gesture_on_webview(wk_webview_ptr: *mut std::ffi::c_void) {
+    if BACK_GESTURE_DONE.load(Ordering::SeqCst) {
+        return;
+    }
+    if wk_webview_ptr.is_null() {
+        tracing::warn!("iOS back gesture received a null WKWebView pointer");
+        return;
+    }
+    // SAFETY: `with_webview` runs on the main thread with a live WKWebView;
+    // every UIKit object is null-checked before use, and target/delegate live
+    // in OnceLock for the process lifetime.
     unsafe {
-        let app: *mut AnyObject = msg_send![class!(UIApplication), sharedApplication];
-        if app.is_null() {
-            return false;
+        let wk_webview = &*wk_webview_ptr.cast::<AnyObject>();
+        let ui_window: *mut AnyObject = msg_send![wk_webview, window];
+        if ui_window.is_null() {
+            tracing::debug!("iOS back gesture deferred until main WKWebView has a UIWindow");
+            return;
         }
-        let scenes: *mut AnyObject = msg_send![&*app, connectedScenes];
-        if scenes.is_null() {
-            return false;
+        let window_addr = ui_window as usize;
+        if ATTACHED_UI_WINDOW.load(Ordering::SeqCst) == window_addr {
+            BACK_GESTURE_DONE.store(true, Ordering::SeqCst);
+            return;
         }
-        let scenes: *mut AnyObject = msg_send![&*scenes, allObjects];
-        if scenes.is_null() {
-            return false;
+        let target = BACK_GESTURE_TARGET.get_or_init(BackGestureTarget::new);
+        let delegate = BACK_GESTURE_DELEGATE.get_or_init(BackGestureDelegate::new);
+        let allocated: Allocated<AnyObject> =
+            msg_send![class!(UIScreenEdgePanGestureRecognizer), alloc];
+        if Allocated::as_ptr(&allocated).is_null() {
+            tracing::warn!("allocating UIScreenEdgePanGestureRecognizer returned nil");
+            return;
         }
-        let scenes = &*scenes;
-        let scene_count: usize = msg_send![scenes, count];
-        let mut installed = false;
-        for scene_index in 0..scene_count {
-            let scene: *mut AnyObject = msg_send![scenes, objectAtIndex: scene_index];
-            if scene.is_null() {
-                continue;
-            }
-            let scene = &*scene;
-            let has_windows: bool = msg_send![scene, respondsToSelector: sel!(windows)];
-            if !has_windows {
-                continue;
-            }
-            let windows: *mut AnyObject = msg_send![scene, windows];
-            if windows.is_null() {
-                continue;
-            }
-            let windows = &*windows;
-            let window_count: usize = msg_send![windows, count];
-            for window_index in 0..window_count {
-                let window: *mut AnyObject = msg_send![windows, objectAtIndex: window_index];
-                if window.is_null() {
-                    continue;
-                }
-                let allocated: Allocated<AnyObject> =
-                    msg_send![class!(UIScreenEdgePanGestureRecognizer), alloc];
-                if Allocated::as_ptr(&allocated).is_null() {
-                    continue;
-                }
-                // UIRectEdgeLeft == 1 << 1, stable API contract.
-                let swipe: Retained<AnyObject> = msg_send![
-                    allocated,
-                    initWithTarget: &*target,
-                    action: sel!(handleSwipe:)
-                ];
-                let _: () = msg_send![&*swipe, setEdges: 2usize];
-                let _: () = msg_send![&*window, addGestureRecognizer: &*swipe];
-                installed = true;
-            }
-        }
-        if installed {
-            // Recognizers hold their target weakly: forget the retain so
-            // the action can never dangle. One tiny object per process.
-            std::mem::forget(target);
-        }
-        installed
+        let swipe: Option<Retained<AnyObject>> = msg_send![
+            allocated,
+            initWithTarget: &**target,
+            action: sel!(handleSwipe:)
+        ];
+        let Some(swipe) = swipe else {
+            tracing::warn!("initializing UIScreenEdgePanGestureRecognizer returned nil");
+            return;
+        };
+        // UIRectEdgeLeft == 1 << 1, stable API contract.
+        let _: () = msg_send![&*swipe, setEdges: 2usize];
+        let _: () = msg_send![&*swipe, setDelegate: &**delegate];
+        let _: () = msg_send![&*ui_window, addGestureRecognizer: &*swipe];
+        ATTACHED_UI_WINDOW.store(window_addr, Ordering::SeqCst);
+        BACK_GESTURE_DONE.store(true, Ordering::SeqCst);
+        tracing::info!("iOS back gesture installed on main UIWindow");
     }
 }

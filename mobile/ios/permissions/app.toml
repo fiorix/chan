@@ -20,3 +20,48 @@ commands.allow = ["gateway_csrf_token"]
 identifier = "allow-mobile-back-to-computers"
 description = "Enables the mobile_back_to_computers command (back-to-Computers navigation on iOS)."
 commands.allow = ["mobile_back_to_computers"]
+
+[[permission]]
+identifier = "allow-native-vocabulary"
+description = "Enables the native_vocabulary command (the granted command list plus build identity)."
+commands.allow = ["native_vocabulary"]
+
+[[permission]]
+identifier = "allow-focus-library-window"
+description = "Enables the focus_library_window command (focus or unhide a window of the active devserver library)."
+commands.allow = ["focus_library_window"]
+
+[[permission]]
+identifier = "allow-create-library-window"
+description = "Enables the create_library_window command (mint and navigate to a window on the active devserver library)."
+commands.allow = ["create_library_window"]
+
+[[permission]]
+identifier = "allow-open-new-window"
+description = "Enables the open_new_window command (open another window or tmux window for the active devserver session)."
+commands.allow = ["open_new_window"]
+
+[[permission]]
+identifier = "allow-toggle-launcher-panel"
+description = "Enables the toggle_launcher_panel command (return to Computers from a remote window)."
+commands.allow = ["toggle_launcher_panel"]
+
+[[permission]]
+identifier = "allow-show-computers-for-window"
+description = "Enables the show_computers_for_window command (navigate back to Computers focused on the devserver card)."
+commands.allow = ["show_computers_for_window"]
+
+[[permission]]
+identifier = "allow-reconnect-devserver-for-window"
+description = "Enables the reconnect_devserver_for_window command (tear down and reconnect the active devserver)."
+commands.allow = ["reconnect_devserver_for_window"]
+
+[[permission]]
+identifier = "allow-abandon-devserver-for-window"
+description = "Enables the abandon_devserver_for_window command (tear down the active devserver and return to Computers)."
+commands.allow = ["abandon_devserver_for_window"]
+
+[[permission]]
+identifier = "allow-mobile-deliver-pending-show-card"
+description = "Enables the loopback-only mobile_deliver_pending_show_card command after the launcher listener attaches."
+commands.allow = ["mobile_deliver_pending_show_card"]

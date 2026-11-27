@@ -150,11 +150,91 @@ pub(crate) fn mobile_gateway_conn(
     Ok(conn)
 }
 
+/// Build the navigation URL for a remote window on `"main"`, stamping the
+/// boot query parameters (`w`, `h`, `client_name`, `kind`, `seed`, `start`,
+/// `lib`, `pane`) expected by `workspace-app`.
+pub(crate) fn mobile_window_target_url(
+    state: &crate::AppState,
+    base_url: &str,
+    record: &chan_server::WindowRecord,
+    holder: Option<&str>,
+) -> Result<url::Url, String> {
+    let mut parsed = url::Url::parse(base_url).map_err(|e| format!("devserver target URL: {e}"))?;
+    if parsed.query_pairs().any(|(key, _)| key == "client_name") {
+        let retained = parsed
+            .query_pairs()
+            .filter(|(key, _)| key != "client_name")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        parsed.set_query(None);
+        if !retained.is_empty() {
+            parsed.query_pairs_mut().extend_pairs(retained);
+        }
+    }
+    if holder.is_some() {
+        let name = state
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get()
+            .map_err(|e| e.to_string())?
+            .client_session_name;
+        if !name.is_empty() {
+            parsed.query_pairs_mut().append_pair("client_name", &name);
+        }
+    }
+    parsed.query_pairs_mut().append_pair("w", &record.window_id);
+    if let Some(holder) = holder {
+        parsed.query_pairs_mut().append_pair("h", holder);
+    }
+    match record.kind {
+        chan_server::WindowKind::Terminal => {
+            let kind = if record.control {
+                "control"
+            } else {
+                "terminal"
+            };
+            parsed.query_pairs_mut().append_pair("kind", kind);
+            if record.tmux.is_some() {
+                parsed.query_pairs_mut().append_pair("seed", "0");
+            }
+        }
+        chan_server::WindowKind::Workspace => {
+            if record.start_terminal {
+                parsed.query_pairs_mut().append_pair("start", "terminal");
+            }
+        }
+    }
+    if !record.library_id.is_empty() {
+        parsed
+            .query_pairs_mut()
+            .append_pair("lib", &record.library_id);
+        let pane = state
+            .embedded()
+            .and_then(|embedded| embedded.pane_color(&record.library_id))
+            .or_else(|| {
+                chan_server::DevserverFeedSource::pane_color(
+                    &*state.devserver_feed,
+                    &record.library_id,
+                )
+            });
+        if let Some(color) = pane {
+            parsed.query_pairs_mut().append_pair("pane", &color);
+        }
+    }
+    Ok(parsed)
+}
+
+fn record_last_remote_origin(state: &crate::AppState, url: &url::Url, id: &str) {
+    *state.last_remote_origin.lock().unwrap() =
+        Some((url.origin().ascii_serialization(), id.to_string()));
+}
+
 /// Open a rostered devserver in the single webview: mint the window record,
-/// resolve the tenant URL through a validated entry exchange, reinstall the
-/// gateway session cookies (the install returns only after the cookie store
-/// confirms both), then navigate. The record mint and the entry exchange are
-/// the shared desktop implementations; only the window is different.
+/// refresh the feed, resolve the tenant URL through a validated entry
+/// exchange, reinstall the gateway session cookies (the install returns only
+/// after the cookie store confirms both), stamp the boot query parameters, and
+/// navigate.
 pub(crate) async fn mobile_open_devserver(
     state: &Arc<crate::AppState>,
     id: &str,
@@ -164,6 +244,17 @@ pub(crate) async fn mobile_open_devserver(
 ) -> Result<(), String> {
     let app = mobile_app_handle()
         .ok_or_else(|| "the mobile app handle is not ready; connect again".to_string())?;
+    mobile_open_devserver_with_app(&app, state, id, kind, path, start_terminal).await
+}
+
+pub(crate) async fn mobile_open_devserver_with_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<crate::AppState>,
+    id: &str,
+    kind: chan_server::WindowKind,
+    path: Option<String>,
+    start_terminal: bool,
+) -> Result<(), String> {
     let conn = mobile_gateway_conn(&state.devservers, id)?;
     let epoch = conn
         .gateway
@@ -173,21 +264,31 @@ pub(crate) async fn mobile_open_devserver(
         .flatten();
     let record =
         crate::devserver::mint_library_window_with_start(&conn, kind, path, start_terminal).await?;
+    if let Err(error) = crate::refresh_devserver_windows(state, id, &conn).await {
+        tracing::warn!(devserver = %id, %error, "refreshing devserver windows after mint failed");
+    }
     let target = crate::devserver::window_navigation_url(&conn, &record).await?;
     if let Some(gateway) = &conn.gateway {
         gateway.require_operation(epoch)?;
     }
-    crate::devserver::install_gateway_webview_session(&app, &conn, None)?;
-    let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
+    crate::devserver::install_gateway_webview_session(app, &conn, None)?;
+    let url =
+        mobile_window_target_url(state, &target, &record, crate::serve::desktop_holder_tag())?;
+    record_last_remote_origin(state, &url, id);
     let webview = app
         .get_webview_window("main")
         .or_else(|| app.webview_windows().into_values().next())
         .ok_or_else(|| "no webview to open the devserver in".to_string())?;
-    crate::wireguard::navigate(&app, state, id, &conn, webview, url, epoch).await
+    let res = crate::wireguard::navigate(app, state, id, &conn, webview, url, epoch).await;
+    if res.is_err() {
+        state.last_remote_origin.lock().unwrap().take();
+    }
+    res
 }
 
 /// Navigate `"main"` to an already-existing remote window record on a connected
-/// gateway devserver, reinstalling the WebView session cookies first.
+/// gateway devserver, unhiding it if hidden and reinstalling the WebView
+/// session cookies first.
 pub(crate) async fn mobile_open_existing_window(
     state: &Arc<crate::AppState>,
     id: &str,
@@ -211,16 +312,30 @@ pub(crate) async fn mobile_open_existing_window_with_app<R: tauri::Runtime>(
         .map(|gateway| gateway.begin_operation())
         .transpose()?
         .flatten();
+    if record.hidden {
+        crate::devserver::set_window_visibility(&conn, &record.window_id, false).await?;
+        if let Some(gateway) = &conn.gateway {
+            gateway.require_operation(epoch)?;
+        }
+        if let Err(error) = crate::refresh_devserver_windows(state, id, &conn).await {
+            tracing::warn!(devserver = %id, %error, "refreshing devserver windows after unhide failed");
+        }
+    }
     let target = crate::devserver::window_navigation_url(&conn, record).await?;
     if let Some(gateway) = &conn.gateway {
         gateway.require_operation(epoch)?;
     }
     crate::devserver::install_gateway_webview_session(app, &conn, None)?;
-    let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
+    let url = mobile_window_target_url(state, &target, record, crate::serve::desktop_holder_tag())?;
+    record_last_remote_origin(state, &url, id);
     let webview = app
         .get_webview_window("main")
         .ok_or_else(|| "no main webview to open the devserver in".to_string())?;
-    crate::wireguard::navigate(app, state, id, &conn, webview, url, epoch).await
+    let res = crate::wireguard::navigate(app, state, id, &conn, webview, url, epoch).await;
+    if res.is_err() {
+        state.last_remote_origin.lock().unwrap().take();
+    }
+    res
 }
 
 /// The loopback launcher URL back-to-Computers navigates home to: the
@@ -242,6 +357,24 @@ pub(crate) fn launcher_url_for_addr(
         .map_err(|e| format!("launcher URL: {e}"))
 }
 
+/// Navigate `window` back to the loopback launcher URL, clearing active
+/// WireGuard selection and remote-origin tracking.
+pub(crate) fn navigate_main_to_launcher<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    state: &crate::AppState,
+) -> Result<(), String> {
+    let url = mobile_launcher_url(state)?;
+    state
+        .navigation_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    state.selected_wireguard.lock().unwrap().take();
+    state.last_remote_origin.lock().unwrap().take();
+    window
+        .navigate(url)
+        .map_err(|e| format!("returning to Computers: {e}"))?;
+    Ok(())
+}
+
 /// Back to Computers: re-navigate the invoking webview to the loopback
 /// launcher URL. Registered on the mobile build only; the native affordance
 /// that invokes it lives in the app scaffold.
@@ -250,15 +383,7 @@ pub(crate) fn mobile_back_to_computers(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<crate::AppState>>,
 ) -> Result<(), String> {
-    let url = mobile_launcher_url(state.inner())?;
-    state
-        .navigation_epoch
-        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    state.selected_wireguard.lock().unwrap().take();
-    window
-        .navigate(url)
-        .map_err(|e| format!("returning to Computers: {e}"))?;
-    Ok(())
+    navigate_main_to_launcher(&window, state.inner())
 }
 
 #[cfg(target_os = "ios")]
@@ -953,9 +1078,32 @@ mod tests {
         mobile_open_existing_window_with_app(app.handle(), &state, "gw:1", &record)
             .await
             .expect("existing gateway window opens in main");
+        let navigated = main.url().unwrap();
         assert_eq!(
-            main.url().unwrap().as_str(),
+            format!(
+                "{}{}",
+                navigated.origin().ascii_serialization(),
+                navigated.path()
+            ),
             "https://owner--disc.proxy.example/api/notes-1a2b3c/index.html"
+        );
+        let pairs: std::collections::HashMap<String, String> =
+            navigated.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("w").map(String::as_str), Some("w-42"));
+        assert_eq!(pairs.get("lib").map(String::as_str), Some("lib-99"));
+        assert_eq!(pairs.get("kind"), None);
+        assert_eq!(pairs.get("seed"), None);
+        assert_eq!(pairs.get("start"), None);
+        assert_eq!(
+            pairs.get("h").map(String::as_str),
+            crate::serve::desktop_holder_tag()
+        );
+        assert_eq!(
+            state.last_remote_origin.lock().unwrap().as_ref(),
+            Some(&(
+                "https://owner--disc.proxy.example".to_string(),
+                "gw:1".to_string()
+            ))
         );
     }
 
@@ -1110,5 +1258,386 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(state);
         crate::auth::settle_mobile_query(app.handle().clone(), "gw-mobile", &attempt, "code=c1");
+    }
+
+    fn test_window_record(
+        window_id: &str,
+        library_id: &str,
+        kind: chan_server::WindowKind,
+    ) -> chan_server::WindowRecord {
+        chan_server::WindowRecord {
+            window_id: window_id.into(),
+            library_id: library_id.into(),
+            kind,
+            title: "Test".into(),
+            ordinal: 1,
+            label: "Test".into(),
+            workspace_path: Some("/srv/notes".into()),
+            prefix: "/notes".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        }
+    }
+
+    fn query_map(url: &url::Url) -> std::collections::HashMap<String, String> {
+        url.query_pairs().into_owned().collect()
+    }
+
+    #[test]
+    fn mobile_window_target_url_stamps_every_branch_and_sanitizes_client_name() {
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.client_session_name = "iPhone 16 & Pro".into();
+            store.save(&cfg).unwrap();
+        }
+        state
+            .devserver_feed
+            .seed_library_id("gw:1".into(), "lib-99".into());
+        state
+            .devserver_feed
+            .set_color("gw:1".into(), Some("#112233".into()));
+
+        // Workspace with start_terminal, untrusted client_name, and feed pane fallback.
+        let mut ws = test_window_record("w-1/a", "lib-99", chan_server::WindowKind::Workspace);
+        ws.start_terminal = true;
+        let ws_url = mobile_window_target_url(
+            &state,
+            "https://owner--disc.proxy.example/notes/index.html?client_name=evil",
+            &ws,
+            Some("deadbeef00112233"),
+        )
+        .unwrap();
+        let ws_q = query_map(&ws_url);
+        assert_eq!(
+            ws_q.get("client_name").map(String::as_str),
+            Some("iPhone 16 & Pro")
+        );
+        assert_eq!(ws_q.get("w").map(String::as_str), Some("w-1/a"));
+        assert_eq!(ws_q.get("h").map(String::as_str), Some("deadbeef00112233"));
+        assert_eq!(ws_q.get("start").map(String::as_str), Some("terminal"));
+        assert_eq!(ws_q.get("lib").map(String::as_str), Some("lib-99"));
+        assert_eq!(ws_q.get("pane").map(String::as_str), Some("#112233"));
+        assert_eq!(ws_q.get("kind"), None);
+        assert_eq!(ws_q.get("seed"), None);
+        assert!(ws_url.as_str().contains("pane=%23112233"), "{ws_url}");
+        assert!(ws_url.as_str().contains("w=w-1%2Fa"), "{ws_url}");
+        assert!(!ws_url.as_str().contains("evil"), "{ws_url}");
+
+        // Standalone tmux terminal stamps kind=terminal and seed=0.
+        let mut term = test_window_record("w-2", "lib-99", chan_server::WindowKind::Terminal);
+        term.tmux = Some(chan_server::TmuxWindowMark {
+            connection: "tmux-1".into(),
+            control: false,
+            user_label: false,
+        });
+        let term_url = mobile_window_target_url(
+            &state,
+            "https://owner--disc.proxy.example/terminal/index.html",
+            &term,
+            Some("holder1"),
+        )
+        .unwrap();
+        let term_q = query_map(&term_url);
+        assert_eq!(term_q.get("kind").map(String::as_str), Some("terminal"));
+        assert_eq!(term_q.get("seed").map(String::as_str), Some("0"));
+        assert_eq!(term_q.get("start"), None);
+
+        // Plain terminal without tmux omits seed.
+        term.tmux = None;
+        let plain_term_url = mobile_window_target_url(
+            &state,
+            "https://owner--disc.proxy.example/terminal/index.html",
+            &term,
+            Some("holder1"),
+        )
+        .unwrap();
+        assert_eq!(query_map(&plain_term_url).get("seed"), None);
+
+        // Control terminal stamps kind=control and preserves raw ?t= alongside stripped client_name.
+        term.control = true;
+        term.tmux = Some(chan_server::TmuxWindowMark {
+            connection: "tmux-1".into(),
+            control: true,
+            user_label: false,
+        });
+        let ctrl_url = mobile_window_target_url(
+            &state,
+            "http://127.0.0.1:7001/control-0/index.html?client_name=evil&t=raw-tok",
+            &term,
+            None,
+        )
+        .unwrap();
+        let ctrl_q = query_map(&ctrl_url);
+        assert_eq!(ctrl_q.get("t").map(String::as_str), Some("raw-tok"));
+        assert_eq!(ctrl_q.get("kind").map(String::as_str), Some("control"));
+        assert_eq!(ctrl_q.get("seed").map(String::as_str), Some("0"));
+        assert_eq!(ctrl_q.get("client_name"), None);
+        assert_eq!(ctrl_q.get("h"), None);
+
+        // Empty client_session_name omits client_name even when holder is Some.
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.client_session_name.clear();
+            store.save(&cfg).unwrap();
+        }
+        let empty_name_url = mobile_window_target_url(
+            &state,
+            "https://owner--disc.proxy.example/notes/index.html?client_name=evil",
+            &ws,
+            Some("holder1"),
+        )
+        .unwrap();
+        assert_eq!(query_map(&empty_name_url).get("client_name"), None);
+    }
+
+    #[tokio::test]
+    async fn mobile_open_existing_window_unhides_refreshes_feed_and_stamps_url() {
+        use chan_server::DevserverFeedSource;
+
+        let hidden_flag = Arc::new(std::sync::Mutex::new(true));
+        let vis_requests = Arc::new(std::sync::Mutex::new(Vec::<(
+            String,
+            serde_json::Value,
+            Option<String>,
+            Option<String>,
+        )>::new()));
+        let hidden_r = Arc::clone(&hidden_flag);
+        let vis_r = Arc::clone(&vis_requests);
+        let hidden_list = Arc::clone(&hidden_flag);
+
+        let router = axum::Router::new()
+            .route(
+                "/api/library/windows/{id}/visibility",
+                axum::routing::post(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          headers: axum::http::HeaderMap,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let hidden = Arc::clone(&hidden_r);
+                        let vis = Arc::clone(&vis_r);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            let csrf = headers
+                                .get("x-chan-csrf")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            vis.lock().unwrap().push((id, body.clone(), cookie, csrf));
+                            if let Some(val) = body.get("hidden").and_then(|v| v.as_bool()) {
+                                *hidden.lock().unwrap() = val;
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::get(move || {
+                    let hidden = *hidden_list.lock().unwrap();
+                    async move {
+                        let mut rec = test_window_record(
+                            "w-77",
+                            "lib-77",
+                            chan_server::WindowKind::Workspace,
+                        );
+                        rec.prefix = "/api/notes".into();
+                        rec.hidden = hidden;
+                        axum::Json(vec![rec])
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = crate::devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin.clone(),
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-unhide");
+        state.devservers.set(
+            "gw:1".into(),
+            crate::devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        let mut record = test_window_record("w-77", "lib-77", chan_server::WindowKind::Workspace);
+        record.prefix = "/api/notes".into();
+        record.hidden = true;
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(std::sync::Mutex::new(
+                crate::state::DevserverWindowSnapshot::from(vec![record.clone()]),
+            )),
+        );
+        state
+            .devserver_feed
+            .set_color("gw:1".into(), Some("#abcdef".into()));
+
+        let app = tauri::test::mock_app();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        mobile_open_existing_window_with_app(app.handle(), &state, "gw:1", &record)
+            .await
+            .expect("open existing hidden window");
+
+        let vis = vis_requests.lock().unwrap().clone();
+        assert_eq!(vis.len(), 1);
+        assert_eq!(vis[0].0, "w-77");
+        assert_eq!(vis[0].1, serde_json::json!({ "hidden": false }));
+        assert!(vis[0]
+            .2
+            .as_deref()
+            .is_some_and(|c| c.contains("__Host-devserver_gate=test-gate")));
+        assert_eq!(vis[0].3.as_deref(), Some("csrf-unhide"));
+
+        let feed_windows = state.devserver_feed.windows();
+        assert_eq!(feed_windows.len(), 1);
+        assert!(!feed_windows[0].hidden);
+
+        let q = query_map(&main.url().unwrap());
+        assert_eq!(q.get("w").map(String::as_str), Some("w-77"));
+        assert_eq!(q.get("lib").map(String::as_str), Some("lib-77"));
+        assert_eq!(q.get("pane").map(String::as_str), Some("#abcdef"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mobile_open_devserver_with_app_mints_refreshes_feed_and_navigates() {
+        let library_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(library_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        let notify = embedded.library_change_notify();
+
+        let minted_list = Arc::new(std::sync::Mutex::new(
+            Vec::<chan_server::WindowRecord>::new(),
+        ));
+        let minted_post = Arc::clone(&minted_list);
+        let minted_get = Arc::clone(&minted_list);
+
+        let router = axum::Router::new().route(
+            "/api/library/windows",
+            axum::routing::post(
+                move |axum::Json(req): axum::Json<chan_server::CreateWindow>| {
+                    let minted = Arc::clone(&minted_post);
+                    async move {
+                        let mut rec = test_window_record("w-minted", "lib-88", req.kind);
+                        rec.prefix = "/terminal".into();
+                        rec.workspace_path = req.workspace_path;
+                        rec.start_terminal = req.start_terminal;
+                        minted.lock().unwrap().push(rec.clone());
+                        axum::Json(rec)
+                    }
+                },
+            )
+            .get(move || {
+                let minted = Arc::clone(&minted_get);
+                async move { axum::Json(minted.lock().unwrap().clone()) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let _ = state.embedded.set(embedded);
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = crate::devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin.clone(),
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-mint");
+        state.devservers.set(
+            "gw:1".into(),
+            crate::devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(std::sync::Mutex::new(
+                crate::state::DevserverWindowSnapshot::default(),
+            )),
+        );
+        state
+            .devserver_feed
+            .set_color("gw:1".into(), Some("#445566".into()));
+        state.embedded().unwrap().install_devserver_feed(
+            Arc::clone(&state.devserver_feed) as Arc<dyn chan_server::DevserverFeedSource>
+        );
+
+        let notified = notify.notified();
+        let app = tauri::test::mock_app();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        mobile_open_devserver_with_app(
+            app.handle(),
+            &state,
+            "gw:1",
+            chan_server::WindowKind::Terminal,
+            None,
+            false,
+        )
+        .await
+        .expect("mint and open devserver window");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("refresh fires library_change_notify");
+        assert_eq!(
+            state
+                .devserver_feed
+                .record_for_window_id("w-minted")
+                .map(|(id, _)| id),
+            Some("gw:1".to_string())
+        );
+        let q = query_map(&main.url().unwrap());
+        assert_eq!(q.get("w").map(String::as_str), Some("w-minted"));
+        assert_eq!(q.get("kind").map(String::as_str), Some("terminal"));
+        assert_eq!(q.get("lib").map(String::as_str), Some("lib-88"));
+        assert_eq!(q.get("pane").map(String::as_str), Some("#445566"));
+
+        server.abort();
     }
 }

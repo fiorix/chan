@@ -64,6 +64,9 @@ pub(crate) fn init_tracing() {
         .init();
 }
 
+const TMUX_NEW_WINDOW_DISPATCH_JS: &str =
+    "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.tmux.newWindow' } }));";
+
 /// The one IPC command table for the single webview. The ACL in
 /// `capabilities/` and [`runtime_capability`] grants exactly these names
 /// to `"main"` on the origins that may call them; keep them in step.
@@ -81,7 +84,468 @@ pub(crate) fn app_invoke_handler(
         // The gateway CSRF token a tenant page presents on its
         // management calls.
         devserver::gateway_csrf_token,
+        // Single-webview workspace-app commands.
+        native_vocabulary,
+        focus_library_window,
+        create_library_window,
+        open_new_window,
+        toggle_launcher_panel,
+        show_computers_for_window,
+        reconnect_devserver_for_window,
+        abandon_devserver_for_window,
+        // Loopback-only delivery trigger for pending Computers card focus.
+        mobile_deliver_pending_show_card,
     ]
+}
+
+/// Same page ignoring query and fragment, so a launcher showing its bearer
+/// token still reads as home.
+pub(crate) fn same_page(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port() == right.port()
+        && left.path() == right.path()
+}
+
+/// Run post-navigation hooks when `"main"` finishes loading a page.
+pub(crate) fn on_main_page_load<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    payload: &tauri::webview::PageLoadPayload<'_>,
+) {
+    if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+        return;
+    }
+    if webview.label() != "main" {
+        return;
+    }
+    let state = webview.state::<Arc<AppState>>();
+    let Ok(home) = mobile_auth::mobile_launcher_url(&state) else {
+        return;
+    };
+    if !same_page(payload.url(), &home) {
+        return;
+    }
+    if state.pending_show_card.lock().unwrap().is_none() {
+        return;
+    }
+    // Wait for a FIFO-ordered event listen on the launcher so App.svelte's
+    // onMount listener is active in EventManager before emitting the card event.
+    const DELIVER_SHOW_CARD_JS: &str = r#"(function(){
+  var deliver=function(){
+    var api=window.__TAURI__;
+    var invoke=(api&&((api.core&&api.core.invoke)||api.invoke))||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);
+    var listen=api&&api.event&&api.event.listen;
+    if(!invoke)return;
+    if(listen){
+      listen("launcher-show-devserver-card",function(){}).then(function(u){
+        if(typeof u==="function")u();
+        return invoke("mobile_deliver_pending_show_card");
+      }).catch(function(){
+        return invoke("mobile_deliver_pending_show_card");
+      });
+    }else{
+      invoke("mobile_deliver_pending_show_card");
+    }
+  };
+  if(document.readyState==="complete"){deliver();}
+  else{window.addEventListener("load",deliver,{once:true});}
+})();"#;
+    if let Err(error) = webview.eval(DELIVER_SHOW_CARD_JS) {
+        tracing::warn!(%error, "scheduling pending show-card delivery failed");
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NativeVocabulary {
+    pub(crate) version: String,
+    pub(crate) build: String,
+    pub(crate) commands: Vec<String>,
+}
+
+pub(crate) fn native_vocabulary_for<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> NativeVocabulary {
+    NativeVocabulary {
+        version: app.package_info().version.to_string(),
+        build: CHAN_IOS_BUILD_ID.to_string(),
+        commands: runtime_capability::GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .map(|cmd| (*cmd).to_string())
+            .collect(),
+    }
+}
+
+#[tauri::command]
+fn native_vocabulary(app: tauri::AppHandle) -> NativeVocabulary {
+    native_vocabulary_for(&app)
+}
+
+async fn devserver_workspace_path(
+    conn: &devserver::DevserverConn,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let workspace_id =
+        workspace_id.ok_or_else(|| "a workspace window needs a workspace id".to_string())?;
+    let wanted = workspace_id.trim_start_matches('/');
+    devserver::fetch_workspaces(conn)
+        .await?
+        .into_iter()
+        .find(|row| row.prefix.trim_start_matches('/') == wanted)
+        .map(|row| row.path)
+        .ok_or_else(|| format!("no workspace {wanted} on this devserver"))
+}
+
+fn is_loopback_launcher_page(state: &AppState, current: &url::Url) -> bool {
+    mobile_auth::mobile_launcher_url(state).is_ok_and(|home| same_page(current, &home))
+}
+
+fn resolve_devserver_id_for_window(state: &AppState, current: &url::Url) -> Option<String> {
+    if is_loopback_launcher_page(state, current) {
+        return None;
+    }
+    let exact_origin = current.origin().ascii_serialization();
+    if let Some((id, _)) = state.devservers.gateway_entry_for_origin(&exact_origin) {
+        return Some(id);
+    }
+    if let Some(lib_id) = current
+        .query_pairs()
+        .find(|(k, _)| k == "lib")
+        .map(|(_, v)| v.into_owned())
+        .filter(|lib| lib.starts_with("lib-"))
+    {
+        if let Some(id) = state.devserver_feed.devserver_id_for_library(&lib_id) {
+            return Some(id);
+        }
+    }
+    state
+        .last_remote_origin
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|(origin, id)| (origin == &exact_origin).then(|| id.clone()))
+}
+
+fn is_remote_devserver_page(state: &AppState, current: &url::Url) -> bool {
+    if is_loopback_launcher_page(state, current) {
+        return false;
+    }
+    let exact_origin = current.origin().ascii_serialization();
+    state
+        .devservers
+        .gateway_entry_for_origin(&exact_origin)
+        .is_some()
+        || current
+            .query_pairs()
+            .any(|(k, v)| k == "lib" && v.starts_with("lib-"))
+        || state
+            .last_remote_origin
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(origin, _)| origin == &exact_origin)
+}
+
+pub(crate) async fn focus_library_window_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    window: &tauri::WebviewWindow<R>,
+    window_id: String,
+) -> Result<(), String> {
+    if window_id.is_empty() || window_id.contains("::") {
+        return Err(format!("invalid window id {window_id:?}"));
+    }
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    let exact_origin = current.origin().ascii_serialization();
+    let (id, conn) = state
+        .devservers
+        .gateway_entry_for_origin(&exact_origin)
+        .ok_or_else(|| "window does not belong to a connected devserver".to_string())?;
+    let record = match state.devserver_feed.record_for_window_id(&window_id) {
+        Some((owner_id, record)) if owner_id == id => record,
+        _ => devserver::fetch_library_windows(&id, &conn)
+            .await?
+            .into_iter()
+            .find(|r| r.window_id == window_id)
+            .ok_or_else(|| format!("window {window_id} was not found"))?,
+    };
+    let already_open = current
+        .query_pairs()
+        .any(|(k, v)| k == "w" && v == window_id);
+    if already_open {
+        if record.hidden {
+            devserver::set_window_visibility(&conn, &record.window_id, false).await?;
+            if let Err(error) = refresh_devserver_windows(state, &id, &conn).await {
+                tracing::warn!(devserver = %id, %error, "refreshing devserver windows after focus unhide failed");
+            }
+        }
+        return Ok(());
+    }
+    mobile_auth::mobile_open_existing_window_with_app(app, state, &id, &record).await
+}
+
+#[tauri::command]
+async fn focus_library_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+    window_id: String,
+) -> Result<(), String> {
+    focus_library_window_impl(&app, state.inner(), &window, window_id).await
+}
+
+pub(crate) async fn create_library_window_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    window: &tauri::WebviewWindow<R>,
+    kind: chan_server::WindowKind,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    let exact_origin = current.origin().ascii_serialization();
+    let (id, conn) = state
+        .devservers
+        .gateway_entry_for_origin(&exact_origin)
+        .ok_or_else(|| "window does not belong to a connected devserver".to_string())?;
+    let workspace_path = match kind {
+        chan_server::WindowKind::Terminal => None,
+        chan_server::WindowKind::Workspace => {
+            Some(devserver_workspace_path(&conn, workspace_id).await?)
+        }
+    };
+    mobile_auth::mobile_open_devserver_with_app(app, state, &id, kind, workspace_path, false).await
+}
+
+#[tauri::command]
+async fn create_library_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+    kind: chan_server::WindowKind,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    create_library_window_impl(&app, state.inner(), &window, kind, workspace_id).await
+}
+
+pub(crate) async fn open_new_window_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    let exact_origin = current.origin().ascii_serialization();
+    let (id, conn) = state
+        .devservers
+        .gateway_entry_for_origin(&exact_origin)
+        .ok_or_else(|| "window does not belong to a connected devserver".to_string())?;
+    let active_window_id = current
+        .query_pairs()
+        .find(|(k, _)| k == "w")
+        .map(|(_, v)| v.into_owned());
+    let record = if let Some(wid) = active_window_id.as_deref() {
+        match state.devserver_feed.record_for_window_id(wid) {
+            Some((owner_id, record)) if owner_id == id => Some(record),
+            _ => devserver::fetch_library_windows(&id, &conn)
+                .await
+                .ok()
+                .and_then(|windows| windows.into_iter().find(|r| r.window_id == wid)),
+        }
+    } else {
+        None
+    };
+    if let Some(r) = &record {
+        if r.tmux.as_ref().is_some_and(|mark| !mark.control) {
+            return window
+                .eval(TMUX_NEW_WINDOW_DISPATCH_JS)
+                .map_err(|e| format!("asking the tmux window for a new window: {e}"));
+        }
+    }
+    let (kind, workspace_path) = match record {
+        Some(r) => {
+            let workspace_path = match r.kind {
+                chan_server::WindowKind::Terminal => None,
+                chan_server::WindowKind::Workspace => r.workspace_path,
+            };
+            (r.kind, workspace_path)
+        }
+        None => (chan_server::WindowKind::Terminal, None),
+    };
+    mobile_auth::mobile_open_devserver_with_app(app, state, &id, kind, workspace_path, false).await
+}
+
+#[tauri::command]
+async fn open_new_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    open_new_window_impl(&app, state.inner(), &window).await
+}
+
+pub(crate) fn toggle_launcher_panel_impl<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    let home = mobile_auth::mobile_launcher_url(state)?;
+    if window.url().is_ok_and(|current| same_page(&current, &home)) {
+        return Ok(());
+    }
+    mobile_auth::navigate_main_to_launcher(window, state)
+}
+
+#[tauri::command]
+fn toggle_launcher_panel(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    toggle_launcher_panel_impl(&window, state.inner())
+}
+
+pub(crate) fn show_computers_for_window_impl<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    if !is_remote_devserver_page(state, &current) {
+        return Err("window is not on a devserver page".to_string());
+    }
+    let card = resolve_devserver_id_for_window(state, &current);
+    *state.pending_show_card.lock().unwrap() = Some(card);
+    mobile_auth::navigate_main_to_launcher(window, state)
+}
+
+#[tauri::command]
+fn show_computers_for_window(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    show_computers_for_window_impl(&window, state.inner())
+}
+
+pub(crate) fn mobile_deliver_pending_show_card_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("launcher card delivery is restricted to main".to_string());
+    }
+    let home = mobile_auth::mobile_launcher_url(state)?;
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    if !same_page(&current, &home) {
+        return Err("launcher card delivery requires the loopback launcher page".to_string());
+    }
+    let Some(card) = state.pending_show_card.lock().unwrap().take() else {
+        return Ok(());
+    };
+    tauri::Emitter::emit_to(
+        app,
+        "main",
+        "launcher-show-devserver-card",
+        serde_json::json!({ "devserverId": card }),
+    )
+    .map_err(|e| format!("emitting launcher-show-devserver-card: {e}"))
+}
+
+#[tauri::command]
+fn mobile_deliver_pending_show_card(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    mobile_deliver_pending_show_card_impl(&app, &window, state.inner())
+}
+
+pub(crate) async fn reconnect_devserver_for_window_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    let Some(id) = resolve_devserver_id_for_window(state, &current) else {
+        return Ok(());
+    };
+    if state.devserver_connecting.lock().unwrap().contains(&id) {
+        return Ok(());
+    }
+    let current_window_id = current
+        .query_pairs()
+        .find(|(k, _)| k == "w")
+        .map(|(_, v)| v.into_owned());
+    teardown_devserver_connection(app, state, &id).await;
+    connect_rostered_devserver(app.clone(), Arc::clone(state), id.clone()).await?;
+    let reconnected_record = if let Some(wid) = current_window_id.as_deref() {
+        match state.devserver_feed.record_for_window_id(wid) {
+            Some((owner_id, record)) if owner_id == id => Some(record),
+            _ => match state.devservers.get(&id) {
+                Some(conn) => devserver::fetch_library_windows(&id, &conn)
+                    .await
+                    .ok()
+                    .and_then(|windows| windows.into_iter().find(|r| r.window_id == wid)),
+                None => None,
+            },
+        }
+    } else {
+        None
+    };
+    if let Some(record) = reconnected_record {
+        mobile_auth::mobile_open_existing_window_with_app(app, state, &id, &record).await?;
+    } else if let Ok(home) = mobile_auth::mobile_launcher_url(state) {
+        if !window.url().is_ok_and(|u| same_page(&u, &home)) {
+            mobile_auth::navigate_main_to_launcher(window, state)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn reconnect_devserver_for_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    reconnect_devserver_for_window_impl(&app, state.inner(), &window).await
+}
+
+pub(crate) async fn abandon_devserver_for_window_impl<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
+    let current = window
+        .url()
+        .map_err(|e| format!("reading window URL: {e}"))?;
+    let Some(id) = resolve_devserver_id_for_window(state, &current) else {
+        return Ok(());
+    };
+    teardown_devserver_connection(app, state, &id).await;
+    if let Ok(home) = mobile_auth::mobile_launcher_url(state) {
+        if !window.url().is_ok_and(|u| same_page(&u, &home)) {
+            let _ = mobile_auth::navigate_main_to_launcher(window, state);
+        }
+    }
+    let _ = tauri::Emitter::emit(app, "devserver-abandon", id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn abandon_devserver_for_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    abandon_devserver_for_window_impl(&app, state.inner(), &window).await
 }
 
 /// iOS entry, called from Swift as `start_app` through Tauri's mobile
@@ -360,6 +824,22 @@ async fn refresh_devserver_workspace_cache(
     Ok(())
 }
 
+pub(crate) async fn refresh_devserver_windows(
+    state: &AppState,
+    id: &str,
+    conn: &devserver::DevserverConn,
+) -> Result<(), String> {
+    let windows = devserver::fetch_library_windows(id, conn).await?;
+    let mut changed = state.devserver_feed.set_down(id, false);
+    changed |= state.devserver_feed.replace_windows(id, windows);
+    if changed {
+        if let Some(embedded) = state.embedded() {
+            embedded.signal_library_change();
+        }
+    }
+    Ok(())
+}
+
 /// Periodically refresh a connected rostered devserver's workspace and window
 /// lists in [`DevserverFeed`], stopping cleanly once `id` is disconnected or
 /// replaced by another connection in `state.devservers`.
@@ -369,13 +849,11 @@ fn spawn_rostered_devserver_poll(
     conn: devserver::DevserverConn,
     snapshot: Arc<std::sync::Mutex<state::DevserverWindowSnapshot>>,
     initial_ws: Vec<devserver::DevserverWorkspaceRow>,
-    initial_windows: Vec<chan_server::WindowRecord>,
 ) {
     const POLL: std::time::Duration = std::time::Duration::from_secs(5);
     tauri::async_runtime::spawn(async move {
         let initial_lib = state.devserver_feed.library_id_of(&id);
         let mut last_ws = Some((initial_ws, initial_lib));
-        let mut last_windows = initial_windows;
         loop {
             tokio::time::sleep(POLL).await;
             if !state.devservers.is_same_gateway_conn(&id, &conn) {
@@ -400,10 +878,9 @@ fn spawn_rostered_devserver_poll(
                         if let Some(lib_id) = windows.first().map(|w| w.library_id.clone()) {
                             state.devserver_feed.seed_library_id(id.clone(), lib_id);
                         }
-                        if windows != last_windows {
-                            *snapshot.lock().unwrap() =
-                                state::DevserverWindowSnapshot::from(windows.clone());
-                            last_windows = windows;
+                        let mut snap = snapshot.lock().unwrap();
+                        if snap.windows != windows {
+                            snap.windows = windows;
                             changed = true;
                         }
                     }
@@ -593,14 +1070,7 @@ async fn connect_rostered_devserver_inner<R: tauri::Runtime>(
     if let Some(color) = color {
         state.devserver_feed.set_color(id.to_string(), color);
     }
-    spawn_rostered_devserver_poll(
-        Arc::clone(state),
-        id.to_string(),
-        conn,
-        snapshot,
-        rows,
-        windows,
-    );
+    spawn_rostered_devserver_poll(Arc::clone(state), id.to_string(), conn, snapshot, rows);
     Ok(())
 }
 
@@ -694,21 +1164,37 @@ pub(crate) async fn close_devserver_control_terminal<R: tauri::Runtime>(
     let _ = app;
 }
 
+pub(crate) async fn discard_devserver_window_in_state(
+    state: &AppState,
+    window_id: &str,
+) -> Result<bool, String> {
+    let Some((devserver_id, record)) = state
+        .devserver_feed
+        .record_for_window_id(window_id)
+        .or_else(|| state.devserver_feed.record_for_native_label(window_id))
+    else {
+        return Ok(false);
+    };
+    let Some(conn) = state.devservers.get(&devserver_id) else {
+        return Err(format!("devserver {devserver_id} is not connected"));
+    };
+    devserver::discard_library_window(&conn, &record.window_id).await?;
+    if let Err(error) = refresh_devserver_windows(state, &devserver_id, &conn).await {
+        tracing::warn!(
+            devserver = %devserver_id,
+            %error,
+            "refreshing devserver windows after discard failed"
+        );
+    }
+    Ok(true)
+}
+
 async fn discard_devserver_window_by_id(
     app: &tauri::AppHandle,
     window_id: &str,
 ) -> Result<bool, String> {
     let state = app.state::<Arc<AppState>>();
-    if state
-        .devserver_feed
-        .record_for_window_id(window_id)
-        .is_none()
-    {
-        return Ok(false);
-    };
-    // The row lives on its devserver, and this build exposes no remote window
-    // discard endpoint. Refuse loudly rather than pretend the row went away.
-    Err("closing a devserver window is not supported on this build".to_string())
+    discard_devserver_window_in_state(state.inner(), window_id).await
 }
 
 /// Open a devserver workspace in the single webview: mint the window
@@ -1474,6 +1960,693 @@ mod tests {
             chan_server::SetWorkspaceOnOutcome::Done { workspace: None }
         ));
 
+        server.abort();
+    }
+
+    fn sample_remote_record(
+        library_id: &str,
+        window_id: &str,
+        kind: chan_server::WindowKind,
+    ) -> chan_server::WindowRecord {
+        chan_server::WindowRecord {
+            window_id: window_id.into(),
+            library_id: library_id.into(),
+            kind,
+            title: "Test".into(),
+            ordinal: 1,
+            label: "Test".into(),
+            workspace_path: Some("/srv/notes".into()),
+            prefix: "/notes".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        }
+    }
+
+    async fn install_test_embedded(
+        state: &AppState,
+    ) -> (tempfile::TempDir, Arc<tokio::sync::Notify>) {
+        let lib_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(lib_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        let notify = embedded.library_change_notify();
+        embedded.install_devserver_feed(
+            Arc::clone(&state.devserver_feed) as Arc<dyn chan_server::DevserverFeedSource>
+        );
+        let _ = state.embedded.set(embedded);
+        (lib_home, notify)
+    }
+
+    fn query_map(url: &url::Url) -> std::collections::HashMap<String, String> {
+        url.query_pairs().into_owned().collect()
+    }
+
+    #[tokio::test]
+    async fn refresh_devserver_windows_updates_feed_and_signals_library_change() {
+        use chan_server::DevserverFeedSource;
+
+        let windows_store = Arc::new(Mutex::new(vec![sample_remote_record(
+            "lib-1",
+            "w-1",
+            chan_server::WindowKind::Workspace,
+        )]));
+        let ws_get = Arc::clone(&windows_store);
+        let router = axum::Router::new().route(
+            "/api/library/windows",
+            axum::routing::get(move || {
+                let ws = Arc::clone(&ws_get);
+                async move { axum::Json(ws.lock().unwrap().clone()) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let (_lib_home, notify) = install_test_embedded(&state).await;
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin,
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-ref");
+        let conn = devserver::DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: String::new(),
+            name: "box".into(),
+            gateway: Some(Box::new(gw)),
+        };
+        state.devservers.set("gw:1".into(), conn.clone());
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(Mutex::new(state::DevserverWindowSnapshot::default())),
+        );
+        state.devserver_feed.set_down("gw:1", true);
+
+        let notified = notify.notified();
+        refresh_devserver_windows(&state, "gw:1", &conn)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("first refresh clears down and notifies");
+        assert_eq!(state.devserver_feed.windows().len(), 1);
+
+        // Repeat with unchanged response must not fire a spurious change signal.
+        refresh_devserver_windows(&state, "gw:1", &conn)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(80), notify.notified())
+                .await
+                .is_err(),
+            "unchanged snapshot should not re-signal"
+        );
+
+        server.abort();
+    }
+
+    #[test]
+    fn native_vocabulary_returns_version_build_and_gateway_commands() {
+        let app = tauri::test::mock_app();
+        let vocab = native_vocabulary_for(app.handle());
+        assert_eq!(vocab.version, app.package_info().version.to_string());
+        assert_eq!(vocab.build, CHAN_IOS_BUILD_ID);
+        let expected: Vec<String> = runtime_capability::GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        assert_eq!(vocab.commands, expected);
+    }
+
+    #[tokio::test]
+    async fn focus_library_window_validates_unhides_and_avoids_reloading_same_window() {
+        let windows_store = Arc::new(Mutex::new(vec![
+            {
+                let mut r =
+                    sample_remote_record("lib-1", "w-1", chan_server::WindowKind::Workspace);
+                r.hidden = true;
+                r
+            },
+            {
+                let mut r = sample_remote_record("lib-1", "w-2", chan_server::WindowKind::Terminal);
+                r.prefix = "/terminal".into();
+                r.hidden = true;
+                r
+            },
+        ]));
+        let vis_hits = Arc::new(Mutex::new(Vec::<(String, bool)>::new()));
+        let ws_get = Arc::clone(&windows_store);
+        let ws_post = Arc::clone(&windows_store);
+        let vis_r = Arc::clone(&vis_hits);
+
+        let router = axum::Router::new()
+            .route(
+                "/api/library/windows",
+                axum::routing::get(move || {
+                    let ws = Arc::clone(&ws_get);
+                    async move { axum::Json(ws.lock().unwrap().clone()) }
+                }),
+            )
+            .route(
+                "/api/library/windows/{id}/visibility",
+                axum::routing::post(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let ws = Arc::clone(&ws_post);
+                        let vis = Arc::clone(&vis_r);
+                        async move {
+                            let hidden = body["hidden"].as_bool().unwrap_or(false);
+                            vis.lock().unwrap().push((id.clone(), hidden));
+                            if let Some(row) =
+                                ws.lock().unwrap().iter_mut().find(|r| r.window_id == id)
+                            {
+                                row.hidden = hidden;
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin.clone(),
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-focus");
+        state.devservers.set(
+            "gw:1".into(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(Mutex::new(state::DevserverWindowSnapshot::from(
+                windows_store.lock().unwrap().clone(),
+            ))),
+        );
+
+        let app = tauri::test::mock_app();
+        let start_url = format!("{origin}/notes/index.html?w=w-1&lib=lib-1");
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(start_url.parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        // Reject invalid window ids.
+        assert!(
+            focus_library_window_impl(app.handle(), &state, &main, String::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            focus_library_window_impl(app.handle(), &state, &main, "lib-1::w-2".into())
+                .await
+                .is_err()
+        );
+
+        // Focusing already-open w-1 unhides without reloading URL.
+        focus_library_window_impl(app.handle(), &state, &main, "w-1".into())
+            .await
+            .unwrap();
+        assert_eq!(main.url().unwrap().as_str(), start_url);
+        assert_eq!(vis_hits.lock().unwrap().as_slice(), [("w-1".into(), false)]);
+        assert!(
+            !state
+                .devserver_feed
+                .record_for_window_id("w-1")
+                .unwrap()
+                .1
+                .hidden
+        );
+
+        // Focusing w-2 unhides and navigates main to w-2.
+        focus_library_window_impl(app.handle(), &state, &main, "w-2".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            query_map(&main.url().unwrap()).get("w").map(String::as_str),
+            Some("w-2")
+        );
+        assert!(
+            !state
+                .devserver_feed
+                .record_for_window_id("w-2")
+                .unwrap()
+                .1
+                .hidden
+        );
+
+        // Loopback origin is rejected.
+        main.navigate("http://127.0.0.1:8471/?t=boot".parse().unwrap())
+            .unwrap();
+        assert!(
+            focus_library_window_impl(app.handle(), &state, &main, "w-1".into())
+                .await
+                .is_err()
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_library_window_and_open_new_window_handle_tmux_workspace_and_terminal() {
+        let minted = Arc::new(Mutex::new(Vec::<chan_server::CreateWindow>::new()));
+        let minted_r = Arc::clone(&minted);
+        let router = axum::Router::new()
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get(|| async {
+                    axum::Json(vec![chan_server::LauncherWorkspace {
+                        workspace_id: "notes-1a2b".into(),
+                        path: "/srv/notes".into(),
+                        status: chan_server::WorkspaceStatus::Running,
+                        error: None,
+                        label: "notes".into(),
+                        on: true,
+                        library_id: Some("lib-1".into()),
+                        devserver_id: None,
+                        prefix: "notes-1a2b".into(),
+                    }])
+                }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::post(
+                    move |axum::Json(req): axum::Json<chan_server::CreateWindow>| {
+                        let minted = Arc::clone(&minted_r);
+                        async move {
+                            let idx = {
+                                let mut guard = minted.lock().unwrap();
+                                guard.push(req.clone());
+                                guard.len()
+                            };
+                            let mut rec =
+                                sample_remote_record("lib-1", &format!("w-new-{idx}"), req.kind);
+                            rec.workspace_path = req.workspace_path;
+                            rec.prefix = if req.kind == chan_server::WindowKind::Workspace {
+                                "/notes-1a2b".into()
+                            } else {
+                                "/terminal".into()
+                            };
+                            axum::Json(rec)
+                        }
+                    },
+                )
+                .get(|| async { axum::Json(Vec::<chan_server::WindowRecord>::new()) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin.clone(),
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-create");
+        state.devservers.set(
+            "gw:1".into(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        let mut ws_rec = sample_remote_record("lib-1", "w-ws", chan_server::WindowKind::Workspace);
+        ws_rec.workspace_path = Some("/srv/notes".into());
+        let mut tmux_rec =
+            sample_remote_record("lib-1", "w-tmux", chan_server::WindowKind::Terminal);
+        tmux_rec.tmux = Some(chan_server::TmuxWindowMark {
+            connection: "c1".into(),
+            control: false,
+            user_label: false,
+        });
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(Mutex::new(state::DevserverWindowSnapshot::from(vec![
+                ws_rec, tmux_rec,
+            ]))),
+        );
+
+        let app = tauri::test::mock_app();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(
+                format!("{origin}/notes-1a2b/index.html?w=w-tmux&lib=lib-1")
+                    .parse()
+                    .unwrap(),
+            ),
+        )
+        .build()
+        .unwrap();
+
+        // Non-control tmux window dispatches app.tmux.newWindow without minting.
+        open_new_window_impl(app.handle(), &state, &main)
+            .await
+            .unwrap();
+        assert!(minted.lock().unwrap().is_empty());
+
+        // Workspace window mints another window of the same workspace_path.
+        main.navigate(
+            format!("{origin}/notes-1a2b/index.html?w=w-ws&lib=lib-1")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        open_new_window_impl(app.handle(), &state, &main)
+            .await
+            .unwrap();
+        assert_eq!(minted.lock().unwrap().len(), 1);
+        assert_eq!(
+            minted.lock().unwrap()[0].kind,
+            chan_server::WindowKind::Workspace
+        );
+        assert_eq!(
+            minted.lock().unwrap()[0].workspace_path.as_deref(),
+            Some("/srv/notes")
+        );
+        assert_eq!(
+            query_map(&main.url().unwrap()).get("w").map(String::as_str),
+            Some("w-new-1")
+        );
+
+        // create_library_window resolves workspace_id to /srv/notes and navigates.
+        create_library_window_impl(
+            app.handle(),
+            &state,
+            &main,
+            chan_server::WindowKind::Workspace,
+            Some("notes-1a2b".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(minted.lock().unwrap().len(), 2);
+        assert_eq!(
+            query_map(&main.url().unwrap()).get("w").map(String::as_str),
+            Some("w-new-2")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn toggle_launcher_and_show_computers_and_abandon_and_reconnect_flow() {
+        let (_dir, state) = test_state();
+        let (_lib_home, _notify) = install_test_embedded(&state).await;
+        let home = mobile_auth::mobile_launcher_url(&state).unwrap();
+
+        let app = tauri::test::mock_app();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(home.clone()),
+        )
+        .build()
+        .unwrap();
+
+        // Loopback: toggle_launcher_panel is a no-op, show_computers refuses,
+        // abandon/reconnect are inert Ok(()).
+        toggle_launcher_panel_impl(&main, &state).unwrap();
+        assert_eq!(main.url().unwrap(), home);
+        assert!(show_computers_for_window_impl(&main, &state).is_err());
+        abandon_devserver_for_window_impl(app.handle(), &state, &main)
+            .await
+            .unwrap();
+        reconnect_devserver_for_window_impl(app.handle(), &state, &main)
+            .await
+            .unwrap();
+
+        // Navigate to a remote origin with ?lib=lib-1 (simulating a disconnected
+        // devserver whose library_ids cache still remembers gw:1).
+        state
+            .devserver_feed
+            .seed_library_id("gw:1".into(), "lib-1".into());
+        let remote_url: url::Url =
+            "https://alice--aaaa.proxy.example/notes/index.html?w=w-1&lib=lib-1"
+                .parse()
+                .unwrap();
+        main.navigate(remote_url.clone()).unwrap();
+
+        // show_computers_for_window navigates home and queues pending_show_card.
+        show_computers_for_window_impl(&main, &state).unwrap();
+        assert!(same_page(&main.url().unwrap(), &home));
+        assert_eq!(
+            *state.pending_show_card.lock().unwrap(),
+            Some(Some("gw:1".to_string()))
+        );
+
+        // Delivery emits launcher-show-devserver-card once and clears the slot.
+        let (card_tx, mut card_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        main.listen("launcher-show-devserver-card", move |event| {
+            let _ = card_tx.send(event.payload().to_string());
+        });
+        mobile_deliver_pending_show_card_impl(app.handle(), &main, &state).unwrap();
+        let payload = card_rx.try_recv().expect("card event emitted");
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["devserverId"], "gw:1");
+        assert!(state.pending_show_card.lock().unwrap().is_none());
+        // Second call is a no-op.
+        mobile_deliver_pending_show_card_impl(app.handle(), &main, &state).unwrap();
+        assert!(card_rx.try_recv().is_err());
+
+        // toggle_launcher_panel from remote navigates home.
+        main.navigate(remote_url.clone()).unwrap();
+        toggle_launcher_panel_impl(&main, &state).unwrap();
+        assert!(same_page(&main.url().unwrap(), &home));
+
+        // abandon_devserver_for_window tears down, navigates home, and emits devserver-abandon.
+        let (aban_tx, mut aban_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        app.listen("devserver-abandon", move |event| {
+            let _ = aban_tx.send(event.payload().to_string());
+        });
+        state.devservers.set(
+            "gw:1".into(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: 9999,
+                token: String::new(),
+                name: "box".into(),
+                gateway: None,
+            },
+        );
+        main.navigate(remote_url).unwrap();
+        abandon_devserver_for_window_impl(app.handle(), &state, &main)
+            .await
+            .unwrap();
+        assert!(!state.devservers.is_connected("gw:1"));
+        assert!(same_page(&main.url().unwrap(), &home));
+        assert_eq!(aban_rx.try_recv().unwrap(), "\"gw:1\"");
+    }
+
+    #[tokio::test]
+    async fn reconnect_devserver_for_window_reconnects_and_reopens_active_window() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let identity_origin = format!("http://{addr}");
+        let proxy_apex = format!("http://localtest.me:{}", addr.port());
+        let proxy_origin = format!("http://alice--bbbbbbbbbbbb.p1.localtest.me:{}", addr.port());
+        let proxy_for_entry = proxy_origin.clone();
+        let ds64 = "b".repeat(64);
+        let ds64_entry = ds64.clone();
+
+        let router = axum::Router::new()
+            .route(
+                "/mobile/v1/devserver/entry",
+                axum::routing::post(move || {
+                    let proxy_origin = proxy_for_entry.clone();
+                    let ds64 = ds64_entry.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "owner_user_id": uuid::Uuid::from_u128(7),
+                            "username": "alice",
+                            "devserver_id": ds64,
+                            "proxy_origin": proxy_origin,
+                            "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                            "entry_credential": "entry-cred-reconn",
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post(|| async {
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::SEE_OTHER)
+                        .header("location", "/")
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_gate=gate-reconn; Path=/; HttpOnly; Max-Age=120",
+                        )
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_csrf=csrf-reconn; Path=/; Max-Age=120",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get(|| async { axum::Json(Vec::<chan_server::LauncherWorkspace>::new()) }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::get(|| async {
+                    let mut rec = sample_remote_record(
+                        "lib-reconn",
+                        "w-reopen",
+                        chan_server::WindowKind::Workspace,
+                    );
+                    rec.prefix = "/notes".into();
+                    axum::Json(vec![rec])
+                }),
+            )
+            .route(
+                "/api/library/local-color",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({ "color": "#223344" })) }),
+            )
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    r#"<!doctype html><html><head><meta name="chan-launcher-host-os" content="linux"></head></html>"#
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let (_lib_home, _notify) = install_test_embedded(&state).await;
+        let gateway_id = "gw-reconn";
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways.push(config::Gateway {
+                id: gateway_id.into(),
+                url: identity_origin.clone(),
+                label: "Gateway".into(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+                wireguard: None,
+                wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
+                wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
+                wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
+                wireguard_hosts: Vec::new(),
+            });
+            store.save(&cfg).unwrap();
+        }
+        state.gateway_manager.seed_test_runtime(
+            gateway_id,
+            devserver::GatewayDiscovery {
+                kind: "chan-gateway".into(),
+                api_version: 1,
+                identity_origin: identity_origin.clone(),
+                mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+                mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
+                devserver_proxy_origin: proxy_apex,
+                devserver_proxy_host_depth: 2,
+                wireguard: None,
+            },
+            vec![gateway::RosterDevserver {
+                owner_user_id: uuid::Uuid::from_u128(7),
+                owner: "alice".into(),
+                devserver_id: ds64.clone(),
+                label: "workstation".into(),
+                online: true,
+                shared: false,
+                proxy_origin: None,
+            }],
+        );
+        auth::test_gateway_pats().lock().unwrap().insert(
+            identity_origin.clone(),
+            auth::StoredPat {
+                id: "pat-reconn".into(),
+                secret: "secret-reconn".into(),
+                label: "reconn".into(),
+                expires_at: String::new(),
+            },
+        );
+        let synth_id = gateway::synthesized_row_id(gateway_id, "alice", &ds64);
+        state
+            .devserver_feed
+            .seed_library_id(synth_id.clone(), "lib-reconn".into());
+
+        let app = runtime_capability::tests::mock_app_with_context();
+        let stale_url = format!("{proxy_origin}/notes/index.html?w=w-reopen&lib=lib-reconn");
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(stale_url.parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        reconnect_devserver_for_window_impl(app.handle(), &state, &main)
+            .await
+            .expect("reconnect succeeds and reopens active window");
+
+        assert!(state.devservers.is_connected(&synth_id));
+        let reopened = main.url().unwrap();
+        assert_eq!(reopened.origin().ascii_serialization(), proxy_origin);
+        let q = query_map(&reopened);
+        assert_eq!(q.get("w").map(String::as_str), Some("w-reopen"));
+        assert_eq!(q.get("lib").map(String::as_str), Some("lib-reconn"));
+        assert_eq!(q.get("pane").map(String::as_str), Some("#223344"));
+
+        // If the window record no longer exists after reconnect, return home.
+        let home = mobile_auth::mobile_launcher_url(&state).unwrap();
+        main.navigate(
+            format!("{proxy_origin}/notes/index.html?w=w-gone&lib=lib-reconn")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        reconnect_devserver_for_window_impl(app.handle(), &state, &main)
+            .await
+            .expect("reconnect with gone window navigates home");
+        assert!(same_page(&main.url().unwrap(), &home));
+
+        auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&identity_origin);
         server.abort();
     }
 }

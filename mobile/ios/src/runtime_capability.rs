@@ -55,10 +55,26 @@ pub(crate) fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>
     Ok(vec![parsed.origin().ascii_serialization()])
 }
 
+/// Every app command the minted gateway grant carries on `"main"`.
+/// `native_vocabulary` returns this list so a remotely served page knows what
+/// this build provides before invoking a command.
+pub(crate) const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
+    "abandon_devserver_for_window",
+    "create_library_window",
+    "focus_library_window",
+    "gateway_csrf_token",
+    "mobile_back_to_computers",
+    "native_vocabulary",
+    "open_new_window",
+    "reconnect_devserver_for_window",
+    "set_terminal_background_opacity",
+    "show_computers_for_window",
+    "terminal_background_opacity",
+    "toggle_launcher_panel",
+];
+
 /// The capability JSON minted for one authenticated exact origin on the single
-/// iOS webview (`"main"`): back-to-Computers navigation, the gateway CSRF
-/// token, terminal background opacity read/write, event listen/unlisten, and
-/// external URL opening. No scoped permissions and no deny entries.
+/// iOS webview (`"main"`). No scoped permissions and no deny entries.
 pub(crate) fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String> {
     let remote_urls = exact_origin_remote_urls(exact_origin)?;
     Ok(serde_json::json!({
@@ -67,10 +83,18 @@ pub(crate) fn exact_origin_capability_json(exact_origin: &str) -> Result<String,
         "remote": { "urls": remote_urls },
         "windows": ["main"],
         "permissions": [
-            "allow-mobile-back-to-computers",
+            "allow-abandon-devserver-for-window",
+            "allow-create-library-window",
+            "allow-focus-library-window",
             "allow-gateway-csrf-token",
-            "allow-terminal-background-opacity",
+            "allow-mobile-back-to-computers",
+            "allow-native-vocabulary",
+            "allow-open-new-window",
+            "allow-reconnect-devserver-for-window",
             "allow-set-terminal-background-opacity",
+            "allow-show-computers-for-window",
+            "allow-terminal-background-opacity",
+            "allow-toggle-launcher-panel",
             "core:event:allow-listen",
             "core:event:allow-unlisten",
             "opener:default",
@@ -121,7 +145,7 @@ pub(crate) fn mint_exact_origin_grant<R: tauri::Runtime>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use tauri::ipc::{CallbackFn, InvokeBody};
@@ -155,18 +179,85 @@ mod tests {
         "stub-set-opacity"
     }
 
-    fn mock_ios_app() -> tauri::App<tauri::test::MockRuntime> {
+    #[tauri::command]
+    fn native_vocabulary() -> &'static str {
+        "stub-vocab"
+    }
+
+    #[tauri::command]
+    fn focus_library_window() -> &'static str {
+        "stub-focus"
+    }
+
+    #[tauri::command]
+    fn create_library_window() -> &'static str {
+        "stub-create"
+    }
+
+    #[tauri::command]
+    fn open_new_window() -> &'static str {
+        "stub-new-window"
+    }
+
+    #[tauri::command]
+    fn toggle_launcher_panel() -> &'static str {
+        "stub-toggle"
+    }
+
+    #[tauri::command]
+    fn show_computers_for_window() -> &'static str {
+        "stub-computers"
+    }
+
+    #[tauri::command]
+    fn reconnect_devserver_for_window() -> &'static str {
+        "stub-reconnect"
+    }
+
+    #[tauri::command]
+    fn abandon_devserver_for_window() -> &'static str {
+        "stub-abandon"
+    }
+
+    #[tauri::command]
+    fn mobile_deliver_pending_show_card() -> &'static str {
+        "stub-deliver-card"
+    }
+
+    pub(crate) fn mock_app_with_context_and_handler<F>(
+        handler: F,
+    ) -> tauri::App<tauri::test::MockRuntime>
+    where
+        F: Fn(tauri::ipc::Invoke<tauri::test::MockRuntime>) -> bool + Send + Sync + 'static,
+    {
         mock_builder()
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_opener::init())
-            .invoke_handler(tauri::generate_handler![
-                mobile_back_to_computers,
-                gateway_csrf_token,
-                terminal_background_opacity,
-                set_terminal_background_opacity,
-            ])
+            .invoke_handler(handler)
             .build(tauri::generate_context!())
             .expect("mock app builds from the real chan-ios context")
+    }
+
+    pub(crate) fn mock_app_with_context() -> tauri::App<tauri::test::MockRuntime> {
+        mock_app_with_context_and_handler(|_| false)
+    }
+
+    fn mock_ios_app() -> tauri::App<tauri::test::MockRuntime> {
+        mock_app_with_context_and_handler(tauri::generate_handler![
+            mobile_back_to_computers,
+            gateway_csrf_token,
+            terminal_background_opacity,
+            set_terminal_background_opacity,
+            native_vocabulary,
+            focus_library_window,
+            create_library_window,
+            open_new_window,
+            toggle_launcher_panel,
+            show_computers_for_window,
+            reconnect_devserver_for_window,
+            abandon_devserver_for_window,
+            mobile_deliver_pending_show_card,
+        ])
     }
 
     fn window_at(
@@ -248,10 +339,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "allow-mobile-back-to-computers",
+                "allow-abandon-devserver-for-window",
+                "allow-create-library-window",
+                "allow-focus-library-window",
                 "allow-gateway-csrf-token",
-                "allow-terminal-background-opacity",
+                "allow-mobile-back-to-computers",
+                "allow-native-vocabulary",
+                "allow-open-new-window",
+                "allow-reconnect-devserver-for-window",
                 "allow-set-terminal-background-opacity",
+                "allow-show-computers-for-window",
+                "allow-terminal-background-opacity",
+                "allow-toggle-launcher-panel",
                 "core:event:allow-listen",
                 "core:event:allow-unlisten",
                 "opener:default",
@@ -261,35 +360,116 @@ mod tests {
     }
 
     #[test]
+    fn gateway_window_commands_match_exact_origin_grant_app_toml_and_invoke_handler() {
+        let json = exact_origin_capability_json(EXACT_ORIGIN).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let mut granted_cmds: Vec<String> = parsed["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|perm| perm.strip_prefix("allow-"))
+            .map(|cmd| cmd.replace('-', "_"))
+            .collect();
+        granted_cmds.sort();
+
+        let mut advertised: Vec<String> = GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        advertised.sort();
+        assert_eq!(granted_cmds, advertised);
+
+        let app_toml: toml::Value =
+            toml::from_str(include_str!("../permissions/app.toml")).expect("valid app.toml");
+        let perms = app_toml["permission"].as_array().expect("permission array");
+        let mut allowed_in_toml = HashSet::new();
+        for perm in perms {
+            if let Some(cmds) = perm
+                .get("commands")
+                .and_then(|c| c.get("allow"))
+                .and_then(|a| a.as_array())
+            {
+                for cmd in cmds {
+                    allowed_in_toml.insert(cmd.as_str().unwrap().to_string());
+                }
+            }
+        }
+        for cmd in GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .copied()
+            .chain(std::iter::once("mobile_deliver_pending_show_card"))
+        {
+            assert!(
+                allowed_in_toml.contains(cmd),
+                "{cmd} missing from permissions/app.toml"
+            );
+        }
+
+        let lib_rs = include_str!("lib.rs");
+        let handler = lib_rs
+            .split_once("pub(crate) fn app_invoke_handler(")
+            .expect("app_invoke_handler exists")
+            .1
+            .split_once("\n}\n")
+            .expect("app_invoke_handler ends")
+            .0;
+        for cmd in GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .copied()
+            .chain(std::iter::once("mobile_deliver_pending_show_card"))
+        {
+            assert!(
+                handler.contains(cmd),
+                "{cmd} missing from app_invoke_handler()"
+            );
+        }
+    }
+
+    #[test]
     fn mint_exact_origin_grant_resolves_deduplicates_and_enforces_acl() {
         let app = mock_ios_app();
         let main = window_at(&app, "main", LOOPBACK_PAGE);
         let other = window_at(&app, "other", GATEWAY_PAGE);
 
-        // Static ios.json allows loopback launcher commands on main, but never
-        // grants gateway_csrf_token to loopback.
-        assert_eq!(
-            invoke_from(&main, LOOPBACK_PAGE, "mobile_back_to_computers"),
-            Ok("stub-back".into())
-        );
-        assert_eq!(
-            invoke_from(&main, LOOPBACK_PAGE, "terminal_background_opacity"),
-            Ok("stub-opacity".into())
-        );
-        assert!(
-            invoke_from(&main, LOOPBACK_PAGE, "gateway_csrf_token").is_err(),
-            "loopback origin must not hold allow-gateway-csrf-token"
-        );
+        // Static ios.json allows loopback launcher commands on main, including
+        // toggle_launcher_panel, native_vocabulary, and card delivery, while
+        // keeping remote-only and gateway CSRF commands off loopback.
+        for allowed in [
+            "mobile_back_to_computers",
+            "terminal_background_opacity",
+            "set_terminal_background_opacity",
+            "toggle_launcher_panel",
+            "native_vocabulary",
+            "mobile_deliver_pending_show_card",
+        ] {
+            assert!(
+                invoke_from(&main, LOOPBACK_PAGE, allowed).is_ok(),
+                "loopback origin must permit {allowed}"
+            );
+        }
+        for denied in [
+            "gateway_csrf_token",
+            "focus_library_window",
+            "create_library_window",
+            "open_new_window",
+            "show_computers_for_window",
+            "reconnect_devserver_for_window",
+            "abandon_devserver_for_window",
+        ] {
+            assert!(
+                invoke_from(&main, LOOPBACK_PAGE, denied).is_err(),
+                "loopback origin must not hold {denied}"
+            );
+        }
 
         // Before minting, main on the gateway origin is denied all IPC commands.
-        assert!(
-            invoke_from(&main, GATEWAY_PAGE, "gateway_csrf_token").is_err(),
-            "unminted remote origin must be denied"
-        );
-        assert!(
-            invoke_from(&main, GATEWAY_PAGE, "mobile_back_to_computers").is_err(),
-            "unminted remote origin must be denied"
-        );
+        for cmd in GATEWAY_WINDOW_COMMANDS {
+            assert!(
+                invoke_from(&main, GATEWAY_PAGE, cmd).is_err(),
+                "unminted remote origin must deny {cmd}"
+            );
+        }
 
         assert_eq!(
             mint_exact_origin_grant(&app, EXACT_ORIGIN),
@@ -307,32 +487,29 @@ mod tests {
             "canonicalized equivalent origin also deduplicates"
         );
 
-        // Already-open main gains the grant on the minted exact origin.
-        assert_eq!(
-            invoke_from(&main, GATEWAY_PAGE, "gateway_csrf_token"),
-            Ok("stub-csrf".into())
-        );
-        assert_eq!(
-            invoke_from(&main, GATEWAY_PAGE, "mobile_back_to_computers"),
-            Ok("stub-back".into())
-        );
-        assert_eq!(
-            invoke_from(&main, GATEWAY_PAGE, "terminal_background_opacity"),
-            Ok("stub-opacity".into())
-        );
-        assert_eq!(
-            invoke_from(&main, GATEWAY_PAGE, "set_terminal_background_opacity"),
-            Ok("stub-set-opacity".into())
+        // Already-open main gains every GATEWAY_WINDOW_COMMANDS entry on the
+        // minted exact origin, while loopback-only card delivery stays denied.
+        for cmd in GATEWAY_WINDOW_COMMANDS {
+            assert!(
+                invoke_from(&main, GATEWAY_PAGE, cmd).is_ok(),
+                "minted exact origin must permit {cmd}"
+            );
+        }
+        assert!(
+            invoke_from(&main, GATEWAY_PAGE, "mobile_deliver_pending_show_card").is_err(),
+            "remote origin must never hold loopback-only card delivery"
         );
 
-        // Sibling origin and non-main labels stay denied.
-        assert!(
-            invoke_from(&main, SIBLING_PAGE, "gateway_csrf_token").is_err(),
-            "sibling gateway tenant origin must stay denied"
-        );
-        assert!(
-            invoke_from(&other, GATEWAY_PAGE, "gateway_csrf_token").is_err(),
-            "non-main window label must stay denied"
-        );
+        // Sibling origin and non-main labels stay denied for every command.
+        for cmd in GATEWAY_WINDOW_COMMANDS {
+            assert!(
+                invoke_from(&main, SIBLING_PAGE, cmd).is_err(),
+                "sibling gateway tenant origin must stay denied for {cmd}"
+            );
+            assert!(
+                invoke_from(&other, GATEWAY_PAGE, cmd).is_err(),
+                "non-main window label must stay denied for {cmd}"
+            );
+        }
     }
 }

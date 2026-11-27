@@ -3,11 +3,27 @@
 //! window mint/resolve/open helpers. The single-webview iOS app has no
 //! multi-window watcher, retargeting, or geometry persistence.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tauri::{AppHandle, Manager};
 
 use crate::state::AppState;
+
+/// A process-wide, non-secret claim identifying this client's webview sockets.
+/// Sixteen random bytes are minted and cached once as lowercase hex. A failed
+/// mint logs once and leaves the client untagged.
+pub(crate) fn desktop_holder_tag() -> Option<&'static str> {
+    static TAG: OnceLock<Option<String>> = OnceLock::new();
+    TAG.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        if let Err(error) = getrandom::getrandom(&mut bytes) {
+            tracing::warn!(%error, "desktop holder tag could not be minted");
+            return None;
+        }
+        Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    })
+    .as_deref()
+}
 
 /// The event the launcher receives when the serve set changes.
 pub const SERVES_CHANGED: &str = "serves-changed";
@@ -111,5 +127,21 @@ pub(crate) fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), S
             Ok(())
         }
         None => Err(format!("window {label} isn't open")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desktop_holder_tag;
+
+    #[test]
+    fn desktop_holder_tag_is_stable_32_char_lowercase_hex() {
+        let first = desktop_holder_tag().expect("holder tag mints");
+        let second = desktop_holder_tag().expect("holder tag stays cached");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 32);
+        assert!(first
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
 }

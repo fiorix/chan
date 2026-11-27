@@ -84,10 +84,18 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             let _ = reply.send(result);
         }
         DesktopWindowOp::Hide { id, reply } => {
-            let app2 = app.clone();
-            let result = on_main(&app, move || hide_window(&app2, &id))
-                .await
-                .and_then(|inner| inner);
+            let remote = state
+                .devserver_feed
+                .record_for_window_id(&id)
+                .or_else(|| state.devserver_feed.record_for_native_label(&id));
+            let result = if let Some((devserver_id, record)) = remote {
+                hide_remote_window(&state, &devserver_id, &record.window_id).await
+            } else {
+                let app2 = app.clone();
+                on_main(&app, move || hide_window(&app2, &id))
+                    .await
+                    .and_then(|inner| inner)
+            };
             let _ = reply.send(result);
         }
         DesktopWindowOp::Close { id, reply } => {
@@ -241,6 +249,9 @@ async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String
 /// ([`last_window`]).
 fn hide_window<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let label = serve::resolve_window_label(app, id);
+    if label == "main" {
+        return Ok(());
+    }
     match app.get_webview_window(&label) {
         Some(w) => {
             let state = Arc::clone(app.state::<Arc<AppState>>().inner());
@@ -293,7 +304,12 @@ async fn close_window(
     // the devserver watch reconcile close the local native view. This preserves
     // the existing remote-close behavior while local rows below gain proper
     // bare-id -> composite-label resolution.
-    if state.devserver_feed.record_for_window_id(&id).is_some() {
+    if state
+        .devserver_feed
+        .record_for_window_id(&id)
+        .or_else(|| state.devserver_feed.record_for_native_label(&id))
+        .is_some()
+    {
         let _ = reply.send(crate::discard_devserver_window_by_id(&app, &id).await);
         return;
     }
@@ -326,25 +342,45 @@ fn close_refusal<R: Runtime>(app: &AppHandle<R>, state: &AppState, id: &str) -> 
     last_window::check(app, state, &label, Gesture::Close)
 }
 
-async fn set_remote_window_label(
-    state: &Arc<AppState>,
+pub(crate) async fn hide_remote_window(
+    state: &AppState,
+    devserver_id: &str,
+    window_id: &str,
+) -> Result<(), String> {
+    let Some(conn) = state.devservers.get(devserver_id) else {
+        return Err(format!("devserver {devserver_id} is not connected"));
+    };
+    crate::devserver::set_window_visibility(&conn, window_id, true).await?;
+    if let Err(error) = crate::refresh_devserver_windows(state, devserver_id, &conn).await {
+        tracing::warn!(devserver = %devserver_id, %error, "refreshing devserver windows after hide failed");
+    }
+    Ok(())
+}
+
+pub(crate) async fn set_remote_window_label(
+    state: &AppState,
     window_id: &str,
     label: &str,
 ) -> Result<(), String> {
-    let Some((devserver_id, record)) = state.devserver_feed.record_for_window_id(window_id) else {
+    let Some((devserver_id, record)) = state
+        .devserver_feed
+        .record_for_window_id(window_id)
+        .or_else(|| state.devserver_feed.record_for_native_label(window_id))
+    else {
         return Err(format!("window {window_id} was not found"));
     };
-    let Some(_conn) = state.devservers.get(&devserver_id) else {
+    let Some(conn) = state.devservers.get(&devserver_id) else {
         return Err(format!("devserver {devserver_id} is not connected"));
     };
-    // This build exposes no remote window-label mutation endpoint, so the op
-    // refuses loudly instead of parking.
-    let _ = (&record, label);
-    Err("renaming a devserver window is not supported on this build".to_string())
+    crate::devserver::set_window_label(&conn, &record.window_id, label).await?;
+    if let Err(error) = crate::refresh_devserver_windows(state, &devserver_id, &conn).await {
+        tracing::warn!(devserver = %devserver_id, %error, "refreshing devserver windows after rename failed");
+    }
+    Ok(())
 }
 
-async fn request_remote_tmux(
-    state: &Arc<AppState>,
+pub(crate) async fn request_remote_tmux(
+    state: &AppState,
     library_id: &str,
     connection: &str,
     request: chan_server::TmuxRequest,
@@ -352,13 +388,14 @@ async fn request_remote_tmux(
     let Some(id) = state.devserver_feed.devserver_id_for_library(library_id) else {
         return Err(format!("library {library_id} is not connected"));
     };
-    let Some(_conn) = state.devservers.get(&id) else {
+    let Some(conn) = state.devservers.get(&id) else {
         return Err(format!("devserver {id} is not connected"));
     };
-    // This build exposes no remote tmux action endpoint, so the op refuses
-    // loudly instead of parking.
-    let _ = (connection, request);
-    Err("tmux actions on a devserver are not supported on this build".to_string())
+    crate::devserver::tmux_request(&conn, connection, request).await?;
+    if let Err(error) = crate::refresh_devserver_windows(state, &id, &conn).await {
+        tracing::warn!(devserver = %id, %error, "refreshing devserver windows after tmux request failed");
+    }
+    Ok(())
 }
 
 /// Run `f` on the Tauri main thread and await its result. Tauri window
@@ -450,7 +487,8 @@ mod tests {
             "take_window_ops_rx()",
             "window_ops::run(",
             "connect_rostered_devserver(",
-            "connectedScenes",
+            "with_webview",
+            "gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:",
         ] {
             assert!(IOS_RS.contains(required), "ios.rs must contain {required}");
         }
@@ -458,5 +496,307 @@ mod tests {
             !IOS_RS.contains("[&*app, windows]"),
             "ios.rs must enumerate scene windows rather than legacy UIApplication.windows"
         );
+    }
+
+    fn test_record(library_id: &str, window_id: &str) -> chan_server::WindowRecord {
+        chan_server::WindowRecord {
+            window_id: window_id.into(),
+            library_id: library_id.into(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "Notes".into(),
+            ordinal: 1,
+            label: "Notes".into(),
+            workspace_path: Some("/srv/notes".into()),
+            prefix: "/notes".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_hide_close_label_and_tmux_mutate_devserver_and_refresh_feed() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Manager;
+
+        let windows_store = Arc::new(Mutex::new(vec![test_record("lib-1", "w-1")]));
+        let tmux_calls = Arc::new(Mutex::new(Vec::<(String, chan_server::TmuxRequest)>::new()));
+
+        let ws_vis = Arc::clone(&windows_store);
+        let ws_lbl = Arc::clone(&windows_store);
+        let ws_del = Arc::clone(&windows_store);
+        let ws_get = Arc::clone(&windows_store);
+        let tmux_r = Arc::clone(&tmux_calls);
+
+        let router = axum::Router::new()
+            .route(
+                "/api/library/windows/{id}/visibility",
+                axum::routing::post(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let store = Arc::clone(&ws_vis);
+                        async move {
+                            if let Some(row) = store.lock().unwrap().iter_mut().find(|r| r.window_id == id) {
+                                row.hidden = body["hidden"].as_bool().unwrap_or(false);
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/library/windows/{id}/label",
+                axum::routing::put(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let store = Arc::clone(&ws_lbl);
+                        async move {
+                            if let Some(row) = store.lock().unwrap().iter_mut().find(|r| r.window_id == id) {
+                                row.label = body["label"].as_str().unwrap_or_default().to_string();
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/library/windows/{id}",
+                axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let store = Arc::clone(&ws_del);
+                    async move {
+                        store.lock().unwrap().retain(|r| r.window_id != id);
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::get(move || {
+                    let store = Arc::clone(&ws_get);
+                    async move { axum::Json(store.lock().unwrap().clone()) }
+                }),
+            )
+            .route(
+                "/api/library/tmux/{conn}/request",
+                axum::routing::post(
+                    move |axum::extract::Path(conn): axum::extract::Path<String>,
+                          axum::Json(req): axum::Json<chan_server::TmuxRequest>| {
+                        let tmux = Arc::clone(&tmux_r);
+                        async move {
+                            tmux.lock().unwrap().push((conn, req));
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(super::AppState::with_store(store));
+
+        let lib_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(lib_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        let notify = embedded.library_change_notify();
+        embedded.install_devserver_feed(
+            Arc::clone(&state.devserver_feed) as Arc<dyn chan_server::DevserverFeedSource>
+        );
+        let _ = state.embedded.set(embedded);
+
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = crate::devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin,
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-ops");
+        state.devservers.set(
+            "gw:1".into(),
+            crate::devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(Mutex::new(crate::state::DevserverWindowSnapshot::from(
+                vec![test_record("lib-1", "w-1")],
+            ))),
+        );
+        state
+            .devserver_feed
+            .seed_library_id("gw:1".into(), "lib-1".into());
+
+        // Hide refreshes DevserverFeed and notifies library_change_notify.
+        let n1 = notify.notified();
+        super::hide_remote_window(&state, "gw:1", "w-1")
+            .await
+            .expect("remote hide succeeds");
+        tokio::time::timeout(std::time::Duration::from_secs(2), n1)
+            .await
+            .expect("hide fires library_change_notify");
+        assert!(
+            state
+                .devserver_feed
+                .record_for_window_id("w-1")
+                .unwrap()
+                .1
+                .hidden
+        );
+
+        // SetWindowLabel (via composite native label too) refreshes DevserverFeed.
+        let n2 = notify.notified();
+        super::set_remote_window_label(&state, "lib-1::w-1", "Renamed")
+            .await
+            .expect("remote rename succeeds");
+        tokio::time::timeout(std::time::Duration::from_secs(2), n2)
+            .await
+            .expect("rename fires library_change_notify");
+        assert_eq!(
+            state
+                .devserver_feed
+                .record_for_window_id("w-1")
+                .unwrap()
+                .1
+                .label,
+            "Renamed"
+        );
+
+        // TmuxRequest forwards to /api/library/tmux/{conn}/request.
+        super::request_remote_tmux(
+            &state,
+            "lib-1",
+            "tmux-conn",
+            chan_server::TmuxRequest::NewWindow,
+        )
+        .await
+        .expect("remote tmux request succeeds");
+        assert_eq!(
+            tmux_calls.lock().unwrap().as_slice(),
+            [("tmux-conn".into(), chan_server::TmuxRequest::NewWindow)]
+        );
+
+        // last_window::check never refuses closing a remote window when "main" is sole window.
+        let app = tauri::test::mock_app();
+        app.manage(Arc::clone(&state));
+        let _main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+        assert!(super::close_refusal(app.handle(), &state, "w-1").is_ok());
+
+        // Close discards remote window, returns Ok(true), and removes it from DevserverFeed.
+        let n3 = notify.notified();
+        let closed = crate::discard_devserver_window_in_state(&state, "w-1")
+            .await
+            .expect("remote discard succeeds");
+        assert!(closed);
+        tokio::time::timeout(std::time::Duration::from_secs(2), n3)
+            .await
+            .expect("discard fires library_change_notify");
+        assert!(state.devserver_feed.record_for_window_id("w-1").is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_hide_and_close_unknown_or_disconnected_behave_cleanly() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(super::AppState::with_store(store));
+
+        // Unknown / local id returns Ok(false) from discard_devserver_window_in_state.
+        assert_eq!(
+            crate::discard_devserver_window_in_state(&state, "w-missing").await,
+            Ok(false)
+        );
+        assert!(super::set_remote_window_label(&state, "w-missing", "X")
+            .await
+            .unwrap_err()
+            .contains("was not found"));
+        assert!(super::request_remote_tmux(
+            &state,
+            "lib-missing",
+            "conn",
+            chan_server::TmuxRequest::Detach
+        )
+        .await
+        .unwrap_err()
+        .contains("is not connected"));
+
+        // Feed row present without live connection returns Err("devserver ... is not connected").
+        state.devserver_feed.register_windows(
+            "gw:gone".into(),
+            Arc::new(Mutex::new(crate::state::DevserverWindowSnapshot::from(
+                vec![test_record("lib-gone", "w-gone")],
+            ))),
+        );
+        state
+            .devserver_feed
+            .seed_library_id("gw:gone".into(), "lib-gone".into());
+        assert_eq!(
+            super::hide_remote_window(&state, "gw:gone", "w-gone")
+                .await
+                .unwrap_err(),
+            "devserver gw:gone is not connected"
+        );
+        assert_eq!(
+            super::set_remote_window_label(&state, "w-gone", "Label")
+                .await
+                .unwrap_err(),
+            "devserver gw:gone is not connected"
+        );
+        assert_eq!(
+            super::request_remote_tmux(
+                &state,
+                "lib-gone",
+                "conn",
+                chan_server::TmuxRequest::Detach
+            )
+            .await
+            .unwrap_err(),
+            "devserver gw:gone is not connected"
+        );
+        assert_eq!(
+            crate::discard_devserver_window_in_state(&state, "w-gone")
+                .await
+                .unwrap_err(),
+            "devserver gw:gone is not connected"
+        );
+
+        // hide_window on "main" is a safe no-op.
+        let app = tauri::test::mock_app();
+        let _main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+        assert!(super::hide_window(app.handle(), "main").is_ok());
     }
 }

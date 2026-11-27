@@ -248,14 +248,24 @@ impl DevserverConns {
             .map(|(conn, _)| conn.clone())
     }
 
+    /// Find the live `(devserver_id, conn)` entry pinned to `exact_origin`.
+    pub fn gateway_entry_for_origin(&self, exact_origin: &str) -> Option<(String, DevserverConn)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(id, (conn, _))| {
+                conn.gateway
+                    .as_ref()
+                    .is_some_and(|gw| gw.proxy_origin == exact_origin)
+                    .then(|| (id.clone(), conn.clone()))
+            })
+    }
+
     /// Find the live gateway-backed connection pinned to `exact_origin`.
     pub fn gateway_conn_for_origin(&self, exact_origin: &str) -> Option<DevserverConn> {
-        self.inner.lock().unwrap().values().find_map(|(conn, _)| {
-            conn.gateway
-                .as_ref()
-                .is_some_and(|gw| gw.proxy_origin == exact_origin)
-                .then(|| conn.clone())
-        })
+        self.gateway_entry_for_origin(exact_origin)
+            .map(|(_, conn)| conn)
     }
 
     /// Whether `id` is currently registered with the exact gateway connection
@@ -2179,6 +2189,145 @@ pub async fn mint_library_window_with_start(
     resp.json::<chan_server::WindowRecord>()
         .await
         .map_err(|e| format!("decoding {}: {e}", decode_label.for_conn(conn)))
+}
+
+fn library_window_path(window_id: &str, suffix: Option<&str>) -> Result<String, String> {
+    if window_id.is_empty() {
+        return Err("window id must not be empty".to_string());
+    }
+    let mut url = url::Url::parse("http://localhost/api/library/windows").expect("static base URL");
+    {
+        let mut segments = url.path_segments_mut().expect("base URL has path segments");
+        segments.push(window_id);
+        if let Some(suffix) = suffix {
+            segments.push(suffix);
+        }
+    }
+    Ok(url.path().to_string())
+}
+
+/// Discard a remote library window (`DELETE /api/library/windows/{window_id}`).
+/// A 404 (already gone) is treated as success.
+pub async fn discard_library_window(conn: &DevserverConn, window_id: &str) -> Result<(), String> {
+    let path = library_window_path(window_id, None)?;
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::DELETE,
+        &path,
+        None::<&()>,
+        "discarding library window",
+    )
+    .await?;
+    if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(devserver_status_error(
+            conn,
+            resp,
+            PerArmLabel {
+                gateway: "gateway library window discard",
+                raw: "library window discard",
+            },
+        )
+        .await);
+    }
+    Ok(())
+}
+
+/// Persist a remote window's hidden state (`POST /api/library/windows/{window_id}/visibility`).
+pub async fn set_window_visibility(
+    conn: &DevserverConn,
+    window_id: &str,
+    hidden: bool,
+) -> Result<(), String> {
+    let path = library_window_path(window_id, Some("visibility"))?;
+    let body = serde_json::json!({ "hidden": hidden });
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(&body),
+        "setting devserver window visibility",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(
+            conn,
+            resp,
+            PerArmLabel {
+                gateway: "gateway window visibility",
+                raw: "devserver window visibility",
+            },
+        )
+        .await);
+    }
+    Ok(())
+}
+
+/// Persist a remote non-control window's label (`PUT /api/library/windows/{window_id}/label`).
+pub async fn set_window_label(
+    conn: &DevserverConn,
+    window_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let path = library_window_path(window_id, Some("label"))?;
+    let body = serde_json::json!({ "label": label });
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::PUT,
+        &path,
+        Some(&body),
+        "setting devserver window label",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(
+            conn,
+            resp,
+            PerArmLabel {
+                gateway: "gateway window label",
+                raw: "devserver window label",
+            },
+        )
+        .await);
+    }
+    Ok(())
+}
+
+/// Ask a live tmux connection on this devserver to run `request` through the
+/// authenticated devserver transport.
+pub async fn tmux_request(
+    conn: &DevserverConn,
+    connection: &str,
+    request: chan_server::TmuxRequest,
+) -> Result<(), String> {
+    if connection.is_empty() {
+        return Err("tmux connection must not be empty".to_string());
+    }
+    let mut url = url::Url::parse("http://localhost/api/library/tmux").expect("static base URL");
+    url.path_segments_mut()
+        .expect("base URL has path segments")
+        .push(connection)
+        .push("request");
+    let body = serde_json::to_value(request).map_err(|e| format!("encoding tmux request: {e}"))?;
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::POST,
+        url.path(),
+        Some(&body),
+        "requesting devserver tmux action",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(
+            conn,
+            resp,
+            PerArmLabel {
+                gateway: "gateway tmux request",
+                raw: "devserver tmux request",
+            },
+        )
+        .await);
+    }
+    Ok(())
 }
 
 /// Allow lifecycle requests to mount or drain a tenant (above the server's 60 s
@@ -4215,6 +4364,392 @@ mod tests {
                 Some(serde_json::json!({ "force": true }))
             )
         );
+    }
+
+    #[test]
+    fn gateway_entry_for_origin_returns_id_and_conn_and_clears_on_remove() {
+        let conns = DevserverConns::default();
+        let gw_conn = gateway_test_conn("https://gw.chan.app/mobile/v1/devserver/entry".into());
+        let origin = gw_conn.gateway.as_ref().unwrap().proxy_origin.clone();
+        let raw_conn = DevserverConn {
+            host: "127.0.0.1".into(),
+            port: 7000,
+            token: "raw-tok".into(),
+            name: "raw".into(),
+            gateway: None,
+        };
+        conns.set("direct".into(), raw_conn);
+        conns.set("gw:1".into(), gw_conn);
+
+        let (id, conn) = conns
+            .gateway_entry_for_origin(&origin)
+            .expect("matching gateway origin resolves");
+        assert_eq!(id, "gw:1");
+        assert_eq!(conn.gateway.as_ref().unwrap().proxy_origin, origin);
+        assert!(conns
+            .gateway_entry_for_origin("https://other.proxy.chan.app")
+            .is_none());
+        assert!(conns
+            .gateway_entry_for_origin("http://127.0.0.1:7000")
+            .is_none());
+
+        conns.remove("gw:1");
+        assert!(conns.gateway_entry_for_origin(&origin).is_none());
+    }
+
+    async fn start_stub_server(
+        router: axum::Router,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (addr, handle)
+    }
+
+    fn local_gateway_conn(addr: std::net::SocketAddr, csrf: &str) -> DevserverConn {
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin,
+            "pat-test".into(),
+        );
+        gw.seed_fresh_session_for_test(csrf);
+        DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: String::new(),
+            name: "gw-box".into(),
+            gateway: Some(Box::new(gw)),
+        }
+    }
+
+    fn local_gateway_conn_with_apex(addr: std::net::SocketAddr, csrf: &str) -> DevserverConn {
+        let identity_origin = format!("http://127.0.0.1:{}", addr.port());
+        let proxy_apex = format!("http://localtest.me:{}", addr.port());
+        let proxy_origin = format!("http://alice--aaaaaaaaaaaa.p1.localtest.me:{}", addr.port());
+        let mut gw = GatewayConn::new(
+            identity_origin.clone(),
+            format!("{identity_origin}/mobile/v1/devserver/entry"),
+            proxy_origin,
+            "pat-test".into(),
+        );
+        gw.proxy_apex_origin = proxy_apex;
+        gw.seed_fresh_session_for_test(csrf);
+        DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: String::new(),
+            name: "gw-box".into(),
+            gateway: Some(Box::new(gw)),
+        }
+    }
+
+    fn local_raw_conn(addr: std::net::SocketAddr, token: &str) -> DevserverConn {
+        DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: token.into(),
+            name: "raw-box".into(),
+            gateway: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_library_window_request_contract_per_arm() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let seen_raw = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let seen_gw = Arc::new(Mutex::new(
+            Vec::<(String, Option<String>, Option<String>)>::new(),
+        ));
+        let gw_entry_hits = Arc::new(AtomicUsize::new(0));
+
+        let seen_raw_r = Arc::clone(&seen_raw);
+        let raw_router = axum::Router::new().route(
+            "/api/library/windows/{id}",
+            axum::routing::delete(
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let seen_raw = Arc::clone(&seen_raw_r);
+                    async move {
+                        let auth = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        seen_raw.lock().unwrap().push((id.clone(), auth));
+                        match id.as_str() {
+                            "win/1" => axum::http::StatusCode::NO_CONTENT,
+                            "missing" => axum::http::StatusCode::NOT_FOUND,
+                            _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        }
+                    }
+                },
+            ),
+        );
+        let (raw_addr, raw_server) = start_stub_server(raw_router).await;
+        let raw_conn = local_raw_conn(raw_addr, "raw-secret");
+
+        assert!(discard_library_window(&raw_conn, "").await.is_err());
+        discard_library_window(&raw_conn, "win/1").await.unwrap();
+        discard_library_window(&raw_conn, "missing").await.unwrap();
+        let err = discard_library_window(&raw_conn, "boom").await.unwrap_err();
+        assert!(err.contains("library window discard"), "{err}");
+        assert!(err.contains("500"), "{err}");
+        assert_eq!(
+            seen_raw.lock().unwrap().as_slice(),
+            [
+                ("win/1".to_string(), Some("Bearer raw-secret".to_string())),
+                ("missing".to_string(), Some("Bearer raw-secret".to_string())),
+                ("boom".to_string(), Some("Bearer raw-secret".to_string())),
+            ]
+        );
+
+        let seen_gw_r = Arc::clone(&seen_gw);
+        let gw_entry_hits_r = Arc::clone(&gw_entry_hits);
+        let gw_addr_holder = Arc::new(OnceLock::<std::net::SocketAddr>::new());
+        let gw_addr_entry = Arc::clone(&gw_addr_holder);
+        let gw_router = axum::Router::new()
+            .route(
+                "/mobile/v1/devserver/entry",
+                axum::routing::post(move || {
+                    let hits = Arc::clone(&gw_entry_hits_r);
+                    let addr = *gw_addr_entry.get().unwrap();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        let proxy_origin =
+                            format!("http://alice--aaaaaaaaaaaa.p1.localtest.me:{}", addr.port());
+                        axum::Json(serde_json::json!({
+                            "owner_user_id": test_owner_id(),
+                            "username": "alice",
+                            "devserver_id": "a".repeat(64),
+                            "proxy_origin": proxy_origin,
+                            "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                            "entry_credential": "cred-1",
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post(|| async {
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::SEE_OTHER)
+                        .header("location", "/")
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_gate=gate-2; Path=/; HttpOnly; Max-Age=120",
+                        )
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_csrf=csrf-2; Path=/; Max-Age=120",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/library/windows/{id}",
+                axum::routing::delete(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          headers: axum::http::HeaderMap| {
+                        let seen_gw = Arc::clone(&seen_gw_r);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            let csrf = headers
+                                .get("x-chan-csrf")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            seen_gw.lock().unwrap().push((id.clone(), cookie, csrf));
+                            match id.as_str() {
+                                "w-1" => axum::http::StatusCode::NO_CONTENT,
+                                "gone" => axum::http::StatusCode::NOT_FOUND,
+                                _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            }
+                        }
+                    },
+                ),
+            );
+        let (gw_addr, gw_server) = start_stub_server(gw_router).await;
+        gw_addr_holder.set(gw_addr).unwrap();
+        let gw_conn = local_gateway_conn_with_apex(gw_addr, "csrf-1");
+
+        discard_library_window(&gw_conn, "w-1").await.unwrap();
+        // 404 refreshes session once and retries, then accepts second 404 as Ok(()).
+        discard_library_window(&gw_conn, "gone").await.unwrap();
+        assert_eq!(gw_entry_hits.load(Ordering::SeqCst), 1);
+        let gw_err = discard_library_window(&gw_conn, "fail").await.unwrap_err();
+        assert!(
+            gw_err.contains("gateway library window discard"),
+            "{gw_err}"
+        );
+        assert_eq!(
+            seen_gw.lock().unwrap()[0],
+            (
+                "w-1".to_string(),
+                Some("__Host-devserver_gate=test-gate; __Host-devserver_csrf=csrf-1".to_string()),
+                Some("csrf-1".to_string()),
+            )
+        );
+        assert_eq!(
+            seen_gw.lock().unwrap()[2].2.as_deref(),
+            Some("csrf-2"),
+            "404 refresh updated CSRF token for subsequent request"
+        );
+
+        raw_server.abort();
+        gw_server.abort();
+    }
+
+    #[tokio::test]
+    async fn set_window_visibility_and_label_and_tmux_request_contracts_per_arm() {
+        let recorded = Arc::new(Mutex::new(Vec::<(String, String, serde_json::Value)>::new()));
+        let recorded_r = Arc::clone(&recorded);
+        let router = axum::Router::new()
+            .route(
+                "/api/library/windows/{id}/visibility",
+                axum::routing::post(
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let recorded = Arc::clone(&recorded_r);
+                        async move {
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(("visibility".into(), id.clone(), body));
+                            if id == "bad" {
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                            } else {
+                                axum::http::StatusCode::NO_CONTENT
+                            }
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/library/windows/{id}/label",
+                axum::routing::put({
+                    let recorded = Arc::clone(&recorded);
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let recorded = Arc::clone(&recorded);
+                        async move {
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(("label".into(), id.clone(), body));
+                            if id == "bad" {
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                            } else {
+                                axum::http::StatusCode::NO_CONTENT
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/tmux/{conn}/request",
+                axum::routing::post({
+                    let recorded = Arc::clone(&recorded);
+                    move |axum::extract::Path(conn): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let recorded = Arc::clone(&recorded);
+                        async move {
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(("tmux".into(), conn.clone(), body));
+                            if conn == "bad" {
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                            } else {
+                                axum::http::StatusCode::NO_CONTENT
+                            }
+                        }
+                    }
+                }),
+            );
+        let (addr, server) = start_stub_server(router).await;
+        let raw = local_raw_conn(addr, "raw-tok");
+        let gw = local_gateway_conn(addr, "csrf-tok");
+
+        set_window_visibility(&raw, "w-1", true).await.unwrap();
+        set_window_visibility(&gw, "w-1", false).await.unwrap();
+        assert!(set_window_visibility(&raw, "bad", true)
+            .await
+            .unwrap_err()
+            .contains("devserver window visibility"));
+        assert!(set_window_visibility(&gw, "bad", false)
+            .await
+            .unwrap_err()
+            .contains("gateway window visibility"));
+
+        set_window_label(&raw, "w-1", "Alpha").await.unwrap();
+        set_window_label(&gw, "w-1", "Beta").await.unwrap();
+        assert!(set_window_label(&raw, "bad", "X")
+            .await
+            .unwrap_err()
+            .contains("devserver window label"));
+        assert!(set_window_label(&gw, "bad", "Y")
+            .await
+            .unwrap_err()
+            .contains("gateway window label"));
+
+        assert!(tmux_request(&raw, "", chan_server::TmuxRequest::NewWindow)
+            .await
+            .is_err());
+        tmux_request(&raw, "term/one", chan_server::TmuxRequest::NewWindow)
+            .await
+            .unwrap();
+        tmux_request(&gw, "term/one", chan_server::TmuxRequest::Detach)
+            .await
+            .unwrap();
+        assert!(tmux_request(&raw, "bad", chan_server::TmuxRequest::Detach)
+            .await
+            .unwrap_err()
+            .contains("devserver tmux request"));
+        assert!(
+            tmux_request(&gw, "bad", chan_server::TmuxRequest::NewWindow)
+                .await
+                .unwrap_err()
+                .contains("gateway tmux request")
+        );
+
+        let calls = recorded.lock().unwrap().clone();
+        assert!(calls.contains(&(
+            "visibility".into(),
+            "w-1".into(),
+            serde_json::json!({ "hidden": true })
+        )));
+        assert!(calls.contains(&(
+            "visibility".into(),
+            "w-1".into(),
+            serde_json::json!({ "hidden": false })
+        )));
+        assert!(calls.contains(&(
+            "label".into(),
+            "w-1".into(),
+            serde_json::json!({ "label": "Alpha" })
+        )));
+        assert!(calls.contains(&(
+            "label".into(),
+            "w-1".into(),
+            serde_json::json!({ "label": "Beta" })
+        )));
+        assert!(calls.contains(&(
+            "tmux".into(),
+            "term/one".into(),
+            serde_json::to_value(chan_server::TmuxRequest::NewWindow).unwrap()
+        )));
+        assert!(calls.contains(&(
+            "tmux".into(),
+            "term/one".into(),
+            serde_json::to_value(chan_server::TmuxRequest::Detach).unwrap()
+        )));
+
+        server.abort();
     }
 }
 

@@ -561,6 +561,12 @@ impl EmbeddedServer {
         self.host.signal_library_change();
     }
 
+    /// Resolve the pane-highlight colour for `library_id` across the local
+    /// colour store and connected devservers.
+    pub fn pane_color(&self, library_id: &str) -> Option<String> {
+        self.host.pane_color(library_id)
+    }
+
     /// Mint a window into the local library registry and return its assembled
     /// record.
     pub fn mint_window(
