@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{Gateway, WireguardProtection};
 
 const RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The launcher's words for a tunnel whose driver has stopped.
+const STOPPED: &str = "stopped; connect the gateway again";
 static NATIVE_PROXY: OnceLock<url::Url> = OnceLock::new();
 
 pub(crate) fn client_builder(
@@ -240,11 +242,31 @@ fn host_routes(hosts: &[crate::config::WireguardHost]) -> Vec<HostRoute> {
         .collect()
 }
 
+#[cfg(test)]
+fn next_ingress_instance() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 struct Ingress {
     id: String,
     fingerprint: [u8; 32],
     route: ProxyRoute,
+    #[cfg(test)]
+    instance: u64,
+    #[cfg(test)]
+    test_closed: bool,
+}
+
+impl Ingress {
+    fn is_closed(&self) -> bool {
+        #[cfg(test)]
+        if self.test_closed {
+            return true;
+        }
+        self.route.tunnel.is_closed()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -395,11 +417,9 @@ impl Fabric {
             Ok(configs) => {
                 let _runtime = self.runtime.enter();
                 for next in configs {
-                    if let Some(ingress) = previous
-                        .routes
-                        .iter()
-                        .find(|old| old.id == next.id && old.fingerprint == next.fingerprint)
-                    {
+                    if let Some(ingress) = previous.routes.iter().find(|old| {
+                        old.id == next.id && old.fingerprint == next.fingerprint && !old.is_closed()
+                    }) {
                         row.routes.push(ingress.clone());
                         continue;
                     }
@@ -411,6 +431,10 @@ impl Fabric {
                                 tunnel,
                                 hosts: next.hosts,
                             },
+                            #[cfg(test)]
+                            instance: next_ingress_instance(),
+                            #[cfg(test)]
+                            test_closed: false,
                         }),
                         Err(error) => {
                             let reason = format!("WireGuard: {}: {error}", next.id);
@@ -509,10 +533,9 @@ impl Fabric {
         match &prepared.configs {
             Ok(configs) if enabled => {
                 configs.len() != row.routes.len()
-                    || configs
-                        .iter()
-                        .zip(&row.routes)
-                        .any(|(next, old)| next.id != old.id || next.fingerprint != old.fingerprint)
+                    || configs.iter().zip(&row.routes).any(|(next, old)| {
+                        next.id != old.id || next.fingerprint != old.fingerprint || old.is_closed()
+                    })
             }
             _ => !row.routes.is_empty(),
         }
@@ -564,13 +587,24 @@ impl Fabric {
             return Err("WireGuard: previous connections are still closing".into());
         }
         if row.routes.iter().any(|route| {
-            route
-                .route
-                .hosts
-                .iter()
-                .any(|mapped| host_matches(&mapped.name, host))
+            !route.is_closed()
+                && route
+                    .route
+                    .hosts
+                    .iter()
+                    .any(|mapped| host_matches(&mapped.name, host))
         }) {
             return Ok(());
+        }
+        if row.routes.iter().any(|route| {
+            route.is_closed()
+                && route
+                    .route
+                    .hosts
+                    .iter()
+                    .any(|mapped| host_matches(&mapped.name, host))
+        }) {
+            return Err(format!("WireGuard: {STOPPED}"));
         }
         if row
             .protection
@@ -585,7 +619,10 @@ impl Fabric {
         }
         match &row.refusal {
             Some(reason) => Err(reason.clone()),
-            None if !row.routes.is_empty() => Ok(()),
+            None if row.routes.iter().any(|route| !route.is_closed()) => Ok(()),
+            None if row.routes.iter().any(Ingress::is_closed) => {
+                Err(format!("WireGuard: {STOPPED}"))
+            }
             None => Err("WireGuard: no active ingress".into()),
         }
     }
@@ -611,10 +648,14 @@ impl Fabric {
                     .strip_prefix(&format!("{id}/"))
                     .unwrap_or(&ingress.id)
                     .to_string(),
-                status: match ingress.route.tunnel.status().handshake {
-                    chan_wireguard::HandshakeState::Live(_) => "connected",
-                    chan_wireguard::HandshakeState::Never => "connecting",
-                    chan_wireguard::HandshakeState::Lost(_) => "disconnected",
+                status: if ingress.is_closed() {
+                    STOPPED
+                } else {
+                    match ingress.route.tunnel.status().handshake {
+                        chan_wireguard::HandshakeState::Live(_) => "connected",
+                        chan_wireguard::HandshakeState::Never => "connecting",
+                        chan_wireguard::HandshakeState::Lost(_) => "disconnected",
+                    }
                 }
                 .into(),
             })
@@ -630,7 +671,12 @@ impl Fabric {
         }));
         let status = ingresses
             .iter()
-            .find(|ingress| ingress.status != "connected")
+            .find(|ingress| ingress.status == STOPPED)
+            .or_else(|| {
+                ingresses
+                    .iter()
+                    .find(|ingress| ingress.status != "connected")
+            })
             .or_else(|| ingresses.first())
             .map(|ingress| ingress.status.clone());
         (
@@ -638,6 +684,79 @@ impl Fabric {
             ingresses,
             row.refusal.clone().filter(|_| row.configured),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_closed_for_test(&self, gateway_id: &str, ingress_id: &str) {
+        let mut policy = self.policy.lock().unwrap();
+        let ingress = policy
+            .rows
+            .get_mut(gateway_id)
+            .expect("test gateway row")
+            .routes
+            .iter_mut()
+            .find(|route| route.id == ingress_id)
+            .expect("test ingress");
+        ingress.test_closed = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingress_instances(&self, gateway_id: &str) -> Vec<(String, u64)> {
+        self.policy
+            .lock()
+            .unwrap()
+            .rows
+            .get(gateway_id)
+            .map(|row| {
+                row.routes
+                    .iter()
+                    .map(|route| (route.id.clone(), route.instance))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn shut_down_ingress_for_test(&self, gateway_id: &str, ingress_id: &str) {
+        let tunnel = {
+            let policy = self.policy.lock().unwrap();
+            policy
+                .rows
+                .get(gateway_id)
+                .expect("test gateway row")
+                .routes
+                .iter()
+                .find(|route| route.id == ingress_id)
+                .expect("test ingress")
+                .route
+                .tunnel
+                .clone()
+        };
+        let scratch = Arc::new(
+            ConnectProxy::bind_routed_with_loopback_bypass(
+                Vec::new(),
+                "127.0.0.1:0".parse().expect("loopback socket"),
+            )
+            .await
+            .unwrap(),
+        );
+        let _install = scratch
+            .replace_protected_routes(
+                vec![(
+                    "kill".into(),
+                    ProxyRoute {
+                        tunnel: tunnel.clone(),
+                        hosts: Vec::new(),
+                    },
+                )],
+                ProtectedDestinations::default(),
+            )
+            .unwrap();
+        let retirement = scratch
+            .replace_protected_routes(Vec::new(), ProtectedDestinations::default())
+            .unwrap();
+        retirement.wait().await;
+        assert!(tunnel.is_closed());
     }
 }
 
@@ -839,10 +958,17 @@ pub(crate) fn invalidate_native<R: tauri::Runtime>(
     gateway: &str,
 ) {
     let ids = state.invalidate_gateway_native(gateway);
+    let any = !ids.is_empty();
     for id in ids {
         state.devservers.remove(&id);
         state.devserver_feed.forget(&id);
         stop_selected(app, state, &id);
+    }
+    if any {
+        if let Some(embedded) = state.embedded() {
+            embedded.signal_library_change();
+        }
+        let _ = tauri::Emitter::emit(app, crate::serve::SERVES_CHANGED, ());
     }
 }
 
@@ -1473,5 +1599,927 @@ mod tests {
             &networks[0],
             "127.0.0.1".parse().unwrap()
         ));
+    }
+
+    fn generate_secret() -> (chan_wireguard::x25519::StaticSecret, String) {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes).unwrap();
+        let secret = chan_wireguard::x25519::StaticSecret::from(bytes);
+        let public = base64::engine::general_purpose::STANDARD
+            .encode(chan_wireguard::x25519::PublicKey::from(&secret).as_bytes());
+        (secret, public)
+    }
+
+    struct LoopbackPeer {
+        _tunnel: Tunnel,
+        endpoint: String,
+        public_key: String,
+        http_port: u16,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for LoopbackPeer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn start_loopback_peer(client_public_key: &str, body: &'static str) -> LoopbackPeer {
+        let (peer_secret, peer_public) = generate_secret();
+        let client_pub = parse_public_key(client_public_key).unwrap();
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_addr = udp.local_addr().unwrap();
+        let placeholder: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let config = chan_wireguard::config::Config {
+            private_key: peer_secret,
+            addresses: vec![chan_wireguard::config::Cidr {
+                addr: "10.7.0.1".parse().unwrap(),
+                prefix: 32,
+            }],
+            mtu: None,
+            peer: chan_wireguard::config::Peer {
+                public_key: client_pub,
+                preshared_key: None,
+                endpoint: chan_wireguard::config::Endpoint::parse("127.0.0.1:9").unwrap(),
+                allowed_ips: vec![chan_wireguard::config::Cidr {
+                    addr: "10.7.0.2".parse().unwrap(),
+                    prefix: 32,
+                }],
+                persistent_keepalive: None,
+            },
+        };
+        let tunnel = Tunnel::start_on(config, udp, placeholder).unwrap();
+        let mut listener = tunnel.listen(0).unwrap();
+        let http_port = listener.port();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_hits = Arc::clone(&hits);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok(mut stream) = listener.accept().await else {
+                    break;
+                };
+                let conn_hits = Arc::clone(&task_hits);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    if stream.read(&mut buf).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    conn_hits.fetch_add(1, Ordering::Relaxed);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        LoopbackPeer {
+            _tunnel: tunnel,
+            endpoint: udp_addr.to_string(),
+            public_key: peer_public,
+            http_port,
+            hits,
+            task,
+        }
+    }
+
+    fn proxy_client(fabric: &Fabric) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(format!("http://{}", fabric.address())).unwrap())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+    }
+
+    fn enrolled_gateway_with_peers(
+        id: &str,
+        key: &crate::wireguard_keys::GeneratedKey,
+        peers: &[(&str, &LoopbackPeer)],
+    ) -> Gateway {
+        let mut gw = gateway();
+        gw.id = id.into();
+        gw.wireguard_public_key = Some(key.public_key.clone());
+        gw.wireguard_enrolled_key = Some(key.public_key.clone());
+        gw.wireguard_key_file = Some(key.path.clone());
+        let ingresses = peers
+            .iter()
+            .map(|(ingress_id, peer)| crate::config::WireguardIngress {
+                id: (*ingress_id).into(),
+                endpoint: peer.endpoint.clone(),
+                public_key: peer.public_key.clone(),
+                hosts: vec![crate::config::WireguardHost {
+                    name: format!("*.{ingress_id}.example.test"),
+                    addresses: vec!["10.7.0.1".parse().unwrap()],
+                }],
+            })
+            .collect();
+        gw.wireguard_enrollment = Some(crate::config::WireguardEnrollment {
+            key_file: key.path.clone(),
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: Some(5),
+            ingresses,
+        });
+        let prepared = prepare(&gw);
+        gw.wireguard_protection = prepared.protection;
+        gw
+    }
+
+    #[tokio::test]
+    async fn reconcile_replaces_a_tunnel_whose_driver_stopped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (client_secret, client_public) = generate_secret();
+        let peer = start_loopback_peer(&client_public, "ok").await;
+
+        let conf = dir.path().join("client.conf");
+        std::fs::write(
+            &conf,
+            format!(
+                "[Interface]\nPrivateKey = {}\nAddress = 10.7.0.2/32\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = 10.7.0.1/32\n",
+                base64::engine::general_purpose::STANDARD.encode(client_secret.to_bytes()),
+                peer.public_key,
+                peer.endpoint
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&conf, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut gw = gateway();
+        gw.wireguard = Some(conf);
+        gw.wireguard_hosts = vec![crate::config::WireguardHost {
+            name: "*.private.example.test".into(),
+            addresses: vec!["10.7.0.1".parse().unwrap()],
+        }];
+        let fabric = fabric().await;
+        fabric.reconcile(&gw, prepare(&gw)).unwrap();
+        fabric.settled().await.unwrap();
+
+        let client = proxy_client(&fabric);
+        let url = format!(
+            "http://tenant.private.example.test:{}/probe",
+            peer.http_port
+        );
+        assert_eq!(
+            client.get(&url).send().await.unwrap().text().await.unwrap(),
+            "ok"
+        );
+        assert_eq!(fabric.view(&gw.id).0.as_deref(), Some("connected"));
+        let before = fabric.ingress_instances(&gw.id);
+
+        fabric.mark_closed_for_test(&gw.id, &gw.id);
+        let (status, ingresses, _) = fabric.view(&gw.id);
+        assert_eq!(status.as_deref(), Some(STOPPED));
+        assert_eq!(ingresses[0].status, STOPPED);
+        assert!(fabric.changes_routes(&gw.id, &prepare(&gw), true));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.private.example.test")
+            .unwrap_err()
+            .contains(STOPPED));
+
+        fabric.reconcile(&gw, prepare(&gw)).unwrap();
+        fabric.settled().await.unwrap();
+        assert_ne!(fabric.ingress_instances(&gw.id), before);
+        assert!(!fabric.changes_routes(&gw.id, &prepare(&gw), true));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.private.example.test")
+            .is_ok());
+        assert_eq!(
+            client.get(&url).send().await.unwrap().text().await.unwrap(),
+            "ok"
+        );
+        assert_eq!(fabric.view(&gw.id).0.as_deref(), Some("connected"));
+    }
+
+    #[tokio::test]
+    async fn enrolled_reconcile_restarts_only_the_ingress_whose_driver_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::wireguard_keys::generate(dir.path(), "gw-multi").unwrap();
+        let p1 = start_loopback_peer(&key.public_key, "p1").await;
+        let p2 = start_loopback_peer(&key.public_key, "p2").await;
+        let gw = enrolled_gateway_with_peers("gw-multi", &key, &[("p1", &p1), ("p2", &p2)]);
+
+        let fabric = fabric().await;
+        fabric.reconcile(&gw, prepare(&gw)).unwrap();
+        fabric.settled().await.unwrap();
+        let instances =
+            || -> BTreeMap<String, u64> { fabric.ingress_instances(&gw.id).into_iter().collect() };
+        let initial = instances();
+
+        // While p1 is still "connecting", marking p2 closed must give STOPPED precedence.
+        fabric.mark_closed_for_test(&gw.id, "gw-multi/p2");
+        let (summary, ingresses, _) = fabric.view(&gw.id);
+        assert_eq!(ingresses[0].status, "connecting");
+        assert_eq!(ingresses[1].status, STOPPED);
+        assert_eq!(summary.as_deref(), Some(STOPPED));
+        assert!(fabric.changes_routes(&gw.id, &prepare(&gw), true));
+
+        fabric.reconcile(&gw, prepare(&gw)).unwrap();
+        fabric.settled().await.unwrap();
+        let after_p2 = instances();
+        assert_eq!(after_p2["gw-multi/p1"], initial["gw-multi/p1"]);
+        assert_ne!(after_p2["gw-multi/p2"], initial["gw-multi/p2"]);
+
+        let client = proxy_client(&fabric);
+        let u1 = format!("http://tenant.p1.example.test:{}/probe", p1.http_port);
+        let u2 = format!("http://tenant.p2.example.test:{}/probe", p2.http_port);
+        assert_eq!(
+            client.get(&u1).send().await.unwrap().text().await.unwrap(),
+            "p1"
+        );
+        assert_eq!(
+            client.get(&u2).send().await.unwrap().text().await.unwrap(),
+            "p2"
+        );
+
+        // Now mark p1 closed while p2 stays live and connected.
+        fabric.mark_closed_for_test(&gw.id, "gw-multi/p1");
+        let (summary, ingresses, _) = fabric.view(&gw.id);
+        assert_eq!(ingresses[0].status, STOPPED);
+        assert_eq!(ingresses[1].status, "connected");
+        assert_eq!(summary.as_deref(), Some(STOPPED));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.p1.example.test")
+            .unwrap_err()
+            .contains(STOPPED));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.p2.example.test")
+            .is_ok());
+
+        fabric.reconcile(&gw, prepare(&gw)).unwrap();
+        fabric.settled().await.unwrap();
+        let after_p1 = instances();
+        assert_ne!(after_p1["gw-multi/p1"], after_p2["gw-multi/p1"]);
+        assert_eq!(after_p1["gw-multi/p2"], after_p2["gw-multi/p2"]);
+        assert_eq!(
+            client.get(&u1).send().await.unwrap().text().await.unwrap(),
+            "p1"
+        );
+        assert_eq!(
+            client.get(&u2).send().await.unwrap().text().await.unwrap(),
+            "p2"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_tunnel_shutdown_and_reconcile_saved_resume_recovery() {
+        use tauri::{Listener, Manager};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let wg_dir = store.lock().unwrap().wireguard_dir();
+        let key = crate::wireguard_keys::generate(&wg_dir, "gw-resume").unwrap();
+        let p1 = start_loopback_peer(&key.public_key, "p1").await;
+        let p2 = start_loopback_peer(&key.public_key, "p2").await;
+        let gw = enrolled_gateway_with_peers("gw-resume", &key, &[("p1", &p1), ("p2", &p2)]);
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(gw.clone());
+            guard.save(&cfg).unwrap();
+        }
+
+        let state = Arc::new(crate::AppState::with_store(store));
+        let fabric = fabric().await;
+        assert!(state
+            .gateway_manager
+            .fabric
+            .set(Arc::clone(&fabric))
+            .is_ok());
+
+        let app = tauri::test::mock_app();
+        app.manage(Arc::clone(&state));
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = signal_tx.send(());
+        });
+        let app_for_invalidate = app.handle().clone();
+        let _ = state
+            .gateway_manager
+            .transport_invalidate
+            .set(Arc::new(move |id| {
+                let state = app_for_invalidate.state::<Arc<crate::AppState>>();
+                invalidate_native(&app_for_invalidate, &state, id);
+            }));
+
+        reconcile_saved(&state, &gw.id).unwrap();
+        fabric.settled_gateway(&gw.id).await.unwrap();
+
+        let client = proxy_client(&fabric);
+        let u1 = format!("http://tenant.p1.example.test:{}/probe", p1.http_port);
+        let u2 = format!("http://tenant.p2.example.test:{}/probe", p2.http_port);
+        assert_eq!(
+            client.get(&u1).send().await.unwrap().text().await.unwrap(),
+            "p1"
+        );
+        assert_eq!(
+            client.get(&u2).send().await.unwrap().text().await.unwrap(),
+            "p2"
+        );
+
+        let synth_id = crate::gateway::synthesized_row_id(&gw.id, "alice", &"d".repeat(64));
+        let gen_before = state.native_policy_generation(&synth_id);
+        state.devservers.set(
+            synth_id.clone(),
+            crate::devserver::DevserverConn {
+                host: "tenant.p1.example.test".into(),
+                port: 443,
+                token: String::new(),
+                name: "alice".into(),
+                gateway: None,
+            },
+        );
+        assert!(state.devservers.is_connected(&synth_id));
+        let before: BTreeMap<String, u64> = fabric.ingress_instances(&gw.id).into_iter().collect();
+
+        // Trigger a real Tunnel::shut_down() on p1 via scratch ConnectProxy retirement.
+        fabric
+            .shut_down_ingress_for_test(&gw.id, "gw-resume/p1")
+            .await;
+        let (summary, ingresses, _) = fabric.view(&gw.id);
+        assert_eq!(ingresses[0].status, STOPPED);
+        assert_eq!(summary.as_deref(), Some(STOPPED));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.p1.example.test")
+            .unwrap_err()
+            .contains(STOPPED));
+        assert!(fabric.changes_routes(&gw.id, &prepare(&gw), true));
+
+        // Execute the exact mobile_auth::resume_wireguard foreground call sequence.
+        fabric.suspend();
+        let ticket = fabric.resume_ticket();
+        fabric.settled_gateway(&gw.id).await.unwrap();
+        reconcile_saved(&state, &gw.id).unwrap();
+        fabric.settled_gateway(&gw.id).await.unwrap();
+        assert!(fabric.resume_gateway(&gw.id, ticket));
+        assert!(fabric.resume(ticket));
+
+        assert!(!state.devservers.is_connected(&synth_id));
+        assert!(state.native_policy_generation(&synth_id) > gen_before);
+        assert!(signal_rx.try_recv().is_ok());
+
+        let after: BTreeMap<String, u64> = fabric.ingress_instances(&gw.id).into_iter().collect();
+        assert_ne!(after["gw-resume/p1"], before["gw-resume/p1"]);
+        assert_eq!(after["gw-resume/p2"], before["gw-resume/p2"]);
+        assert_ne!(fabric.view(&gw.id).0.as_deref(), Some(STOPPED));
+        assert!(fabric
+            .require_destination(&gw.id, "https://tenant.p1.example.test")
+            .is_ok());
+        assert_eq!(
+            client.get(&u1).send().await.unwrap().text().await.unwrap(),
+            "p1"
+        );
+        assert_eq!(
+            client.get(&u2).send().await.unwrap().text().await.unwrap(),
+            "p2"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_enrollment_routing_and_stopped_recovery_e2e() {
+        use std::sync::atomic::AtomicUsize;
+        use tauri::Manager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(crate::AppState::with_store(Arc::clone(&store)));
+        let fabric = fabric().await;
+        assert!(state
+            .gateway_manager
+            .fabric
+            .set(Arc::clone(&fabric))
+            .is_ok());
+
+        let app = tauri::test::mock_app();
+        app.manage(Arc::clone(&state));
+        let app_for_invalidate = app.handle().clone();
+        let _ = state
+            .gateway_manager
+            .transport_invalidate
+            .set(Arc::new(move |id| {
+                let state = app_for_invalidate.state::<Arc<crate::AppState>>();
+                invalidate_native(&app_for_invalidate, &state, id);
+            }));
+
+        // Bind UDP sockets for p1 and p2 ahead of discovery so discovery advertises real endpoints.
+        let p1_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let p2_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let p1_udp_addr = p1_udp.local_addr().unwrap();
+        let p2_udp_addr = p2_udp.local_addr().unwrap();
+        let (p1_secret, p1_pub) = generate_secret();
+        let (p2_secret, p2_pub) = generate_secret();
+
+        #[derive(Clone)]
+        struct AuthCodeRecord {
+            challenge: String,
+            wireguard_public_key: String,
+        }
+
+        struct MockGateway {
+            origin: String,
+            p1_pub: String,
+            p1_endpoint: String,
+            p2_pub: String,
+            p2_endpoint: String,
+            expected_client_key: Mutex<Option<String>>,
+            codes: Mutex<std::collections::HashMap<String, AuthCodeRecord>>,
+            pat_secret: String,
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_addr = listener.local_addr().unwrap();
+        let mock_origin = format!("http://{mock_addr}");
+        let pat_secret = "pat-e2e-secret".to_string();
+        let mock = Arc::new(MockGateway {
+            origin: mock_origin.clone(),
+            p1_pub: p1_pub.clone(),
+            p1_endpoint: p1_udp_addr.to_string(),
+            p2_pub: p2_pub.clone(),
+            p2_endpoint: p2_udp_addr.to_string(),
+            expected_client_key: Mutex::new(None),
+            codes: Mutex::new(std::collections::HashMap::new()),
+            pat_secret: pat_secret.clone(),
+        });
+
+        let router = axum::Router::new()
+            .route(
+                "/.well-known/chan-gateway",
+                axum::routing::get({
+                    let mock = Arc::clone(&mock);
+                    move || {
+                        let mock = Arc::clone(&mock);
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "kind": "chan-gateway",
+                                "api_version": 1,
+                                "identity_origin": mock.origin,
+                                "mobile_authorize_url": format!("{}/mobile/authorize", mock.origin),
+                                "mobile_entry_url": format!("{}/mobile/v1/devserver/entry", mock.origin),
+                                "mobile_roster_url": format!("{}/mobile/v1/devservers", mock.origin),
+                                "devserver_proxy_origin": "https://proxy.e2e.invalid",
+                                "devserver_proxy_host_depth": 2,
+                                "wireguard": {
+                                    "mobile_enrollment": true,
+                                    "endpoint": mock.p1_endpoint,
+                                    "public_key": mock.p1_pub,
+                                    "allowed_ips": ["10.7.0.1/32"],
+                                    "persistent_keepalive": 5,
+                                    "ingresses": [
+                                        {
+                                            "id": "p1",
+                                            "endpoint": mock.p1_endpoint,
+                                            "public_key": mock.p1_pub,
+                                            "hosts": [{
+                                                "name": "*.p1.proxy.e2e.invalid",
+                                                "addresses": ["10.7.0.1"]
+                                            }]
+                                        },
+                                        {
+                                            "id": "p2",
+                                            "endpoint": mock.p2_endpoint,
+                                            "public_key": mock.p2_pub,
+                                            "hosts": [{
+                                                "name": "*.p2.proxy.e2e.invalid",
+                                                "addresses": ["10.7.0.1"]
+                                            }]
+                                        }
+                                    ]
+                                }
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/mobile/authorize",
+                axum::routing::get({
+                    let mock = Arc::clone(&mock);
+                    move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                        let mock = Arc::clone(&mock);
+                        async move {
+                            assert_eq!(q.get("redirect_uri").map(String::as_str), Some("chan://auth/callback"));
+                            assert_eq!(q.get("code_challenge_method").map(String::as_str), Some("S256"));
+                            assert_eq!(q.get("scopes").map(String::as_str), Some("mobile.account"));
+                            let wg_key = q.get("wireguard_public_key").cloned().unwrap();
+                            assert_eq!(
+                                Some(wg_key.as_str()),
+                                mock.expected_client_key.lock().unwrap().as_deref()
+                            );
+                            let challenge = q.get("code_challenge").cloned().unwrap();
+                            let state_param = q.get("state").cloned().unwrap();
+                            let code = "code-once-1".to_string();
+                            mock.codes.lock().unwrap().insert(
+                                code.clone(),
+                                AuthCodeRecord {
+                                    challenge,
+                                    wireguard_public_key: wg_key,
+                                },
+                            );
+                            let location = format!("chan://auth/callback?code={code}&state={state_param}");
+                            axum::response::Response::builder()
+                                .status(axum::http::StatusCode::FOUND)
+                                .header(axum::http::header::LOCATION, location)
+                                .body(axum::body::Body::empty())
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/mobile/authorize/redeem",
+                axum::routing::post({
+                    let mock = Arc::clone(&mock);
+                    move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let mock = Arc::clone(&mock);
+                        async move {
+                            let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            let verifier = body.get("code_verifier").and_then(|v| v.as_str()).unwrap_or("");
+                            let Some(rec) = mock.codes.lock().unwrap().remove(code) else {
+                                return axum::response::Response::builder()
+                                    .status(axum::http::StatusCode::GONE)
+                                    .body(axum::body::Body::empty())
+                                    .unwrap();
+                            };
+                            let digest = Sha256::digest(verifier.as_bytes());
+                            let expected_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+                            assert_eq!(expected_challenge, rec.challenge);
+                            assert!(!rec.wireguard_public_key.is_empty());
+                            let payload = serde_json::json!({
+                                "id": "11111111-1111-1111-1111-111111111111",
+                                "secret": mock.pat_secret,
+                                "label": "ios-e2e",
+                                "expires_at": null,
+                                "wireguard": {
+                                    "server_public_key": mock.p1_pub,
+                                    "endpoint": mock.p1_endpoint,
+                                    "addresses": ["10.7.0.2/32"],
+                                    "allowed_ips": ["10.7.0.1/32"],
+                                    "persistent_keepalive": 5,
+                                    "hosts": [{
+                                        "name": "*.p1.proxy.e2e.invalid",
+                                        "addresses": ["10.7.0.1"]
+                                    }],
+                                    "ingresses": [
+                                        {
+                                            "id": "p1",
+                                            "server_public_key": mock.p1_pub,
+                                            "endpoint": mock.p1_endpoint,
+                                            "hosts": [{
+                                                "name": "*.p1.proxy.e2e.invalid",
+                                                "addresses": ["10.7.0.1"]
+                                            }]
+                                        },
+                                        {
+                                            "id": "p2",
+                                            "server_public_key": mock.p2_pub,
+                                            "endpoint": mock.p2_endpoint,
+                                            "hosts": [{
+                                                "name": "*.p2.proxy.e2e.invalid",
+                                                "addresses": ["10.7.0.1"]
+                                            }]
+                                        }
+                                    ]
+                                }
+                            });
+                            axum::response::Response::builder()
+                                .status(axum::http::StatusCode::OK)
+                                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                                .body(axum::body::Body::from(payload.to_string()))
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/mobile/v1/devservers",
+                axum::routing::get({
+                    let mock = Arc::clone(&mock);
+                    move |headers: axum::http::HeaderMap| {
+                        let mock = Arc::clone(&mock);
+                        async move {
+                            let expected = format!("Bearer {}", mock.pat_secret);
+                            let auth = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok());
+                            assert_eq!(auth, Some(expected.as_str()));
+                            axum::Json(serde_json::json!([{
+                                "owner_user_id": "22222222-2222-2222-2222-222222222222",
+                                "owner": "alice",
+                                "devserver_id": "d".repeat(64),
+                                "label": "box",
+                                "online": true,
+                                "shared": false,
+                                "proxy_origin": "https://alice--dddddddddddd.p1.proxy.e2e.invalid"
+                            }]))
+                        }
+                    }
+                }),
+            );
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let registry = crate::config::GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::clone(&state.gateway_remove_hook),
+            Arc::clone(&state.gateway_manager),
+        );
+        let added = registry
+            .add(chan_server::GatewayInput {
+                url: mock_origin.clone(),
+                label: Some("e2e".into()),
+                wireguard: None,
+            })
+            .unwrap();
+        let gw_id = added.id;
+
+        // Generate client key through config::generate_wireguard_key against mock discovery.
+        let outcome = crate::config::generate_wireguard_key(&store, &state.gateway_manager, &gw_id)
+            .await
+            .unwrap();
+        let chan_server::WireguardKeyOutcome::Generated(entry) = outcome else {
+            panic!("expected generated WireGuard key");
+        };
+        let client_public = entry.wireguard_public_key.unwrap();
+        *mock.expected_client_key.lock().unwrap() = Some(client_public.clone());
+
+        let (key_file, raw_config_json) = {
+            let guard = store.lock().unwrap();
+            let cfg = guard.get().unwrap();
+            let row = cfg.gateways.iter().find(|g| g.id == gw_id).unwrap();
+            let path = crate::wireguard_keys::selected_path(&guard.wireguard_dir(), row).unwrap();
+            let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+            (path, raw)
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let secret_text = std::fs::read_to_string(&key_file).unwrap();
+        assert!(!raw_config_json.contains(secret_text.trim()));
+
+        // Start real loopback peer tunnels admitting the generated client public key.
+        let spawn_peer = |secret: chan_wireguard::x25519::StaticSecret,
+                          udp: tokio::net::UdpSocket,
+                          body: &'static str| {
+            let client_pub = parse_public_key(&client_public).unwrap();
+            let placeholder: SocketAddr = "127.0.0.1:9".parse().unwrap();
+            let cfg = chan_wireguard::config::Config {
+                private_key: secret,
+                addresses: vec![chan_wireguard::config::Cidr {
+                    addr: "10.7.0.1".parse().unwrap(),
+                    prefix: 32,
+                }],
+                mtu: None,
+                peer: chan_wireguard::config::Peer {
+                    public_key: client_pub,
+                    preshared_key: None,
+                    endpoint: chan_wireguard::config::Endpoint::parse("127.0.0.1:9").unwrap(),
+                    allowed_ips: vec![chan_wireguard::config::Cidr {
+                        addr: "10.7.0.2".parse().unwrap(),
+                        prefix: 32,
+                    }],
+                    persistent_keepalive: None,
+                },
+            };
+            let tunnel = Tunnel::start_on(cfg, udp, placeholder).unwrap();
+            let mut listener = tunnel.listen(0).unwrap();
+            let port = listener.port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let task_hits = Arc::clone(&hits);
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok(mut stream) = listener.accept().await else {
+                        break;
+                    };
+                    let conn_hits = Arc::clone(&task_hits);
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        if stream.read(&mut buf).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        conn_hits.fetch_add(1, Ordering::Relaxed);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            });
+            (tunnel, port, hits, task)
+        };
+        let (_t1, p1_http_port, p1_hits, p1_task) = spawn_peer(p1_secret, p1_udp, "p1-ok");
+        let (_t2, p2_http_port, p2_hits, p2_task) = spawn_peer(p2_secret, p2_udp, "p2-ok");
+
+        // Exercise OAuth /mobile/authorize + PKCE S256 + /mobile/authorize/redeem + /mobile/v1/devservers.
+        let direct = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let discovery = crate::devserver::discover_gateway(&mock_origin)
+            .await
+            .unwrap();
+        let verifier = "e2e-pkce-verifier-0123456789abcdef0123456789";
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
+        let state_nonce = "state-e2e-1";
+        let auth_url = url::Url::parse_with_params(
+            &discovery.mobile_authorize_url,
+            &[
+                ("redirect_uri", "chan://auth/callback"),
+                ("state", state_nonce),
+                ("label", "ios-e2e"),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("scopes", "mobile.account"),
+                ("expires_in", "3600"),
+                ("wireguard_public_key", client_public.as_str()),
+            ],
+        )
+        .unwrap();
+        let auth_resp = direct.get(auth_url).send().await.unwrap();
+        assert_eq!(auth_resp.status(), reqwest::StatusCode::FOUND);
+        let location = auth_resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let callback_url = url::Url::parse(location).unwrap();
+        assert_eq!(callback_url.scheme(), "chan");
+        assert_eq!(callback_url.host_str(), Some("auth"));
+        assert_eq!(callback_url.path(), "/callback");
+        let callback_params: std::collections::HashMap<String, String> =
+            callback_url.query_pairs().into_owned().collect();
+        assert_eq!(
+            callback_params.get("state").map(String::as_str),
+            Some(state_nonce)
+        );
+        let code = callback_params.get("code").unwrap().clone();
+
+        let redeem_url = format!("{mock_origin}/mobile/authorize/redeem");
+        let redeem_resp = direct
+            .post(&redeem_url)
+            .json(&serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(redeem_resp.status(), reqwest::StatusCode::OK);
+        let redeem_json: serde_json::Value = redeem_resp.json().await.unwrap();
+        let replay = direct
+            .post(&redeem_url)
+            .json(&serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), reqwest::StatusCode::GONE);
+
+        let token = redeem_json.get("secret").and_then(|v| v.as_str()).unwrap();
+        let roster_resp = direct
+            .get(&discovery.mobile_roster_url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(roster_resp.status(), reqwest::StatusCode::OK);
+        let roster: Vec<serde_json::Value> = roster_resp.json().await.unwrap();
+        assert_eq!(roster.len(), 1);
+
+        let wg_params: crate::wireguard_keys::EnrollmentParams =
+            serde_json::from_value(redeem_json.get("wireguard").cloned().unwrap()).unwrap();
+        let prepared_enrollment = crate::wireguard_keys::prepare(
+            &key_file,
+            &client_public,
+            discovery.wireguard.as_ref().unwrap(),
+            &wg_params,
+        )
+        .unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let row = cfg.gateways.iter_mut().find(|g| g.id == gw_id).unwrap();
+            row.wireguard_enrolled_key = Some(client_public.clone());
+            row.wireguard_enrollment = Some(prepared_enrollment.parameters(key_file.clone()));
+            guard.save(&cfg).unwrap();
+        }
+
+        reconcile_saved(&state, &gw_id).unwrap();
+        fabric.settled_gateway(&gw_id).await.unwrap();
+
+        let client = proxy_client(&fabric);
+        let p1_url =
+            format!("http://alice--dddddddddddd.p1.proxy.e2e.invalid:{p1_http_port}/probe");
+        let p2_url =
+            format!("http://alice--dddddddddddd.p2.proxy.e2e.invalid:{p2_http_port}/probe");
+        assert_eq!(
+            client
+                .get(&p1_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "p1-ok"
+        );
+        assert_eq!(p1_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(p2_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            client
+                .get(&p2_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "p2-ok"
+        );
+        assert_eq!(p2_hits.load(Ordering::Relaxed), 1);
+
+        // Protected unmapped IP fails via the proxy without bypassing to host.
+        let unmapped_resp = client.get("http://10.7.0.1:1/probe").send().await.unwrap();
+        assert_eq!(unmapped_resp.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+        let before: BTreeMap<String, u64> = fabric.ingress_instances(&gw_id).into_iter().collect();
+
+        // Shut down p1's real tunnel driver and verify fail-closed + STOPPED view.
+        fabric
+            .shut_down_ingress_for_test(&gw_id, &format!("{gw_id}/p1"))
+            .await;
+        assert_eq!(fabric.view(&gw_id).0.as_deref(), Some(STOPPED));
+        assert!(fabric
+            .require_destination(&gw_id, "https://alice--dddddddddddd.p1.proxy.e2e.invalid")
+            .unwrap_err()
+            .contains(STOPPED));
+        assert!(fabric
+            .require_destination(&gw_id, "https://alice--dddddddddddd.p2.proxy.e2e.invalid")
+            .is_ok());
+        assert_eq!(
+            client.get(&p1_url).send().await.unwrap().status(),
+            reqwest::StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(p1_hits.load(Ordering::Relaxed), 1);
+
+        // Foreground reconcile_saved restarts only p1 and traffic succeeds again.
+        reconcile_saved(&state, &gw_id).unwrap();
+        fabric.settled_gateway(&gw_id).await.unwrap();
+        let after: BTreeMap<String, u64> = fabric.ingress_instances(&gw_id).into_iter().collect();
+        assert_ne!(
+            after[&format!("{gw_id}/p1")],
+            before[&format!("{gw_id}/p1")]
+        );
+        assert_eq!(
+            after[&format!("{gw_id}/p2")],
+            before[&format!("{gw_id}/p2")]
+        );
+        assert_ne!(fabric.view(&gw_id).0.as_deref(), Some(STOPPED));
+        assert_eq!(
+            client
+                .get(&p1_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "p1-ok"
+        );
+        assert_eq!(p1_hits.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            client
+                .get(&p2_url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "p2-ok"
+        );
+        assert_eq!(p2_hits.load(Ordering::Relaxed), 2);
+
+        p1_task.abort();
+        p2_task.abort();
+        server_task.abort();
     }
 }

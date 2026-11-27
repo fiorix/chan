@@ -649,4 +649,136 @@ mod tests {
         assert!(second.path.exists());
         assert!(manual.exists());
     }
+
+    #[test]
+    fn prepare_preserves_discovery_order_and_rejects_mismatched_peers_or_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = generate(dir.path(), "gw-order").unwrap();
+        let p1 = WireguardIngress {
+            id: "p1".into(),
+            endpoint: "p1.example.test:51820".into(),
+            public_key: encode(&[7; 32]),
+            hosts: vec![WireguardHost {
+                name: "*.p1.proxy.example.test".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }],
+        };
+        let p2 = WireguardIngress {
+            id: "p2".into(),
+            endpoint: "p2.example.test:51821".into(),
+            public_key: encode(&[9; 32]),
+            hosts: vec![WireguardHost {
+                name: "*.p2.proxy.example.test".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }],
+        };
+        let entry = WireguardDiscovery {
+            mobile_enrollment: true,
+            endpoint: p1.endpoint.clone(),
+            public_key: p1.public_key.clone(),
+            allowed_ips: Some(vec!["10.7.0.0/24".into()]),
+            persistent_keepalive: Some(25),
+            ingresses: Some(vec![p1.clone(), p2.clone()]),
+        };
+        let reordered = EnrollmentParams {
+            server_public_key: p2.public_key.clone(),
+            endpoint: p2.endpoint.clone(),
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.0/24".into()],
+            persistent_keepalive: Some(25),
+            hosts: p2.hosts.clone(),
+            ingresses: Some(vec![
+                EnrollmentIngress {
+                    id: p2.id.clone(),
+                    server_public_key: p2.public_key.clone(),
+                    endpoint: p2.endpoint.clone(),
+                    hosts: p2.hosts.clone(),
+                },
+                EnrollmentIngress {
+                    id: p1.id.clone(),
+                    server_public_key: p1.public_key.clone(),
+                    endpoint: p1.endpoint.clone(),
+                    hosts: p1.hosts.clone(),
+                },
+            ]),
+        };
+        let enrollment = prepare(&key.path, &key.public_key, &entry, &reordered).unwrap();
+        let ids: Vec<_> = enrollment
+            .ingresses
+            .iter()
+            .map(|ingress| ingress.id.as_str())
+            .collect();
+        assert_eq!(ids, ["p1", "p2"]);
+        assert_eq!(enrollment.config.peer.public_key.as_bytes(), &[7; 32]);
+
+        let mut wrong_ingress_key = reordered.clone();
+        wrong_ingress_key.ingresses.as_mut().unwrap()[1].server_public_key = encode(&[11; 32]);
+        assert_eq!(
+            prepare(&key.path, &key.public_key, &entry, &wrong_ingress_key)
+                .err()
+                .as_deref(),
+            Some(PEER_CHANGED)
+        );
+
+        let legacy_entry = WireguardDiscovery {
+            mobile_enrollment: true,
+            endpoint: p1.endpoint.clone(),
+            public_key: p1.public_key.clone(),
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
+        };
+        let legacy_wrong_key = EnrollmentParams {
+            server_public_key: encode(&[12; 32]),
+            endpoint: p1.endpoint.clone(),
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.0/24".into()],
+            persistent_keepalive: None,
+            hosts: p1.hosts.clone(),
+            ingresses: None,
+        };
+        assert_eq!(
+            prepare(&key.path, &key.public_key, &legacy_entry, &legacy_wrong_key)
+                .err()
+                .as_deref(),
+            Some(PEER_CHANGED)
+        );
+
+        let legacy_outside_allowed = EnrollmentParams {
+            server_public_key: p1.public_key.clone(),
+            endpoint: p1.endpoint.clone(),
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.0/24".into()],
+            persistent_keepalive: None,
+            hosts: vec![WireguardHost {
+                name: "*.p1.proxy.example.test".into(),
+                addresses: vec!["10.8.0.1".parse().unwrap()],
+            }],
+            ingresses: None,
+        };
+        assert!(prepare(
+            &key.path,
+            &key.public_key,
+            &legacy_entry,
+            &legacy_outside_allowed
+        )
+        .err()
+        .unwrap()
+        .contains("ingresses is invalid"));
+
+        let mut enrolled_outside_allowed = entry.clone();
+        enrolled_outside_allowed.ingresses.as_mut().unwrap()[0].hosts[0].addresses =
+            vec!["10.8.0.1".parse().unwrap()];
+        assert_eq!(
+            prepare(
+                &key.path,
+                &key.public_key,
+                &enrolled_outside_allowed,
+                &reordered
+            )
+            .err()
+            .as_deref(),
+            Some(PEER_CHANGED)
+        );
+    }
 }

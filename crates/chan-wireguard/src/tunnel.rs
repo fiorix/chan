@@ -1537,13 +1537,19 @@ mod tests {
         let Pair { a, b, a_at, .. } = pair().await;
         let mut listener = b.listen(0).unwrap();
         let clone = a.clone();
-        let (client, server) = tokio::join!(a.connect(b_port(listener.port())), listener.accept());
+        let (client, server) = timeout(WAIT, async {
+            tokio::join!(a.connect(b_port(listener.port())), listener.accept())
+        })
+        .await
+        .unwrap();
         let mut client = client.unwrap();
         let _server = server.unwrap();
         a.shut_down();
         // Both waits observe actual task completion; shutdown remains idempotent.
         clone.shut_down();
-        tokio::join!(a.stopped(), clone.stopped());
+        timeout(WAIT, async { tokio::join!(a.stopped(), clone.stopped()) })
+            .await
+            .unwrap();
         let _released = UdpSocket::bind(a_at)
             .await
             .expect("retired driver released its UDP socket");

@@ -380,18 +380,25 @@ mod tests {
 
     #[test]
     fn versions_before_ios17_are_refused() {
-        for version in [15, 16] {
+        for version in [-1, 0, 15, 16] {
             assert!(require_supported_version(version)
                 .unwrap_err()
                 .contains("iOS 17"));
         }
-        assert!(require_supported_version(17).is_ok());
-        assert!(require_supported_version(27).is_ok());
+        for version in [17, 18, 27] {
+            assert!(require_supported_version(version).is_ok());
+        }
     }
 
     #[test]
     fn refuses_non_loopback_and_zero_ports() {
-        for addr in ["192.0.2.1:8080", "127.0.0.1:0", "[::1]:0"] {
+        for addr in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.0.2.1:8080",
+            "127.0.0.1:0",
+            "[::1]:0",
+        ] {
             assert!(install(addr.parse().unwrap())
                 .unwrap_err()
                 .contains("loopback"));
@@ -401,8 +408,10 @@ mod tests {
     #[cfg(not(target_os = "ios"))]
     #[test]
     fn unsupported_platform_refuses_a_valid_proxy() {
-        assert!(install("127.0.0.1:8080".parse().unwrap())
-            .unwrap_err()
-            .contains("unavailable"));
+        for addr in ["127.0.0.1:8080", "[::1]:8080"] {
+            assert!(install(addr.parse().unwrap())
+                .unwrap_err()
+                .contains("unavailable"));
+        }
     }
 }
