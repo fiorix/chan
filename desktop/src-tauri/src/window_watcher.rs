@@ -1388,6 +1388,86 @@ mod tests {
         );
     }
 
+    /// A Reload queued on the local library's view reaches the surface as a
+    /// refresh with the reload flag for the open window it names, leaves the
+    /// flag clear for the other open windows, and opens nothing for a window
+    /// that is not open.
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_reload_of_a_local_window_refreshes_it_and_opens_nothing() {
+        struct Feed(Vec<WindowRecord>, Arc<Notify>);
+        impl WindowFeed for Feed {
+            fn snapshot(&self) -> Vec<WindowRecord> {
+                self.0.clone()
+            }
+            fn change_notify(&self) -> Arc<Notify> {
+                Arc::clone(&self.1)
+            }
+        }
+        #[derive(Default)]
+        struct Calls {
+            refreshed: Vec<(String, bool)>,
+            opened: Vec<String>,
+        }
+        struct Surface(HashSet<String>, Arc<Mutex<Calls>>);
+        impl NativeSurface for Surface {
+            fn open_labels(&self, _: &str) -> HashSet<String> {
+                self.0.clone()
+            }
+            fn open(&self, record: &WindowRecord) {
+                self.1.lock().unwrap().opened.push(native_label(record));
+            }
+            fn refresh(&self, record: &WindowRecord, reload: bool) {
+                self.1
+                    .lock()
+                    .unwrap()
+                    .refreshed
+                    .push((native_label(record), reload));
+            }
+            fn close(&self, _: &str) {}
+        }
+        let reloaded = rec("local", "w-1", WindowKind::Workspace);
+        let other = rec("local", "w-2", WindowKind::Terminal);
+        let missing = rec("local", "w-3", WindowKind::Terminal);
+        let open = HashSet::from([native_label(&reloaded), native_label(&other)]);
+        let view = Arc::new(WatcherViewState::default());
+        assert!(view.request_reload(&native_label(&reloaded)));
+        assert!(view.request_reload(&native_label(&missing)));
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let watcher = watch_loop(
+            Some("local"),
+            Feed(vec![reloaded, other, missing], Arc::new(Notify::new())),
+            Surface(open, Arc::clone(&calls)),
+            Arc::clone(&view),
+            std::future::pending(),
+        );
+        tokio::pin!(watcher);
+        assert!(futures::poll!(watcher.as_mut()).is_pending());
+        let calls = calls.lock().unwrap();
+        // The Reload's buffered wake runs one more pass, with no Reload left.
+        let reloaded = calls
+            .refreshed
+            .iter()
+            .filter(|(_, reload)| *reload)
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reloaded,
+            ["local::w-1"],
+            "the Reload reaches the window it names, once"
+        );
+        assert!(
+            calls
+                .refreshed
+                .iter()
+                .any(|(label, reload)| label == "local::w-2" && !reload),
+            "the other open window is refreshed without the flag"
+        );
+        assert!(
+            calls.opened.is_empty(),
+            "a Reload never opens a window that is not open"
+        );
+    }
+
     #[test]
     fn view_state_bury_unbury_tracks_local_set() {
         let view = WatcherViewState::default();

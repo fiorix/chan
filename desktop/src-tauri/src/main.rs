@@ -15265,4 +15265,144 @@ mod tests {
             );
         }
     }
+
+    /// A Reload of a local window goes to the local window watcher, which
+    /// navigates the window to its record's URL with the serving tenant's
+    /// token, only while the watcher is up and the window's record in the
+    /// local feed carries that token. Every other window reloads in page.
+    mod local_reload {
+        use super::*;
+        use chan_server::WindowKind;
+
+        fn own_home(test: &str) -> bool {
+            embedded::in_own_chan_home(&format!("tests::local_reload::{test}"))
+        }
+
+        /// A desktop over an embedded host with the local window registry
+        /// installed, and the runtime its host was built on.
+        fn desktop() -> (tokio::runtime::Runtime, Arc<AppState>) {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let home = chan_workspace::paths::config_dir();
+            let library =
+                chan_workspace::Library::open_at(home.join("config.toml")).expect("library");
+            let embedded = runtime.block_on(async {
+                let embedded = embedded::EmbeddedServer::for_tests(library).await;
+                embedded.install_local_window_registry_for_tests();
+                embedded
+            });
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            (runtime, state)
+        }
+
+        fn mount_terminal_tenant(runtime: &tokio::runtime::Runtime, state: &AppState) {
+            let embedded = state.embedded().expect("embedded");
+            runtime
+                .block_on(embedded.open_terminal_in(chan_workspace::paths::config_dir()))
+                .expect("mount the shared terminal tenant");
+        }
+
+        /// The token of the record the local feed holds for `label`.
+        fn fed_token(state: &AppState, label: &str) -> Option<String> {
+            state
+                .embedded()
+                .expect("embedded")
+                .local_window_records()
+                .into_iter()
+                .find(|record| window_watcher::native_label(record) == label)
+                .map(|record| record.token)
+        }
+
+        fn mint_terminal_window(state: &AppState) -> String {
+            let window = state
+                .embedded()
+                .expect("embedded")
+                .mint_window(WindowKind::Terminal, None)
+                .expect("mint a terminal window");
+            let label = window_watcher::native_label(&window);
+            assert!(label.starts_with("local::"), "fixture: {label}");
+            label
+        }
+
+        #[test]
+        fn a_local_window_reloads_in_page_without_a_watcher() {
+            if !own_home("a_local_window_reloads_in_page_without_a_watcher") {
+                return;
+            }
+            let (runtime, state) = desktop();
+            mount_terminal_tenant(&runtime, &state);
+            let label = mint_terminal_window(&state);
+            assert!(
+                fed_token(&state, &label).is_some_and(|token| !token.is_empty()),
+                "fixture: the window's record carries its tenant's token"
+            );
+            assert!(
+                !route_window_reload(&state, &label).expect("routing"),
+                "with no local watcher the Reload stays in page"
+            );
+            runtime
+                .block_on(state.embedded().expect("embedded").shutdown_all())
+                .expect("shut the tenants down");
+        }
+
+        #[test]
+        fn a_local_window_reloads_through_its_watcher_only_with_a_token() {
+            if !own_home("a_local_window_reloads_through_its_watcher_only_with_a_token") {
+                return;
+            }
+            let (runtime, state) = desktop();
+            let routed = |label: &str| route_window_reload(&state, label).expect("routing");
+            let view = Arc::new(window_watcher::WatcherViewState::default());
+            state.set_local_watcher_view(Arc::clone(&view));
+
+            // Minted before the shared terminal tenant is up, the window is in
+            // the feed with no token: no tenant serves it yet.
+            let label = mint_terminal_window(&state);
+            assert_eq!(
+                fed_token(&state, &label).as_deref(),
+                Some(""),
+                "fixture: the record has no token before its tenant is up"
+            );
+            assert!(!routed(&label), "a record with no token reloads in page");
+            assert!(
+                view.take_reload_requests().is_empty(),
+                "a Reload left to the page queues nothing"
+            );
+
+            mount_terminal_tenant(&runtime, &state);
+            assert!(
+                fed_token(&state, &label).is_some_and(|token| !token.is_empty()),
+                "fixture: the record carries its tenant's token once it is up"
+            );
+            assert!(
+                routed(&label),
+                "the local watcher takes the Reload of a tokened local window"
+            );
+            assert_eq!(
+                view.take_reload_requests(),
+                std::collections::HashSet::from([label.clone()]),
+                "the Reload is queued for that window alone"
+            );
+
+            for other in [
+                "local::w-not-in-the-feed",
+                "control-terminal-ds-1",
+                "launcher",
+                "lib-feed::w-1",
+            ] {
+                assert!(!routed(other), "{other} reloads in page");
+            }
+            assert!(
+                view.take_reload_requests().is_empty(),
+                "a Reload left to the page queues nothing"
+            );
+            runtime
+                .block_on(state.embedded().expect("embedded").shutdown_all())
+                .expect("shut the tenants down");
+        }
+    }
 }
