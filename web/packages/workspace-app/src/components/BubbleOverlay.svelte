@@ -25,7 +25,10 @@
     type SurveySlot,
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
-  import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { activeTabInPane, layout, openLinkTarget, tabFocusPulse } from "../state/tabs.svelte";
+  import { windowCaps } from "../state/windowCaps";
+  import { openLinkBubble, openRowFor, openRowTarget, type OpenPath } from "../editor/bubbles/open_row";
+  import type { BubbleHandle } from "../editor/bubbles/types";
   import { canTakeFocus } from "@chan/web-shared/modal-focus";
   import { handKeyboardToOwner, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
@@ -228,20 +231,111 @@
     });
   }
 
+  // A link in the body follows the editor's model. A plain click shows the
+  // editor's drop-down under the link, its OPEN row with the href as
+  // written, which Enter or a press on the row opens; Cmd or Ctrl with a
+  // click opens the target at once. The click is always cancelled, the
+  // middle button's too, so the app's tab or window never follows a body
+  // link, and a link whose target opens nothing (another scheme, a bare
+  // fragment, a path out of the workspace, any path in a window with no
+  // workspace) shows nothing. A relative path resolves against the
+  // workspace root, as the editor resolves one in a document with no path,
+  // and opens in the focused pane, the survey's own after the press. The
+  // drop-down's keys come through the card's keydown, never through the
+  // link's focus, which WebKit for macOS does not give a pressed link.
+  const LINK = "[*|href]";
+  const XLINK = "http://www.w3.org/1999/xlink";
+  const openPath: OpenPath = (target) => void openLinkTarget(target);
+  let linkMenu: { link: Element; handle: BubbleHandle } | null = null;
+
+  function linkOf(e: Event): Element | null {
+    const link = (e.target as Element | null)?.closest?.(LINK) ?? null;
+    return link && body?.contains(link) ? link : null;
+  }
+
+  function closeLinkMenu(): void {
+    const menu = linkMenu;
+    linkMenu = null;
+    menu?.handle.dismiss();
+  }
+
+  function onBodyClick(e: MouseEvent): void {
+    const link = linkOf(e);
+    if (!link) return;
+    e.preventDefault();
+    if (!shown || !active || !ownsKeyboard()) return;
+    const href = link.getAttribute("href") ?? link.getAttributeNS(XLINK, "href") ?? "";
+    const opensPaths = windowCaps.workspace;
+    if (e.metaKey || e.ctrlKey) {
+      closeLinkMenu();
+      const hit = openRowFor(href, null, opensPaths);
+      if (hit) openRowTarget(hit, openPath);
+      return;
+    }
+    // A second click on the link keeps its drop-down, as the editor's
+    // caret staying in the link does.
+    if (linkMenu?.link === link) return;
+    closeLinkMenu();
+    const handle = openLinkBubble({
+      // The shell reads only the box and containment every element has, so
+      // an SVG or MathML link anchors it as an HTML one does.
+      host: link as HTMLElement,
+      url: href,
+      onOpenLink: opensPaths ? openPath : undefined,
+      onDismiss: () => {
+        if (linkMenu?.handle === handle) linkMenu = null;
+      },
+    });
+    if (handle) linkMenu = { link, handle };
+  }
+
+  function onBodyAuxclick(e: MouseEvent): void {
+    if (linkOf(e)) e.preventDefault();
+  }
+
+  // Listened on the body itself rather than through Svelte's delegation at
+  // the app's root, so no listener between the two that stops the click can
+  // leave a link its default.
+  $effect(() => {
+    const el = body;
+    if (!el) return;
+    el.addEventListener("click", onBodyClick);
+    el.addEventListener("auxclick", onBodyAuxclick);
+    return () => {
+      el.removeEventListener("click", onBodyClick);
+      el.removeEventListener("auxclick", onBodyAuxclick);
+    };
+  });
+
+  // The drop-down lasts while its survey shows where it owns the keyboard:
+  // a survey answered, replaced or hidden, or no longer in the focused pane,
+  // takes its drop-down with it, as the overlay's unmount does.
+  const linkMenuOwner = $derived(shown && active && ownsKeyboard() ? active.surveyId : null);
+  $effect(() => {
+    linkMenuOwner;
+    return closeLinkMenu;
+  });
+
   // Number keys 1..N pick an option; F follows up; X or Escape dismisses. F
   // and X/Escape are standard on every survey. Scoped to the focused
   // card (NOT the window) so each terminal's survey handles its own keys, a
   // focused terminal does not swallow the keystroke into its PTY, and a handled
   // Escape does not bubble out to close other overlays. The card answers them
   // unmodified, as the viewers do: a chord with Ctrl, Cmd or Alt held is the
-  // app's and travels on. A card whose survey does not own the keyboard
-  // answers no key: focus can still reach it (a script, assistive
-  // technology), and its keys travel on as from any element outside the
-  // focused pane.
+  // app's and travels on. A body link's open drop-down answers first: Escape
+  // closes it, so a second Escape dismisses, and Enter, with Cmd or Ctrl or
+  // without, opens its link; the survey's own keys still answer under it. A
+  // card whose survey does not own the keyboard answers no key: focus can
+  // still reach it (a script, assistive technology), and its keys travel on
+  // as from any element outside the focused pane.
   function onCardKeydown(e: KeyboardEvent): void {
     const s = active;
     if (!s) return;
     if (!ownsKeyboard()) return;
+    if (linkMenu && !e.isComposing && linkMenu.handle.handleKey(e)) {
+      consumeKey(e);
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key >= "1" && e.key <= "9") {
       const idx = Number(e.key) - 1;
@@ -285,6 +379,7 @@
       tabindex="-1"
       bind:this={card}
       onkeydown={onCardKeydown}
+      onscrollcapture={closeLinkMenu}
     >
       {#if active.title}
         <h2 class="survey-title">{active.title}</h2>
