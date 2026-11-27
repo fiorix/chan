@@ -242,7 +242,7 @@ pub(crate) mod tests {
         mock_app_with_context_and_handler(|_| false)
     }
 
-    fn mock_ios_app() -> tauri::App<tauri::test::MockRuntime> {
+    pub(crate) fn mock_ios_app() -> tauri::App<tauri::test::MockRuntime> {
         mock_app_with_context_and_handler(tauri::generate_handler![
             mobile_back_to_computers,
             gateway_csrf_token,
@@ -260,7 +260,7 @@ pub(crate) mod tests {
         ])
     }
 
-    fn window_at(
+    pub(crate) fn window_at(
         app: &tauri::App<tauri::test::MockRuntime>,
         label: &str,
         url: &str,
@@ -270,7 +270,7 @@ pub(crate) mod tests {
             .expect("mock webview window")
     }
 
-    fn invoke_from(
+    pub(crate) fn invoke_from(
         webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
         url: &str,
         cmd: &str,

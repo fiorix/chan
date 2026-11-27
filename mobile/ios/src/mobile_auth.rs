@@ -1640,4 +1640,382 @@ mod tests {
 
         server.abort();
     }
+
+    #[tokio::test]
+    async fn wg_proxy_entry_exchange_cookies_and_window_url_e2e() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Mutex;
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let entry_cookies_and_csrf =
+            Arc::new(Mutex::new(Vec::<(Option<String>, Option<String>)>::new()));
+        let windows_store = Arc::new(Mutex::new(Vec::<chan_server::WindowRecord>::new()));
+        let peer_port_cell = Arc::new(OnceLock::<u16>::new());
+
+        let ds64 = "d".repeat(64);
+        let owner_user_id = uuid::Uuid::from_u128(7);
+
+        let router = axum::Router::new()
+            .route(
+                "/mobile/v1/devserver/entry",
+                axum::routing::post({
+                    let calls = Arc::clone(&calls);
+                    let peer_port_cell = Arc::clone(&peer_port_cell);
+                    let ds64 = ds64.clone();
+                    move |headers: axum::http::HeaderMap,
+                          axum::Json(req): axum::Json<serde_json::Value>| {
+                        let calls = Arc::clone(&calls);
+                        let peer_port_cell = Arc::clone(&peer_port_cell);
+                        let ds64 = ds64.clone();
+                        async move {
+                            let auth = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok());
+                            assert_eq!(auth, Some("Bearer pat-f2f4"));
+                            let path = req.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+                            calls
+                                .lock()
+                                .unwrap()
+                                .push(format!("POST /mobile/v1/devserver/entry {path}"));
+                            let port = *peer_port_cell.get().expect("peer port set");
+                            let proxy_origin =
+                                format!("http://alice--dddddddddddd.p1.localtest.me:{port}");
+                            axum::Json(serde_json::json!({
+                                "owner_user_id": owner_user_id,
+                                "username": "alice",
+                                "devserver_id": ds64,
+                                "proxy_origin": proxy_origin,
+                                "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                                "entry_credential": format!("entry-cred-secret:{path}"),
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post({
+                    let calls = Arc::clone(&calls);
+                    move |body: String| {
+                        let calls = Arc::clone(&calls);
+                        async move {
+                            calls.lock().unwrap().push("POST /_chan/entry".into());
+                            let cred = url::form_urlencoded::parse(body.as_bytes())
+                                .find(|(k, _)| k == "credential")
+                                .map(|(_, v)| v.into_owned())
+                                .expect("credential form field");
+                            let location = cred
+                                .strip_prefix("entry-cred-secret:")
+                                .expect("expected entry credential prefix")
+                                .to_string();
+                            axum::response::Response::builder()
+                                .status(axum::http::StatusCode::SEE_OTHER)
+                                .header("location", location)
+                                .header(
+                                    "set-cookie",
+                                    "__Host-devserver_gate=gate-f2f4; Path=/; HttpOnly; Max-Age=120",
+                                )
+                                .header(
+                                    "set-cookie",
+                                    "__Host-devserver_csrf=csrf-f2f4; Path=/; Max-Age=120",
+                                )
+                                .body(axum::body::Body::empty())
+                                .unwrap()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get({
+                    let calls = Arc::clone(&calls);
+                    move |headers: axum::http::HeaderMap| {
+                        let calls = Arc::clone(&calls);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            assert!(cookie.contains("__Host-devserver_gate=gate-f2f4"));
+                            calls.lock().unwrap().push("GET /api/library/workspaces".into());
+                            axum::Json(Vec::<chan_server::LauncherWorkspace>::new())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::post({
+                    let calls = Arc::clone(&calls);
+                    let entry_cookies_and_csrf = Arc::clone(&entry_cookies_and_csrf);
+                    let windows_store = Arc::clone(&windows_store);
+                    move |headers: axum::http::HeaderMap,
+                          axum::Json(req): axum::Json<chan_server::CreateWindow>| {
+                        let calls = Arc::clone(&calls);
+                        let entry_cookies_and_csrf = Arc::clone(&entry_cookies_and_csrf);
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            let csrf = headers
+                                .get("x-chan-csrf")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string);
+                            assert!(cookie
+                                .as_deref()
+                                .is_some_and(|c| c.contains("__Host-devserver_gate=gate-f2f4")
+                                    && c.contains("__Host-devserver_csrf=csrf-f2f4")));
+                            assert_eq!(csrf.as_deref(), Some("csrf-f2f4"));
+                            entry_cookies_and_csrf.lock().unwrap().push((cookie, csrf));
+                            calls.lock().unwrap().push("POST /api/library/windows".into());
+                            let mut rec = test_window_record("w-wg-minted", "lib-f2f4", req.kind);
+                            rec.prefix = "/terminal".into();
+                            rec.workspace_path = req.workspace_path;
+                            rec.start_terminal = req.start_terminal;
+                            windows_store.lock().unwrap().push(rec.clone());
+                            axum::Json(rec)
+                        }
+                    }
+                })
+                .get({
+                    let calls = Arc::clone(&calls);
+                    let windows_store = Arc::clone(&windows_store);
+                    move |headers: axum::http::HeaderMap| {
+                        let calls = Arc::clone(&calls);
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            assert!(cookie.contains("__Host-devserver_gate=gate-f2f4"));
+                            calls.lock().unwrap().push("GET /api/library/windows".into());
+                            axum::Json(windows_store.lock().unwrap().clone())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/local-color",
+                axum::routing::get({
+                    let calls = Arc::clone(&calls);
+                    move |headers: axum::http::HeaderMap| {
+                        let calls = Arc::clone(&calls);
+                        async move {
+                            let cookie = headers
+                                .get(axum::http::header::COOKIE)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            assert!(cookie.contains("__Host-devserver_gate=gate-f2f4"));
+                            calls.lock().unwrap().push("GET /api/library/local-color".into());
+                            axum::Json(serde_json::json!({ "color": "#336699" }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    r#"<!doctype html><html><head><meta name="chan-launcher-host-os" content="linux"></head></html>"#
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let axum_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(crate::AppState::with_store(Arc::clone(&store)));
+        let fabric = crate::wireguard::tests::fabric().await;
+        assert!(state
+            .gateway_manager
+            .fabric
+            .set(Arc::clone(&fabric))
+            .is_ok());
+
+        let gateway_id = "gw-f2f4";
+        let client_key = crate::wireguard_keys::generate(dir.path(), gateway_id).unwrap();
+        let peer = crate::wireguard::tests::start_loopback_peer_forwarder(
+            &client_key.public_key,
+            axum_addr,
+        )
+        .await;
+        peer_port_cell.set(peer.http_port).unwrap();
+
+        let identity_origin = format!("http://id.p1.localtest.me:{}", peer.http_port);
+        let proxy_apex = format!("http://localtest.me:{}", peer.http_port);
+        let proxy_origin = format!(
+            "http://alice--dddddddddddd.p1.localtest.me:{}",
+            peer.http_port
+        );
+
+        let ingress = crate::config::WireguardIngress {
+            id: "p1".into(),
+            endpoint: peer.endpoint.clone(),
+            public_key: peer.public_key.clone(),
+            hosts: vec![crate::config::WireguardHost {
+                name: "*.p1.localtest.me".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }],
+        };
+        let mut gw_cfg: crate::config::Gateway = serde_json::from_value(serde_json::json!({
+            "id": gateway_id,
+            "url": identity_origin,
+        }))
+        .unwrap();
+        gw_cfg.wireguard_public_key = Some(client_key.public_key.clone());
+        gw_cfg.wireguard_enrolled_key = Some(client_key.public_key);
+        gw_cfg.wireguard_key_file = Some(client_key.path.clone());
+        gw_cfg.wireguard_enrollment = Some(crate::config::WireguardEnrollment {
+            key_file: client_key.path,
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: Some(5),
+            ingresses: vec![ingress],
+        });
+        let prepared = crate::wireguard::prepare(&gw_cfg);
+        gw_cfg.wireguard_protection = prepared.protection;
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.client_session_name = "iPhone-WG".into();
+            cfg.gateways.push(gw_cfg);
+            guard.save(&cfg).unwrap();
+        }
+        crate::wireguard::reconcile_saved(&state, gateway_id).unwrap();
+        fabric.settled_gateway(gateway_id).await.unwrap();
+
+        state.gateway_manager.seed_test_runtime(
+            gateway_id,
+            crate::devserver::GatewayDiscovery {
+                kind: "chan-gateway".into(),
+                api_version: 1,
+                identity_origin: identity_origin.clone(),
+                mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+                mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
+                devserver_proxy_origin: proxy_apex,
+                devserver_proxy_host_depth: 2,
+                wireguard: None,
+            },
+            vec![crate::gateway::RosterDevserver {
+                owner_user_id,
+                owner: "alice".into(),
+                devserver_id: ds64.clone(),
+                label: "wg-box".into(),
+                online: true,
+                shared: false,
+                proxy_origin: None,
+            }],
+        );
+        crate::auth::test_gateway_pats().lock().unwrap().insert(
+            identity_origin.clone(),
+            crate::auth::StoredPat {
+                id: "pat-id-f2f4".into(),
+                secret: "pat-f2f4".into(),
+                label: "f2f4".into(),
+                expires_at: String::new(),
+            },
+        );
+
+        let library_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(library_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        let notify = embedded.library_change_notify();
+        embedded.install_devserver_feed(
+            Arc::clone(&state.devserver_feed) as Arc<dyn chan_server::DevserverFeedSource>
+        );
+        let _ = state.embedded.set(embedded);
+
+        let app = crate::runtime_capability::tests::mock_app_with_context();
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        let synth_id = crate::gateway::synthesized_row_id(gateway_id, "alice", &ds64);
+        crate::devserver::with_test_wireguard_http(fabric.address(), async {
+            crate::connect_rostered_devserver(
+                app.handle().clone(),
+                Arc::clone(&state),
+                synth_id.clone(),
+            )
+            .await
+            .expect("connect_rostered_devserver through WireGuard");
+            let notified = notify.notified();
+            mobile_open_devserver_with_app(
+                app.handle(),
+                &state,
+                &synth_id,
+                chan_server::WindowKind::Terminal,
+                None,
+                false,
+            )
+            .await
+            .expect("mobile_open_devserver_with_app through WireGuard");
+            tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+                .await
+                .expect("refresh fires library_change_notify");
+        })
+        .await;
+
+        assert!(peer.hits.load(Ordering::Relaxed) > 0);
+        let recorded = calls.lock().unwrap().clone();
+        for required in [
+            "POST /mobile/v1/devserver/entry /",
+            "POST /_chan/entry",
+            "GET /api/library/workspaces",
+            "POST /api/library/windows",
+            "GET /api/library/windows",
+            "GET /api/library/local-color",
+        ] {
+            assert!(
+                recorded.iter().any(|c| c == required),
+                "missing {required} in {recorded:?}"
+            );
+        }
+        assert_eq!(entry_cookies_and_csrf.lock().unwrap().len(), 1);
+        assert!(state
+            .devservers
+            .get(&synth_id)
+            .unwrap()
+            .gateway
+            .as_ref()
+            .unwrap()
+            .access
+            .is_some());
+        assert!(state
+            .devserver_feed
+            .record_for_window_id("w-wg-minted")
+            .is_some());
+
+        let navigated = main.url().unwrap();
+        assert_eq!(navigated.origin().ascii_serialization(), proxy_origin);
+        assert!(!navigated.as_str().contains("entry-cred-secret"));
+        let q = query_map(&navigated);
+        assert_eq!(q.get("w").map(String::as_str), Some("w-wg-minted"));
+        assert_eq!(q.get("kind").map(String::as_str), Some("terminal"));
+        assert_eq!(q.get("lib").map(String::as_str), Some("lib-f2f4"));
+        assert_eq!(q.get("pane").map(String::as_str), Some("#336699"));
+        assert_eq!(q.get("client_name").map(String::as_str), Some("iPhone-WG"));
+        let holder = q.get("h").expect("holder tag");
+        assert_eq!(holder.len(), 32);
+        assert!(holder
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+
+        crate::auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&identity_origin);
+        server_task.abort();
+    }
 }

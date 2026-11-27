@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-fn require_supported_version(major: isize) -> Result<(), String> {
+pub(crate) fn require_supported_version(major: isize) -> Result<(), String> {
     if major < 17 {
         return Err("WireGuard requires iOS 17 or later for WebView proxy support".into());
     }

@@ -2649,4 +2649,745 @@ mod tests {
             .remove(&identity_origin);
         server.abort();
     }
+
+    #[tokio::test]
+    async fn f3_f6_stopped_tunnel_refuses_reconnect_until_reconcile_saved_recovers() {
+        use std::sync::atomic::Ordering;
+
+        let peer_port_cell = Arc::new(std::sync::OnceLock::<u16>::new());
+        let ds64 = "b".repeat(64);
+        let owner_user_id = uuid::Uuid::from_u128(7);
+
+        let router = axum::Router::new()
+            .route(
+                "/mobile/v1/devserver/entry",
+                axum::routing::post({
+                    let peer_port_cell = Arc::clone(&peer_port_cell);
+                    let ds64 = ds64.clone();
+                    move |axum::Json(req): axum::Json<serde_json::Value>| {
+                        let peer_port_cell = Arc::clone(&peer_port_cell);
+                        let ds64 = ds64.clone();
+                        async move {
+                            let path = req.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+                            let port = *peer_port_cell.get().expect("peer port set");
+                            let proxy_origin =
+                                format!("http://alice--bbbbbbbbbbbb.p1.localtest.me:{port}");
+                            axum::Json(serde_json::json!({
+                                "owner_user_id": owner_user_id,
+                                "username": "alice",
+                                "devserver_id": ds64,
+                                "proxy_origin": proxy_origin,
+                                "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                                "entry_credential": format!("entry-cred-f3f6:{path}"),
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post(|body: String| async move {
+                    let cred = url::form_urlencoded::parse(body.as_bytes())
+                        .find(|(k, _)| k == "credential")
+                        .map(|(_, v)| v.into_owned())
+                        .expect("credential form field");
+                    let location = cred
+                        .strip_prefix("entry-cred-f3f6:")
+                        .expect("expected entry credential prefix")
+                        .to_string();
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::SEE_OTHER)
+                        .header("location", location)
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_gate=gate-f3f6; Path=/; HttpOnly; Max-Age=120",
+                        )
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_csrf=csrf-f3f6; Path=/; Max-Age=120",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get(|| async { axum::Json(Vec::<chan_server::LauncherWorkspace>::new()) }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::get(|| async {
+                    let mut rec = sample_remote_record(
+                        "lib-reconn",
+                        "w-reopen",
+                        chan_server::WindowKind::Workspace,
+                    );
+                    rec.prefix = "/notes".into();
+                    axum::Json(vec![rec])
+                }),
+            )
+            .route(
+                "/api/library/local-color",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({ "color": "#223344" })) }),
+            )
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    r#"<!doctype html><html><head><meta name="chan-launcher-host-os" content="linux"></head></html>"#
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let axum_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(AppState::with_store(Arc::clone(&store)));
+        let fabric = wireguard::tests::fabric().await;
+        assert!(state
+            .gateway_manager
+            .fabric
+            .set(Arc::clone(&fabric))
+            .is_ok());
+
+        let gateway_id = "gw-f3f6";
+        let client_key = wireguard_keys::generate(dir.path(), gateway_id).unwrap();
+        let peer =
+            wireguard::tests::start_loopback_peer_forwarder(&client_key.public_key, axum_addr)
+                .await;
+        peer_port_cell.set(peer.http_port).unwrap();
+
+        let identity_origin = format!("http://{axum_addr}");
+        let proxy_apex = format!("http://localtest.me:{}", peer.http_port);
+        let proxy_origin = format!(
+            "http://alice--bbbbbbbbbbbb.p1.localtest.me:{}",
+            peer.http_port
+        );
+
+        let mut gw_cfg: config::Gateway = serde_json::from_value(serde_json::json!({
+            "id": gateway_id,
+            "url": identity_origin,
+        }))
+        .unwrap();
+        gw_cfg.wireguard_public_key = Some(client_key.public_key.clone());
+        gw_cfg.wireguard_enrolled_key = Some(client_key.public_key);
+        gw_cfg.wireguard_key_file = Some(client_key.path.clone());
+        gw_cfg.wireguard_enrollment = Some(config::WireguardEnrollment {
+            key_file: client_key.path,
+            addresses: vec!["10.7.0.2/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: Some(5),
+            ingresses: vec![config::WireguardIngress {
+                id: "p1".into(),
+                endpoint: peer.endpoint.clone(),
+                public_key: peer.public_key.clone(),
+                hosts: vec![config::WireguardHost {
+                    name: "*.p1.localtest.me".into(),
+                    addresses: vec!["10.7.0.1".parse().unwrap()],
+                }],
+            }],
+        });
+        let prepared = wireguard::prepare(&gw_cfg);
+        gw_cfg.wireguard_protection = prepared.protection;
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(gw_cfg);
+            guard.save(&cfg).unwrap();
+        }
+        wireguard::reconcile_saved(&state, gateway_id).unwrap();
+        fabric.settled_gateway(gateway_id).await.unwrap();
+
+        state.gateway_manager.seed_test_runtime(
+            gateway_id,
+            devserver::GatewayDiscovery {
+                kind: "chan-gateway".into(),
+                api_version: 1,
+                identity_origin: identity_origin.clone(),
+                mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+                mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
+                devserver_proxy_origin: proxy_apex,
+                devserver_proxy_host_depth: 2,
+                wireguard: None,
+            },
+            vec![gateway::RosterDevserver {
+                owner_user_id,
+                owner: "alice".into(),
+                devserver_id: ds64.clone(),
+                label: "workstation".into(),
+                online: true,
+                shared: false,
+                proxy_origin: None,
+            }],
+        );
+        auth::test_gateway_pats().lock().unwrap().insert(
+            identity_origin.clone(),
+            auth::StoredPat {
+                id: "pat-f3f6".into(),
+                secret: "secret-f3f6".into(),
+                label: "f3f6".into(),
+                expires_at: String::new(),
+            },
+        );
+        let (_lib_home, _notify) = install_test_embedded(&state).await;
+
+        let app = runtime_capability::tests::mock_app_with_context();
+        app.manage(Arc::clone(&state));
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+        let synth_id = gateway::synthesized_row_id(gateway_id, "alice", &ds64);
+
+        devserver::with_test_wireguard_http(fabric.address(), async {
+            connect_rostered_devserver(app.handle().clone(), Arc::clone(&state), synth_id.clone())
+                .await
+                .expect("initial rostered connect over WireGuard");
+            let rec = state
+                .devserver_feed
+                .record_for_window_id("w-reopen")
+                .expect("w-reopen in feed")
+                .1;
+            mobile_auth::mobile_open_existing_window_with_app(
+                app.handle(),
+                &state,
+                &synth_id,
+                &rec,
+            )
+            .await
+            .expect("open existing window over WireGuard");
+            assert!(state
+                .devservers
+                .get(&synth_id)
+                .unwrap()
+                .gateway
+                .as_ref()
+                .unwrap()
+                .access
+                .is_some());
+            assert!(peer.hits.load(Ordering::Relaxed) > 0);
+            assert_eq!(
+                main.url().unwrap().origin().ascii_serialization(),
+                proxy_origin
+            );
+
+            // Stop p1's WireGuard tunnel; reconnect must fail closed with STOPPED.
+            fabric
+                .shut_down_ingress_for_test(gateway_id, &format!("{gateway_id}/p1"))
+                .await;
+            assert_eq!(
+                fabric.view(gateway_id).0.as_deref(),
+                Some("stopped; connect the gateway again")
+            );
+            let err = reconnect_devserver_for_window_impl(app.handle(), &state, &main)
+                .await
+                .expect_err("reconnect must fail closed while tunnel is stopped");
+            assert!(err.contains("stopped; connect the gateway again"), "{err}");
+            assert!(!state.devservers.is_connected(&synth_id));
+
+            // Navigate back to the stale remote window URL, recover via reconcile_saved, and reconnect.
+            let stale_url = format!("{proxy_origin}/notes/index.html?w=w-reopen&lib=lib-reconn");
+            main.navigate(stale_url.parse().unwrap()).unwrap();
+            wireguard::reconcile_saved(&state, gateway_id).unwrap();
+            fabric.settled_gateway(gateway_id).await.unwrap();
+
+            let hits_before = peer.hits.load(Ordering::Relaxed);
+            reconnect_devserver_for_window_impl(app.handle(), &state, &main)
+                .await
+                .expect("reconnect succeeds after tunnel recovery");
+            assert!(state.devservers.is_connected(&synth_id));
+            assert!(state
+                .devservers
+                .get(&synth_id)
+                .unwrap()
+                .gateway
+                .as_ref()
+                .unwrap()
+                .access
+                .is_some());
+            let reopened = main.url().unwrap();
+            assert_eq!(reopened.origin().ascii_serialization(), proxy_origin);
+            let q = query_map(&reopened);
+            assert_eq!(q.get("w").map(String::as_str), Some("w-reopen"));
+            assert_eq!(q.get("lib").map(String::as_str), Some("lib-reconn"));
+            assert_eq!(q.get("pane").map(String::as_str), Some("#223344"));
+            assert!(peer.hits.load(Ordering::Relaxed) > hits_before);
+        })
+        .await;
+
+        auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&identity_origin);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn f6_f7_create_mutate_close_and_focus_observe_shared_feed() {
+        let mut seed_rec =
+            sample_remote_record("lib-1", "w-seed", chan_server::WindowKind::Workspace);
+        seed_rec.prefix = "/notes-1a2b".into();
+        let windows_store = Arc::new(Mutex::new(vec![seed_rec]));
+
+        let router = axum::Router::new()
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get(|| async {
+                    axum::Json(vec![chan_server::LauncherWorkspace {
+                        workspace_id: "notes-1a2b".into(),
+                        path: "/srv/notes".into(),
+                        status: chan_server::WorkspaceStatus::Running,
+                        error: None,
+                        label: "notes".into(),
+                        on: true,
+                        library_id: Some("lib-1".into()),
+                        devserver_id: None,
+                        prefix: "notes-1a2b".into(),
+                    }])
+                }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::post({
+                    let windows_store = Arc::clone(&windows_store);
+                    move |axum::Json(req): axum::Json<chan_server::CreateWindow>| {
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let mut rec = sample_remote_record("lib-1", "w-new-1", req.kind);
+                            rec.workspace_path = req.workspace_path;
+                            rec.prefix = "/notes-1a2b".into();
+                            rec.hidden = false;
+                            windows_store.lock().unwrap().push(rec.clone());
+                            axum::Json(rec)
+                        }
+                    }
+                })
+                .get({
+                    let windows_store = Arc::clone(&windows_store);
+                    move || {
+                        let windows_store = Arc::clone(&windows_store);
+                        async move { axum::Json(windows_store.lock().unwrap().clone()) }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/windows/{id}/visibility",
+                axum::routing::post({
+                    let windows_store = Arc::clone(&windows_store);
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let hidden = body["hidden"].as_bool().unwrap_or(false);
+                            if let Some(row) = windows_store
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|r| r.window_id == id)
+                            {
+                                row.hidden = hidden;
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/windows/{id}/label",
+                axum::routing::put({
+                    let windows_store = Arc::clone(&windows_store);
+                    move |axum::extract::Path(id): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let label = body["label"].as_str().unwrap_or("").to_string();
+                            if let Some(row) = windows_store
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|r| r.window_id == id)
+                            {
+                                row.label = label;
+                            }
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/library/windows/{id}",
+                axum::routing::delete({
+                    let windows_store = Arc::clone(&windows_store);
+                    move |axum::extract::Path(id): axum::extract::Path<String>| {
+                        let windows_store = Arc::clone(&windows_store);
+                        async move {
+                            let mut guard = windows_store.lock().unwrap();
+                            let before = guard.len();
+                            guard.retain(|r| r.window_id != id);
+                            if guard.len() < before {
+                                axum::http::StatusCode::NO_CONTENT
+                            } else {
+                                axum::http::StatusCode::NOT_FOUND
+                            }
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let (_lib_home, notify) = install_test_embedded(&state).await;
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin.clone(),
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-f6f7");
+        state.devservers.set(
+            "gw:1".into(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: String::new(),
+                name: "box".into(),
+                gateway: Some(Box::new(gw)),
+            },
+        );
+        state.devserver_feed.register_windows(
+            "gw:1".into(),
+            Arc::new(Mutex::new(state::DevserverWindowSnapshot::from(
+                windows_store.lock().unwrap().clone(),
+            ))),
+        );
+
+        let app = tauri::test::mock_app();
+        let seed_url = format!("{origin}/notes-1a2b/index.html?w=w-seed&lib=lib-1");
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(seed_url.parse().unwrap()),
+        )
+        .build()
+        .unwrap();
+
+        // 1. Create via single-webview command -> feed + notify + navigation.
+        let notified = notify.notified();
+        create_library_window_impl(
+            app.handle(),
+            &state,
+            &main,
+            chan_server::WindowKind::Workspace,
+            Some("notes-1a2b".into()),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("create notifies library change");
+        assert!(state
+            .devserver_feed
+            .record_for_window_id("w-new-1")
+            .is_some());
+        assert_eq!(
+            query_map(&main.url().unwrap()).get("w").map(String::as_str),
+            Some("w-new-1")
+        );
+
+        // 2. Hide via remote window_ops -> feed reflects hidden == true + notify.
+        let notified = notify.notified();
+        window_ops::hide_remote_window(&state, "gw:1", "w-new-1")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("hide notifies library change");
+        assert!(
+            state
+                .devserver_feed
+                .record_for_window_id("w-new-1")
+                .unwrap()
+                .1
+                .hidden
+        );
+
+        // 3. Rename via remote window_ops -> feed reflects label + notify.
+        let notified = notify.notified();
+        window_ops::set_remote_window_label(&state, "w-new-1", "Renamed-Pair")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("label notifies library change");
+        assert_eq!(
+            state
+                .devserver_feed
+                .record_for_window_id("w-new-1")
+                .unwrap()
+                .1
+                .label,
+            "Renamed-Pair"
+        );
+
+        // 4. Focus from w-seed -> observes hidden == true in feed, unhides, preserves label, navigates.
+        main.navigate(seed_url.parse().unwrap()).unwrap();
+        let notified = notify.notified();
+        focus_library_window_impl(app.handle(), &state, &main, "w-new-1".into())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("focus unhide notifies library change");
+        let focused_rec = state
+            .devserver_feed
+            .record_for_window_id("w-new-1")
+            .unwrap()
+            .1;
+        assert!(!focused_rec.hidden);
+        assert_eq!(focused_rec.label, "Renamed-Pair");
+        assert_eq!(
+            query_map(&main.url().unwrap()).get("w").map(String::as_str),
+            Some("w-new-1")
+        );
+
+        // 5. Close via discard_devserver_window_in_state -> removes from feed + focus fails.
+        let notified = notify.notified();
+        assert!(discard_devserver_window_in_state(&state, "w-new-1")
+            .await
+            .unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("discard notifies library change");
+        assert!(state
+            .devserver_feed
+            .record_for_window_id("w-new-1")
+            .is_none());
+        let missing_err = focus_library_window_impl(app.handle(), &state, &main, "w-new-1".into())
+            .await
+            .expect_err("focusing closed window must fail");
+        assert!(
+            missing_err.contains("window w-new-1 was not found"),
+            "{missing_err}"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn f6_f8_runtime_acl_show_computers_delivery_and_launcher_toggle() {
+        const EXACT_ORIGIN: &str = "https://alice--f6f8aabbccdd.p1.proxy.chan.app";
+        const REMOTE_PAGE: &str =
+            "https://alice--f6f8aabbccdd.p1.proxy.chan.app/notes/index.html?w=w-1&lib=lib-1";
+
+        let app = runtime_capability::tests::mock_ios_app();
+        let (_dir, state) = test_state();
+        let (_lib_home, _notify) = install_test_embedded(&state).await;
+        let home = mobile_auth::mobile_launcher_url(&state).unwrap();
+
+        let main = runtime_capability::tests::window_at(&app, "main", home.as_str());
+        let other = runtime_capability::tests::window_at(&app, "other", REMOTE_PAGE);
+
+        assert_eq!(
+            runtime_capability::mint_exact_origin_grant(&app, EXACT_ORIGIN),
+            Ok(true)
+        );
+
+        for allowed in [
+            "show_computers_for_window",
+            "toggle_launcher_panel",
+            "mobile_back_to_computers",
+        ] {
+            assert!(
+                runtime_capability::tests::invoke_from(&main, REMOTE_PAGE, allowed).is_ok(),
+                "remote main must permit {allowed}"
+            );
+        }
+        assert!(
+            runtime_capability::tests::invoke_from(
+                &main,
+                REMOTE_PAGE,
+                "mobile_deliver_pending_show_card"
+            )
+            .is_err(),
+            "remote main must deny loopback card delivery"
+        );
+
+        for allowed in [
+            "toggle_launcher_panel",
+            "mobile_back_to_computers",
+            "mobile_deliver_pending_show_card",
+        ] {
+            assert!(
+                runtime_capability::tests::invoke_from(&main, home.as_str(), allowed).is_ok(),
+                "loopback main must permit {allowed}"
+            );
+        }
+        assert!(
+            runtime_capability::tests::invoke_from(
+                &main,
+                home.as_str(),
+                "show_computers_for_window"
+            )
+            .is_err(),
+            "loopback main must deny show_computers_for_window"
+        );
+
+        for cmd in [
+            "show_computers_for_window",
+            "toggle_launcher_panel",
+            "mobile_back_to_computers",
+            "mobile_deliver_pending_show_card",
+        ] {
+            assert!(
+                runtime_capability::tests::invoke_from(&other, REMOTE_PAGE, cmd).is_err(),
+                "non-main window must deny {cmd}"
+            );
+        }
+
+        // Navigate main to remote origin, seed remote tracking + WireGuard selection + feed.
+        state
+            .devserver_feed
+            .seed_library_id("gw:1".into(), "lib-1".into());
+        main.navigate(REMOTE_PAGE.parse().unwrap()).unwrap();
+        wireguard::select_for_test(&state, "gw:1", EXACT_ORIGIN);
+        *state.last_remote_origin.lock().unwrap() =
+            Some((EXACT_ORIGIN.to_string(), "gw:1".to_string()));
+        let epoch_before = state
+            .navigation_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        show_computers_for_window_impl(&main, &state).unwrap();
+        assert!(same_page(&main.url().unwrap(), &home));
+        assert!(
+            state
+                .navigation_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+                > epoch_before
+        );
+        assert!(state.selected_wireguard.lock().unwrap().is_none());
+        assert!(state.last_remote_origin.lock().unwrap().is_none());
+        assert_eq!(
+            *state.pending_show_card.lock().unwrap(),
+            Some(Some("gw:1".to_string()))
+        );
+
+        // Card delivery rejects non-main and non-loopback, then emits once on main at home.
+        assert!(mobile_deliver_pending_show_card_impl(app.handle(), &other, &state).is_err());
+        main.navigate(REMOTE_PAGE.parse().unwrap()).unwrap();
+        assert!(mobile_deliver_pending_show_card_impl(app.handle(), &main, &state).is_err());
+
+        main.navigate(home.clone()).unwrap();
+        let (card_tx, mut card_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        main.listen("launcher-show-devserver-card", move |event| {
+            let _ = card_tx.send(event.payload().to_string());
+        });
+        mobile_deliver_pending_show_card_impl(app.handle(), &main, &state).unwrap();
+        let payload = card_rx.try_recv().expect("card event emitted");
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["devserverId"], "gw:1");
+        assert!(state.pending_show_card.lock().unwrap().is_none());
+        mobile_deliver_pending_show_card_impl(app.handle(), &main, &state).unwrap();
+        assert!(card_rx.try_recv().is_err());
+
+        // toggle_launcher_panel returns home from remote and resets epoch/state, then is a no-op on loopback.
+        main.navigate(REMOTE_PAGE.parse().unwrap()).unwrap();
+        wireguard::select_for_test(&state, "gw:1", EXACT_ORIGIN);
+        *state.last_remote_origin.lock().unwrap() =
+            Some((EXACT_ORIGIN.to_string(), "gw:1".to_string()));
+        let epoch_remote = state
+            .navigation_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        toggle_launcher_panel_impl(&main, &state).unwrap();
+        assert!(same_page(&main.url().unwrap(), &home));
+        let epoch_home = state
+            .navigation_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(epoch_home > epoch_remote);
+        assert!(state.selected_wireguard.lock().unwrap().is_none());
+        assert!(state.last_remote_origin.lock().unwrap().is_none());
+
+        toggle_launcher_panel_impl(&main, &state).unwrap();
+        assert!(same_page(&main.url().unwrap(), &home));
+        assert_eq!(
+            state
+                .navigation_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            epoch_home
+        );
+    }
+
+    #[tokio::test]
+    async fn f1_f9_context_boot_webview_and_embedded_launcher_align() {
+        let app = runtime_capability::tests::mock_ios_app();
+        let (_dir, state) = test_state();
+        let lib_home = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(lib_home.path().join("library.toml"))
+            .expect("open library");
+        let embedded = embedded::EmbeddedServer::for_tests_listening(library).await;
+        embedded.install_devserver_feed(
+            Arc::clone(&state.devserver_feed) as Arc<dyn chan_server::DevserverFeedSource>
+        );
+        let _ = state.embedded.set(embedded);
+        let embedded = state.embedded().expect("embedded server installed");
+        let launcher_url = mobile_auth::mobile_launcher_url(&state).unwrap();
+
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External(launcher_url.clone()),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(app.package_info().version.to_string(), "0.135.0");
+        assert_eq!(app.config().identifier, "app.chan.ios");
+
+        let vocab = native_vocabulary_for(app.handle());
+        assert_eq!(vocab.version, "0.135.0");
+        let expected_cmds: Vec<String> = runtime_capability::GATEWAY_WINDOW_COMMANDS
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect();
+        assert_eq!(vocab.commands, expected_cmds);
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let windows_url = format!("http://{}/api/library/windows", embedded.addr());
+        let authed = client
+            .get(&windows_url)
+            .bearer_auth(embedded.launcher_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), reqwest::StatusCode::OK);
+        let unauthed = client.get(&windows_url).send().await.unwrap();
+        assert_eq!(unauthed.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        for allowed in [
+            "mobile_back_to_computers",
+            "toggle_launcher_panel",
+            "native_vocabulary",
+        ] {
+            assert!(
+                runtime_capability::tests::invoke_from(&main, launcher_url.as_str(), allowed)
+                    .is_ok(),
+                "loopback main must allow {allowed}"
+            );
+        }
+        for denied in ["show_computers_for_window", "focus_library_window"] {
+            assert!(
+                runtime_capability::tests::invoke_from(&main, launcher_url.as_str(), denied)
+                    .is_err(),
+                "loopback main must deny {denied}"
+            );
+        }
+    }
 }

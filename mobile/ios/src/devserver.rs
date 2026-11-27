@@ -18,9 +18,17 @@ use serde::{Deserialize, Serialize};
 /// trust decision with HTTP/1.1 ALPN and the process-wide routing decision.
 pub(crate) fn tls_client_builder() -> Result<reqwest::ClientBuilder, String> {
     let tls = chan_tls::client_config().map_err(|e| e.to_string())?;
-    crate::wireguard::client_builder(
-        reqwest::Client::builder().use_preconfigured_tls(http1_tls(tls)),
-    )
+    let builder = reqwest::Client::builder().use_preconfigured_tls(http1_tls(tls));
+    #[cfg(test)]
+    if let Ok(proxy) = TEST_HTTP_PROXY.try_with(Clone::clone) {
+        return Ok(builder.no_proxy().proxy(reqwest::Proxy::custom(move |url| {
+            match url.host_str() {
+                Some("localhost" | "127.0.0.1" | "::1" | "[::1]") => None,
+                _ => Some(proxy.clone()),
+            }
+        })));
+    }
+    crate::wireguard::client_builder(builder)
 }
 
 /// `config` with HTTP/1.1 ALPN alone, as the desktop's HTTP clients
@@ -537,11 +545,46 @@ pub struct DevserverWorkspaceRow {
     pub url: String,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_HTTP_PROXY: url::Url;
+    static TEST_ALLOW_WIREGUARD_COOKIES: bool;
+}
+
+/// Scope a per-task WireGuard CONNECT proxy and test WebView cookie allowance
+/// without initializing process-global `NATIVE_PROXY` or HTTP client caches.
+#[cfg(test)]
+pub(crate) async fn with_test_wireguard_http<F, T>(proxy_addr: std::net::SocketAddr, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let proxy_url =
+        url::Url::parse(&format!("http://{proxy_addr}")).expect("valid proxy socket address");
+    TEST_HTTP_PROXY
+        .scope(proxy_url, TEST_ALLOW_WIREGUARD_COOKIES.scope(true, fut))
+        .await
+}
+
+#[cfg(test)]
+fn build_test_wireguard_client(no_redirect: bool) -> Result<reqwest::Client, String> {
+    let mut builder = tls_client_builder()?.timeout(Duration::from_secs(HTTP_TIMEOUT_SECS));
+    if no_redirect {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder
+        .build()
+        .map_err(|e| format!("building test wireguard http client: {e}"))
+}
+
 /// Reuse one process-wide HTTP client so devserver polls and requests share keep-alive connection pools. Cloning the client shares its pool rather than opening an independent one. Memoize the build result, including TLS initialization failures, so every caller sees the same initialization outcome without repeated build attempts.
 ///
 /// iOS setup installs the stable proxy before any request. The builder refuses
 /// an earlier call, so initialization cannot silently cache a direct client.
 fn http_client() -> Result<reqwest::Client, String> {
+    #[cfg(test)]
+    if TEST_HTTP_PROXY.try_with(|_| ()).is_ok() {
+        return build_test_wireguard_client(false);
+    }
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -559,6 +602,10 @@ fn http_client() -> Result<reqwest::Client, String> {
 
 /// The no-redirect twin of [`http_client`], under the same proxy order.
 fn http_client_no_redirect() -> Result<reqwest::Client, String> {
+    #[cfg(test)]
+    if TEST_HTTP_PROXY.try_with(|_| ()).is_ok() {
+        return build_test_wireguard_client(true);
+    }
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -1568,7 +1615,19 @@ fn install_gateway_webview_session_values<R: tauri::Runtime>(
     access: Option<&crate::wireguard::AccessGuard>,
 ) -> Result<(), String> {
     use tauri::Manager;
-    if access.is_some() {
+    let allow_test_wireguard = {
+        #[cfg(test)]
+        {
+            TEST_ALLOW_WIREGUARD_COOKIES
+                .try_with(|v| *v)
+                .unwrap_or(false)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if access.is_some() && !allow_test_wireguard {
         return Err("WireGuard cookie installation is unavailable on this platform".into());
     }
     let origin =

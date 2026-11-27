@@ -291,6 +291,36 @@ impl EmbeddedServer {
         )
     }
 
+    #[cfg(test)]
+    pub async fn for_tests_listening(library: chan_workspace::Library) -> Self {
+        let host = Arc::new(chan_server::WorkspaceHost::new(
+            library,
+            chan_server::route_builder(),
+        ));
+        host.install_self();
+        let launcher_token = uuid::Uuid::new_v4().to_string();
+        let addr_cell: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
+        chan_server::install_launcher_root_fallback(
+            &host,
+            Some(Arc::new(std::sync::RwLock::new(launcher_token.clone()))),
+            Some(addr_cell.clone()),
+        );
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test embedded listener");
+        let addr = listener.local_addr().expect("read test embedded addr");
+        let _ = addr_cell.set(addr);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let router = host.clone().router();
+        tokio::spawn(async move {
+            let _ = serve_router(listener, router, async move {
+                let _ = shutdown_rx.changed().await;
+            })
+            .await;
+        });
+        Self::assemble(host, None, addr, shutdown_tx, None, launcher_token)
+    }
+
     /// Install a workspace overlay at `store`, which
     /// [`for_tests`](Self::for_tests) leaves out, so a test can observe the
     /// on-set snapshot the desktop writes there.
