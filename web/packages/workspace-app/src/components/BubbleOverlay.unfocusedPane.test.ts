@@ -325,24 +325,32 @@ describe("a survey over a terminal whose pane is not focused", () => {
   // jsdom dispatches the press at the link whatever covers it (`inert`,
   // `pointer-events`), so hit-testing is read by a browser check, which
   // presses the link through the page.
-  test("a press on a link in its body makes its pane the focused one and leaves the link its click", async () => {
+  test("a press on a link in its body makes its pane the focused one, then cancels the link's click and shows its drop-down", async () => {
     const card = await surveyOverUnfocusedPane(LINKED);
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
     const link = card.querySelector<HTMLAnchorElement>(".survey-body a[href]")!;
     const followed: boolean[] = [];
-    // Read whether the click reached the document with the link's default
-    // left alone, then hold the default: jsdom cannot navigate.
+    // Read, after the app's listeners, whether the click reached the
+    // document with the link's default left alone.
     const onDocumentClick = (e: MouseEvent) => {
       if (e.target !== link) return;
       followed.push(!e.defaultPrevented);
-      e.preventDefault();
     };
     document.addEventListener("click", onDocumentClick);
-    await click(link);
-    document.removeEventListener("click", onDocumentClick);
+    try {
+      await click(link);
+    } finally {
+      document.removeEventListener("click", onDocumentClick);
+    }
 
-    expect(followed, "the link's click travels on with its default").toEqual([true]);
+    expect(followed, "the link's click reaches the document cancelled").toEqual([false]);
     expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
+    const rows = [...document.querySelectorAll(".md-bubble .md-bubble-row")]
+      .map((row) => [...row.querySelectorAll(":scope > span")].map((span) => span.textContent));
+    expect(rows, "the click shows the link's drop-down, its OPEN row and the URL")
+      .toEqual([["OPEN", "https://example.com/pull/1"]]);
+    expect(open, "the click opens nothing").not.toHaveBeenCalled();
     expect(link.tabIndex, "the link is back in the Tab order with its pane").toBe(0);
     expect(reply, "a link answers nothing").not.toHaveBeenCalled();
     expect(surveyFor(TERMINAL)?.surveyId).toBe(LINKED.surveyId);
