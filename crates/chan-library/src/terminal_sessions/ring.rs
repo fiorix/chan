@@ -12,10 +12,47 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+/// Where the session's screen tracker stood at a chunk's first byte.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ScreenMark {
+    /// Whether the output before the chunk had selected the alternate
+    /// screen. `None` where a restored ring cannot tell: its bytes switch
+    /// screens after the chunk, and nothing before it says which screen
+    /// they started on.
+    pub(super) alt_screen: Option<bool>,
+    /// A switch the tracker had begun and not finished before the chunk,
+    /// which the chunk's first bytes may finish.
+    pub(super) partial: Vec<u8>,
+}
+
+impl ScreenMark {
+    /// Where the tracker stands after `bytes`, from this mark.
+    pub(super) fn after(&self, bytes: &[u8]) -> Self {
+        let mut partial = self.partial.clone();
+        let mut alt_screen = self.alt_screen;
+        super::scan_private_modes(&mut partial, bytes, |mode, on| {
+            if super::is_screen_switch(mode) {
+                alt_screen = Some(on);
+            }
+        });
+        Self {
+            alt_screen,
+            partial,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Chunk {
+    start: u64,
+    bytes: Vec<u8>,
+    screen: ScreenMark,
+}
+
 #[derive(Debug)]
 pub(super) struct RingBuffer {
     cap: usize,
-    chunks: VecDeque<(u64, Vec<u8>)>,
+    chunks: VecDeque<Chunk>,
     start_seq: u64,
     end_seq: u64,
     len: usize,
@@ -42,8 +79,15 @@ impl RingBuffer {
         }
     }
 
+    /// A ring rebuilt from the `replay` its bytes end with at `end_seq`, which
+    /// leave the terminal on the alternate screen when `alt_screen`.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn new_with_replay(cap: usize, end_seq: u64, replay: &[u8]) -> Self {
+    pub(super) fn new_with_replay(
+        cap: usize,
+        end_seq: u64,
+        replay: &[u8],
+        alt_screen: bool,
+    ) -> Self {
         if replay.is_empty() {
             return Self::new_at(cap, end_seq);
         }
@@ -53,55 +97,84 @@ impl RingBuffer {
             replay
         };
         // Cut to the capacity first: a chunk evicted from a longer tail would
-        // take bytes the ring has room for.
-        let replay = &replay[replay.len().saturating_sub(cap.max(1))..];
+        // take bytes the ring has room for. The bytes cut are still read for
+        // the screen and the switch they leave the kept ones on.
+        let cut = replay.len().saturating_sub(cap.max(1));
+        let mut screen = ScreenMark::default().after(&replay[..cut]);
+        let replay = &replay[cut..];
         let start_seq = end_seq.saturating_sub(replay.len() as u64);
         let mut ring = Self::new_at(cap, start_seq);
         // Eviction drops whole chunks, so a restored tail keeps the chunk size
         // of the reads it came from: one long chunk would empty the ring at
-        // the first push past capacity.
+        // the first push past capacity. Nothing records the screen these
+        // bytes, the cut ones included, start on. From their first switch on,
+        // the switches tell; up to it, the screen they leave is the one they
+        // start on only when they make no switch at all.
+        let mut chunks = Vec::new();
         for chunk in replay.chunks(super::PTY_READ_BYTES) {
-            ring.push(chunk);
+            let next = screen.after(chunk);
+            chunks.push((chunk, std::mem::replace(&mut screen, next)));
+        }
+        let switches = screen.alt_screen.is_some();
+        for (chunk, mut mark) in chunks {
+            if !switches {
+                mark.alt_screen = Some(alt_screen);
+            }
+            ring.push(chunk, mark);
         }
         ring
     }
 
-    pub(super) fn push(&mut self, bytes: &[u8]) {
+    /// Push `bytes`, at whose first byte the screen tracker stood at `screen`.
+    pub(super) fn push(&mut self, bytes: &[u8], screen: ScreenMark) {
         let start = self.end_seq;
         self.end_seq = self.end_seq.saturating_add(bytes.len() as u64);
         #[cfg(target_os = "linux")]
         self.write_mirror(start, bytes, None);
-        self.keep(start, bytes);
+        self.keep(start, bytes, screen);
     }
 
     /// Push `bytes` that leave the terminal in `state`. The ring file takes
     /// the state in the same write as the window that counts the bytes, so a
     /// process killed at any point leaves the two from one moment.
     #[cfg(target_os = "linux")]
-    pub(super) fn push_with_state(&mut self, bytes: &[u8], state: &TerminalState) {
+    pub(super) fn push_with_state(
+        &mut self,
+        bytes: &[u8],
+        screen: ScreenMark,
+        state: &TerminalState,
+    ) {
         let start = self.end_seq;
         self.end_seq = self.end_seq.saturating_add(bytes.len() as u64);
         self.write_mirror(start, bytes, Some(state));
-        self.keep(start, bytes);
+        self.keep(start, bytes, screen);
     }
 
     /// Keep `bytes`, numbered from `start`, in memory, dropping the oldest
     /// past the capacity.
-    fn keep(&mut self, start: u64, bytes: &[u8]) {
+    fn keep(&mut self, start: u64, bytes: &[u8], screen: ScreenMark) {
         if bytes.len() >= self.cap {
             self.chunks.clear();
-            let tail = bytes[bytes.len() - self.cap..].to_vec();
-            self.start_seq = self.end_seq.saturating_sub(tail.len() as u64);
-            self.len = tail.len();
-            self.chunks.push_back((self.start_seq, tail));
+            let cut = bytes.len() - self.cap;
+            self.start_seq = self.end_seq.saturating_sub(self.cap as u64);
+            self.len = self.cap;
+            self.chunks.push_back(Chunk {
+                start: self.start_seq,
+                bytes: bytes[cut..].to_vec(),
+                screen: screen.after(&bytes[..cut]),
+            });
             return;
         }
         self.len = self.len.saturating_add(bytes.len());
-        self.chunks.push_back((start, bytes.to_vec()));
+        self.chunks.push_back(Chunk {
+            start,
+            bytes: bytes.to_vec(),
+            screen,
+        });
         while self.len > self.cap {
-            if let Some((_start, chunk)) = self.chunks.pop_front() {
-                self.len = self.len.saturating_sub(chunk.len());
-                self.start_seq = self.start_seq.saturating_add(chunk.len() as u64);
+            if let Some(chunk) = self.chunks.pop_front() {
+                self.len = self.len.saturating_sub(chunk.bytes.len());
+                self.start_seq = self.start_seq.saturating_add(chunk.bytes.len() as u64);
             } else {
                 self.start_seq = self.end_seq;
                 self.len = 0;
@@ -112,6 +185,22 @@ impl RingBuffer {
 
     pub(super) fn end_seq(&self) -> u64 {
         self.end_seq
+    }
+
+    /// The screen tracker's mark at the ring's first byte; `None` for an
+    /// empty ring.
+    pub(super) fn start_screen(&self) -> Option<&ScreenMark> {
+        self.chunks.front().map(|chunk| &chunk.screen)
+    }
+
+    /// The start of a private-mode sequence the ring's last bytes leave
+    /// open, which the next read may finish; empty when they leave none.
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_sequence(&self) -> Vec<u8> {
+        self.chunks
+            .back()
+            .map(|chunk| chunk.screen.after(&chunk.bytes).partial)
+            .unwrap_or_default()
     }
 
     #[cfg(target_os = "linux")]
@@ -129,13 +218,13 @@ impl RingBuffer {
         let replay_start = requested.max(self.start_seq);
         let missed = self.start_seq.saturating_sub(requested);
         let mut replay = Vec::new();
-        for (chunk_start, chunk) in &self.chunks {
-            let chunk_end = chunk_start.saturating_add(chunk.len() as u64);
+        for chunk in &self.chunks {
+            let chunk_end = chunk.start.saturating_add(chunk.bytes.len() as u64);
             if chunk_end <= replay_start {
                 continue;
             }
-            let offset = replay_start.saturating_sub(*chunk_start) as usize;
-            replay.push(chunk[offset..].to_vec());
+            let offset = replay_start.saturating_sub(chunk.start) as usize;
+            replay.push(chunk.bytes[offset..].to_vec());
         }
         (replay, missed)
     }
@@ -152,7 +241,11 @@ impl RingBuffer {
         } else {
             self.start_seq.saturating_sub(since)
         };
-        let replay = self.chunks.iter().map(|(_, chunk)| chunk.clone()).collect();
+        let replay = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.bytes.clone())
+            .collect();
         (replay, missed)
     }
 
@@ -170,8 +263,8 @@ impl RingBuffer {
     ) -> io::Result<()> {
         file.state = state.encode(stopped);
         file.reset(self.start_seq)?;
-        for (chunk_start, chunk) in &self.chunks {
-            file.append(*chunk_start, chunk)?;
+        for chunk in &self.chunks {
+            file.append(chunk.start, &chunk.bytes)?;
         }
         self.mirror = Some(file);
         Ok(())
@@ -977,7 +1070,7 @@ mod tests {
     fn a_mirrored_ring_and_its_file_hold_the_same_stream() {
         let bytes = stream(300);
         let mut ring = RingBuffer::new(64);
-        ring.push(&bytes[..100]);
+        ring.push(&bytes[..100], ScreenMark::default());
         ring.mirror_into(
             RingFile::create(64).unwrap(),
             &TerminalState::default(),
@@ -985,7 +1078,7 @@ mod tests {
         )
         .unwrap();
         for chunk in bytes[100..].chunks(9) {
-            ring.push(chunk);
+            ring.push(chunk, ScreenMark::default());
         }
         let (end, read) = reread(ring.mirror.as_ref().unwrap()).unwrap();
         assert_eq!(end, ring.end_seq());

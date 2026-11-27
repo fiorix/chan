@@ -23,8 +23,8 @@ use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, OutputFlow, ProgramReading,
     ProgramStatusSnapshot, QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle,
-    TerminalExit, TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
-    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP, NO_PROGRESS_LIMIT,
+    TerminalExit, TerminalPlacement, TerminalScreen, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef,
+    TmuxRequest, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP, NO_PROGRESS_LIMIT,
 };
 
 #[path = "terminal_socket.rs"]
@@ -353,6 +353,15 @@ enum ServerFrame {
         /// Ring bytes sent immediately after this frame, excluding the
         /// alternate-screen prelude and private-mode reassert.
         replay_bytes: usize,
+        /// `"normal"` or `"alternate"`: the screen the program had at the
+        /// replay's first byte, present only on an attach that reconciles
+        /// after missed bytes, a redial and a live recovery alike. The
+        /// missed span can hold the program's switch away from the screen
+        /// the client still shows, so a client that shows the other screen
+        /// switches before writing the replay from its first byte; the
+        /// server sends no switch. Absent where the ring cannot tell.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replay_screen: Option<TerminalScreen>,
         /// The most output this socket leaves unacknowledged, present only
         /// when the client dialed with `ack=1`. Its presence is what allows
         /// the client to send `ack` frames.
@@ -1806,6 +1815,7 @@ fn session_frame_with_pty(session: &AttachHandle, pty: Option<SessionPty>) -> Se
         generation: session.generation,
         missed_bytes: session.missed_bytes,
         replay_bytes: session.replay.iter().map(Vec::len).sum(),
+        replay_screen: session.replay_screen,
         ack_window: session
             .output_progress()
             .and_then(|progress| progress.ack_window()),
@@ -2885,8 +2895,9 @@ mod tests {
             spawn_group: Some("spawn-group".into()),
             seq: 7,
             generation: 3,
-            missed_bytes: 0,
+            missed_bytes: 2,
             replay_bytes: 7,
+            replay_screen: Some(TerminalScreen::Alternate),
             ack_window: None,
             bytes_since_focus: 0,
             queue_depth: 2,
@@ -2899,7 +2910,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program":{"title":null,"command":null},"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":2,"replay_bytes":7,"replay_screen":"alternate","bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program":{"title":null,"command":null},"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2914,6 +2925,7 @@ mod tests {
             generation: 0,
             missed_bytes: 0,
             replay_bytes: 0,
+            replay_screen: None,
             ack_window: None,
             bytes_since_focus: 0,
             queue_depth: 0,
