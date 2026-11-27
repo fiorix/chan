@@ -935,13 +935,16 @@ describe("a reconciling answer that names its replay's start screen", () => {
     await deliver(second, { frame: session(VIEW_AT + REDRAWN.length, 0, REDRAWN.length), replay: REDRAWN, after: "" }, REDRAWN.length / 2);
     const third = await redialedAfterCut(second);
     // An answer in another generation does not continue the view, so its
-    // replay goes on a reset screen; the program is on its alternate screen
-    // at the replay's first byte.
-    const replay = "\x1b[5;1Hrestored frame";
+    // replay goes on a reset screen. A reconciling one ends on the normal
+    // screen: its program is on its alternate screen at the replay's first
+    // byte and leaves it in the replay.
+    const replay = "\x1b[5;1Hrestored frame\x1b[?1049l\r\nafter restore\r\n$ ";
     const frame = { ...session(500, 10, replay.length, "alternate"), generation: GENERATION + 1 };
-    await deliver(third, { frame, replay, after: LOST_ALT_SUFFIX });
-    expect(ghosttyAlternateScreen(term), "the program's alternate screen").toBe(true);
-    expect(ghosttyLineText(term, 4), "the replay drew on it").toContain("restored frame");
+    await deliver(third, { frame, replay, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen the program left for").toBe(false);
+    const normal = rows(term.buffer.normal);
+    expect(normal, "the tail on the normal screen").toContain("after restore");
+    expect(normal.filter((row) => row.includes("restored frame")), "no frame on the normal screen").toEqual([]);
   });
 
   /// A view whose normal screen holds five lines and a prompt, with a
@@ -1030,13 +1033,15 @@ describe("a reconciling answer that names its replay's start screen", () => {
 
   test("a reset replay that starts on the alternate screen switches the keyboard protocol back to it", async () => {
     const { tab, term, third } = await kittyViewCutBeforeAResetReplay();
-    // The program pushes other flags on its alternate screen.
-    const replay = "\x1b[>1u\x1b[1;1Hframe";
+    // The program pushes other flags on its alternate screen, then leaves
+    // it: a reconciling answer in another generation ends on the normal
+    // screen.
+    const replay = "\x1b[>1u\x1b[1;1Hframe\x1b[?1049l$ ";
     const frame = { ...session(500, 20, replay.length, "alternate"), generation: GENERATION + 1 };
-    await deliver(third, { frame, replay, after: LOST_ALT_SUFFIX });
-    expect(ghosttyAlternateScreen(term), "the alternate screen").toBe(true);
-    expect(tab.keyboardProtocol?.kitty, "the program's flags on the alternate screen's stack").toMatchObject({
-      screen: "alternate", alternateFlags: 1, mainFlags: 0,
+    await deliver(third, { frame, replay, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen").toBe(false);
+    expect(tab.keyboardProtocol?.kitty, "the program's flags went on the alternate screen's stack").toMatchObject({
+      screen: "main", alternateFlags: 1, mainFlags: 0,
     });
   });
 
