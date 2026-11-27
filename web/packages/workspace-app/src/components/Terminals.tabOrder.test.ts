@@ -17,6 +17,8 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { ghosttyHasFocus, seatedGhostty } from "../__tests__/ghosttyTab";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { setSocketFactory } from "../api/transport";
+import { demoSocketFactory } from "../demo/socket";
 import { layout, setActivePane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -224,6 +226,37 @@ describe("terminals that keep their Tab order", () => {
     await twoPanes();
     expect(tabStops(TERM_B), "B's terminal, in the active pane, has its host and input in the Tab order")
       .toEqual(IN_ORDER);
+  });
+
+  test("Tab and Shift+Tab in the active pane's terminal go to its program, and the keyboard stays there", async () => {
+    // What the terminals send their PTYs: the input frames on their sockets.
+    const typed: unknown[] = [];
+    setSocketFactory((url) => {
+      const socket = demoSocketFactory(url);
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        const frame = typeof data === "string" ? JSON.parse(data) : null;
+        if (frame?.type === "input") typed.push(frame.data);
+        send(data);
+      };
+      return socket;
+    });
+    await twoPanes();
+    const b = await seatedGhostty(pane(PANE_B));
+    await pressTerminal(TERM_B);
+    expect(ghosttyHasFocus(b), "the press gives B's terminal the keyboard").toBe(true);
+    typed.splice(0);
+
+    for (const [name, shiftKey] of [["Tab", false], ["Shift+Tab", true]] as const) {
+      const key = new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey, bubbles: true, cancelable: true });
+      // The legacy key code a browser gives Tab, which the terminal's key
+      // mapping reads.
+      Object.defineProperty(key, "keyCode", { value: 9 });
+      document.activeElement!.dispatchEvent(key);
+      expect(key.defaultPrevented, `${name} runs no Tab walk out of the terminal`).toBe(true);
+    }
+    expect(typed, "the program gets a tab and a back tab").toEqual(["\t", "\x1b[Z"]);
+    expect(ghosttyHasFocus(b), "B's terminal keeps the keyboard").toBe(true);
   });
 
   test("script focus still reaches a terminal whose host and input are out of the Tab order", async () => {
