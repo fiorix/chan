@@ -34,3 +34,16 @@ Read at `aabb9d039`, by reading; nothing run.
 ## Accepted, 2026-11-26
 
 Accepted by the owner on 2026-11-26 ("app and workspace recommendations are good to me", `dev/v0135-team/decisions.md`, D125), answering the candidate rows of the round's hand-back (`dev/v0135-team/handback.md`, section 7, "Backlinks"). Drafted as a lead document and not built in v0.135.0, so the GA commit moves it to the next version (D125).
+
+## What is there now, corrected 2026-11-27
+
+Read at `cfbeddcbe`, by reading; the guest measurement is to confirm it. The second point of "What is there now" is wrong for a plain link. The index stores each link target already normalized (`build_edges`, `crates/chan-workspace/src/workspace.rs`, through `markdown::normalize_href`): a wikilink is made workspace-rooted and `../` is collapsed against the note's folder. When no file in the resolver's set matches, `resolve_link_target` (`crates/chan-server/src/routes/graph_normalize.rs`) answers that stored spelling, which is the target's own path. So over the cap a plain link to an unindexed file, the `[link](LICENSE)` example included, is found at the base.
+
+The answer over the cap misses only where resolution needs the file set to rewrite the stored spelling:
+
+- Shadowed: `[[D/leaf]]` with an unindexed `D/leaf` beside an indexed `D/leaf.md`. Under the cap the link lands on `D/leaf`; over the cap it lands on `D/leaf.md`, so `D/leaf` misses it and `D/leaf.md` gains it.
+- Source-relative: `[[att/k.png]]` in `notes/` naming `notes/att/k.png`. Under the cap the resolver finds it through the note's folder; over the cap the link stays `att/k.png`, so `notes/att/k.png` misses it.
+
+Acceptance 1's red uses these two shapes. The graph's lookup as it stands (`link_targets_on_disk`) would fix the shadowed shape and leave the source-relative one missed, as its doc comment states, so the fix is a lookup aimed at the one target a link names, which fixes both and changes no answer under the cap. The test counter for "no whole-tree walk" sits in `crates/chan-workspace`'s listing test hooks, beside the counts the listing's tests already keep: the walk to count is the workspace's, outside the Boundaries line above.
+
+Also read: over the cap a window's load answers `GET /api/inspector?path=` with 500 after a walk of 2 to 3 s (the listing's too-large error falls to the generic 500). That is the inspector, not backlinks, and is outside this row.
