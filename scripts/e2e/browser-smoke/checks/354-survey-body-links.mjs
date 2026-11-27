@@ -29,6 +29,18 @@
 // - tab-mod-enter: Tab to the link and Ctrl+Enter make the engine's
 //   modified click, which is cancelled and opens the URL once with no
 //   drop-down.
+// - overlay: with the drop-down open, Search opens over the panes and takes
+//   the keyboard, and the drop-down closes; once Search closes and the
+//   keyboard is back in the card, Enter opens nothing.
+// - footer: a press on the drop-down's footer leaves the keyboard where
+//   the click on the link left it and the drop-down open, and 1 then
+//   answers Alpha.
+// - tab-answer: with the drop-down open, Tab moves the keyboard to the
+//   first answer and the drop-down closes; Enter there presses the answer,
+//   which answers Alpha, and opens nothing.
+// - area: a click on an image map's area, over its loaded image, is
+//   cancelled and shows the drop-down under the image, not at the
+//   window's corner, since the area has no box of its own.
 // - path: a click on a link to a seeded note shows its OPEN row with the
 //   path as written and no copy button; Enter opens the note as pane A's
 //   active tab while pane B keeps its terminal, the survey stays pending,
@@ -56,9 +68,14 @@ const NOTE = `${NOTE_DIR}/a354.md`;
 const NOTE_TEXT = "NOTE354 opened from a survey body";
 const URL_BODY = `Pane B keeps the keyboard; read [the notes](${LINK_URL}) first.`;
 const PATH_BODY = `Pane B keeps the keyboard; read [the note](${NOTE}) first.`;
+// A 1x1 PNG, so the map's image loads with no network and the engine
+// hit-tests its area.
+const MAP_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+const AREA_BODY = `Pane B keeps the keyboard; the map: <img src="${MAP_IMAGE}" usemap="#m354" width="120" height="60" alt="map"><map name="m354"><area href="${LINK_URL}" shape="rect" coords="0,0,120,60" alt="the notes"></map>`;
 const OPENED = [[LINK_URL, "_blank", "noopener,noreferrer"]];
-const LEG_BODY = { path: PATH_BODY };
-const LEG_COUNT = 10;
+const LEG_BODY = { area: AREA_BODY, path: PATH_BODY };
+const LEG_COUNT = 14;
+const SEARCH_INPUT = ".search .head input";
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -154,9 +171,10 @@ async function takeProbe(page) {
 }
 
 /// The drop-downs showing: each one's rows as text (the OPEN tag and the
-/// target as written), its copy button, whether it sits under `linkQuery`'s
-/// link, and the styles only the app's stylesheet gives it.
-async function dropDowns(page, linkQuery) {
+/// target as written), its copy button, whether it sits under the element
+/// `anchorQuery` names (the link, or an area's image), and the styles only
+/// the app's stylesheet gives it.
+async function dropDowns(page, anchorQuery) {
   return page.evaluate((query) => {
     const linkBox = document.querySelector(query)?.getBoundingClientRect() ?? null;
     return [...document.querySelectorAll(".md-bubble")].map((wrap) => {
@@ -239,11 +257,11 @@ async function runSurvey(ctx, directory, save) {
   }
 
   /// The drop-downs once one shows, or none after the wait.
-  async function waitDropDowns(timeout = 3_000) {
+  async function waitDropDowns(timeout = 3_000, anchor = linkQuery()) {
     return until("a drop-down shows", async () => {
-      const shown = await dropDowns(page, linkQuery());
+      const shown = await dropDowns(page, anchor);
       return shown.length ? shown : null;
-    }, timeout).catch(() => dropDowns(page, linkQuery()));
+    }, timeout).catch(() => dropDowns(page, anchor));
   }
 
   /// No drop-down, read after a pause in which one would have shown.
@@ -456,6 +474,111 @@ async function runSurvey(ctx, directory, save) {
       await expectPageStays(result, "Ctrl+Enter on the focused link");
       await expectSurveyUp(result, handle, "Ctrl+Enter on the focused link");
       expectNoBytes(result, "Ctrl+Enter on the focused link", bytes(files.target, offsets.target), bytes(files.away, offsets.away));
+    },
+
+    async overlay(result, handle) {
+      const shown = await clickLink(result);
+      expectRow(result, shown, LINK_URL, true);
+      try {
+        await dispatchCommand(page, "app.search.toggle");
+        await page.waitForSelector(SEARCH_INPUT, { visible: true, timeout: 15_000 });
+        await settle(page);
+        // Search owns the keyboard while it shows, wherever focus is.
+        result.underSearch = { inSearch: await page.evaluate(() => Boolean(document.activeElement?.closest?.(".search"))) };
+        await sleep(300);
+        result.underSearch.dropDowns = (await dropDowns(page, linkQuery())).map((d) => d.rows);
+        if (result.underSearch.dropDowns.length) result.failures.push(`the drop-down stays open under Search: ${JSON.stringify(result.underSearch.dropDowns)}`);
+        result.screenshot = basename(await ctx.shot("354-overlay", page));
+      } finally {
+        if (await page.$(SEARCH_INPUT)) {
+          await dispatchCommand(page, "app.search.toggle");
+          await page.waitForSelector(SEARCH_INPUT, { hidden: true, timeout: 15_000 });
+        }
+      }
+      result.afterSearch = await until("the keyboard comes back to A's survey", async () => {
+        const current = await read();
+        return current.keyboard === "survey" || current.keyboard === "link" ? current : null;
+      }).catch(async () => ({ ...(await read()), timedOut: true }));
+      if (result.afterSearch.timedOut) throw new Error(`precondition: after Search closed the keyboard is at ${result.afterSearch.keyboard}, not in A's survey`);
+      await takeProbe(page);
+      await page.keyboard.press("Enter");
+      result.probe = await waitOpened(1_000);
+      if (result.probe.opened.length) result.failures.push(`Enter after Search closed opened ${JSON.stringify(result.probe.opened)}`);
+      await expectPageStays(result, "Enter after Search closed");
+      await expectSurveyUp(result, handle, "Enter after Search closed");
+    },
+
+    async footer(result, handle) {
+      const shown = await clickLink(result);
+      expectRow(result, shown, LINK_URL, true);
+      result.beforePress = await read();
+      await page.click(".md-bubble .md-bubble-status");
+      await settle(page);
+      result.afterPress = await read();
+      result.afterPressDropDowns = (await dropDowns(page, linkQuery())).map((d) => d.rows);
+      if (result.afterPress.keyboard !== result.beforePress.keyboard) {
+        result.failures.push(`the press on the footer moved the keyboard from ${result.beforePress.keyboard} to ${result.afterPress.keyboard}`);
+      }
+      if (!same(result.afterPressDropDowns, [[["OPEN", LINK_URL]]])) {
+        result.failures.push(`after the press on the footer the drop-downs read ${JSON.stringify(result.afterPressDropDowns)}`);
+      }
+      await page.keyboard.press("1");
+      result.reply = await until("1 answers the survey", () => handle.result, 3_000).catch(() => null);
+      if (result.reply?.code !== 0 || result.reply?.stdout !== "Alpha") {
+        result.failures.push(`1 after the press on the footer answered ${JSON.stringify(result.reply)}, expected "Alpha"`);
+      }
+      result.probe = await takeProbe(page);
+      if (result.probe.opened.length) result.failures.push(`the press on the footer and 1 opened ${JSON.stringify(result.probe.opened)}`);
+      await expectPageStays(result, "the press on the footer");
+    },
+
+    async "tab-answer"(result, handle) {
+      const shown = await clickLink(result);
+      expectRow(result, shown, LINK_URL, true);
+      await page.keyboard.press("Tab");
+      await settle(page);
+      result.onAnswer = await page.evaluate(() => {
+        const active = document.activeElement;
+        return active?.closest?.(".survey-option")?.querySelector(".survey-option-label")?.textContent?.trim()
+          ?? `${active?.tagName ?? "none"}.${active?.className?.toString?.() ?? ""}`;
+      });
+      if (result.onAnswer !== "Alpha") throw new Error(`precondition: Tab from the link reached ${result.onAnswer}, not the first answer`);
+      await noDropDown(result, "with the keyboard on the first answer the page");
+      await page.keyboard.press("Enter");
+      result.reply = await until("Enter on the first answer answers the survey", () => handle.result, 3_000).catch(() => null);
+      if (result.reply?.code !== 0 || result.reply?.stdout !== "Alpha") {
+        result.failures.push(`Enter on the first answer answered ${JSON.stringify(result.reply)}, expected "Alpha"`);
+      }
+      result.probe = await takeProbe(page);
+      if (result.probe.opened.length) result.failures.push(`Enter on the first answer opened ${JSON.stringify(result.probe.opened)}`);
+      await expectPageStays(result, "Enter on the first answer");
+    },
+
+    async area(result, handle) {
+      const image = `${terminalSelector(target.tab)} .survey-body img[usemap="#m354"]`;
+      result.image = await until("the map's image loads", () => page.evaluate((query) => {
+        const img = document.querySelector(query);
+        if (!img?.complete || !img.naturalWidth) return null;
+        const box = img.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+      }, image));
+      result.areas = await page.evaluate((tab) => document.querySelectorAll(`.terminal-tab[data-terminal-tab-id="${tab}"] .survey-body map[name="m354"] area[href]`).length, target.tab);
+      if (result.areas !== 1) throw new Error(`precondition: the body renders ${result.areas} areas in the map`);
+      await page.mouse.click(result.image.x, result.image.y);
+      await settle(page);
+      result.shown = await waitDropDowns(3_000, image);
+      result.clickProbe = await takeProbe(page);
+      expectClicks(result, result.clickProbe.clicks, "the click on the area");
+      if (result.clickProbe.opened.length) result.failures.push(`the click on the area opened ${JSON.stringify(result.clickProbe.opened)}`);
+      result.box = await page.evaluate(() => {
+        const box = document.querySelector(".md-bubble")?.getBoundingClientRect();
+        return box ? { top: box.top, left: box.left } : null;
+      });
+      // expectRow's "under the link" reads the drop-down against the image.
+      expectRow(result, result.shown, LINK_URL, true);
+      await expectPageStays(result, "the click on the area");
+      await expectSurveyUp(result, handle, "the click on the area");
+      result.screenshot = basename(await ctx.shot("354-area", page));
     },
 
     async path(result, handle) {
