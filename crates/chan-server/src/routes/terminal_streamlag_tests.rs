@@ -2278,6 +2278,27 @@ fn parsed_modes_reads_switches_cut_sequences_queries_and_resets() {
     );
 }
 
+#[test]
+fn parsed_modes_reads_a_switch_and_a_reset_across_a_del_or_a_cr_inside_them() {
+    let read: Vec<_> = [("DEL", "\x7f"), ("CR", "\r")]
+        .into_iter()
+        .map(|(name, control)| {
+            let bytes = format!("\x1b[?1049h\x1b[?1000h\x1b[?10{control}49l\x1b[?10{control}00l");
+            (name, parsed_modes(bytes.as_bytes()))
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("DEL", (false, BTreeSet::new())),
+            ("CR", (false, BTreeSet::new()))
+        ],
+        "(alternate screen, modes on): the core ignores a DEL and executes a CR inside a \
+         CSI, which goes on to its final, so each DECRST leaves the alternate screen or \
+         turns its mode off"
+    );
+}
+
 /// The text a terminal draws on each of its screens as it parses a stream,
 /// in the order it lands there, and the screen it shows at the end.
 #[derive(Debug, Default)]
@@ -2382,6 +2403,35 @@ fn drawn_screens_puts_text_on_the_screen_shown_when_it_arrives() {
         (screens.normal, screens.alternate, screens.alternate_shown),
         (b"plain".to_vec(), Vec::new(), false),
         "RIS clears both screens and shows the normal one"
+    );
+}
+
+#[test]
+fn drawn_screens_leaves_the_alternate_screen_across_a_del_or_a_cr_inside_the_switch() {
+    let drawn: Vec<_> = [("DEL", "\x7f"), ("CR", "\r")]
+        .into_iter()
+        .map(|(name, control)| {
+            let screens = drawn_screens(
+                format!("$ top\r\n\x1b[?1049hframe\x1b[?10{control}49lplain").as_bytes(),
+            );
+            let normal = String::from_utf8_lossy(&screens.normal).into_owned();
+            let alternate = String::from_utf8_lossy(&screens.alternate).into_owned();
+            (name, (normal, alternate, screens.alternate_shown))
+        })
+        .collect();
+    let left_after = |alternate: &str| {
+        (
+            String::from("$ top\r\nplain"),
+            String::from(alternate),
+            false,
+        )
+    };
+    assert_eq!(
+        drawn,
+        vec![("DEL", left_after("frame")), ("CR", left_after("frame\r"))],
+        "(normal, alternate, alternate shown): the core ignores a DEL inside the switch and \
+         executes a CR there on the screen still shown, then the switch completes and the \
+         text after it lands on the normal screen"
     );
 }
 
