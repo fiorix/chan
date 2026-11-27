@@ -391,13 +391,21 @@ final class ChanSmokeUITests: XCTestCase {
             }
 
             var reconnectOk = false
-            let entryBefore = (fetchLedger()?["entryCalls"] as? [[String: Any]])?.count ?? 0
+            let beforeLedger = fetchLedger()
+            let entryBefore = (beforeLedger?["entryCalls"] as? [[String: Any]])?.count ?? 0
+            let navBefore = (beforeLedger?["navigations"] as? [[String: Any]])?.count ?? 0
             let reconnectBtn = webview.buttons["Reconnect devserver for window"]
             if reconnectBtn.exists {
                 reconnectBtn.tap()
                 reconnectOk = waitUntil(timeout: 12) {
-                    let after = (self.fetchLedger()?["entryCalls"] as? [[String: Any]])?.count ?? 0
-                    return after > entryBefore && webview.buttons["All computers..."].exists
+                    let afterLedger = self.fetchLedger()
+                    let entryAfter = (afterLedger?["entryCalls"] as? [[String: Any]])?.count ?? 0
+                    let navAfter = (afterLedger?["navigations"] as? [[String: Any]])?.count ?? 0
+                    let allComputersBtn = webview.buttons["All computers..."]
+                    return entryAfter > entryBefore &&
+                        navAfter > navBefore &&
+                        allComputersBtn.exists &&
+                        allComputersBtn.isHittable
                 }
             }
 
@@ -483,20 +491,33 @@ final class ChanSmokeUITests: XCTestCase {
         let cmdLauncherBtn = webview.buttons["Open command launcher"]
         if cmdLauncherBtn.waitForExistence(timeout: 5) {
             cmdLauncherBtn.tap()
-            let searchField = webview.textFields.firstMatch
-            if searchField.waitForExistence(timeout: 5) {
+            let primarySearchField = webview.textFields.firstMatch
+            let fallbackSearchField = webview.descendants(matching: .any).matching(
+                NSPredicate(format: "label == 'Computers'")
+            ).firstMatch
+            let searchField = primarySearchField.waitForExistence(timeout: 3)
+                ? primarySearchField
+                : fallbackSearchField
+            if searchField.exists || searchField.waitForExistence(timeout: 2) {
                 searchField.tap()
                 searchField.typeText("Close Terminal Window 3")
-                let optionBtn = webview.buttons.matching(NSPredicate(format: "label CONTAINS 'Close Terminal Window 3'")).firstMatch
-                if optionBtn.waitForExistence(timeout: 5) {
-                    optionBtn.tap()
-                    let confirmCloseBtn = webview.buttons["Close"]
-                    if confirmCloseBtn.waitForExistence(timeout: 5) {
-                        confirmCloseBtn.tap()
-                        closeOk = waitUntil(timeout: 6) {
-                            !webview.buttons["Terminal Window 3"].exists &&
-                                self.hasWindowOp(op: "delete", windowId: "w-3", deleted: true)
-                        }
+                let optionPred = NSPredicate(
+                    format: "elementType != %d AND label CONTAINS 'Close Terminal Window 3'",
+                    XCUIElement.ElementType.textField.rawValue
+                )
+                let optionRow = webview.descendants(matching: .any).matching(optionPred).firstMatch
+                let confirmCloseBtn = webview.buttons["Close"]
+                if optionRow.waitForExistence(timeout: 3) && optionRow.isHittable {
+                    optionRow.tap()
+                }
+                if !confirmCloseBtn.waitForExistence(timeout: 2) {
+                    searchField.typeText("\n")
+                }
+                if confirmCloseBtn.waitForExistence(timeout: 5) {
+                    confirmCloseBtn.tap()
+                    closeOk = waitUntil(timeout: 6) {
+                        !webview.buttons["Terminal Window 3"].exists &&
+                            self.hasWindowOp(op: "delete", windowId: "w-3", deleted: true)
                     }
                 }
             }

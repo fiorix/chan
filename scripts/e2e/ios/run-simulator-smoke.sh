@@ -265,7 +265,8 @@ NAV_ORACLE_RC=0
 if [ -f "$WORK/ledger.json" ]; then
     node --input-type=module -e '
 import fs from "node:fs";
-import { verifyWindowNavigationParams } from "./scripts/e2e/ios/ios-wireguard-oracle.mjs";
+import { pathToFileURL } from "node:url";
+const { verifyWindowNavigationParams } = await import(pathToFileURL(process.argv[2]).href);
 const ledger = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
 const navs = Array.isArray(ledger.navigations) ? ledger.navigations : [];
 for (const nav of navs) {
@@ -285,7 +286,7 @@ for (const nav of navs) {
 if (navs.length > 0) {
     console.log(`verdict tier4 sim-nav-oracle 0 PASS validated ${navs.length} recorded navigation URL(s)`);
 }
-' "$WORK/ledger.json" >"$WORK/nav-oracle.log" 2>&1 || NAV_ORACLE_RC="$?"
+' "$WORK/ledger.json" "$SCRIPT_DIR/ios-wireguard-oracle.mjs" >"$WORK/nav-oracle.log" 2>&1 || NAV_ORACLE_RC="$?"
     if [ "$NAV_ORACLE_RC" -ne 0 ]; then
         echo "verdict tier4 sim-nav-oracle 1 FAIL recorded navigation URL failed oracle check (see $WORK/nav-oracle.log)"
         cat "$WORK/nav-oracle.log" >&2

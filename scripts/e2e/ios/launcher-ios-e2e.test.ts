@@ -32,11 +32,6 @@ function setSurfaceMeta(content: string): void {
     document.head.appendChild(meta);
 }
 
-vi.mock("../../../web/packages/launcher/src/api/backend", async () => {
-    const { mockApi } = await import("../../../web/packages/launcher/src/api/mock");
-    return { backend: mockApi };
-});
-
 let mountTarget: HTMLElement | null = null;
 let mountedApp: Record<string, unknown> | null = null;
 let cleanupUnmount: ((app: Record<string, unknown>) => void) | null = null;
@@ -49,6 +44,22 @@ function cleanupMount(): void {
     cleanupUnmount = null;
     mountTarget?.remove();
     mountTarget = null;
+}
+
+function deckTitles(root: HTMLElement): string[] {
+    return [...root.querySelectorAll(".deck-result-title")].map(
+        (el) => el.textContent?.trim() ?? "",
+    );
+}
+
+async function queryDeck(root: HTMLElement, value: string): Promise<void> {
+    const { flushSync, tick } = await import("svelte");
+    const field = root.querySelector<HTMLInputElement>(".deck-input");
+    expect(field).not.toBeNull();
+    field!.value = value;
+    field!.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
+    flushSync();
+    await tick();
 }
 
 function makeOfflineDevserver(): DevserverEntry {
@@ -77,9 +88,12 @@ function makeOfflineDevserver(): DevserverEntry {
 
 async function setupSeededLibrary({ emptyDevservers = false }: { emptyDevservers?: boolean } = {}) {
     const { resetDeck } = await import("../../../web/packages/launcher/src/state/deck.svelte");
+    const backendMod = await import("../../../web/packages/launcher/src/api/backend");
     const { mockApi, resetMockRemoteWorkspaces } = await import(
         "../../../web/packages/launcher/src/api/mock"
     );
+    backendMod.setBackend(mockApi);
+    const { backend } = backendMod;
     const { library, loadLibrary, stopWatching } = await import(
         "../../../web/packages/launcher/src/state/library.svelte"
     );
@@ -94,7 +108,7 @@ async function setupSeededLibrary({ emptyDevservers = false }: { emptyDevservers
               ),
               makeOfflineDevserver(),
           ];
-    return { library, mockApi, stopWatching };
+    return { library, backend, mockApi, stopWatching };
 }
 
 beforeEach(() => {
@@ -166,12 +180,21 @@ describe("tier1", () => {
         flushSync();
         await tick();
 
-        const titles = [...mountTarget.querySelectorAll(".deck-result-title")].map(
-            (el) => el.textContent?.trim() ?? "",
-        );
-        expect(titles.some((t) => t.startsWith("New terminal on "))).toBe(true);
-        expect(titles.some((t) => t.startsWith("New terminal window of "))).toBe(true);
-        expect(titles.some((t) => t.startsWith("Connect and open"))).toBe(true);
+        const rootTitles = deckTitles(mountTarget);
+        expect(rootTitles).toContain("prod");
+        expect(rootTitles).toContain("offline-box");
+        expect(rootTitles).not.toContain("This machine");
+        expect(rootTitles).not.toContain("New terminal");
+        expect(rootTitles).not.toContain("New workspace");
+
+        await queryDeck(mountTarget, "new terminal");
+        const terminalTitles = deckTitles(mountTarget);
+        expect(terminalTitles).toContain("New terminal on prod");
+        expect(terminalTitles).toContain("New terminal window of api");
+
+        await queryDeck(mountTarget, "connect and open");
+        const connectTitles = deckTitles(mountTarget);
+        expect(connectTitles).toContain("Connect and open offline-box");
 
         closeCommandLauncher();
         stopWatching();
@@ -214,13 +237,14 @@ describe("tier1", () => {
         setNavigatorProfile({ userAgent: IPHONE_UA, platform: "iPhone", maxTouchPoints: 5 });
         const { flushSync, mount, tick, unmount } = await import("svelte");
         cleanupUnmount = unmount;
-        const { library, mockApi, stopWatching } = await setupSeededLibrary();
+        const { library, backend, mockApi, stopWatching } = await setupSeededLibrary();
         const { default: Library } = await import(
             "../../../web/packages/launcher/src/components/Library.svelte"
         );
 
-        const termSpy = vi.spyOn(mockApi, "openDevserverTerminal");
-        const wsSpy = vi.spyOn(mockApi, "openDevserverWorkspace");
+        expect(backend).toBe(mockApi);
+        const termSpy = vi.spyOn(backend, "openDevserverTerminal");
+        const wsSpy = vi.spyOn(backend, "openDevserverWorkspace");
 
         mountTarget = document.createElement("div");
         document.body.appendChild(mountTarget);
@@ -343,12 +367,37 @@ describe("tier2", () => {
         flushSync();
         await tick();
 
-        const titles = [...mountTarget.querySelectorAll(".deck-result-title")].map(
-            (el) => el.textContent?.trim() ?? "",
-        );
-        expect(titles).not.toContain("New local terminal");
-        expect(titles).not.toContain("New terminal on This machine");
-        expect(titles).not.toContain("This machine");
+        const localForbidden = [
+            "New terminal",
+            "New local terminal",
+            "New terminal on This machine",
+            "New workspace",
+            "New local workspace",
+            "This machine",
+        ];
+        const rootTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(rootTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new terminal");
+        const termTitles = deckTitles(mountTarget);
+        expect(termTitles).toContain("New terminal on prod");
+        for (const forbidden of localForbidden) {
+            expect(termTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new workspace");
+        const wsTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(wsTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "this machine");
+        const machineTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(machineTitles).not.toContain(forbidden);
+        }
 
         closeCommandLauncher();
         stopWatching();
@@ -389,11 +438,37 @@ describe("tier2", () => {
         flushSync();
         await tick();
 
-        const titles = [...mountTarget.querySelectorAll(".deck-result-title")].map(
-            (el) => el.textContent?.trim() ?? "",
-        );
-        expect(titles).not.toContain("New local workspace");
-        expect(titles).not.toContain("New workspace");
+        const localForbidden = [
+            "New terminal",
+            "New local terminal",
+            "New terminal on This machine",
+            "New workspace",
+            "New local workspace",
+            "This machine",
+        ];
+        const rootTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(rootTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new terminal");
+        const termTitles = deckTitles(mountTarget);
+        expect(termTitles).toContain("New terminal on prod");
+        for (const forbidden of localForbidden) {
+            expect(termTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new workspace");
+        const wsTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(wsTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "this machine");
+        const machineTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(machineTitles).not.toContain(forbidden);
+        }
 
         closeCommandLauncher();
         stopWatching();
@@ -440,12 +515,37 @@ describe("tier2", () => {
         flushSync();
         await tick();
 
-        const titles = [...mountTarget.querySelectorAll(".deck-result-title")].map(
-            (el) => el.textContent?.trim() ?? "",
-        );
-        expect(titles).not.toContain("This machine");
-        expect(titles).not.toContain("New local terminal");
-        expect(titles).not.toContain("New local workspace");
+        const localForbidden = [
+            "New terminal",
+            "New local terminal",
+            "New terminal on This machine",
+            "New workspace",
+            "New local workspace",
+            "This machine",
+        ];
+        const rootTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(rootTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new terminal");
+        const termTitles = deckTitles(mountTarget);
+        expect(termTitles).toContain("New terminal on prod");
+        for (const forbidden of localForbidden) {
+            expect(termTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "new workspace");
+        const wsTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(wsTitles).not.toContain(forbidden);
+        }
+
+        await queryDeck(mountTarget, "this machine");
+        const machineTitles = deckTitles(mountTarget);
+        for (const forbidden of localForbidden) {
+            expect(machineTitles).not.toContain(forbidden);
+        }
 
         closeCommandLauncher();
         stopWatching();

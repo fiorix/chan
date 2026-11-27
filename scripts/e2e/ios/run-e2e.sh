@@ -262,12 +262,12 @@ run_probe_red() {
         "http://alice--0123456789ab.p1.localtest.me:8080/api/notes/index.html?w=w-1&h=0123456789abcdef0123456789abcdef&client_name=attacker" \
         '{"windowId":"w-1","kind":"workspace"}'
     expect_red probe-oracle-bad-peer node -e "
-        import('./scripts/e2e/ios/ios-wireguard-oracle.mjs').then(({ verifyPeerRouting }) => {
+        import('$SCRIPT_DIR/ios-wireguard-oracle.mjs').then(({ verifyPeerRouting }) => {
             verifyPeerRouting({ p1: [], p2: [] }, { p1: [], p2: [] }, 'p2', '/probe');
         });
     "
     expect_red probe-oracle-stopped-view node -e "
-        import('./scripts/e2e/ios/ios-wireguard-oracle.mjs').then(({ verifyStoppedTunnelView }) => {
+        import('$SCRIPT_DIR/ios-wireguard-oracle.mjs').then(({ verifyStoppedTunnelView }) => {
             verifyStoppedTunnelView({ wireguard_status: 'connecting' }, 'p1');
         });
     "
