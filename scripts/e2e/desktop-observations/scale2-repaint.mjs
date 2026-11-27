@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // The check-296 reset on the real WebKitGTK desktop at GDK_SCALE=2: open
-// one terminal, paint pages, read the samples off the background per
+// one terminal, paint pages, count the samples off the background per
 // quarter plus the transform, drop the canvas drawing state by a
 // same-size reset, and refocus the window (the app's forced passes run on
-// focus). At the tip the repaint lands at full scale; at the base it stays
-// in the top-left quarter. Run once per tree: base first, then tip. Exit 0 held; the
+// focus and on a return to visible). With the transform repair the
+// repaint lands at full scale; without it the repaint stays in the
+// top-left quarter at half size. Run once per tree. Exit 0 held; the
 // wrapper exits 1 on an observed fault (this driver exits 10 through its
 // judge), 3 when inconclusive, 2 when refused. Runs only in the desktop
 // guest; syntax-checked here.
@@ -111,18 +112,20 @@ const COUNT = `(() => {
     events: window.__scale2Events ?? null };
 })()`;
 const MEASURE = COUNT;
-// The page's focus and visibility events from the reset on: the app's
-// forced passes run on a window focus or a return to visible, and the
-// minimize must reach the page as a blur or a hide first. The counter is
-// installed and zeroed in the reset's own synchronous expression, so no
-// event can land between the zero and the reset.
+// The page's focus and visibility events from the reset on, counted and in
+// the order they arrived: the app's forced passes run on a window focus or
+// a return to visible, and the minimize must reach the page as a blur or a
+// hide first. The counter is installed and zeroed in the reset's own
+// synchronous expression, so no event can land between the zero and the
+// reset.
 const ZERO_EVENTS = `if (!window.__scale2Events) {
     const counts = window.__scale2Events = {};
-    addEventListener("focus", () => { counts.focus++; });
-    addEventListener("blur", () => { counts.blur++; });
-    document.addEventListener("visibilitychange", () => { counts[document.visibilityState === "visible" ? "visible" : "hidden"]++; });
+    const note = (name) => { counts[name]++; counts.order.push(name); };
+    addEventListener("focus", () => note("focus"));
+    addEventListener("blur", () => note("blur"));
+    document.addEventListener("visibilitychange", () => note(document.visibilityState === "visible" ? "visible" : "hidden"));
   }
-  Object.assign(window.__scale2Events, { focus: 0, blur: 0, visible: 0, hidden: 0 });`;
+  Object.assign(window.__scale2Events, { focus: 0, blur: 0, visible: 0, hidden: 0, order: [] });`;
 // Reset and measure in one synchronous expression: the frame loop paints
 // the cursor between two round trips, which would read as leftover paint.
 const RESET_AND_MEASURE = COUNT.replace(
@@ -130,22 +133,31 @@ const RESET_AND_MEASURE = COUNT.replace(
   `const c = document.querySelector(".terminal-host > canvas"); ${ZERO_EVENTS} c.width = c.width;`,
 );
 
+// The bound is judged on its last attempt. When that attempt failed the
+// page may have changed since the last value read, so the outcome is
+// inconclusive whatever the earlier reads showed, and the error carries no
+// value for a caller to judge; otherwise the error carries that last,
+// fresh read.
 async function poll(read, accept, label, bound, timeoutKind) {
   const until = Date.now() + bound;
   let value;
-  let lastError = null;
+  let failure = null;
   do {
     try {
       value = await read();
+      failure = null;
     } catch (error) {
-      lastError = error;
+      failure = error;
       await sleep(300);
       continue;
     }
     if (accept(value)) return value;
     await sleep(300);
   } while (Date.now() < until);
-  const detail = lastError ? `read failed: ${lastError.message}; last value ${JSON.stringify(value)}` : `last ${JSON.stringify(value)}`;
+  if (failure) {
+    throw new Incomplete(`${label}: read failed: ${failure.message}; last value ${JSON.stringify(value)}`);
+  }
+  const detail = `last ${JSON.stringify(value)}`;
   const error = timeoutKind === "fault" ? new Fault(`${label}: ${detail}`) : new Incomplete(`${label}: ${detail}`);
   error.value = value;
   throw error;
@@ -179,11 +191,15 @@ async function main() {
   // size. The written page marks about a seventh of every quarter; one
   // cell, the cursor alone, about a fifth of a percent of one quarter. The
   // floor asks for text in every quarter, which a half-scale paint (three
-  // quarters empty) and a partial or glyphless frame lack. The band holds
-  // what may differ between the baseline and a full repaint of the same
-  // screen (the cursor, a prompt line painted late) and stays half the
-  // floor, so a read inside it keeps marks in every quarter, about ten
-  // times what a cursor-only repaint leaves.
+  // quarters empty) and a glyphless frame lack. The band holds what may
+  // differ between the baseline and a full repaint of the same screen (the
+  // cursor, a prompt line painted late) and stays half the floor, so a
+  // read inside it keeps marks in every quarter, about ten times what a
+  // cursor-only repaint leaves. The band bounds quarters, not rows: one
+  // text row is about 1.4 percent of a quarter's samples on the desktop's
+  // page, so a repaint short of one row in a quarter still holds. A HELD
+  // says every quarter came back within the band at a transform of 2, not
+  // that every row did.
   const FLOOR = 0.04;
   const BAND = 0.02;
   const floorOf = (total) => Math.ceil(total * FLOOR);
@@ -222,7 +238,7 @@ async function main() {
     throw new Incomplete(`the discard did not reset the transform: ${JSON.stringify(hidden)}`);
   }
   const zeroed = hidden.events;
-  if (!zeroed || ["focus", "blur", "visible", "hidden"].some((name) => zeroed[name] !== 0)) {
+  if (!zeroed || ["focus", "blur", "visible", "hidden"].some((name) => zeroed[name] !== 0) || zeroed.order?.length !== 0) {
     throw new Incomplete(`the page took no event counter at the reset: ${JSON.stringify(zeroed)}`);
   }
   xdo("windowminimize", args.xid);
@@ -230,35 +246,54 @@ async function main() {
   // fires on a hidden window and the app runs its forced passes.
   await sleep(1000);
   xdo("windowactivate", "--sync", args.xid);
-  // A verdict either way needs the minimize to have reached the page under
-  // test: with no blur and no hide since the reset another X window took
-  // it, and a repaint or its absence says nothing about this page.
-  const sawHide = (read, detail) => {
-    if (!read) throw new Incomplete(`no read of the page after the refocus: ${detail}`);
-    const events = read.events;
-    if (!events) throw new Incomplete(`the page lost its event counter: ${detail}`);
-    if (events.blur === 0 && events.hidden === 0) {
+  // A verdict either way needs the minimize and then the refocus to have
+  // reached the page under test, in that order, since the reset. With no
+  // blur and no hide another X window took the minimize; with no focus and
+  // no return to visible the product was never asked to repaint; with them
+  // only before the first blur or hide, the page was the other window.
+  const AWAY = ["blur", "hidden"];
+  const BACK = ["focus", "visible"];
+  const sawRefocus = (read, detail) => {
+    const order = read.events?.order;
+    if (!Array.isArray(order)) throw new Incomplete(`the page lost its event counter: ${detail}`);
+    const away = order.findIndex((name) => AWAY.includes(name));
+    if (away < 0) {
       throw new Incomplete(`the page under test saw neither a blur nor a hide after the reset: ${detail}`);
     }
-    return events;
+    if (!order.some((name) => BACK.includes(name))) {
+      throw new Incomplete(`the refocus reached the page under test as neither a focus nor a return to visible: ${detail}`);
+    }
+    if (!order.some((name, i) => i > away && BACK.includes(name))) {
+      throw new Incomplete(`the page under test saw a focus or a return to visible only before its first blur or hide: ${detail}`);
+    }
   };
-  // Only this wait is a product fault: every earlier wait is an
-  // instrument fault, thrown as Incomplete by the poll itself.
+  // The paint a tree without the transform repair leaves: the transform
+  // back at 1 and the page drawn at half size into the top-left quarter, so
+  // that quarter at or above the floor and the other three within the band
+  // of empty, on a canvas of the baseline's size.
+  const halfScale = (m) => m.width === baseline.width && m.height === baseline.height
+    && m.scaleX === 1 && m.scaleY === 1
+    && m.marks[0] >= floorOf(m.total[0])
+    && m.marks.every((q, i) => i === 0 || q <= bandOf(m.total[i]));
+  // Only this wait is a product fault, and only when its last read is the
+  // half-scale paint: every earlier wait is an instrument fault, thrown as
+  // Incomplete by the poll itself, and a miss of another shape (no
+  // repaint, a short or partial one, a transform left at 2) says the run
+  // cannot tell the repair's effect.
   const after = await poll(async () => evaluate(MEASURE),
     (m) => m.width === baseline.width && m.height === baseline.height
       && m.scaleX === 2 && m.scaleY === 2 && near(m, baseline),
     "the terminal did not repaint at full scale after the refocus", 10000, "fault").catch((error) => {
     if (!(error instanceof Fault)) throw error;
-    // A fault also needs a refocus that reached the page; without a focus
-    // or a return to visible the product was never asked to repaint.
-    const events = sawHide(error.value, error.message);
-    if (events.focus === 0 && events.visible === 0) {
-      throw new Incomplete(`the refocus reached the page under test as neither a focus nor a return to visible: ${error.message}`);
+    save("after.json", error.value);
+    sawRefocus(error.value, error.message);
+    if (!halfScale(error.value)) {
+      throw new Incomplete(`the read after the refocus is neither a full-scale repaint nor the half-scale paint: last ${JSON.stringify(error.value)}`);
     }
     throw error;
   });
-  sawHide(after, `last ${JSON.stringify(after)}`);
   save("after.json", after);
+  sawRefocus(after, `last ${JSON.stringify(after)}`);
   run("import", ["-window", args.xid, join(args.output, "after.png")], "screenshot after", 30000);
   let tree = null;
   try {
