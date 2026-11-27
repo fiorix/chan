@@ -1693,6 +1693,104 @@ async fn a_redial_whose_ring_starts_inside_a_switch_names_the_screen_it_selects(
     );
 }
 
+/// The probe's last frame, a bare ESC and the ESC of its switch to the
+/// normal screen, as the write that ends there.
+const BARE_ESCAPE_HEAD: &[u8] = b"\x1b[?1000lthe probe's last frame\x1b\x1b";
+
+/// The probe's last line and the shell's prompt.
+const PROBE_EXITED: &[u8] = b"probe exited\r\n$ ";
+
+/// `head`, the rest of the probe's normal-screen output and
+/// [`PROBE_EXITED`], `len` bytes in all.
+fn the_probe_exits(head: &[u8], len: usize) -> Vec<u8> {
+    let mut bytes = head.to_vec();
+    bytes.resize(len - PROBE_EXITED.len(), b'.');
+    bytes.extend_from_slice(PROBE_EXITED);
+    bytes
+}
+
+/// Redial past `writes`, in which the probe left its alternate screen
+/// right after a bare ESC, where the ring kept only the last `replay`
+/// bytes, from inside the switch, and check that the session frame names
+/// the normal screen that switch selects.
+async fn assert_a_redial_past_a_bare_escape_names_the_normal_screen(
+    writes: &[&[u8]],
+    replay: usize,
+) {
+    let rig = Rig::new(SCREEN_RING, "while IFS= read -r line; do :; done").await;
+    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
+    let (session, before, after) = redial_past(&rig, shown, writes).await;
+    assert_eq!(
+        number(&session, "replay_bytes") as usize,
+        replay,
+        "fixture: the ring keeps the bytes from inside the switch"
+    );
+    assert_eq!(
+        after.first(),
+        Some(&b'['),
+        "fixture: the ring dropped both ESCs"
+    );
+    assert_eq!(
+        replay_screen(&session),
+        Some("normal"),
+        "the session frame names the screen the cut switch selects, whatever ESC came before \
+         its own"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after[replay..]),
+        String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
+        "the recovery suffix follows the replay, unchanged"
+    );
+    let screens = drawn_after_frame(shown, &session, &before, &after);
+    assert!(
+        !screens.alternate_shown,
+        "the view ends on the normal screen"
+    );
+    assert!(
+        screens.normal.ends_with(PROBE_EXITED),
+        "the probe's last line and the prompt are drawn on the normal screen: it ends {:?}",
+        last(&screens.normal, 32)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_whose_ring_starts_inside_a_switch_after_a_bare_escape_names_the_screen_it_selects(
+) {
+    let _gate = pty_test_lock();
+    // Two reads split the switch after its ESC, which a bare one came
+    // before, and the ring keeps only the second.
+    let kept = the_probe_exits(b"[?1049l", SCREEN_RING - 1);
+    assert_a_redial_past_a_bare_escape_names_the_normal_screen(
+        &[BARE_ESCAPE_HEAD, &kept],
+        kept.len(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_whose_ring_cuts_a_write_inside_a_switch_after_a_bare_escape_names_the_screen_it_selects(
+) {
+    let _gate = pty_test_lock();
+    // One write larger than the ring holds the bare ESC and the switch,
+    // and the ring keeps it from just after the switch's ESC.
+    let write = [BARE_ESCAPE_HEAD, &the_probe_exits(b"[?1049l", SCREEN_RING)].concat();
+    assert_a_redial_past_a_bare_escape_names_the_normal_screen(&[&write], SCREEN_RING).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_redial_whose_ring_starts_inside_a_switch_split_twice_after_a_bare_escape_names_the_screen_it_selects(
+) {
+    let _gate = pty_test_lock();
+    // Three reads split the switch after its ESC and inside its number,
+    // and the ring keeps the last two.
+    let kept = the_probe_exits(b"49l", SCREEN_RING - 4);
+    assert_a_redial_past_a_bare_escape_names_the_normal_screen(
+        &[BARE_ESCAPE_HEAD, b"[?10", &kept],
+        SCREEN_RING,
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tmux_pane_redial_names_the_alternate_screen_its_capture_selected() {
     let _gate = pty_test_lock();
