@@ -221,8 +221,9 @@ const BRACKETED_PASTE_MODE: u16 = 2004;
 /// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
 /// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
 /// An escape that may still end in a full reset is carried under the same
-/// bound, so a reset split across reads after 64 or more C0 controls
-/// following its ESC is missed.
+/// bound. The control bytes the core passes over inside a sequence count
+/// toward it, so a sequence split across reads more than 64 bytes after its
+/// ESC, those bytes included, is missed.
 const PRIVATE_MODE_TAIL_CAP: usize = 64;
 
 /// The private modes that switch between the normal and alternate screens.
@@ -312,13 +313,12 @@ fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
 
 /// Scan ordered DECSET/DECRST parameters and full resets (RIS), carrying a
 /// bounded partial sequence across reads. This recognizes private-mode
-/// toggles and the reset, not the full terminal grammar. A reset is read as
-/// the terminal core reads it: `c` after any ESC, the one that ends an OSC
-/// or DCS string included, with any C0 control but CAN and SUB, or a DEL,
-/// between them. The scan does not follow a sequence a terminal finishes
-/// across a C0 control or DEL inside a CSI, which this scan ends there (CAN,
-/// SUB and ESC end it in both), so after one the screen and modes read here
-/// can differ from the view's.
+/// toggles and the reset, not the full terminal grammar, and reads both as
+/// the terminal core reads them. The core passes over a C0 control but CAN
+/// and SUB, or a DEL, anywhere inside an escape or a CSI: between ESC and
+/// `c` or `[`, between `[` and `?`, and among the parameters. CAN and SUB
+/// end the sequence there, and ESC ends it and begins another. A reset is
+/// `c` after any ESC, the one that ends an OSC or DCS string included.
 fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(ModeChange)) {
     scan_private_mode_sequences(tail, bytes, |found, _| change(found));
 }
@@ -343,57 +343,69 @@ fn scan_private_mode_sequences(
             i += 1;
             continue;
         }
-        // RIS. The escape is carried while only bytes the terminal passes
-        // over follow its ESC, since the next read may bring its `c`.
-        let mut end = i + 1;
-        while end < n && passed_over_in_an_escape(scan[end]) {
-            end += 1;
-        }
-        if end == n {
-            if n - i <= PRIVATE_MODE_TAIL_CAP {
-                tail.extend_from_slice(&scan[i..]);
-            }
-            break;
-        }
-        if scan[end] == b'c' {
-            change(ModeChange::Reset, i);
-            i = end + 1;
-            continue;
-        }
-        // Only a true prefix of `ESC [ ?` can still become a private-mode
-        // CSI next read. Carrying anything else, such as a bare ESC before
-        // the one that starts a sequence, would place that start after the
-        // carried bytes' first.
-        let head = &scan[i..n.min(i + 3)];
-        if !b"\x1b[?".starts_with(head) {
-            i += 1;
-            continue;
-        }
-        if head.len() < 3 {
-            tail.extend_from_slice(head);
-            break;
-        }
-        let mut j = i + 3;
-        while j < n && (scan[j].is_ascii_digit() || scan[j] == b';') {
-            j += 1;
-        }
-        if j == n {
-            if n - i <= PRIVATE_MODE_TAIL_CAP {
-                tail.extend_from_slice(&scan[i..]);
-            }
-            break;
-        }
-        let final_byte = scan[j];
-        if final_byte == b'h' || final_byte == b'l' {
-            for param in scan[i + 3..j].split(|&b| b == b';') {
-                if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
-                    change(ModeChange::Mode(mode, final_byte == b'h'), i);
+        match private_mode_sequence(&scan, i, &mut change) {
+            Some(next) => i = next,
+            None => {
+                // The bytes end inside a sequence the scan may still read,
+                // so it is carried from its ESC: the next read may finish
+                // it.
+                if n - i <= PRIVATE_MODE_TAIL_CAP {
+                    tail.extend_from_slice(&scan[i..]);
                 }
+                break;
             }
         }
-        // ESC cancels an unfinished CSI and may start the next one itself.
-        i = if final_byte == 0x1b { j } else { j + 1 };
     }
+}
+
+/// Read the sequence that begins at the ESC `scan[at]`, passing each change
+/// it makes to `change` with `at`, and return where the scan goes on: past
+/// the sequence, or at the next byte when it is not one the scan reads.
+/// `None` when `scan` ends inside a sequence that may still be one. Bytes
+/// the core passes over are skipped wherever they stand in it.
+fn private_mode_sequence(
+    scan: &[u8],
+    at: usize,
+    change: &mut impl FnMut(ModeChange, usize),
+) -> Option<usize> {
+    let read_from = |from: usize| (from..scan.len()).find(|&k| !passed_over_in_an_escape(scan[k]));
+    let after_esc = read_from(at + 1)?;
+    match scan[after_esc] {
+        b'c' => {
+            change(ModeChange::Reset, at);
+            return Some(after_esc + 1);
+        }
+        b'[' => {}
+        // Not a sequence this scan reads; an ESC there is read next.
+        _ => return Some(at + 1),
+    }
+    let question = read_from(after_esc + 1)?;
+    if scan[question] != b'?' {
+        return Some(at + 1);
+    }
+    let params_end = (question + 1..scan.len()).find(|&k| {
+        let byte = scan[k];
+        !(byte.is_ascii_digit() || byte == b';' || passed_over_in_an_escape(byte))
+    })?;
+    let final_byte = scan[params_end];
+    if final_byte == b'h' || final_byte == b'l' {
+        let params: Vec<u8> = scan[question + 1..params_end]
+            .iter()
+            .copied()
+            .filter(|&byte| !passed_over_in_an_escape(byte))
+            .collect();
+        for param in params.split(|&b| b == b';') {
+            if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
+                change(ModeChange::Mode(mode, final_byte == b'h'), at);
+            }
+        }
+    }
+    // ESC cancels an unfinished CSI and may start the next one itself.
+    Some(if final_byte == 0x1b {
+        params_end
+    } else {
+        params_end + 1
+    })
 }
 
 /// A DSR cursor-position query. Something has to answer this or the PTY stalls:
