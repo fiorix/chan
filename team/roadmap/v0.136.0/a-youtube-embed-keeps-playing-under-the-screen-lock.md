@@ -31,3 +31,7 @@ The candidate is YouTube's IFrame Player API: `enablejsapi=1` on the embed URL a
 1. A unit test for the embed URL and for the command posted at the lock, each killed by a named mutation.
 2. An end-to-end reading in a networked guest with a real embed: playing at lock time, paused under the lock, still paused at its position after unlock, and an embed opened under the lock does not play. Red at the base.
 3. The same reading in chan-desktop on the owner's Mac, since WKWebView is where the embed's frame policy differs.
+
+## Decided, 2026-11-27: the sandbox may be loosened for the player API
+
+The session that prepared the v0.136.0 round asked the owner whether loosening the embed's sandbox is acceptable if YouTube's player API cannot work under it; he answered on 2026-11-27: "ytlock: sure". Read as: the YouTube embed's frame may get the sandbox tokens the player API needs, and nothing wider; the build records exactly which tokens it adds and why each is needed, and the map embed and extension frames keep theirs. The probe under the present sandbox and the desktop CSP still comes first, since a pause that works with no change is the smaller fix. A change to the desktop CSP was not asked and stays the owner's.

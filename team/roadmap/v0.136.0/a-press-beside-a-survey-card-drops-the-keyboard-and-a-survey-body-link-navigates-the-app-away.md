@@ -35,3 +35,9 @@ Read at `aabb9d039`. The press is read in two engines; the links are by reading.
 ## Accepted, 2026-11-26
 
 Accepted by the owner on 2026-11-26 ("app and workspace recommendations are good to me", `dev/v0135-team/decisions.md`, D125), answering the candidate rows of the round's hand-back and the overlay press the lead put to him with them (`dev/v0135-team/status.md`, For Alex: "should it keep the keyboard on the card?"). Drafted as a lead document and not built in v0.135.0, so the GA commit moves it to the next version (D125). Contract 1 reads the owner's acceptance as a yes to that question; the owner's word did not state it separately.
+
+## Decided, 2026-11-27: a body's links follow the editor's model
+
+Asked what a survey body's link to a workspace path should do (open the file as an editor link does, or nothing), the owner answered on 2026-11-27: "yes i think we should display links on the survey like we do in the editor: a drop down with open document, open url, and then we open the links on cmd+enter or the click to open; we dont need to invent something new here, just reuse the editor model".
+
+This replaces contract 2's open point and widens it: a link in a survey body, to a workspace path or to a URL, behaves as a link in the editor does, with the editor's menu of open actions and its two ways of opening (the modified Enter and the click), through the editor's own code and not a second implementation. Contract 2's first sentence stands: a body link never navigates the app's own tab or window away. What the editor's model is, piece by piece, and which of its pieces a read-only survey body can reuse as they are, is read at the build and recorded here before the first fix; acceptance 1 and 2 gain a case per piece. The owner did not speak to the keyboard staying on the card; contract 1 stands on his acceptance of 2026-11-26.

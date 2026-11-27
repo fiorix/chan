@@ -42,3 +42,7 @@ Read at `aabb9d039`, by reading, except the readings named.
 ## Accepted, 2026-11-26
 
 Accepted by the owner on 2026-11-26 ("app and workspace recommendations are good to me", `dev/v0135-team/decisions.md`, D125), answering the candidate rows of the round's hand-back (`dev/v0135-team/handback.md`, section 7, "Tab across panes"). Drafted as a lead document and not built in v0.135.0, so the GA commit moves it to the next version (D125). The options above are the lead's draft, with (a) recommended; the owner's word did not choose among them.
+
+## Decided, 2026-11-27
+
+The owner chose option (a) on 2026-11-27 ("1. option a"), asked by the session that prepared the v0.136.0 round: a terminal outside the active pane leaves the Tab order. Options (b) and (c) are not built.

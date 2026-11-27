@@ -39,3 +39,7 @@ Read at `aabb9d039`, by reading, except the reading named.
 ## Accepted, 2026-11-26
 
 Accepted by the owner on 2026-11-26 ("app and workspace recommendations are good to me", `dev/v0135-team/decisions.md`, D125, which names it "reload after a WebKit network crash"). Drafted as a lead document and not built in v0.135.0, so the GA commit moves it to the next version (D125). The options above are the lead's draft, with (a) recommended; the owner's word did not choose among them.
+
+## Decided, 2026-11-27
+
+The owner chose option (a) on 2026-11-27 ("3. option a"), asked by the session that prepared the v0.136.0 round: chan-desktop's reload of a local window navigates to the window's URL with a fresh token, as a devserver window's reload does. The page keeps its token rule, and the draft constraint on where the token is stored stands.
