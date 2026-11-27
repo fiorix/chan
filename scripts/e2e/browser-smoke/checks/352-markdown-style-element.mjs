@@ -21,15 +21,6 @@
 // its precondition is an interaction error: the run then reports an error,
 // not a failure, unless a leg also read a failure.
 //
-// The class route, recorded and never asserted: the sanitizer keeps `class`,
-// so a body element can match one of the app's own rules. A second survey on
-// A's terminal carries `<div class="md-slide-preview-page"><pre>` with one
-// long line, and B's deck then opens and closes its outline, whose stylesheet
-// holds `.md-slide-preview-page pre { overflow: auto; }`. The readings are
-// the `pre`'s computed overflow, its tabindex and whether its content is
-// wider than its box, at each step, beside the tabindex the survey's hold
-// gave a link in the same body.
-//
 // Where the renderers keep a `<style>` element, both legs read the planted
 // outline while the Markdown shows (while the survey shows, pane B
 // .pane[data-pane-id="..."] reads outline-style "dashed", "none" before; the
@@ -55,11 +46,6 @@ const PROPERTIES = Object.keys(PLANTED);
 const SURVEY_PARAGRAPH = "A survey body that carries a style element after this paragraph.";
 const PREVIEW_PARAGRAPH = "A previewed note that carries a style element after this paragraph.";
 const DECK = "---\nchan:\n  kind: slides\n---\n\n# Outline deck\n\nOne slide.\n";
-const LONG_LINE = "0123456789".repeat(40);
-const CLASS_ROUTE_BODY = [
-  "A body element of the outline's class, beside [a link](https://example.com/style-route).",
-  `<div class="md-slide-preview-page"><pre>${LONG_LINE}</pre></div>`,
-].join("\n\n");
 
 async function settle(page) {
   await page.evaluate(() => new Promise((resolve) => {
@@ -158,27 +144,6 @@ async function cardState(page, tab) {
   }, terminalCard(tab));
 }
 
-/// The class route's `pre` in the survey's body, with the link the hold
-/// takes out of the Tab order as the hold's control.
-async function routeState(page, tab, pane) {
-  return page.evaluate((selector, paneQuery) => {
-    const body = document.querySelector(selector)?.querySelector(".survey-body");
-    const pre = body?.querySelector(".md-slide-preview-page pre") ?? null;
-    const link = body?.querySelector("a") ?? null;
-    const style = pre ? getComputedStyle(pre) : null;
-    return {
-      pre: Boolean(pre),
-      overflowX: style?.overflowX ?? null,
-      overflowY: style?.overflowY ?? null,
-      tabindex: pre?.getAttribute("tabindex") ?? null,
-      overflows: pre ? pre.scrollWidth > pre.clientWidth || pre.scrollHeight > pre.clientHeight : null,
-      linkTabindex: link?.getAttribute("tabindex") ?? null,
-      outlineStyleElements: document.querySelector(paneQuery)?.querySelectorAll("nav.slide-outline style").length ?? null,
-      focusedPane: document.querySelector(".pane.focused")?.getAttribute("data-pane-id") ?? null,
-    };
-  }, terminalCard(tab), paneSelector(pane));
-}
-
 async function answerFirstOption(page, tab, call) {
   await page.click(`${terminalCard(tab)} .survey-option`);
   const outcome = await surveyOutcome(call, 10_000);
@@ -191,9 +156,7 @@ async function answerFirstOption(page, tab, call) {
 
 async function runSurveyLeg(ctx, report, directory, save) {
   const leg = newLeg("survey");
-  const observation = { kind: "class-route", asserted: false, step: "not started", readings: {}, errors: [] };
   report.legs.survey = leg;
-  report.observation = observation;
   save();
   const page = await ctx.browser.newPage();
   page.on("pageerror", (error) => leg.pageErrors.push(describeError(error)));
@@ -253,41 +216,6 @@ async function runSurveyLeg(ctx, report, directory, save) {
     leg.screenshot = basename(await ctx.shot("352-survey-failure", page).catch(() => "unavailable"));
   }
   save();
-
-  // The observation raises a survey of its own on the same terminal, so it
-  // runs only once the leg's survey has been answered and its card is gone.
-  if (!leg.observed) observation.step = "skipped: the survey leg did not finish";
-  else {
-    try {
-      observation.step = "focus pane B";
-      await focusPane(shell, page, paneB);
-      observation.step = "raise the class-route survey";
-      const call = raiseSurvey(cs, ["--tab-name", terminalName, "--timeout", "60", "--title", "Class route", "--option", "Alpha", "--option", "Beta", CLASS_ROUTE_BODY]);
-      calls.push(call);
-      await waitForCard(page, terminalCard(terminal.tab), call, "the class-route survey's card");
-      await settle(page);
-      observation.readings.held = await routeState(page, terminal.tab, paneB);
-      observation.step = "open B's outline";
-      await dispatchCommand(page, "app.editor.outline");
-      await page.waitForFunction((selector) => document.querySelector(selector)?.querySelector("nav.slide-outline"),
-        { timeout: 15_000 }, `${paneSelector(paneB)} .editor-tab.active`);
-      await settle(page);
-      observation.readings.outlineOpen = await routeState(page, terminal.tab, paneB);
-      observation.screenshot = basename(await ctx.shot("352-class-route-outline", page));
-      observation.step = "close B's outline";
-      await dispatchCommand(page, "app.editor.outline");
-      await page.waitForFunction((selector) => !document.querySelector(selector)?.querySelector("nav.slide-outline"),
-        { timeout: 15_000 }, `${paneSelector(paneB)} .editor-tab.active`);
-      await settle(page);
-      observation.readings.outlineClosed = await routeState(page, terminal.tab, paneB);
-      observation.step = "answer the class-route survey";
-      await answerFirstOption(page, terminal.tab, call);
-      observation.step = "done";
-    } catch (error) {
-      observation.errors.push(`${observation.step}: ${describeError(error)}`);
-    }
-    save();
-  }
 
   try { await answerOpenSurveys(page, calls); }
   catch (error) { leg.cleanupErrors.push(`answer open surveys: ${describeError(error)}`); }
@@ -384,7 +312,7 @@ export default {
   name: "markdown-style-element",
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
-    const report = { planted: { declaration: DECLARATION, values: PLANTED }, legs: {}, observation: null, cleanupErrors: [] };
+    const report = { planted: { declaration: DECLARATION, values: PLANTED }, legs: {}, cleanupErrors: [] };
     const save = () => writeFileSync(join(ctx.outDir, "352-markdown-style-element.json"), JSON.stringify(report, null, 2) + "\n");
     const relative = `style-352-${Date.now().toString(36)}`;
     const directory = { relative, absolute: join(ctx.workspaceDir, relative) };

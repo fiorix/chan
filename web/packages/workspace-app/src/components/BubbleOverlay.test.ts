@@ -11,6 +11,14 @@ import { press, release } from "../__tests__/pressFocus";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
 
+// A workspace window's capabilities, which a case narrows to a window with
+// no workspace (a terminal or control window) and the next case restores.
+const caps = vi.hoisted(() => ({ workspace: true, files: true, drafts: true, terminal: true }));
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: caps,
+}));
+
 // The survey overlay renders ONE slot's survey (per-terminal): a markdown
 // body, numbered options, plus a standard [F] follow-up + Dismiss.
 // `tabId` null = window-wide
@@ -40,6 +48,7 @@ afterEach(() => {
   surveyState.byTab = {};
   surveyState.windowWide = null;
   tabFocusPulse.value = 0;
+  Object.assign(caps, { workspace: true, files: true, drafts: true, terminal: true });
   vi.restoreAllMocks();
 });
 
@@ -493,5 +502,368 @@ describe("the survey card's keys", () => {
     expect(surveyState.windowWide?.spec.surveyId).toBe("survey-1");
     expect(event.defaultPrevented).toBe(false);
     expect(reached).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A link in a survey's body follows the editor's model: a plain click shows
+// the editor's drop-down under the link, its OPEN row and the href as
+// written, which Enter or a press on the row opens; Cmd or Ctrl with a
+// click opens at once. The click itself never navigates the app.
+describe("a link in a survey's body", () => {
+  const URL = "https://chan.app/notes";
+
+  async function linkedSurvey(bodyMarkdown: string): Promise<HTMLElement> {
+    surveyState.byTab = { t1: { spec: spec({ bodyMarkdown }), busy: false } };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: "t1" } }));
+    await settle();
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    expect(document.activeElement, "the card takes the keyboard as it shows").toBe(card);
+    return card;
+  }
+
+  /// Microtasks and one task, so the drop-down's deferred outside-press
+  /// rule is installed, as it is by a person's next press.
+  async function settle(): Promise<void> {
+    await tick();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await tick();
+  }
+
+  function bodyLink(card: HTMLElement, index = 0): HTMLElement {
+    const link = card.querySelectorAll<HTMLElement>(".survey-body [href], .survey-body a")[index];
+    if (!link) throw new Error(`no link ${index} in the survey body`);
+    return link;
+  }
+
+  /// A press and release on `el` as an engine runs them, the click's
+  /// modifiers as given; returns the click.
+  async function clickOn(el: Element, mods: MouseEventInit = {}): Promise<MouseEvent> {
+    await press(el as HTMLElement);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, detail: 1, ...mods }));
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 1, ...mods });
+    el.dispatchEvent(click);
+    await settle();
+    return click;
+  }
+
+  /// The drop-downs showing, each as its rows' text: the OPEN tag and the
+  /// target as written.
+  function dropDowns(): string[][][] {
+    return [...document.querySelectorAll(".md-bubble")].map((wrap) =>
+      [...wrap.querySelectorAll(".md-bubble-row")].map((row) =>
+        [...row.querySelectorAll(":scope > span")].map((span) => span.textContent ?? "")));
+  }
+
+  function keyAt(el: Element, key: string, mods: KeyboardEventInit = {}): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...mods });
+    el.dispatchEvent(event);
+    return event;
+  }
+
+  function opener() {
+    return vi.spyOn(window, "open").mockReturnValue(null);
+  }
+
+  test("a plain click on an https link is cancelled and shows the drop-down with its OPEN row, opening nothing", async () => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    const click = await clickOn(bodyLink(card));
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "one drop-down, its one OPEN row showing the URL").toEqual([[["OPEN", URL]]]);
+    expect(document.querySelector(".md-bubble .md-bubble-row .copy-btn"), "the URL's copy button").not.toBeNull();
+    expect(open, "the click opens nothing").not.toHaveBeenCalled();
+    expect(reply, "a link answers nothing").not.toHaveBeenCalled();
+  });
+
+  // Chrome and WebKitGTK focus a pressed link; WebKit for macOS does not,
+  // so the keyboard can be on the card instead.
+  test.each(["the link", "the card"])("Enter at %s with the drop-down open opens the URL once and closes it", async (at) => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    if (at === "the card") card.focus();
+    const enter = keyAt(document.activeElement ?? card, "Enter");
+    await settle();
+    expect(open, "Enter opens the URL once, as the editor does").toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(URL, "_blank", "noopener,noreferrer");
+    expect(enter.defaultPrevented, "the drop-down takes the Enter").toBe(true);
+    expect(dropDowns(), "the drop-down closes").toEqual([]);
+    expect(reply, "opening a link answers nothing").not.toHaveBeenCalled();
+    expect(surveyState.byTab.t1?.spec.surveyId, "the survey stays up").toBe("survey-1");
+  });
+
+  test("a press on the drop-down's row opens the URL once and closes it", async () => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    const row = document.querySelector<HTMLElement>(".md-bubble .md-bubble-row");
+    expect(row, "the click shows the drop-down's row").not.toBeNull();
+    await press(row!);
+    release(row!);
+    await settle();
+    expect(open, "the press opens the URL once").toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(URL, "_blank", "noopener,noreferrer");
+    expect(dropDowns(), "the drop-down closes").toEqual([]);
+    expect(reply, "opening a link answers nothing").not.toHaveBeenCalled();
+    expect(surveyState.byTab.t1?.spec.surveyId, "the survey stays up").toBe("survey-1");
+  });
+
+  test.each([
+    ["Cmd", { metaKey: true }],
+    ["Ctrl", { ctrlKey: true }],
+  ])("%s with a click opens the URL at once, with no drop-down", async (_mod, mods) => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    const click = await clickOn(bodyLink(card), mods);
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(open, "the modified click opens the URL once").toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(URL, "_blank", "noopener,noreferrer");
+    expect(dropDowns(), "no drop-down").toEqual([]);
+    expect(reply, "opening a link answers nothing").not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["Cmd", { metaKey: true }],
+    ["Ctrl", { ctrlKey: true }],
+  ])("%s+Enter opens the URL while the drop-down is open, and travels on while none is", async (_mod, mods) => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    const reached: boolean[] = [];
+    const onDocumentKey = (e: KeyboardEvent) => reached.push(e.defaultPrevented);
+    document.addEventListener("keydown", onDocumentKey);
+    try {
+      keyAt(card, "Enter", mods);
+      expect(reached, "with no drop-down the chord travels on, its default left alone").toEqual([false]);
+      expect(open, "and opens nothing").not.toHaveBeenCalled();
+
+      await clickOn(bodyLink(card));
+      expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+      const chord = keyAt(document.activeElement ?? card, "Enter", mods);
+      await settle();
+      expect(open, "the chord opens the URL once").toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(URL, "_blank", "noopener,noreferrer");
+      expect(chord.defaultPrevented, "the drop-down takes the chord").toBe(true);
+      expect(reached, "and the chord stops at the card").toHaveLength(1);
+      expect(dropDowns(), "the drop-down closes").toEqual([]);
+    } finally {
+      document.removeEventListener("keydown", onDocumentKey);
+    }
+  });
+
+  test("a link to a workspace path shows its OPEN row and opens through the editor's path opener, from the workspace root", async () => {
+    const open = opener();
+    const resolve = vi.spyOn(api, "resolveLink").mockReturnValue(new Promise(() => {}));
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey("See [a note](notes/a.md) first.");
+    const click = await clickOn(bodyLink(card));
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "one drop-down, its OPEN row showing the path as written").toEqual([[["OPEN", "notes/a.md"]]]);
+    expect(document.querySelector(".md-bubble .copy-btn"), "a path gets no copy button").toBeNull();
+    expect(resolve, "the drop-down sends nothing yet").not.toHaveBeenCalled();
+    keyAt(document.activeElement ?? card, "Enter");
+    await settle();
+    expect(resolve, "Enter resolves the path from the workspace root, once").toHaveBeenCalledTimes(1);
+    expect(resolve).toHaveBeenCalledWith("notes/a.md");
+    expect(open, "a path is no browser tab").not.toHaveBeenCalled();
+    expect(dropDowns(), "the drop-down closes").toEqual([]);
+    expect(reply, "opening a link answers nothing").not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["plain", {}],
+    ["Ctrl", { ctrlKey: true }],
+  ])("a %s click on a path that climbs out of the workspace is cancelled, shows nothing and opens nothing", async (_how, mods) => {
+    const open = opener();
+    const resolve = vi.spyOn(api, "resolveLink").mockReturnValue(new Promise(() => {}));
+    const card = await linkedSurvey("See [outside](../x.md) first.");
+    const click = await clickOn(bodyLink(card), mods);
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "no drop-down").toEqual([]);
+    expect(resolve, "no request").not.toHaveBeenCalled();
+    expect(open, "no browser tab").not.toHaveBeenCalled();
+  });
+
+  test("in a window with no workspace a path link is cancelled and shows nothing, and an https link still shows its row", async () => {
+    Object.assign(caps, { workspace: false, files: false, drafts: false });
+    const open = opener();
+    const resolve = vi.spyOn(api, "resolveLink").mockReturnValue(new Promise(() => {}));
+    const card = await linkedSurvey(`See [a note](notes/a.md) and [the notes](${URL}).`);
+    const pathClick = await clickOn(bodyLink(card, 0));
+    expect(pathClick.defaultPrevented, "the path's click never navigates the app").toBe(true);
+    expect(dropDowns(), "the path shows no drop-down").toEqual([]);
+    const modClick = await clickOn(bodyLink(card, 0), { ctrlKey: true });
+    expect(modClick.defaultPrevented, "nor does its modified click").toBe(true);
+    expect(resolve, "and nothing asks for the path").not.toHaveBeenCalled();
+
+    const urlClick = await clickOn(bodyLink(card, 1));
+    expect(urlClick.defaultPrevented, "the URL's click never navigates the app").toBe(true);
+    expect(dropDowns(), "the URL still shows its OPEN row").toEqual([[["OPEN", URL]]]);
+    expect(open, "and opens nothing yet").not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["a bare fragment", "[the top](#top)"],
+    ["another scheme", "[the archive](ftp://example.com/a)"],
+  ])("a click on a link to %s is cancelled and shows nothing", async (_what, markdown) => {
+    const open = opener();
+    const resolve = vi.spyOn(api, "resolveLink").mockReturnValue(new Promise(() => {}));
+    const card = await linkedSurvey(`See ${markdown} first.`);
+    for (const mods of [{}, { metaKey: true }]) {
+      const click = await clickOn(bodyLink(card), mods);
+      expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+      expect(dropDowns(), "no drop-down").toEqual([]);
+    }
+    expect(resolve, "no request").not.toHaveBeenCalled();
+    expect(open, "no browser tab").not.toHaveBeenCalled();
+  });
+
+  // Every href carrier the body renders is a link: an SVG link by either
+  // spelling, a MathML element with an href, an image map's area.
+  test.each([
+    ["an SVG link by xlink:href", `<svg width="20" height="20"><a xlink:href="${URL}"><text y="10">s</text></a></svg>`, "text"],
+    ["an SVG link by href", `<svg width="20" height="20"><a href="${URL}"><text y="10">s</text></a></svg>`, "text"],
+    ["a MathML link", `<math><mi href="${URL}">x</mi></math>`, "mi"],
+    ["an image map's area", `<img src="https://example.com/i.png" usemap="#m"><map name="m"><area href="${URL}" shape="rect" coords="0,0,9,9"></map>`, "area"],
+  ])("a click on %s is cancelled and shows its OPEN row", async (_what, html, pressed) => {
+    const open = opener();
+    const card = await linkedSurvey(`A link: ${html}`);
+    const at = card.querySelector(`.survey-body ${pressed}`);
+    expect(at, "the body renders the link").not.toBeNull();
+    const click = await clickOn(at!);
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "the drop-down shows its OPEN row").toEqual([[["OPEN", URL]]]);
+    expect(open, "and opens nothing yet").not.toHaveBeenCalled();
+  });
+
+  test("a middle-button click on a body link is cancelled and opens nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    const aux = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1, detail: 1 });
+    bodyLink(card).dispatchEvent(aux);
+    await settle();
+    expect(aux.defaultPrevented, "the middle button never opens a tab past the app's openers").toBe(true);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+    expect(dropDowns(), "no drop-down").toEqual([]);
+  });
+
+  test("a second click on the link keeps its drop-down, and a click on another link moves it there", async () => {
+    const other = "https://chan.app/other";
+    const card = await linkedSurvey(`Read [the notes](${URL}) or [the other](${other}).`);
+    await clickOn(bodyLink(card, 0));
+    expect(dropDowns(), "the first link's drop-down").toEqual([[["OPEN", URL]]]);
+    const first = document.querySelector(".md-bubble");
+    await clickOn(bodyLink(card, 0));
+    expect(dropDowns(), "a second click keeps it").toEqual([[["OPEN", URL]]]);
+    expect(document.querySelector(".md-bubble"), "the same drop-down, not one shown again").toBe(first);
+    await clickOn(bodyLink(card, 1));
+    expect(dropDowns(), "a click on the other link moves it there").toEqual([[["OPEN", other]]]);
+  });
+
+  test("Cmd with a click on a link whose drop-down is open opens it once and closes the drop-down", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    await clickOn(bodyLink(card), { metaKey: true });
+    expect(open, "the modified click opens the URL once").toHaveBeenCalledTimes(1);
+    expect(dropDowns(), "and closes the drop-down").toEqual([]);
+  });
+
+  test("Enter while an input method composes leaves the drop-down open and opens nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    keyAt(document.activeElement ?? card, "Enter", { isComposing: true });
+    await settle();
+    expect(open, "a composing Enter is the input method's").not.toHaveBeenCalled();
+    expect(dropDowns(), "the drop-down stays").toEqual([[["OPEN", URL]]]);
+  });
+
+  // Focus can reach a body link outside the focused pane (a script,
+  // assistive technology), and Enter on it makes the engine's click with no
+  // press that would focus the pane first.
+  test("a click on a body link while the survey does not own the keyboard is cancelled and shows nothing", async () => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    layout.nodes.other = { kind: "leaf", id: "other", tabs: [terminalTab({ id: "t2" })], activeTabId: "t2" };
+    setActivePane("other");
+    await settle();
+    const link = bodyLink(card);
+    link.focus();
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail: 0 });
+    link.dispatchEvent(click);
+    await settle();
+    expect(click.defaultPrevented, "the click never navigates the app").toBe(true);
+    expect(dropDowns(), "no drop-down where the survey does not own the keyboard").toEqual([]);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  test("Escape with the drop-down open closes it and answers nothing; a second Escape dismisses the survey", async () => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    const first = keyAt(document.activeElement ?? card, "Escape");
+    await settle();
+    expect(first.defaultPrevented, "the drop-down takes the Escape").toBe(true);
+    expect(dropDowns(), "the first Escape closes the drop-down").toEqual([]);
+    expect(reply, "and answers nothing").not.toHaveBeenCalled();
+    expect(surveyState.byTab.t1?.spec.surveyId, "the survey stays up").toBe("survey-1");
+
+    keyAt(document.activeElement ?? card, "Escape");
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply, "the second Escape dismisses the survey").toHaveBeenCalledWith({ surveyId: "survey-1", kind: "dismissed" });
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  test("1 with the drop-down open answers the survey, and the drop-down closes with it", async () => {
+    const open = opener();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    keyAt(document.activeElement ?? card, "1");
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply, "1 answers the first option").toHaveBeenCalledWith({ surveyId: "survey-1", kind: "option", optionIndex: 0, optionLabel: "BM25" });
+    await settle();
+    expect(surveyState.byTab.t1, "the answered survey is gone").toBeUndefined();
+    expect(dropDowns(), "and its drop-down with it").toEqual([]);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["the survey is replaced", () => {
+      surveyState.byTab = { t1: { spec: spec({ surveyId: "survey-2", bodyMarkdown: "Another question" }), busy: false } };
+    }],
+    ["its tab is hidden behind another", () => {
+      const pane = layout.nodes[layout.activePaneId] as LeafNode;
+      pane.tabs.push(terminalTab({ id: "t3" }));
+      pane.activeTabId = "t3";
+    }],
+    ["its pane stops being the focused one", () => {
+      layout.nodes.other = { kind: "leaf", id: "other", tabs: [terminalTab({ id: "t2" })], activeTabId: "t2" };
+      setActivePane("other");
+    }],
+    ["the card scrolls", () => {
+      document.querySelector(".survey-card")!.dispatchEvent(new Event("scroll"));
+    }],
+  ])("the drop-down closes when %s", async (_when, change) => {
+    const open = opener();
+    const card = await linkedSurvey(`Read [the notes](${URL}) first.`);
+    await clickOn(bodyLink(card));
+    expect(dropDowns(), "the click shows the drop-down").toEqual([[["OPEN", URL]]]);
+    change();
+    await settle();
+    expect(dropDowns(), "the drop-down closes").toEqual([]);
+    expect(open, "nothing opens").not.toHaveBeenCalled();
   });
 });

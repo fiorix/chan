@@ -24,8 +24,11 @@
 // - link-press: the survey's body renders the same two links; a press on
 //   the first, through the page's hit-testing, clicks that link, makes A
 //   the focused pane, puts the link back in the Tab order and answers
-//   nothing. A capture listener on the window holds the click's default,
-//   so the page stays.
+//   nothing. The app cancels the click, read from a bubble-phase listener
+//   on the window after the app's, so the page stays where it was, and
+//   the click shows the link's drop-down with its OPEN row and the URL.
+//   Nothing holds the default for the app: a run where the page leaves
+//   loads the app again for the next leg.
 // - pointer: a click on A's option answers it and makes A the focused pane.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -384,32 +387,50 @@ async function runSurvey(ctx, directory, save) {
     async "link-press"(result, handle, offsets) {
       await expectBodyLinks(result);
       const link = `${terminalSelector(target.tab)} .survey-body a[href]`;
+      // The app keeps its layout in the hash, so the page's place is its
+      // origin and path, and the marker shows the document is the same one.
+      const where = () => page.evaluate(() => ({
+        at: location.origin + location.pathname,
+        same: Boolean(window.__survey348LinkPress),
+      })).catch((error) => ({ at: null, same: false, error: String(error) }));
       await page.evaluate((query) => {
         const clicks = [];
-        const hold = (event) => {
+        const seen = (event) => {
           const at = event.target;
           clicks.push({
             link: at === document.querySelector(query),
+            prevented: event.defaultPrevented,
             element: `${at?.tagName ?? "none"}.${at?.className?.toString?.() ?? ""}`,
           });
-          event.preventDefault();
         };
-        window.__survey348LinkPress = { clicks, hold };
-        window.addEventListener("click", hold, true);
+        window.__survey348LinkPress = { clicks, seen };
+        window.addEventListener("click", seen);
       }, link);
-      try {
-        await page.click(link);
-        await settle(page);
-      } finally {
-        result.clicks = await page.evaluate(() => {
-          const { clicks, hold } = window.__survey348LinkPress;
-          window.removeEventListener("click", hold, true);
-          delete window.__survey348LinkPress;
-          return clicks;
-        });
+      const before = await where();
+      await page.click(link);
+      await settle(page);
+      // A followed link leaves the page once its navigation commits.
+      await sleep(1_000);
+      result.where = await where();
+      if (result.where.at !== before.at || !result.where.same) {
+        result.failures.push(`the press on the body link took the page away from the app: ${maskTokens(JSON.stringify(result.where))}`);
+        await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await page.waitForSelector(".pane", { timeout: 30_000 });
+        return;
       }
-      if (!same(result.clicks.map((click) => click.link), [true])) {
-        result.failures.push(`the press on the body link clicked ${JSON.stringify(result.clicks)}, expected the link once`);
+      result.clicks = await page.evaluate(() => {
+        const { clicks, seen } = window.__survey348LinkPress;
+        window.removeEventListener("click", seen);
+        delete window.__survey348LinkPress;
+        return clicks;
+      });
+      if (!same(result.clicks.map((click) => [click.link, click.prevented]), [[true, true]])) {
+        result.failures.push(`the press on the body link clicked ${JSON.stringify(result.clicks)}, expected the link once with its click cancelled`);
+      }
+      result.dropDown = await page.evaluate(() => [...document.querySelectorAll(".md-bubble")].map((wrap) =>
+        [...wrap.querySelectorAll(".md-bubble-row")].map((row) => [...row.querySelectorAll(":scope > span")].map((span) => span.textContent))));
+      if (!same(result.dropDown, [[["OPEN", "https://example.com/pull/348"]]])) {
+        result.failures.push(`the press on the body link shows the drop-downs ${JSON.stringify(result.dropDown)}, expected one with the row OPEN https://example.com/pull/348`);
       }
       result.afterPress = await until("the press on the body link makes A the focused pane", async () => {
         const current = await read();
