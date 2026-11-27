@@ -4087,9 +4087,9 @@ mod tests {
     }
 
     /// The notes `backlinks_route_app` indexes, at three depths, each with
-    /// its body. `notes/b.md`, `notes/my note.md` and `docs/leaf.md` link
-    /// nothing and are link targets.
-    const BACKLINKS_NOTES: [(&str, &str); 6] = [
+    /// its body. `notes/b.md`, `notes/my note.md`, `notes/sub.md` and
+    /// `docs/leaf.md` link nothing and are link targets.
+    const BACKLINKS_NOTES: [(&str, &str); 7] = [
         (
             "top.md",
             "# Top\n\n\
@@ -4098,7 +4098,8 @@ mod tests {
              [[docs/spec.log]]\n\
              [[docs/leaf]]\n\
              [[%2e%2e/outside.log]]\n\
-             [[out/outside.log]]\n",
+             [[out/outside.log]]\n\
+             [[notes/sub]]\n",
         ),
         (
             "notes/a.md",
@@ -4110,7 +4111,8 @@ mod tests {
              [[todo]]\n\
              [[att/shot.png]]\n\
              [[docs/leaf.md]]\n\
-             [docs](../docs/)\n",
+             [docs](../docs/)\n\
+             [[alias/leaf]]\n",
         ),
         (
             "notes/sub/deep.md",
@@ -4122,10 +4124,12 @@ mod tests {
              [[keys/key.secret]]\n\
              [[node_modules/pkg/index.js]]\n\
              [[alias/spec.log]]\n\
-             [[docs/gone.log]]\n",
+             [[docs/gone.log]]\n\
+             [[hidden.log]]\n",
         ),
         ("notes/b.md", "# B\n\n## Part\n"),
         ("notes/my note.md", "# My note\n"),
+        ("notes/sub.md", "# Sub\n"),
         ("docs/leaf.md", "# Leaf\n"),
     ];
 
@@ -4138,7 +4142,12 @@ mod tests {
     /// its `.md` twin. It also holds what the whole-tree walk does not
     /// list: a file the `.gitignore` names, one in an excluded directory,
     /// and on Unix a symlinked directory inside the root and one to the
-    /// directory above.
+    /// directory above. Three links name such an entry as an earlier
+    /// spelling than a listed file or an indexed note: `[[hidden.log]]`
+    /// from `notes/sub/` (the ignored `hidden.log` at the root before
+    /// `notes/sub/hidden.log`), `[[alias/leaf]]` from `notes/` (the file
+    /// through the symlinked `alias` before `notes/alias/leaf`) and
+    /// `[[notes/sub]]` (the folder before the note `notes/sub.md`).
     ///
     /// Two of the differences the per-target lookup's doc comment names
     /// are not made here, as no test can count on them: a wrong-case
@@ -4164,8 +4173,11 @@ mod tests {
         put(&root, "notes/sub/beside.log", b"beside\n");
         put(&root, "notes/up.log", b"up\n");
         put(&root, "notes/att/shot.png", b"png");
-        put(&root, ".gitignore", b"*.secret\n");
+        put(&root, ".gitignore", b"*.secret\n/hidden.log\n");
         put(&root, "keys/key.secret", b"key\n");
+        put(&root, "hidden.log", b"hidden\n");
+        put(&root, "notes/sub/hidden.log", b"hidden\n");
+        put(&root, "notes/alias/leaf", b"leaf\n");
         put(&root, "node_modules/pkg/index.js", b"dep\n");
         #[cfg(unix)]
         {
@@ -4199,7 +4211,7 @@ mod tests {
     /// `(dst, anchor)`: a wikilink workspace-rooted, a Markdown link joined
     /// to its note's folder with `..` collapsed, neither decoded, and an
     /// anchor kept only on a `.md` target.
-    const BACKLINKS_STORED: [(&str, &[Anchored]); 6] = [
+    const BACKLINKS_STORED: [(&str, &[Anchored]); 7] = [
         (
             "top.md",
             &[
@@ -4208,6 +4220,7 @@ mod tests {
                 ("docs/leaf", None),
                 ("docs/spec.log", None),
                 ("notes/b.md", None),
+                ("notes/sub", None),
                 ("out/outside.log", None),
             ],
         ),
@@ -4215,6 +4228,7 @@ mod tests {
             "notes/a.md",
             &[
                 ("LICENSE", None),
+                ("alias/leaf", None),
                 ("att/shot.png", None),
                 ("docs", None),
                 ("docs/leaf.md", None),
@@ -4231,6 +4245,7 @@ mod tests {
                 ("beside.log", None),
                 ("docs/gone.log", None),
                 ("docs/spec.log", None),
+                ("hidden.log", None),
                 ("keys/key.secret", None),
                 ("node_modules/pkg/index.js", None),
                 ("notes/b", None),
@@ -4239,6 +4254,7 @@ mod tests {
         ),
         ("notes/b.md", &[]),
         ("notes/my note.md", &[]),
+        ("notes/sub.md", &[]),
         ("docs/leaf.md", &[]),
     ];
 
@@ -4282,11 +4298,14 @@ mod tests {
                 "docs/spec.log",
                 "img/pic.png",
                 "notes/a.md",
+                "notes/alias/leaf",
                 "notes/att/shot.png",
                 "notes/b.md",
                 "notes/my note.md",
+                "notes/sub.md",
                 "notes/sub/beside.log",
                 "notes/sub/deep.md",
+                "notes/sub/hidden.log",
                 "notes/up.log",
                 "todo.txt",
                 "top.md",
@@ -4372,7 +4391,7 @@ mod tests {
     /// links and the resolver: the links whose resolution against the walk's
     /// files and the index's lands on the target, sorted by source.
     fn backlinks_pinned() -> std::collections::BTreeMap<String, Vec<Backlink>> {
-        let pinned: [(&str, &[Anchored]); 22] = [
+        let pinned: [(&str, &[Anchored]); 28] = [
             // An indexed note: by its workspace-rooted path, by a
             // source-relative Markdown link with a heading anchor, and by
             // an extensionless wikilink (the `.md` form).
@@ -4412,6 +4431,16 @@ mod tests {
             // the extensionless file and not on the note.
             ("docs/leaf", &[("top.md", None)]),
             ("docs/leaf.md", &[("notes/a.md", None)]),
+            // An earlier spelling the walk does not list does not decide:
+            // a file the `.gitignore` names, a file through a symlinked
+            // directory and a folder each come before the file or note the
+            // link lands on, and answer nothing.
+            ("notes/sub/hidden.log", &[("notes/sub/deep.md", None)]),
+            ("hidden.log", &[]),
+            ("notes/alias/leaf", &[("notes/a.md", None)]),
+            ("alias/leaf", &[]),
+            ("notes/sub.md", &[("top.md", None)]),
+            ("notes/sub", &[]),
             // What the walk does not list: a file the `.gitignore` names,
             // one in an excluded directory, one through a symlinked
             // directory, paths out of the root, a missing file and a
