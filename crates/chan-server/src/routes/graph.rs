@@ -1806,11 +1806,12 @@ fn merge_language_layer(
 ) -> chan_workspace::Result<()> {
     // The workspace-graph language layer emits Language -> File
     // edges directly so the language lens (1-hop BFS in GraphPanel)
-    // splays out to EVERY file of that language. It does not go
-    // through `build_language_graph`, which aggregates files into
-    // per-directory edges with a depth-bounded top-N rank: the
-    // lens's 1-hop neighbours would then be directories (only the
-    // top-ranked ones under a depth) rather than files. The
+    // splays out to every file node of that language the answer
+    // holds. It does not go through `build_language_graph`, which
+    // aggregates files into per-directory edges with a depth-bounded
+    // top-N rank: the lens's 1-hop neighbours would then be
+    // directories (only the top-ranked ones under a depth) rather
+    // than files. The
     // Workspace filesystem layer already emits each file as a node
     // + the contains-edges that anchor it to the spine, so per-file
     // language edges plug straight into the rendered graph.
@@ -1819,10 +1820,21 @@ fn merge_language_layer(
     // overview's directory rollup (with `?depth=N` ranking); only
     // the workspace lens takes this per-file path.
     //
+    // What the answer holds bounds the lens. A workspace answer under
+    // the listing cap holds every file in scope, so the lens reaches
+    // every file of the language. Over the cap, or when the listing
+    // fails (an answer whose `tree` is `folders` or `depth`), it holds
+    // only the files the graph holds otherwise: the indexed ones, the
+    // files the filesystem layer reaches down to the request's depth
+    // and, over the cap, the link targets found on disk. The lens then
+    // reaches those alone, and a Language node's `files` and `code`
+    // count those alone, though the report, whose scan has no entry
+    // cap, classifies every file in scope.
+    //
     // The file-NODE set comes from the unified tree
-    // layer (the full File Browser namespace), and the language
-    // EDGE set comes from the FULL workspace report -- the SAME
-    // namespace as the nodes. A scope-restricted report
+    // layer (under the cap, the full File Browser namespace), and the
+    // language EDGE set comes from the FULL workspace report -- the
+    // SAME namespace as the nodes. A scope-restricted report
     // (`report_for_prefix` / `report_for_files`) would miss the
     // spine and link-target files the tree layer pulls in from
     // OUTSIDE the scoped prefix in directory and file scope, so
