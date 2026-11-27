@@ -683,8 +683,8 @@ describe("a terminal whose view fails after the core loads", () => {
     const { target, props } = page.place(tab!, { active: true, focused: true });
     const error = await shownLoadError(target);
     expect(refused, "the first terminal opened and its wiring failed once").toBe(1);
-    expect(terminalArea(target).getAttribute("tabindex"), "the terminal that failed left its area in the Tab order")
-      .toBe("0");
+    expect(terminalArea(target).getAttribute("tabindex"), "the terminal that failed took its tabindex from its area")
+      .toBeNull();
 
     // Another pane becomes the active one while the error is shown, and the
     // error's Retry, which stays in the Tab order, is pressed from the

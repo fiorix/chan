@@ -245,7 +245,7 @@ describe('sequential focus navigation', () => {
 
     term.dispose();
     expect(() => term.setSequentiallyFocusable(true)).not.toThrow();
-    expect(host.getAttribute('tabindex'), 'nothing is written after disposal').toBe('-1');
+    expect(host.getAttribute('tabindex'), 'nothing is written after disposal').toBeNull();
   });
 
   test('taking a terminal out or in moves no focus, and focus() and a press or tap still give it the keyboard', async () => {
@@ -281,7 +281,7 @@ describe('sequential focus navigation', () => {
     first.setSequentiallyFocusable(false);
     first.open(host);
     first.dispose();
-    expect(host.getAttribute('tabindex'), 'the disposed terminal left the host out').toBe('-1');
+    expect(host.getAttribute('tabindex'), 'the disposed terminal took its value').toBeNull();
 
     const second = await terminal();
     second.setSequentiallyFocusable(true);
