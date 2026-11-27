@@ -127,6 +127,9 @@ export class Terminal {
   // The tabindex setSequentiallyFocusable() asked for, held across open();
   // unset, open() keeps its defaults.
   #tabIndex?: '0' | '-1';
+  // Whether the host's tabindex is the widget's own write, which leaves with
+  // the terminal; an embedder's value the widget never overwrote stays.
+  #wroteHostTabIndex = false;
 
   // Link detection system
   #linkDetector?: LinkDetector;
@@ -406,9 +409,11 @@ export class Terminal {
       const tabIndex = this.#tabIndex;
       if (tabIndex !== undefined) {
         parent.setAttribute('tabindex', tabIndex);
+        this.#wroteHostTabIndex = true;
       } else if (!parent.hasAttribute('tabindex')) {
         // Make parent focusable if it isn't already
         parent.setAttribute('tabindex', '0');
+        this.#wroteHostTabIndex = true;
       }
 
       // Mark as contenteditable so browser extensions (Vimium, etc.) recognize
@@ -837,8 +842,9 @@ export class Terminal {
   /**
    * Take the terminal out of the page's sequential focus navigation (false)
    * or put it back (true): tabindex -1 or 0 on the host and on the hidden
-   * input. Before open the value is held for open() to write; after disposal
-   * the call does nothing. It moves no focus.
+   * input. Before open the value is held for open() to write; disposal takes
+   * it off the host, and after disposal the call does nothing. It moves no
+   * focus.
    */
   setSequentiallyFocusable(focusable: boolean): void {
     if (this.#isDisposed) return;
@@ -846,6 +852,7 @@ export class Terminal {
     if (!this.#isOpen) return;
     this.element?.setAttribute('tabindex', this.#tabIndex);
     this.#textarea?.setAttribute('tabindex', this.#tabIndex);
+    this.#wroteHostTabIndex = true;
   }
 
   /**
@@ -1368,11 +1375,17 @@ export class Terminal {
       this.element.removeEventListener('mouseleave', this.#handleMouseLeave);
       this.element.removeEventListener('click', this.#handleClick);
 
-      // Remove contenteditable and accessibility attributes added in open()
+      // Remove contenteditable and accessibility attributes added in open(),
+      // and a tabindex the widget wrote, so a host with no terminal behind it
+      // is no Tab stop.
       this.element.removeAttribute('contenteditable');
       this.element.removeAttribute('role');
       this.element.removeAttribute('aria-label');
       this.element.removeAttribute('aria-multiline');
+      if (this.#wroteHostTabIndex) {
+        this.element.removeAttribute('tabindex');
+        this.#wroteHostTabIndex = false;
+      }
     }
 
     // Clean up scrollbar timers
