@@ -9709,6 +9709,44 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_write_marks_a_full_reset_where_the_ring_cuts_it() {
+        let alt = ScreenMark {
+            alt_screen: Some(true),
+            partial: Vec::new(),
+        };
+        // The bytes the ring drops hold the program's RIS whole.
+        let mut ring = RingBuffer::new(16);
+        ring.push(&[b"xx\x1bc".as_slice(), &[b'y'; 16]].concat(), alt.clone());
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "the bytes the ring drops reset the terminal to the normal screen"
+        );
+        // A cut between RIS's ESC and its `c`, also with a C0 control the
+        // core passes over between them, leaves the reset begun at the
+        // ring's first byte.
+        for start in [b"\x1b".as_slice(), b"\x1b\r"] {
+            let mut ring = RingBuffer::new(16);
+            ring.push(
+                &[b"xx".as_slice(), start, b"c", &[b'y'; 15]].concat(),
+                alt.clone(),
+            );
+            let mark = ring.start_screen().expect("a held chunk").clone();
+            assert_eq!(
+                (mark.alt_screen, mark.partial.as_slice()),
+                (Some(true), start),
+                "the mark holds the reset the cut began"
+            );
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay_start_screen(&mark, &replay),
+                Some(false),
+                "a reset the cut began after {start:?} counts as made at the ring's first byte"
+            );
+        }
+    }
+
+    #[test]
     fn a_restored_ring_that_switches_no_screen_starts_on_the_screen_it_leaves() {
         for alt_screen in [false, true] {
             let ring = RingBuffer::new_with_replay(1024, 40, b"$ ls\r\nfile\r\n", alt_screen);
@@ -9786,6 +9824,81 @@ mod tests {
             Some(false),
             "a switch the capacity cut began counts as made at the ring's first byte, as one \
              the live ring's start cut does"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_reads_a_full_reset_its_capacity_cut() {
+        // The bytes cut to fit the ring enter the alternate screen and then
+        // reset the terminal, and the bytes kept are drawn after the reset.
+        let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 90], b"\x1bc"].concat();
+        let kept = [b"BETWEEN_TUIS\r\n".as_slice(), &[b't'; 50]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), false);
+        assert_eq!(
+            ring.snapshot_since(None).0.concat(),
+            kept,
+            "fixture: the ring keeps the last 64 bytes"
+        );
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "the reset the cut took says the kept bytes start on the normal screen"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_whose_capacity_cut_a_full_reset_counts_it_as_made() {
+        let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 91], b"\x1b"].concat();
+        let kept = [b"cBETWEEN_TUIS\r\n".as_slice(), &[b't'; 49]].concat();
+        let ring = RingBuffer::new_with_replay(64, 500, &[cut, kept.clone()].concat(), false);
+        let (replay, _) = ring.snapshot_since(None);
+        assert_eq!(
+            replay.concat(),
+            kept,
+            "fixture: the ring starts inside the reset"
+        );
+        let mark = ring.start_screen().expect("the ring holds bytes");
+        assert_eq!(
+            replay_start_screen(mark, &replay),
+            Some(false),
+            "a reset the capacity cut began counts as made at the ring's first byte, as a \
+             switch does"
+        );
+    }
+
+    #[test]
+    fn a_restored_ring_knows_no_screen_before_its_first_full_reset() {
+        // The restored bytes switch no screen, but a full reset ends them on
+        // the normal screen whichever screen they began on.
+        let read = PTY_READ_BYTES;
+        let replay = [
+            vec![b'a'; read],
+            b"\x1bc".to_vec(),
+            vec![b'b'; read - 2],
+            vec![b'c'; read],
+        ]
+        .concat();
+        let mut ring = RingBuffer::new_with_replay(3 * read, replay.len() as u64, &replay, false);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "nothing says which screen the bytes before the reset were on"
+        );
+        let normal = ScreenMark {
+            alt_screen: Some(false),
+            partial: Vec::new(),
+        };
+        ring.push(&vec![b'd'; read], normal.clone());
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(None),
+            "the read that holds the reset starts before it"
+        );
+        ring.push(&vec![b'e'; read], normal);
+        assert_eq!(
+            start_alt_screen(&ring),
+            Some(Some(false)),
+            "past the reset, the reset tells"
         );
     }
 
@@ -16994,6 +17107,48 @@ mod tests {
                     alt_screen, !holds_the_exit,
                     "killed after {writes} writes of the push: the file ends at {end} with \
                      alt_screen {alt_screen}"
+                );
+            }
+        }
+
+        // A full reset changes the screen and the modes like a switch and a
+        // mode reset do, so the push that holds it, or the one that finishes
+        // it, writes the state it leaves. A file left with the program's
+        // alternate screen and mouse tracking would bring both back to a
+        // view after a restore.
+        #[test]
+        fn a_full_reset_leaves_its_state_in_the_ring_file() {
+            let reads: [&[&[u8]]; 2] = [&[b"\x1bc$ "], &[b"\x1b", b"c$ "]];
+            for (n, reads) in reads.into_iter().enumerate() {
+                let store = StoreSim::default();
+                let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+                store.serve(&registry);
+                let id = format!("reset-{n}");
+                let (session, _pair) = parked_session_without_a_child(&registry, &id);
+                session.record_output(b"$ vim notes\r\n\x1b[?1049h\x1b[?1000hvim's screen");
+                let ring = fdstore_ring_fd_name(&id, None);
+                assert_eq!(
+                    store.stored_ring(&ring).0.terminal_state(),
+                    Some(TerminalState {
+                        alt_screen: true,
+                        private_modes: [1000].into(),
+                    }),
+                    "fixture: the file holds the program's screen and mouse mode"
+                );
+                for read in reads {
+                    session.record_output(read);
+                }
+                assert_eq!(
+                    store.stored_ring(&ring).0.terminal_state(),
+                    Some(TerminalState {
+                        alt_screen: false,
+                        private_modes: BTreeSet::new(),
+                    }),
+                    "RIS in the reads {:?} leaves the normal screen and no mode on",
+                    reads
+                        .iter()
+                        .map(|read| String::from_utf8_lossy(read))
+                        .collect::<Vec<_>>()
                 );
             }
         }

@@ -337,6 +337,69 @@ fn a_mode_change_the_ring_start_cut_keeps_the_screen_it_was_made_on() {
 }
 
 #[test]
+fn a_replay_that_starts_after_a_full_reset_names_the_normal_screen() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    // The program's RIS and its next frame are evicted, and the ring keeps
+    // only output drawn after them.
+    session.record_output(b"\x1bc");
+    session.record_output(&[b'x'; 20]);
+    session.record_output(&[b'y'; 20]);
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        live.replay.concat(),
+        [b'y'; 20],
+        "fixture: the ring keeps the last write alone"
+    );
+    assert_eq!(
+        (
+            live.replay_screen,
+            live.alt_screen,
+            String::from_utf8_lossy(&live.mode_reassert).into_owned()
+        ),
+        (
+            Some(TerminalScreen::Normal),
+            false,
+            "\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\
+             \x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l"
+                .to_owned()
+        ),
+        "(replay screen, alternate screen, recovery suffix): RIS selects the normal \
+         screen and turns every tracked mode off"
+    );
+}
+
+#[test]
+fn a_full_reset_the_ring_start_cut_counts_as_made() {
+    // The core passes over a C0 control between RIS's ESC and its `c`, so
+    // a cut there leaves the reset as begun as one right after the ESC.
+    for start in [b"\x1b".as_slice(), b"\x1b\r"] {
+        let session = test_session_with_ring(32);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h\x1b[?1000h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        // Two reads split the program's RIS, and the ring keeps only the
+        // second: a view parses its rest as text.
+        session.record_output(&[b"zz".as_slice(), start].concat());
+        session.record_output(&[b"cBETWEEN_TUIS\r\n".as_slice(), &[b'y'; 15]].concat());
+        let live = viewer.replay_from(cursor);
+        assert!(
+            live.replay.concat().starts_with(b"cBETWEEN_TUIS"),
+            "fixture: the ring starts inside the reset begun by {start:?}"
+        );
+        assert_eq!(
+            (live.replay_screen, live.alt_screen),
+            (Some(TerminalScreen::Normal), false),
+            "(replay screen, alternate screen): the reset begun by {start:?} that the ring's \
+             start cut selects the normal screen"
+        );
+    }
+}
+
+#[test]
 fn a_switch_carried_into_the_ring_ends_with_its_own_sequence() {
     let session = test_session_with_ring(64);
     let viewer = session.clone().attach(None);
