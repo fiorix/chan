@@ -281,6 +281,12 @@
     );
   }
 
+  // On iOS there is no local Chan host, so "This machine" is omitted while
+  // remote devservers and tmux connections remain visible.
+  const visibleMachines = $derived(
+    isIOS ? tree.machines.filter((node) => node.kind !== "local") : tree.machines,
+  );
+
   // The carousel deck: All windows, the machines in tree order (This machine, then the
   // devservers by name), the Connecting card while orphan windows wait, and
   // the Add devserver card last. Keys match the machine collapse keys.
@@ -290,7 +296,7 @@
     | { key: string; label: string; kind: "orphans" }
     | { key: string; label: string; kind: "add" };
   const deckCards = $derived.by((): DeckCard[] => {
-    const cards: DeckCard[] = [{ key: ALL_WINDOWS_CARD, label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
+    const cards: DeckCard[] = [{ key: ALL_WINDOWS_CARD, label: "All windows", kind: "windows" }, ...visibleMachines.map((node) => ({
       key: machineKey(node),
       label: privateText(machineName(node), node.kind === "local" ? "This machine" : "Computer"),
       kind: "machine" as const,
@@ -631,18 +637,16 @@
         <span class="machine-name">This machine</span>
         <div class="card-actions machine-actions">
           {@render windowCount(machineWindowCount(node))}
-          {#if !readOnly}
-            {#if !isIOS}
-              <button
-                class="icon-btn"
-                type="button"
-                title="New terminal (t)"
-                data-deck-key="t"
-                aria-label="New local terminal"
-                onclick={() => run(newTerminal())}>
-                <SquareTerminal size={16} />
-              </button>
-            {/if}
+          {#if !readOnly && !isIOS}
+            <button
+              class="icon-btn"
+              type="button"
+              title="New terminal (t)"
+              data-deck-key="t"
+              aria-label="New local terminal"
+              onclick={() => run(newTerminal())}>
+              <SquareTerminal size={16} />
+            </button>
             <button
               class="icon-btn"
               type="button"
@@ -753,7 +757,7 @@
         {/if}
         <div class="card-actions machine-actions">
           {@render windowCount(machineWindowCount(node))}
-          {#if hasDesktopBridge && connected(ds) && !isIOS}
+          {#if hasDesktopBridge && connected(ds)}
             <button
               class="icon-btn"
               type="button"
@@ -896,7 +900,7 @@
     {/snippet}
   </Carousel>
 {:else}
-  {#each tree.machines as node (machineKey(node))}
+  {#each visibleMachines as node (machineKey(node))}
     {@render machineCard(node, false)}
   {/each}
   {#if tree.orphans.length}

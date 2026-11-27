@@ -29,6 +29,7 @@ const actions = vi.hoisted(() => ({
   desktop: false,
   readOnly: false,
   hostOs: "linux",
+  ios: false,
 }));
 
 // The props the host hands the deck, read where a test needs what no deck
@@ -66,6 +67,7 @@ vi.mock("../state/capabilities", async (importOriginal) => ({
   selfManagedWindows: true,
   get readOnly() { return actions.readOnly; },
   get hostOs() { return actions.hostOs; },
+  get isIOS() { return actions.ios; },
 }));
 
 vi.mock("../state/computerActions", () => ({
@@ -320,10 +322,11 @@ function open(): void {
 
 /** Mount again on another surface: the adapter reads the surface as it builds
  * its model. */
-function remount(surface: { desktop: boolean; readOnly?: boolean }): void {
+function remount(surface: { desktop: boolean; readOnly?: boolean; ios?: boolean }): void {
   unmount(app);
   actions.desktop = surface.desktop;
   actions.readOnly = surface.readOnly === true;
+  actions.ios = surface.ios === true;
   app = mount(CommandLauncher, { target }) as Record<string, unknown>;
 }
 
@@ -337,6 +340,7 @@ beforeEach(() => {
   actions.desktop = false;
   actions.readOnly = false;
   actions.hostOs = "linux";
+  actions.ios = false;
   themeState.theme = "dark";
   actions.canManage.mockReturnValue(true);
   actions.canOpen.mockReturnValue(true);
@@ -1905,5 +1909,185 @@ describe("browser Show readiness", () => {
       expect(card()).toContain("Show refused.");
       expect(notices.items).toHaveLength(0);
     }
+  });
+});
+
+describe("iOS surface", () => {
+  const beta: DevserverEntry = {
+    ...alpha,
+    id: "ds-b",
+    url: "http://beta:8000",
+    host: "beta",
+    label: "beta",
+    library_id: "lib-b",
+    status: "disconnected",
+  };
+
+  const remoteRunning: WorkspaceEntry = {
+    ...workspace,
+    workspace_id: "ws-api",
+    path: "/srv/api",
+    label: "api",
+    on: true,
+    status: "running",
+    library_id: "lib-a",
+    devserver_id: "ds-a",
+    prefix: "w/api",
+  };
+
+  const remoteStopped: WorkspaceEntry = {
+    ...workspace,
+    workspace_id: "ws-docs",
+    path: "/srv/docs",
+    label: "docs",
+    on: false,
+    status: "stopped",
+    library_id: "lib-a",
+    devserver_id: "ds-a",
+    prefix: "w/docs",
+  };
+
+  const remoteWindow: WindowRecord = {
+    ...windowRecord,
+    window_id: "w-remote-api-1",
+    library_id: "lib-a",
+    title: "api Window 1",
+    label: "api shell",
+    workspace_path: "/srv/api",
+    prefix: "w/api",
+  };
+
+  it("hides This machine and local-only entries when zero devservers exist", async () => {
+    library.devservers = [];
+    remount({ desktop: true, ios: true });
+    open();
+
+    const rootOutline = outline();
+    expect(rootOutline).not.toContain("Computers: This machine");
+    expect(rootOutline).not.toContain("New: New terminal");
+    expect(rootOutline).not.toContain("New: New workspace");
+    expect(rootOutline).not.toContain("Workspaces: Project");
+    expect(rootOutline).not.toContain(`Windows: ${WINDOW_1}`);
+    expect(rootOutline).toContain("New: Add devserver");
+    expect(rootOutline).toContain("New: Add gateway");
+
+    await filterBy("workspaces");
+    expect(titles()).toEqual([]);
+    await filterBy("windows");
+    expect(titles()).toEqual([]);
+    await filterBy("computers");
+    expect(titles()).toEqual(["Add devserver"]);
+
+    (deck.props!.onClearScope as () => void)();
+    await tick();
+
+    await query("new workspace");
+    expect(titles()).toEqual([]);
+    await query("new terminal");
+    expect(titles()).toEqual([]);
+    await query("this machine");
+    expect(titles()).toEqual([]);
+  });
+
+  it("exposes remote terminal actions and omits local entries across two devservers", async () => {
+    library.devservers = [alpha, beta];
+    library.workspaces = [{ ...workspace }, remoteRunning, remoteStopped];
+    library.windows = [{ ...windowRecord }, { ...terminalRecord }, remoteWindow];
+    remount({ desktop: true, ios: true });
+    open();
+
+    const rootOutline = outline();
+    expect(rootOutline).not.toContain("Computers: This machine");
+    expect(rootOutline).not.toContain("New: New terminal");
+    expect(rootOutline).not.toContain("New: New workspace");
+    expect(rootOutline).toContain("Computers: alpha");
+    expect(rootOutline).toContain("Needs attention: beta");
+
+    await filterBy("workspaces");
+    expect(outline()).toEqual(["alpha: api", "alpha: docs"]);
+    await filterBy("windows");
+    expect(outline()).toEqual(["alpha: Window 1 [api shell]"]);
+    (deck.props!.onClearScope as () => void)();
+    await tick();
+
+    await query("this machine");
+    expect(titles()).toEqual([]);
+    await query("new workspace");
+    expect(titles()).not.toContain("New workspace");
+
+    await query("new terminal");
+    expect(titles()).toContain("New terminal on alpha");
+    result("New terminal on alpha").click();
+    await flushPromises();
+    expect(actions.newTerminal).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "ds-a" }),
+    );
+
+    actions.newTerminal.mockClear();
+    open();
+    await query("");
+    result("alpha").click();
+    await tick();
+    expect(titles()).toContain("New terminal");
+    result("New terminal").click();
+    await flushPromises();
+    expect(actions.newTerminal).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "ds-a" }),
+    );
+
+    open();
+    result("beta").click();
+    await tick();
+    expect(titles()).toContain("Connect and open");
+    result("Connect and open").click();
+    await flushPromises();
+    expect(actions.connectAndOpen).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "ds-b" }),
+    );
+
+    open();
+    result("alpha").click();
+    await tick();
+    await expand("api");
+    expect(titles()).toContain("New terminal window");
+    result("New terminal window").click();
+    await flushPromises();
+    expect(actions.newTerminalWindow).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ workspace_id: "ws-api", devserver_id: "ds-a" }),
+    );
+  });
+
+  it("promotes a single remote devserver cleanly at root without local entries", async () => {
+    library.devservers = [alpha];
+    library.workspaces = [{ ...workspace }, remoteRunning];
+    library.windows = [{ ...windowRecord }, { ...terminalRecord }, remoteWindow];
+    remount({ desktop: true, ios: true });
+    open();
+
+    const rootOutline = outline();
+    expect(rootOutline).toContain("Workspaces: api");
+    expect(rootOutline).toContain("Windows: Window 1 [api shell]");
+    expect(rootOutline).not.toContain("Workspaces: Project");
+    expect(rootOutline).not.toContain(`Windows: ${WINDOW_1}`);
+    expect(rootOutline).not.toContain("New: New terminal");
+    expect(rootOutline).not.toContain("New: New workspace");
+
+    await query("new terminal");
+    expect(titles()).toContain("New terminal on alpha");
+    result("New terminal on alpha").click();
+    await flushPromises();
+    expect(actions.newTerminal).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "ds-a" }),
+    );
+
+    open();
+    await query("");
+    await expand("api");
+    expect(titles()).toContain("New terminal window");
+    result("New terminal window").click();
+    await flushPromises();
+    expect(actions.newTerminalWindow).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ workspace_id: "ws-api", devserver_id: "ds-a" }),
+    );
   });
 });

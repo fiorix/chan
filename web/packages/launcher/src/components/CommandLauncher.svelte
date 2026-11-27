@@ -394,7 +394,9 @@
       : [];
 
     const model: ComputersModel = {
-      machines: machineTree.machines.map(machineModel),
+      machines: machineTree.machines
+        .filter((node) => !(isIOS && node.kind === "local"))
+        .map(machineModel),
       unplaced: machineTree.orphans.map((window) => windowModel(window)),
       gateways,
       recent: recentWindows.keys,
@@ -402,15 +404,16 @@
       // devserver or a gateway through, and the demo's hero keeps its New
       // workspace button for resetting the demo.
       may: {
-        // No terminals on the single iOS webview (local, devserver, or window).
+        // iOS has no local host for terminals or workspaces; remote devservers
+        // and workspaces keep terminal creation.
         terminal: !isIOS,
-        remoteTerminal: hasDesktopBridge && !isIOS,
+        remoteTerminal: hasDesktopBridge,
         window: true,
-        terminalWindow: !isIOS,
+        terminalWindow: true,
         power: true,
         connect: hasDesktopBridge,
         tmux: true,
-        newWorkspace: !demoState.reset,
+        newWorkspace: !demoState.reset && !isIOS,
         addDevserver: hasDesktopBridge,
         gateways: hasDesktopBridge,
         addGateway: hasDesktopBridge,
