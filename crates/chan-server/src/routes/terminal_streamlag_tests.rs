@@ -2435,6 +2435,173 @@ fn drawn_screens_leaves_the_alternate_screen_across_a_del_or_a_cr_inside_the_swi
     );
 }
 
+/// Byte streams with the vendored terminal core's reading of each, recorded
+/// from the core by `web/packages/workspace-app/src/terminal/coreScreenModes.test.ts`.
+/// chan-library holds the session's tracker to the same readings.
+const CORE_SCREEN_MODES: &str =
+    include_str!("../../../chan-library/tests/fixtures/core-screen-modes.json");
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModes {
+    /// The private modes each reading reports, when on.
+    tracked: Vec<u16>,
+    cases: Vec<CoreScreenModesCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModesCase {
+    name: String,
+    /// The PTY reads in order; each character is one byte.
+    chunks: Vec<String>,
+    core: CoreReading,
+}
+
+/// Whether the alternate screen is active, and the tracked modes on,
+/// ascending.
+#[derive(serde::Deserialize)]
+struct CoreReading {
+    alternate: bool,
+    modes: Vec<u16>,
+}
+
+/// The recorded streams `parsed_modes` reads differently from the terminal
+/// core, by name, each with why: the session tracker's known differences,
+/// for the same reasons. The table test fails when one of them agrees, so
+/// the list stays true.
+const PARSED_MODES_KNOWN_DIFFERENCES: &[(&str, &str)] = &[
+    ("DECSTR with every tracked mode on", DECSTR),
+    (
+        "DECSTR on the alternate screen with every tracked mode on",
+        DECSTR,
+    ),
+    ("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI),
+];
+
+/// The recorded streams `drawn_screens` reads differently from the terminal
+/// core. It reads the screen and no mode, and the core's soft reset leaves
+/// the screen as it is, so the DECSTR streams are not among them.
+const DRAWN_SCREENS_KNOWN_DIFFERENCES: &[(&str, &str)] =
+    &[("a UTF-8 pair (0xc3 0xa9) inside ?1049l", UTF8_INSIDE_A_CSI)];
+
+const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
+                      off in the core; the model does not read it";
+
+const UTF8_INSIDE_A_CSI: &str = "the core skips a UTF-8 character inside a CSI and finishes \
+                                 the CSI; the model ends a CSI at any byte above 0x7f";
+
+/// Mouse highlight tracking, which `parsed_modes` follows as it follows
+/// every private mode and the core does not implement, so the core never
+/// reads it on. The table compares the model's modes without it, and fails
+/// if the core reads it on in any stream.
+const MODE_THE_CORE_LACKS: u16 = 1001;
+
+/// A reading as the table prints it.
+fn screen_reading(alternate: bool, modes: Option<&[u16]>) -> String {
+    let screen = if alternate { "alternate" } else { "normal" };
+    match modes {
+        Some(modes) => format!("{screen} {modes:?}"),
+        None => screen.to_owned(),
+    }
+}
+
+// The redial tests hold the server to what a view draws and which modes it
+// holds, as these models read the view's bytes. A model that reads a stream
+// otherwise than the view's core passes a redial the view gets wrong, or
+// fails one it gets right. Every case is read by both models, and each
+// reading that breaks that rule, or its model's known-differences list, is
+// reported together; the whole table is the test's output.
+#[test]
+fn the_test_models_read_each_recorded_stream_as_the_terminal_core_does() {
+    let fixture: CoreScreenModes =
+        serde_json::from_str(CORE_SCREEN_MODES).expect("the core reading fixture parses");
+    let read_on: Vec<&str> = fixture
+        .cases
+        .iter()
+        .filter(|case| case.core.modes.contains(&MODE_THE_CORE_LACKS))
+        .map(|case| case.name.as_str())
+        .collect();
+    assert!(
+        read_on.is_empty(),
+        "the core reads mode {MODE_THE_CORE_LACKS} on, so the table can no longer leave it \
+         out: {read_on:?}"
+    );
+    for (name, _) in PARSED_MODES_KNOWN_DIFFERENCES
+        .iter()
+        .chain(DRAWN_SCREENS_KNOWN_DIFFERENCES)
+    {
+        assert!(
+            fixture.cases.iter().any(|case| case.name == *name),
+            "the known difference {name:?} names no recorded stream"
+        );
+    }
+    let mut unexpected = Vec::new();
+    for case in &fixture.cases {
+        let stream: Vec<u8> = case
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.chars())
+            .map(|c| u8::try_from(c).unwrap_or_else(|_| panic!("{}: {c:?} is no byte", case.name)))
+            .collect();
+        let core = screen_reading(case.core.alternate, Some(&case.core.modes));
+        let (alternate, modes) = parsed_modes(&stream);
+        let modes: Vec<u16> = modes
+            .into_iter()
+            .filter(|mode| fixture.tracked.contains(mode) && *mode != MODE_THE_CORE_LACKS)
+            .collect();
+        let parsed = screen_reading(alternate, Some(&modes));
+        let shown = drawn_screens(&stream).alternate_shown;
+        let drawn = screen_reading(shown, None);
+        let mut verdicts = Vec::new();
+        for (model, same, read, known_differences) in [
+            (
+                "parsed_modes",
+                (alternate, &modes) == (case.core.alternate, &case.core.modes),
+                &parsed,
+                PARSED_MODES_KNOWN_DIFFERENCES,
+            ),
+            (
+                "drawn_screens",
+                shown == case.core.alternate,
+                &drawn,
+                DRAWN_SCREENS_KNOWN_DIFFERENCES,
+            ),
+        ] {
+            let known = known_differences
+                .iter()
+                .find(|(name, _)| *name == case.name)
+                .map(|(_, why)| *why);
+            verdicts.push(match (same, known) {
+                (true, None) => "same     ",
+                (false, Some(_)) => "known    ",
+                (false, None) => "DIFFERENT",
+                (true, Some(_)) => "AGREES   ",
+            });
+            match (same, known) {
+                (false, None) => {
+                    unexpected.push(format!("{}: core {core}, {model} {read}", case.name))
+                }
+                (true, Some(why)) => unexpected.push(format!(
+                    "{}: listed as a known difference of {model} ({why}), but both read {read}",
+                    case.name
+                )),
+                _ => {}
+            }
+        }
+        println!(
+            "{} {} | core {core} | parsed_modes {parsed} | drawn_screens {drawn} | {}",
+            verdicts[0], verdicts[1], case.name
+        );
+    }
+    assert!(
+        unexpected.is_empty(),
+        "{} readings of {} streams by the test models differ from the terminal core's, or \
+         are listed as known differences and agree with it:\n{}",
+        unexpected.len(),
+        fixture.cases.len(),
+        unexpected.join("\n")
+    );
+}
+
 /// The screen a session frame names for its replay's first byte, when it
 /// names one.
 fn replay_screen(session: &Value) -> Option<&str> {
