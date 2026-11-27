@@ -88,6 +88,9 @@ function makeOfflineDevserver(): DevserverEntry {
 
 async function setupSeededLibrary({ emptyDevservers = false }: { emptyDevservers?: boolean } = {}) {
     const { resetDeck } = await import("../../../web/packages/launcher/src/state/deck.svelte");
+    const { clearCommandLauncherDraft, clearRecentWindows } = await import(
+        "../../../web/packages/launcher/src/state/commandLauncher.svelte"
+    );
     const backendMod = await import("../../../web/packages/launcher/src/api/backend");
     const { mockApi, resetMockRemoteWorkspaces } = await import(
         "../../../web/packages/launcher/src/api/mock"
@@ -98,6 +101,8 @@ async function setupSeededLibrary({ emptyDevservers = false }: { emptyDevservers
         "../../../web/packages/launcher/src/state/library.svelte"
     );
     resetDeck();
+    clearCommandLauncherDraft();
+    clearRecentWindows();
     resetMockRemoteWorkspaces();
     await loadLibrary();
     library.devservers = emptyDevservers
@@ -113,6 +118,8 @@ async function setupSeededLibrary({ emptyDevservers = false }: { emptyDevservers
 
 beforeEach(() => {
     vi.resetModules();
+    sessionStorage.clear();
+    localStorage.clear();
     setSurfaceMeta("desktop");
 });
 
@@ -181,8 +188,10 @@ describe("tier1", () => {
         await tick();
 
         const rootTitles = deckTitles(mountTarget);
+        expect(rootTitles.length).toBeGreaterThanOrEqual(5);
         expect(rootTitles).toContain("prod");
         expect(rootTitles).toContain("offline-box");
+        expect(rootTitles).toContain("Add devserver");
         expect(rootTitles).not.toContain("This machine");
         expect(rootTitles).not.toContain("New terminal");
         expect(rootTitles).not.toContain("New workspace");
@@ -376,6 +385,10 @@ describe("tier2", () => {
             "This machine",
         ];
         const rootTitles = deckTitles(mountTarget);
+        expect(rootTitles.length).toBeGreaterThanOrEqual(5);
+        expect(rootTitles).toContain("prod");
+        expect(rootTitles).toContain("offline-box");
+        expect(rootTitles).toContain("Add devserver");
         for (const forbidden of localForbidden) {
             expect(rootTitles).not.toContain(forbidden);
         }
@@ -447,6 +460,10 @@ describe("tier2", () => {
             "This machine",
         ];
         const rootTitles = deckTitles(mountTarget);
+        expect(rootTitles.length).toBeGreaterThanOrEqual(5);
+        expect(rootTitles).toContain("prod");
+        expect(rootTitles).toContain("offline-box");
+        expect(rootTitles).toContain("Add devserver");
         for (const forbidden of localForbidden) {
             expect(rootTitles).not.toContain(forbidden);
         }
@@ -524,6 +541,10 @@ describe("tier2", () => {
             "This machine",
         ];
         const rootTitles = deckTitles(mountTarget);
+        expect(rootTitles.length).toBeGreaterThanOrEqual(5);
+        expect(rootTitles).toContain("prod");
+        expect(rootTitles).toContain("offline-box");
+        expect(rootTitles).toContain("Add devserver");
         for (const forbidden of localForbidden) {
             expect(rootTitles).not.toContain(forbidden);
         }

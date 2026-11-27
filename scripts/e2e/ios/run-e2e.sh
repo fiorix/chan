@@ -67,6 +67,7 @@ run_cmd_verdict() {
     local tier="$1"
     local name="$2"
     shift 2
+    local cmd_name="${1:-}"
     local log_file
     log_file="$(mktemp "$RUN_DIR/${name}.log.XXXXXX")"
     local rc=0
@@ -75,7 +76,10 @@ run_cmd_verdict() {
         PASS_COUNT=$((PASS_COUNT + 1))
         echo "verdict $tier $name 0 PASS ($SHA)"
         rm -f "$log_file"
-    elif [ "$rc" -eq 2 ]; then
+    elif [ "$cmd_name" != "make" ] && [ "$rc" -eq 2 ]; then
+        PREREQ_COUNT=$((PREREQ_COUNT + 1))
+        echo "verdict $tier $name 2 PREREQ see $log_file"
+    elif [ "$rc" -eq 127 ]; then
         PREREQ_COUNT=$((PREREQ_COUNT + 1))
         echo "verdict $tier $name 2 PREREQ see $log_file"
     else
@@ -208,14 +212,26 @@ run_cargo_verdict() {
     run_cmd_verdict "$tier" "$name" bash -c 'cd "$1" && shift && exec cargo "$@"' _ "$REPO" "$@"
 }
 
+run_make_verdict() {
+    local tier="$1"
+    local name="$2"
+    shift 2
+    if ! command -v make >/dev/null 2>&1; then
+        PREREQ_COUNT=$((PREREQ_COUNT + 1))
+        echo "verdict $tier $name 2 PREREQ missing command make"
+        return 0
+    fi
+    run_cmd_verdict "$tier" "$name" make -C "$REPO" "$@"
+}
+
 run_self_test() {
     echo "=== E2E Self-Test Mode ($SHA) ==="
-    run_cmd_verdict self-test e2e-check make -C "$REPO" e2e-check
-    run_cmd_verdict self-test shell-check make -C "$REPO" shell-check
-    run_cmd_verdict self-test ios-check make -C "$REPO" ios-check
-    run_cmd_verdict self-test ios-lint make -C "$REPO" ios-lint
+    run_make_verdict self-test e2e-check e2e-check
+    run_make_verdict self-test shell-check shell-check
+    run_make_verdict self-test ios-check ios-check
+    run_make_verdict self-test ios-lint ios-lint
     run_cargo_verdict self-test ios-e2e-harness test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
-    run_cmd_verdict self-test ios-unit-tests make -C "$REPO" ios-test
+    run_make_verdict self-test ios-unit-tests ios-test
     run_cmd_verdict self-test node-unit-tests node --test "$SCRIPT_DIR"/*.test.mjs
     run_stream_verdicts "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
 }
@@ -285,9 +301,9 @@ run_tier1() {
     echo "=== Tier 1: Isolated Feature Happy Paths ($SHA) ==="
     run_cargo_verdict tier1 rust-ios-e2e-harness test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
     run_cmd_verdict tier1 node-harness-tests node --test "$SCRIPT_DIR"/*.test.mjs
-    run_cmd_verdict tier1 f9-ios-check-aarch64 make -C "$REPO" ios-check
-    run_cmd_verdict tier1 f9-ios-lint-clippy make -C "$REPO" ios-lint
-    run_cmd_verdict tier1 f9-ios-unit-suite make -C "$REPO" ios-test
+    run_make_verdict tier1 f9-ios-check-aarch64 ios-check
+    run_make_verdict tier1 f9-ios-lint-clippy ios-lint
+    run_make_verdict tier1 f9-ios-unit-suite ios-test
     if ! run_vitest_ios tier1; then :; fi
     run_stream_verdicts node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 1
 }

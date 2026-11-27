@@ -491,13 +491,28 @@ final class ChanSmokeUITests: XCTestCase {
         let cmdLauncherBtn = webview.buttons["Open command launcher"]
         if cmdLauncherBtn.waitForExistence(timeout: 5) {
             cmdLauncherBtn.tap()
-            let primarySearchField = webview.textFields.firstMatch
+            let launcherDialog = webview.dialogs["Command launcher"]
+            let comboSearchField = webview.comboBoxes["Computers"]
+            let primarySearchField = webview.textFields["Computers"]
+            let dialogTextField = launcherDialog.textFields.firstMatch
             let fallbackSearchField = webview.descendants(matching: .any).matching(
-                NSPredicate(format: "label == 'Computers'")
+                NSPredicate(
+                    format: "(elementType == %d OR elementType == %d OR elementType == %d) AND (label == 'Computers' OR placeholderValue == 'Search')",
+                    XCUIElement.ElementType.comboBox.rawValue,
+                    XCUIElement.ElementType.textField.rawValue,
+                    XCUIElement.ElementType.searchField.rawValue
+                )
             ).firstMatch
-            let searchField = primarySearchField.waitForExistence(timeout: 3)
-                ? primarySearchField
-                : fallbackSearchField
+            let searchField: XCUIElement
+            if comboSearchField.waitForExistence(timeout: 3) {
+                searchField = comboSearchField
+            } else if primarySearchField.waitForExistence(timeout: 1) {
+                searchField = primarySearchField
+            } else if dialogTextField.waitForExistence(timeout: 1) {
+                searchField = dialogTextField
+            } else {
+                searchField = fallbackSearchField
+            }
             if searchField.exists || searchField.waitForExistence(timeout: 2) {
                 searchField.tap()
                 searchField.typeText("Close Terminal Window 3")
