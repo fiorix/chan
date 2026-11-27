@@ -9,14 +9,19 @@
 // and a further step would write a byte rather than move the keyboard, or at
 // a step limit. Then `zq` is typed and both recorders are read.
 //
-// - forward, backward: from B's tab label with Tab, then with Shift+Tab. A
-//   leg fails if a step lands in A's terminal, if the active pane moves, or
-//   if A's PTY reads a byte. The Shift+Tab walk must also pass the place of
-//   A's terminal, so that its pass is not a walk that never got there. Tab
-//   from B's label meets B's own terminal before it could reach A's place in
-//   this layout, so the forward legs read the same whatever A's Tab order.
-// - survey-forward, survey-backward: the same two walks with a survey up
-//   over A's terminal.
+// The legs other than the control keep B the active pane. Each fails if a
+// step lands in A's terminal, if the active pane moves, or if A's PTY reads
+// a byte; a walk toward A's terminal must also pass its place, so that its
+// pass is not a walk that never got there, and a Tab walk must end in B's
+// terminal with `zq` on B's PTY, so that a walk that stalls is red.
+//
+// - forward: Tab from B's tab label. In this layout it meets B's terminal
+//   before A's place, so it crosses nothing.
+// - backward: Shift+Tab from B's tab label, across A's place.
+// - forward-from-a: Tab from A's tab label, placed by script with B still
+//   the active pane, across A's place and on to B's terminal.
+// - survey-forward, survey-backward, survey-forward-from-a: the same three
+//   walks with a survey up over A's terminal.
 // - control: A made the active pane by a press, Tab from A's tab label lands
 //   in A's terminal and the typed keys reach A's PTY. Without it a pass could
 //   not tell a terminal that is out of the Tab order from a walk that never
@@ -49,12 +54,16 @@ const WALK_LIMIT = 24;
 const QUIET_MS = 1_500;
 const TYPED = ["z", "q"];
 const TYPED_BYTES = ["7a", "71"];
+/// Each leg's walk starts on the tab label of pane `from`: "away" is B,
+/// "target" is A.
 const LEGS = [
-  { kind: "forward", key: "Tab", survey: false },
-  { kind: "backward", key: "Shift+Tab", survey: false },
-  { kind: "survey-forward", key: "Tab", survey: true },
-  { kind: "survey-backward", key: "Shift+Tab", survey: true },
-  { kind: "control", key: "Tab", survey: false },
+  { kind: "forward", key: "Tab", survey: false, from: "away" },
+  { kind: "backward", key: "Shift+Tab", survey: false, from: "away" },
+  { kind: "survey-forward", key: "Tab", survey: true, from: "away" },
+  { kind: "survey-backward", key: "Shift+Tab", survey: true, from: "away" },
+  { kind: "forward-from-a", key: "Tab", survey: false, from: "target" },
+  { kind: "survey-forward-from-a", key: "Tab", survey: true, from: "target" },
+  { kind: "control", key: "Tab", survey: false, from: "target" },
 ];
 
 /// The check could not make what it reads; the runner records an
@@ -205,15 +214,16 @@ async function runTabOrder(ctx, directory, save) {
     await settle(page);
   }
 
-  /// Walk from `pane`'s tab label with `key`, recording every landing. The
-  /// walk stops back at its start, in either terminal, or at the limit; a
-  /// step that moves the active pane fails the leg and the walk goes on.
-  async function walk(result, pane, key) {
+  /// Walk from `pane`'s tab label with `key` while `activePane` is the
+  /// active pane, recording every landing. The walk stops back at its
+  /// start, in either terminal, or at the limit; a step that moves the
+  /// active pane fails the leg and the walk goes on.
+  async function walk(result, pane, activePane, key) {
     const start = labelSelector(pane);
     await placeFocus(page, start);
     result.start = await read(start);
-    if (!result.start.atStart || result.start.focusedPane !== pane) {
-      throw environment(`the walk's start is not pane ${pane}'s tab label with that pane active: ${JSON.stringify(result.start)}`);
+    if (!result.start.atStart || result.start.focusedPane !== activePane) {
+      throw environment(`the walk's start is not pane ${pane}'s tab label with pane ${activePane} active: ${JSON.stringify(result.start)}`);
     }
     result.phase = "walk";
     result.walk = [];
@@ -240,7 +250,7 @@ async function runTabOrder(ctx, directory, save) {
         break;
       }
     }
-    result.moved = result.walk.filter((at) => at.focusedPane !== pane).map((at) => `step ${at.step}: ${at.focusedPane}`);
+    result.moved = result.walk.filter((at) => at.focusedPane !== activePane).map((at) => `step ${at.step}: ${at.focusedPane}`);
     if (result.moved.length) {
       result.failures.push(`${key} from pane ${pane}'s tab label moved the active pane at ${result.moved.join(", ")}`);
     }
@@ -265,8 +275,9 @@ async function runTabOrder(ctx, directory, save) {
   const walkLine = (result) => result.walk
     .map((at) => `${at.step}:${at.name || at.element}@${at.pane ?? "-"}/${at.relation}`).join(" > ");
 
-  /// A walk from B's tab label with B the active pane, with or without a
-  /// survey over A's terminal, which `slot` holds for the leg's cleanup.
+  /// A walk from B's or A's tab label with B the active pane, with or
+  /// without a survey over A's terminal, which `slot` holds for the leg's
+  /// cleanup.
   async function hold(result, leg, slot) {
     await clickTerminal(page, away.tab).catch((error) => {
       throw environment(`a press did not give pane B's terminal the keyboard: ${firstLine(error)}`);
@@ -279,14 +290,24 @@ async function runTabOrder(ctx, directory, save) {
       }
     }
     const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
-    await walk(result, run.panes.away, leg.key);
+    const from = `${leg.key} from pane ${leg.from === "target" ? "A" : "B"}'s tab label`;
+    await walk(result, run.panes[leg.from], run.panes.away, leg.key);
     const landed = result.walk.filter((at) => at.relation === "inside");
     if (landed.length) {
-      result.failures.push(`${leg.key} from pane B's tab label landed in pane A's terminal at ${landed.map((at) => `step ${at.step} (${at.element})`).join(", ")}`);
+      result.failures.push(`${from} landed in pane A's terminal at ${landed.map((at) => `step ${at.step} (${at.element})`).join(", ")}`);
     }
-    result.passedTarget = result.walk.some((at) => at.relation === "before");
-    if (leg.key === "Shift+Tab" && !result.passedTarget && !landed.length) {
-      result.failures.push(`${leg.key} from pane B's tab label did not pass the place of pane A's terminal (ended: ${result.ended}): ${walkLine(result)}`);
+    // Where a step lies once a walk toward A's terminal has passed it:
+    // before it for Shift+Tab from B, after it for Tab from A. Tab from B
+    // walks away from it.
+    const passed = leg.from === "target" ? "after" : leg.key === "Shift+Tab" ? "before" : null;
+    result.passedTarget = passed !== null && result.walk.some((at) => at.relation === passed);
+    if (!landed.length) {
+      if (passed && !result.passedTarget) {
+        result.failures.push(`${from} did not pass the place of pane A's terminal (ended: ${result.ended}): ${walkLine(result)}`);
+      }
+      if (leg.key === "Tab" && result.ended !== "B's terminal") {
+        result.failures.push(`${from} did not end in pane B's terminal (ended: ${result.ended}): ${walkLine(result)}`);
+      }
     }
     if (leg.survey) {
       result.afterWalk = await read();
@@ -295,6 +316,9 @@ async function runTabOrder(ctx, directory, save) {
     await typeAfterWalk(result, offsets);
     if (result.targetBytes.length) {
       result.failures.push(`pane A's PTY read ${JSON.stringify(result.targetBytes)} after the walk (ended: ${result.ended}) and the typed "zq"`);
+    }
+    if (leg.key === "Tab" && result.ended === "B's terminal" && !same(result.awayBytes, TYPED_BYTES)) {
+      result.failures.push(`pane B's PTY read ${JSON.stringify(result.awayBytes)} after the walk and the typed "zq", expected ${JSON.stringify(TYPED_BYTES)}`);
     }
     result.screenshot = await shot(`353-${leg.kind}`);
   }
@@ -306,7 +330,7 @@ async function runTabOrder(ctx, directory, save) {
       throw environment(`a press did not give pane A's terminal the keyboard: ${firstLine(error)}`);
     });
     const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
-    await walk(result, run.panes.target, "Tab");
+    await walk(result, run.panes.target, run.panes.target, "Tab");
     if (result.ended !== "A's terminal") {
       result.failures.push(`Tab from pane A's tab label, pane A active, did not land in pane A's terminal (ended: ${result.ended}): ${walkLine(result)}`);
     }
@@ -320,7 +344,7 @@ async function runTabOrder(ctx, directory, save) {
 
   async function runLeg(leg) {
     const result = {
-      kind: leg.kind, key: leg.key, survey: leg.survey, phase: "setup", observed: false,
+      kind: leg.kind, key: leg.key, survey: leg.survey, from: leg.from, phase: "setup", observed: false,
       failures: [], setupErrors: [], interactionErrors: [], cleanupErrors: [],
     };
     run.legs.push(result);
