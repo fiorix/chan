@@ -2,12 +2,13 @@
 # The check-296 reset on the real WebKitGTK desktop at GDK_SCALE=2. One
 # ghostty terminal paints pages, the canvas drawing state drops by a
 # same-size reset, and the window refocus runs the app's forced passes;
-# the driver reads painted pixels per quarter plus the transform before
-# and after. Run once per tree at /work/chan, base first, then tip: the
-# base keeps the half-scale paint (an observed fault), the tip repaints
-# at full scale. Exit 0 held; the wrapper exits 1 on an observed fault
-# (the driver exits 10 through its judge), 3 when inconclusive, 2 when
-# refused. Run only in an isolated guest.
+# the driver counts the samples off the canvas's background per quarter,
+# plus the transform, before and after. Run once per tree at /work/chan:
+# a tree without the transform repair keeps the half-scale paint (an
+# observed fault), a tree with it repaints at full scale. Exit 0 held;
+# the wrapper exits 1 on an observed fault (the driver exits 10 through
+# its judge), 3 when inconclusive, 2 when refused. Run only in an
+# isolated guest.
 # shellcheck disable=SC2329
 set -euo pipefail
 

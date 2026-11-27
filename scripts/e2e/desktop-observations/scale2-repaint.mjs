@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // The check-296 reset on the real WebKitGTK desktop at GDK_SCALE=2: open
-// one terminal, paint pages, read the samples off the background per
+// one terminal, paint pages, count the samples off the background per
 // quarter plus the transform, drop the canvas drawing state by a
 // same-size reset, and refocus the window (the app's forced passes run on
-// focus). At the tip the repaint lands at full scale; at the base it stays
-// in the top-left quarter. Run once per tree: base first, then tip. Exit 0 held; the
+// focus and on a return to visible). With the transform repair the
+// repaint lands at full scale; without it the repaint stays in the
+// top-left quarter at half size. Run once per tree. Exit 0 held; the
 // wrapper exits 1 on an observed fault (this driver exits 10 through its
 // judge), 3 when inconclusive, 2 when refused. Runs only in the desktop
 // guest; syntax-checked here.
@@ -190,11 +191,15 @@ async function main() {
   // size. The written page marks about a seventh of every quarter; one
   // cell, the cursor alone, about a fifth of a percent of one quarter. The
   // floor asks for text in every quarter, which a half-scale paint (three
-  // quarters empty) and a partial or glyphless frame lack. The band holds
-  // what may differ between the baseline and a full repaint of the same
-  // screen (the cursor, a prompt line painted late) and stays half the
-  // floor, so a read inside it keeps marks in every quarter, about ten
-  // times what a cursor-only repaint leaves.
+  // quarters empty) and a glyphless frame lack. The band holds what may
+  // differ between the baseline and a full repaint of the same screen (the
+  // cursor, a prompt line painted late) and stays half the floor, so a
+  // read inside it keeps marks in every quarter, about ten times what a
+  // cursor-only repaint leaves. The band bounds quarters, not rows: one
+  // text row is about 1.4 percent of a quarter's samples on the desktop's
+  // page, so a repaint short of one row in a quarter still holds. A HELD
+  // says every quarter came back within the band at a transform of 2, not
+  // that every row did.
   const FLOOR = 0.04;
   const BAND = 0.02;
   const floorOf = (total) => Math.ceil(total * FLOOR);
