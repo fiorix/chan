@@ -53,7 +53,7 @@ echo "$WEBKIT_VERSION" > "$output/engine-package.txt"
 
 WS="$OBS_WORK/ws"
 mkdir -p "$WS"
-timeout --signal=TERM --kill-after=5s 60s chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 \
+timeout --signal=TERM --kill-after=5s 60s "$CHAN_BIN" serve "$WS" > "$OBS_WORK/serve.out" 2>&1 \
     || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
 workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
@@ -72,10 +72,10 @@ for socket in $(obs_control_sockets); do
 done
 [ -n "${CHAN_CONTROL_SOCKET:-}" ] || obs_inconclusive "no private control socket addresses the workspace window"
 import -window "$xid" "$output/window-before.png"
-set +e
+# The ERR trap fires under `set +e` too: only obs_verdict lets the
+# driver's own status, a fault among them, reach obs_judge.
+obs_verdict
 node "$HERE/scale2-repaint.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output"
 verdict=$?
-set -e
-import -window "$xid" "$output/window-after.png"
-obs_verdict
+import -window "$xid" "$output/window-after.png" || obs_log "the screenshot after the driver failed"
 obs_judge "$verdict" "scale-2 repaint differs base to tip in the wrong direction"
