@@ -53,7 +53,7 @@ echo "$WEBKIT_VERSION" > "$output/engine-package.txt"
 
 WS="$OBS_WORK/ws"
 mkdir -p "$WS"
-timeout --signal=TERM --kill-after=5s 60s chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 \
+timeout --signal=TERM --kill-after=5s 60s "$CHAN_BIN" serve "$WS" > "$OBS_WORK/serve.out" 2>&1 \
     || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
 workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid

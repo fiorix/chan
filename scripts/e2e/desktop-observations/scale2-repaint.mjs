@@ -140,7 +140,7 @@ async function main() {
     throw new Incomplete(error.message);
   });
   // Hang guard: the shell takes a moment to answer on the fresh pty.
-  await poll(async () => cs(["scrollback", "--tab-name", tab]),
+  await poll(async () => cs(["terminal", "scrollback", "--tab-name", tab]),
     (text) => text.length > 0, "the shell never answered", 15000, "incomplete").catch((error) => {
     throw new Incomplete(error.message);
   });
