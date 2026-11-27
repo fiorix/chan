@@ -371,6 +371,23 @@ describe("a press on a survey's overlay beside its card", () => {
       .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
   });
 
+  // The same secondary press opens the terminal's context menu on its
+  // contextmenu event, which the press model does not send: what the menu
+  // does with the keyboard is outside this case.
+  test("over an unfocused pane, a secondary press makes its pane the focused one and leaves the keyboard on the card", async () => {
+    const card = await surveyOverUnfocusedPane();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    await press(overlayOf(card), 2);
+    await settleLong();
+    expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
+    expect(document.activeElement, "the keyboard is on the card").toBe(card);
+
+    typeKey("2", "Digit2");
+    await settleLong();
+    expect(reply, "a 2 answers the survey's second option")
+      .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
+  });
+
   test("with its pane focused, leaves the keyboard on the card", async () => {
     const card = await surveyOverUnfocusedPane();
     setActivePane(TOP);
