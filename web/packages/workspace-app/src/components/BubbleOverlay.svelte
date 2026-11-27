@@ -218,9 +218,9 @@
   function holdKeyboardOnCard(e: MouseEvent): void {
     if (e.target !== e.currentTarget) return;
     e.preventDefault();
-    // Svelte runs every `onmousedown` the press reaches from one delegated
-    // listener, so `tick` resolves after all of them, with the state they
-    // changed applied.
+    // Svelte runs the `onmousedown` of every element the press reaches, the
+    // pane's among them, from one delegated listener, so `tick` resolves
+    // after all of them, with the state they changed applied.
     void tick().then(() => {
       if (!ownsKeyboard() || !mayFocus(card)) return;
       if (!card?.contains(document.activeElement)) card?.focus({ preventScroll: true });
