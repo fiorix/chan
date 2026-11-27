@@ -1,0 +1,44 @@
+name: ChanUITests
+options:
+  bundleIdPrefix: app.chan.ios
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  ChanUITestHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: HostApp
+    info:
+      path: HostApp/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.chan.ios.uitest-host
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+  ChanUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests
+    info:
+      path: Tests/Info.plist
+    dependencies:
+      - target: ChanUITestHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.chan.ios.uitests
+        TEST_TARGET_NAME: ChanUITestHost
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+schemes:
+  ChanUITests:
+    build:
+      targets:
+        ChanUITestHost: all
+        ChanUITests: all
+    test:
+      targets:
+        - ChanUITests
