@@ -351,3 +351,84 @@ fn reattach_prelude_orders_input_modes_and_omits_rendering_modes() {
         "the prelude orders input modes numerically and excludes screen modes"
     );
 }
+
+/// A session on the alternate screen with mouse tracking on, as a full
+/// screen program leaves it before `reset` or `tput reset` sends RIS.
+fn session_on_the_alternate_screen_with_a_mouse_mode() -> Arc<Session> {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"normal-screen sentinel\r\n\x1b[?1049h\x1b[?1000hframe");
+    assert!(
+        session.in_alt_screen.load(Ordering::Relaxed),
+        "fixture: the program is on the alternate screen"
+    );
+    assert_eq!(
+        modes_on(&session),
+        vec![1000],
+        "fixture: the program turned mouse tracking on"
+    );
+    session
+}
+
+/// RIS left `session` on the normal screen with no tracked mode on, as the
+/// terminal core leaves a view after it, so a fresh view is told the same.
+fn assert_reset_to_the_normal_screen(session: Arc<Session>, how: &str) {
+    let alt_screen = session.in_alt_screen.load(Ordering::Relaxed);
+    let modes = modes_on(&session);
+    let attached = session.attach(Some(0));
+    assert_eq!(
+        (
+            alt_screen,
+            modes,
+            attached.alt_screen,
+            String::from_utf8_lossy(&attached.mode_reassert).into_owned()
+        ),
+        (false, Vec::new(), false, String::new()),
+        "(alternate screen, modes on, a fresh attach's alternate screen, its mode \
+         reassert): RIS {how} selects the normal screen and turns every tracked mode off"
+    );
+}
+
+#[test]
+fn a_full_reset_in_one_read_selects_the_normal_screen_and_clears_the_modes() {
+    let session = session_on_the_alternate_screen_with_a_mouse_mode();
+    session.record_output(b"\x1bcplain");
+    assert_reset_to_the_normal_screen(session, "in one read");
+}
+
+#[test]
+fn a_full_reset_split_across_reads_selects_the_normal_screen_and_clears_the_modes() {
+    let session = session_on_the_alternate_screen_with_a_mouse_mode();
+    session.record_output(b"more frame\x1b");
+    session.record_output(b"cplain");
+    assert_reset_to_the_normal_screen(session, "split after its ESC");
+}
+
+#[test]
+fn a_mode_set_after_a_full_reset_in_the_same_read_stays_on() {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h\x1bc\x1b[?1006h");
+    assert_eq!(
+        (
+            session.in_alt_screen.load(Ordering::Relaxed),
+            modes_on(&session)
+        ),
+        (false, vec![1006]),
+        "(alternate screen, modes on): RIS ends the switch and the mode before it, and the \
+         mode set after it stays on"
+    );
+}
+
+#[test]
+fn a_switch_after_a_full_reset_in_the_same_read_stands() {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"\x1b[?1000h\x1bc\x1b[?1049hframe");
+    let attached = session.clone().attach(Some(0));
+    assert!(
+        attached.alt_screen,
+        "a switch after RIS selects the alternate screen"
+    );
+    assert!(
+        attached.replay.is_empty(),
+        "the alternate screen takes no replay"
+    );
+}
