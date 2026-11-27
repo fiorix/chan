@@ -39,12 +39,16 @@ const save = (name, value) =>
   writeFileSync(join(args.output, name), JSON.stringify(value, null, 2) + "\n");
 const CHAN = process.env.CHAN_BIN;
 const WID = process.env.CHAN_WINDOW_ID ?? "";
+// A child's stderr (a stack trace) and a parse error that quotes its output
+// can span lines; a verdict line is read as one line, so the message is
+// kept whole on it.
+const oneLine = (text) => String(text ?? "").trim().split(/\s*[\r\n]+\s*/).join(" | ");
 
 function run(executable, words, label, bound = 30000) {
   const call = spawnSync(executable, words.map(String), {
     encoding: "utf8", timeout: bound, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024,
   });
-  if (call.status !== 0) throw new Incomplete(`${label}: status ${call.status}: ${call.error?.message ?? call.stderr}`);
+  if (call.status !== 0) throw new Incomplete(`${label}: status ${call.status}: ${oneLine(call.error?.message ?? call.stderr)}`);
   return (call.stdout ?? "").trim();
 }
 const cs = (words) => run(CHAN, ["shell", ...words], `cs ${words.slice(0, 2).join(" ")}`, 90000);
@@ -155,7 +159,7 @@ async function poll(read, accept, label, bound, timeoutKind) {
     await sleep(300);
   } while (Date.now() < until);
   if (failure) {
-    throw new Incomplete(`${label}: read failed: ${failure.message}; last value ${JSON.stringify(value)}`);
+    throw new Incomplete(`${label}: read failed: ${oneLine(failure.message)}; last value ${JSON.stringify(value)}`);
   }
   const detail = `last ${JSON.stringify(value)}`;
   const error = timeoutKind === "fault" ? new Fault(`${label}: ${detail}`) : new Incomplete(`${label}: ${detail}`);
