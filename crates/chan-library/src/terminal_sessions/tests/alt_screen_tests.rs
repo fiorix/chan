@@ -238,39 +238,179 @@ fn an_interrupting_escape_can_start_an_alt_screen_csi_in_the_next_read() {
     );
 }
 
-#[test]
-fn alt_screen_grouped_csi_at_the_carry_limit_completes() {
+/// A fresh session after `reads`, each one PTY read.
+fn session_after(reads: &[&[u8]]) -> Arc<Session> {
     let session = test_session_with_ring(1024);
-    let partial = format!("\x1b[?{}1", "0;".repeat(30));
-    assert_eq!(partial.len(), PRIVATE_MODE_TAIL_CAP);
-    session.record_output(partial.as_bytes());
-    session.record_output(b";1049hframe");
-    let attached = session.attach(Some(0));
-    assert!(attached.alt_screen, "a CSI at the carry limit can complete");
-    assert!(
-        attached.replay.is_empty(),
-        "the completed grouped CSI suppresses replay"
-    );
+    for read in reads {
+        session.record_output(read);
+    }
+    session
 }
 
+/// Whether the session is on the alternate screen, and its tracked modes
+/// on.
+fn reading(session: &Arc<Session>) -> (bool, Vec<u16>) {
+    (
+        session.in_alt_screen.load(Ordering::Relaxed),
+        modes_on(session),
+    )
+}
+
+/// `stream` in one read, then in two split at each byte after its first.
+fn every_split(stream: &[u8]) -> impl Iterator<Item = Vec<&[u8]>> {
+    std::iter::once(vec![stream])
+        .chain((1..stream.len()).map(move |at| vec![&stream[..at], &stream[at..]]))
+}
+
+// The terminal core keeps at most 24 parameters of a CSI: a grouped switch
+// or mode change that reaches a 25th is dropped whole, wherever the reads
+// split it, and the sequence after it is read as usual. An empty parameter
+// counts toward the 24, a leading or a trailing one included.
 #[test]
-fn alt_screen_discards_an_overlong_partial_csi_and_recovers() {
-    let session = test_session_with_ring(1024);
-    let partial = format!("\x1b[?{}", "0;".repeat(31));
-    assert_eq!(partial.len(), PRIVATE_MODE_TAIL_CAP + 1);
-    session.record_output(partial.as_bytes());
-    session.record_output(b"1049h");
+fn a_grouped_switch_past_24_parameters_is_dropped_whole_or_split() {
+    let streams = [
+        // 32 parameters, the switch last.
+        format!("\x1b[?{}1;1049h", "0;".repeat(30)),
+        // 25 and 33 parameters, the switch first and last.
+        format!("\x1b[?1049;{}1000h", "1007;".repeat(23)),
+        format!("\x1b[?1000;{}1049h", "1007;".repeat(23)),
+        format!("\x1b[?1049;{}1000h", "1007;".repeat(31)),
+        // 24 parameters and an empty one, in the middle, first and last.
+        format!("\x1b[?1049;;{}1000h", "1007;".repeat(22)),
+        format!("\x1b[?;1049;{}1000h", "1007;".repeat(22)),
+        format!("\x1b[?1049;{}1000;h", "1007;".repeat(22)),
+    ];
+    for stream in &streams {
+        for reads in every_split(stream.as_bytes()) {
+            let session = session_after(&reads);
+            assert_eq!(
+                reading(&session),
+                (false, Vec::new()),
+                "(alternate screen, modes on): the core drops a sequence past 24 parameters, \
+                 here read as {:?}",
+                reads
+                    .iter()
+                    .map(|read| String::from_utf8_lossy(read))
+                    .collect::<Vec<_>>()
+            );
+            session.record_output(b"\x1b[?1049hframe");
+            assert!(
+                session.in_alt_screen.load(Ordering::Relaxed),
+                "the switch after the dropped sequence selects the alternate screen"
+            );
+        }
+    }
+}
+
+// A grouped switch or mode change of up to 24 parameters is applied
+// whatever its length and wherever the reads split it, as the core applies
+// it.
+#[test]
+fn a_grouped_switch_of_24_parameters_is_carried_across_any_read_boundary() {
+    let streams = [
+        format!("\x1b[?1049;{}1000h", "1007;".repeat(22)),
+        format!("\x1b[?1000;{}1049h", "1007;".repeat(22)),
+        // 23 parameters and an empty one, in the middle and last.
+        format!("\x1b[?1049;;{}1000h", "1007;".repeat(21)),
+        format!("\x1b[?1049;{}1000;h", "1007;".repeat(21)),
+    ];
+    for stream in &streams {
+        for reads in every_split(stream.as_bytes()) {
+            assert_eq!(
+                reading(&session_after(&reads)),
+                (true, vec![1000]),
+                "(alternate screen, modes on): 24 parameters, split after {} of {} bytes",
+                reads[0].len(),
+                stream.len()
+            );
+        }
+    }
+}
+
+// The core keeps a parameter padded with zeros, or with C0 controls or
+// DELs it passes over inside the sequence, at any length, split or not.
+#[test]
+fn a_padded_switch_is_carried_across_any_read_boundary() {
+    let streams = [
+        [b"\x1b[?".as_slice(), &[b'0'; 300], b"1049h"].concat(),
+        [b"\x1b[?10".as_slice(), &[b'\r'; 300], b"49h"].concat(),
+        [b"\x1b[?10".as_slice(), &[0x7f; 300], b"49h"].concat(),
+    ];
+    for stream in &streams {
+        for reads in every_split(stream) {
+            assert_eq!(
+                reading(&session_after(&reads)),
+                (true, Vec::new()),
+                "(alternate screen, modes on): a switch padded with {:?}, split after {} of {} \
+                 bytes",
+                char::from(stream[5]),
+                reads[0].len(),
+                stream.len()
+            );
+        }
+    }
+}
+
+/// `?1049;1000l`, a switch to the normal screen that also turns mouse
+/// tracking off, cut at each position a control byte can stand in it: the
+/// bytes before the control and after it.
+const CONTROL_POSITIONS: [(&str, &str); 7] = [
+    ("\x1b", "[?1049;1000l"),
+    ("\x1b[", "?1049;1000l"),
+    ("\x1b[?", "1049;1000l"),
+    ("\x1b[?10", "49;1000l"),
+    ("\x1b[?1049", ";1000l"),
+    ("\x1b[?1049;", "1000l"),
+    ("\x1b[?1049;1000", "l"),
+];
+
+// The core passes over a C0 control, which it executes, or a DEL, which it
+// ignores, at any position inside an escape or a CSI, and the sequence goes
+// on to its final byte, whole or split around the control. CAN and SUB
+// cancel the sequence there; ESC cancels it and starts another, so the rest
+// is text unless that ESC is the second byte.
+#[test]
+fn a_control_byte_anywhere_inside_a_switch_is_passed_over() {
+    let mut differing = Vec::new();
+    let mut read = 0;
+    for (before, after) in CONTROL_POSITIONS {
+        for control in (0x00..=0x1fu8).chain([0x7f]) {
+            let cancels = matches!(control, 0x18 | 0x1a) || (control == 0x1b && before != "\x1b");
+            let core = if cancels {
+                (true, vec![1000])
+            } else {
+                (false, Vec::new())
+            };
+            let (before, after) = (before.as_bytes(), after.as_bytes());
+            let splits = [
+                vec![[before, &[control], after].concat()],
+                vec![before.to_vec(), [&[control], after].concat()],
+                vec![[before, &[control]].concat(), after.to_vec()],
+            ];
+            for reads in splits {
+                let mut all = vec![b"\x1b[?1049h\x1b[?1000hframe".as_slice()];
+                all.extend(reads.iter().map(Vec::as_slice));
+                let tracker = reading(&session_after(&all));
+                read += 1;
+                if tracker != core {
+                    differing.push(format!(
+                        "{:?}: core {core:?}, tracker {tracker:?}",
+                        reads
+                            .iter()
+                            .map(|read| String::from_utf8_lossy(read))
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
+        }
+    }
     assert!(
-        !session.in_alt_screen.load(Ordering::Relaxed),
-        "an overlong partial CSI is discarded"
+        differing.is_empty(),
+        "(alternate screen, modes on) after ?1049;1000l with a control inside it, {} of {read} \
+         differ from the core:\n{}",
+        differing.len(),
+        differing.join("\n")
     );
-    session.record_output(b"\x1b[?1049hframe");
-    let attached = session.attach(Some(0));
-    assert!(
-        attached.alt_screen,
-        "a new complete CSI still selects the alternate screen"
-    );
-    assert!(attached.replay.is_empty(), "recovery suppresses replay");
 }
 
 macro_rules! mouse_mode_tests {
@@ -574,10 +714,38 @@ impl std::fmt::Display for ScreenReading {
     }
 }
 
+/// The recorded streams the tracker reads differently from the terminal
+/// core, by name, each with why. None is a switch, a mode change or a reset
+/// the tracker follows. The table test fails when one of them agrees, so
+/// the list stays true.
+const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
+    ("DECSTR with every tracked mode on", DECSTR),
+    (
+        "DECSTR on the alternate screen with every tracked mode on",
+        DECSTR,
+    ),
+    (
+        "a UTF-8 pair (0xc3 0xa9) inside ?1049l",
+        "the core skips a UTF-8 character inside a CSI and finishes the CSI; the tracker ends \
+         a CSI at any byte above 0x7f",
+    ),
+];
+
+const DECSTR: &str = "a soft reset (DECSTR, ESC [ ! p) turns application cursor keys (mode 1) \
+                      off in the core; the tracker does not read it";
+
+/// Mouse highlight tracking, which the tracker follows and reasserts and
+/// the core does not implement (it reports the mode as unrecognized), so
+/// the core never reads it on. Reasserting it is harmless. The table
+/// compares the tracker's modes without it, and fails if the core reads it
+/// on in any stream.
+const MODE_THE_CORE_LACKS: u16 = 1001;
+
 // A view's core and the session's tracker read the same bytes, so they must
 // agree on the screen and the modes, or a fresh view is told a state the
-// program's own view does not have. Every case is read and the differing
-// ones are reported together; the whole table is the test's output.
+// program's own view does not have. Every case is read and the ones that
+// break that rule, or the known-differences list, are reported together;
+// the whole table is the test's output.
 #[test]
 fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
     let fixture: CoreScreenModes =
@@ -586,7 +754,24 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
         fixture.tracked, TRACKED_PRIVATE_MODES,
         "the fixture reads the tracked modes"
     );
-    let mut differing = Vec::new();
+    let read_on: Vec<&str> = fixture
+        .cases
+        .iter()
+        .filter(|case| case.core.modes.contains(&MODE_THE_CORE_LACKS))
+        .map(|case| case.name.as_str())
+        .collect();
+    assert!(
+        read_on.is_empty(),
+        "the core reads mode {MODE_THE_CORE_LACKS} on, so the table can no longer leave it \
+         out: {read_on:?}"
+    );
+    for (name, _) in KNOWN_DIFFERENCES {
+        assert!(
+            fixture.cases.iter().any(|case| case.name == *name),
+            "the known difference {name:?} names no recorded stream"
+        );
+    }
+    let mut unexpected = Vec::new();
     for case in &fixture.cases {
         let session = test_session_with_ring(4096);
         for chunk in &case.chunks {
@@ -600,27 +785,44 @@ fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
         }
         let tracker = ScreenReading {
             alternate: session.in_alt_screen.load(Ordering::Relaxed),
-            modes: modes_on(&session),
+            modes: modes_on(&session)
+                .into_iter()
+                .filter(|mode| *mode != MODE_THE_CORE_LACKS)
+                .collect(),
         };
         let same = tracker == case.core;
+        let known = KNOWN_DIFFERENCES
+            .iter()
+            .find(|(name, _)| *name == case.name)
+            .map(|(_, why)| *why);
+        let verdict = match (same, known) {
+            (true, None) => "same     ",
+            (false, Some(_)) => "known    ",
+            (false, None) => "DIFFERENT",
+            (true, Some(_)) => "AGREES   ",
+        };
         println!(
-            "{} | core {} | tracker {tracker} | {}",
-            if same { "same     " } else { "DIFFERENT" },
-            case.core,
-            case.name
+            "{verdict} | core {} | tracker {tracker} | {}",
+            case.core, case.name
         );
-        if !same {
-            differing.push(format!(
+        match (same, known) {
+            (false, None) => unexpected.push(format!(
                 "{}: core {}, tracker {tracker}",
                 case.name, case.core
-            ));
+            )),
+            (true, Some(why)) => unexpected.push(format!(
+                "{}: listed as a known difference ({why}), but both read {tracker}",
+                case.name
+            )),
+            _ => {}
         }
     }
     assert!(
-        differing.is_empty(),
-        "{} of {} streams read differently by the tracker and the terminal core:\n{}",
-        differing.len(),
+        unexpected.is_empty(),
+        "{} of {} streams read differently by the tracker and the terminal core, or listed \
+         as known differences and read alike:\n{}",
+        unexpected.len(),
         fixture.cases.len(),
-        differing.join("\n")
+        unexpected.join("\n")
     );
 }

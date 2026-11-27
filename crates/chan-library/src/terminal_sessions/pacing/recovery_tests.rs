@@ -400,6 +400,81 @@ fn a_full_reset_the_ring_start_cut_counts_as_made() {
 }
 
 #[test]
+fn a_switch_with_a_control_inside_it_the_ring_start_cut_counts_as_made() {
+    // The core passes over a C0 control or a DEL inside a switch, so a cut
+    // after one leaves the switch begun at the ring's first byte.
+    let cuts: [(&[u8], &[u8]); 4] = [
+        (b"\x1b\r", b"[?1049l"),
+        (b"\x1b[\r", b"?1049l"),
+        (b"\x1b[?10\r", b"49l"),
+        (b"\x1b[?10\x7f", b"49l"),
+    ];
+    for (begun, rest) in cuts {
+        let session = test_session_with_ring(32);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        // Two reads split the switch to the normal screen after the
+        // control, and the ring keeps only the second: a view parses its
+        // rest as text.
+        session.record_output(begun);
+        let mut last = [rest, b"BETWEEN\r\n\x1b[?1049h".as_slice()].concat();
+        last.resize(31, b'y');
+        session.record_output(&last);
+        let live = viewer.replay_from(cursor);
+        assert_eq!(
+            live.replay.concat(),
+            last,
+            "fixture: the ring starts inside the switch begun by {begun:?}"
+        );
+        assert_eq!(
+            live.replay_screen,
+            Some(TerminalScreen::Normal),
+            "the screen the switch begun by {begun:?} selects, not the one before it or after \
+             the next"
+        );
+    }
+}
+
+#[test]
+fn a_long_switch_the_ring_start_cut_counts_as_made() {
+    // A switch of 24 parameters, or one padded past them, is carried
+    // whatever its length, so a ring whose start cut it a hundred bytes in
+    // still counts it as made.
+    let cuts = [
+        format!("\x1b[?1000;{}10", "1007;".repeat(22)).into_bytes(),
+        [b"\x1b[?".as_slice(), &[b'0'; 120], b"10"].concat(),
+        [b"\x1b[?10".as_slice(), &[b'\r'; 120]].concat(),
+    ];
+    for begun in &cuts {
+        let session = test_session_with_ring(256);
+        let viewer = session.clone().attach(None);
+        session.record_output(b"\x1b[?1049h");
+        let cursor = session.clone().attach(None).seq;
+        session.record_output(&[b'f'; 20]);
+        session.record_output(begun);
+        let mut last = b"49lBETWEEN_TUIS\r\n".to_vec();
+        last.resize(250, b'y');
+        session.record_output(&last);
+        let live = viewer.replay_from(cursor);
+        assert_eq!(
+            live.replay.concat(),
+            last,
+            "fixture: the ring starts inside the switch, {} bytes in",
+            begun.len()
+        );
+        assert_eq!(
+            (live.replay_screen, live.alt_screen),
+            (Some(TerminalScreen::Normal), false),
+            "(replay screen, alternate screen): the switch the ring's start cut {} bytes in \
+             selects the normal screen",
+            begun.len()
+        );
+    }
+}
+
+#[test]
 fn a_switch_carried_into_the_ring_ends_with_its_own_sequence() {
     let session = test_session_with_ring(64);
     let viewer = session.clone().attach(None);

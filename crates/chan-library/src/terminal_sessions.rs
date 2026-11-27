@@ -9816,6 +9816,75 @@ mod tests {
         }
     }
 
+    /// The start of a switch to the normal screen of 24 parameters,
+    /// `?1000;1007;...;1049l`, cut before its last `49l` and 120 bytes long.
+    fn a_long_switch_begun() -> Vec<u8> {
+        format!("\x1b[?1000;{}10", "1007;".repeat(22)).into_bytes()
+    }
+
+    #[test]
+    fn an_oversized_write_marks_a_switch_with_a_control_where_the_ring_cuts_it() {
+        let alt = ScreenMark {
+            alt_screen: Some(true),
+            ..ScreenMark::default()
+        };
+        // A cut after a C0 control or a DEL the core passes over inside a
+        // switch, or 120 bytes into a switch of 24 parameters, leaves the
+        // switch begun at the ring's first byte.
+        let long = a_long_switch_begun();
+        let cuts: [&[u8]; 5] = [
+            b"\x1b\r[?10",
+            b"\x1b[\r?10",
+            b"\x1b[?10\r",
+            b"\x1b[?10\x7f",
+            &long,
+        ];
+        for begun in cuts {
+            let mut ring = RingBuffer::new(16);
+            ring.push(
+                &[b"xx".as_slice(), begun, b"49l", &[b'y'; 13]].concat(),
+                alt.clone(),
+            );
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay.concat(),
+                [b"49l".as_slice(), &[b'y'; 13]].concat(),
+                "fixture: the ring cuts after {:?}",
+                String::from_utf8_lossy(begun)
+            );
+            let mark = ring.start_screen().expect("a held chunk");
+            assert_eq!(
+                replay_start_screen(mark, &replay),
+                Some(false),
+                "a switch the cut began with {:?} counts as made at the ring's first byte",
+                String::from_utf8_lossy(begun)
+            );
+        }
+    }
+
+    #[test]
+    fn a_restored_ring_whose_capacity_cut_a_switch_with_a_control_counts_it_as_made() {
+        for begun in [b"\x1b[?10\r".to_vec(), a_long_switch_begun()] {
+            let cut = [b"\x1b[?1049h".as_slice(), &[b'a'; 90], &begun].concat();
+            let mut kept = b"49lBETWEEN_TUIS\r\n".to_vec();
+            kept.resize(64, b't');
+            let ring = RingBuffer::new_with_replay(64, 1000, &[cut, kept.clone()].concat(), false);
+            let (replay, _) = ring.snapshot_since(None);
+            assert_eq!(
+                replay.concat(),
+                kept,
+                "fixture: the ring starts inside the switch"
+            );
+            let mark = ring.start_screen().expect("the ring holds bytes");
+            assert_eq!(
+                replay_start_screen(mark, &replay),
+                Some(false),
+                "a switch the capacity cut began with {:?} counts as made at the ring's first byte",
+                String::from_utf8_lossy(&begun)
+            );
+        }
+    }
+
     #[test]
     fn a_restored_ring_that_switches_no_screen_starts_on_the_screen_it_leaves() {
         for alt_screen in [false, true] {
@@ -16920,6 +16989,41 @@ mod tests {
                 String::from_utf8_lossy(&next.attach(id, Some(0)).unwrap().mode_reassert),
                 "",
                 "the same read ends the mouse mode"
+            );
+        }
+
+        // A restore carries on an open sequence of any length: here a switch
+        // of 24 parameters whose last read left 120 bytes of it open.
+        #[test]
+        fn an_exact_restore_finishes_a_long_sequence_its_last_read_began() {
+            let store = StoreSim::default();
+            let registry = Arc::new(Registry::new(test_config(1024, 8, 600)));
+            store.serve(&registry);
+            let id = "restored-inside-a-long-sequence";
+            let (session, _pair) = parked_session_without_a_child(&registry, id);
+            session.record_output(b"\x1b[?1049h\x1b[?1000htui");
+            session.record_output(&a_long_switch_begun());
+            store.changed();
+            assert_eq!(registry.detach_parked_sessions(), 1);
+            drop(session);
+
+            let next = Arc::new(Registry::new(test_config(1024, 8, 600)));
+            let report = next.restore_fdstore_sessions(store.imports());
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(
+                next.attach(id, None).unwrap().alt_screen,
+                "fixture: restored on the alternate screen"
+            );
+            assert!(next.inject_output(id, b"49l"));
+            let attached = next.attach(id, Some(0)).unwrap();
+            assert_eq!(
+                (
+                    attached.alt_screen,
+                    String::from_utf8_lossy(&attached.mode_reassert).into_owned()
+                ),
+                (false, String::new()),
+                "(alternate screen, mode reassert): the first read after the restore ends the \
+                 switch and the mouse mode"
             );
         }
 
