@@ -63,15 +63,15 @@
   // an element with a tabindex of its own, and a scroll container, which
   // Chrome and Firefox put in the Tab order. A negative tabindex still lets
   // a press focus and follow them. Two shapes stay in the Tab order. The
-  // sanitizer strips `contenteditable` but keeps styles, in a `style`
-  // attribute or in a `<style>` element after other body content, so an
-  // element made editable by `-webkit-user-modify` stays: the property is
-  // non-standard, and focus that reaches such an element answers nothing
+  // sanitizer strips `contenteditable` but keeps the `style` attribute, so
+  // an element made editable by `-webkit-user-modify` stays: the property
+  // is non-standard, and focus that reaches such an element answers nothing
   // and is let go at the next pulse, though keys typed there before it is
-  // let go edit its text. A scroll container that a stylesheet rule makes
-  // only after the hold ran (on hover, on focus, in an opened details)
-  // stays too, since `scrolls` reads the computed style only when the body
-  // or the panes change.
+  // let go edit its text. A scroll container that one of the app's own
+  // stylesheet rules makes of a body element by its class only after the
+  // hold ran (a rule of the stylesheet a deck's outline connects while it
+  // shows) stays too, since `scrolls` reads the computed style only when
+  // the body or the panes change.
   const BODY_FOCUSABLE =
     "[*|href], button, input, select, textarea, iframe, details, summary, " +
     "audio[controls], video[controls], [tabindex]";
