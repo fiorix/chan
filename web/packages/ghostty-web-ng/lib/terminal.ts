@@ -124,6 +124,9 @@ export class Terminal {
   };
   #canvas?: HTMLCanvasElement;
   #textarea?: HTMLTextAreaElement;
+  // The tabindex setSequentiallyFocusable() asked for, held across open();
+  // unset, open() keeps its defaults.
+  #tabIndex?: '0' | '-1';
 
   // Link detection system
   #linkDetector?: LinkDetector;
@@ -398,8 +401,13 @@ export class Terminal {
     this.#isOpen = true;
 
     try {
-      // Make parent focusable if it isn't already
-      if (!parent.hasAttribute('tabindex')) {
+      // The host has a tabindex before the input handler attaches, whose own
+      // default would write 0 on a host without one.
+      const tabIndex = this.#tabIndex;
+      if (tabIndex !== undefined) {
+        parent.setAttribute('tabindex', tabIndex);
+      } else if (!parent.hasAttribute('tabindex')) {
+        // Make parent focusable if it isn't already
         parent.setAttribute('tabindex', '0');
       }
 
@@ -431,7 +439,7 @@ export class Terminal {
       this.#textarea.setAttribute('autocorrect', 'off');
       this.#textarea.setAttribute('autocapitalize', 'off');
       this.#textarea.setAttribute('spellcheck', 'false');
-      this.#textarea.setAttribute('tabindex', '0'); // Allow focus for mobile keyboard
+      this.#textarea.setAttribute('tabindex', tabIndex ?? '0'); // Allow focus for mobile keyboard
       this.#textarea.setAttribute('aria-label', 'Terminal input');
       // Use clip-path to completely hide the textarea and its caret
       this.#textarea.style.position = 'absolute';
@@ -824,6 +832,20 @@ export class Terminal {
     if (this.#isOpen && this.element?.isConnected) {
       this.element.focus({ preventScroll: true });
     }
+  }
+
+  /**
+   * Take the terminal out of the page's sequential focus navigation (false)
+   * or put it back (true): tabindex -1 or 0 on the host and on the hidden
+   * input. Before open the value is held for open() to write; after disposal
+   * the call does nothing. It moves no focus.
+   */
+  setSequentiallyFocusable(focusable: boolean): void {
+    if (this.#isDisposed) return;
+    this.#tabIndex = focusable ? '0' : '-1';
+    if (!this.#isOpen) return;
+    this.element?.setAttribute('tabindex', this.#tabIndex);
+    this.#textarea?.setAttribute('tabindex', this.#tabIndex);
   }
 
   /**
