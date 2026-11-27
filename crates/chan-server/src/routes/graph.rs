@@ -4086,6 +4086,374 @@ mod tests {
         }
     }
 
+    /// The notes `backlinks_route_app` indexes, at three depths, each with
+    /// its body. `notes/b.md`, `notes/my note.md` and `docs/leaf.md` link
+    /// nothing and are link targets.
+    const BACKLINKS_NOTES: [(&str, &str); 6] = [
+        (
+            "top.md",
+            "# Top\n\n\
+             [[notes/b.md]]\n\
+             [license](LICENSE)\n\
+             [[docs/spec.log]]\n\
+             [[docs/leaf]]\n\
+             [[%2e%2e/outside.log]]\n\
+             [[out/outside.log]]\n",
+        ),
+        (
+            "notes/a.md",
+            "# A\n\n\
+             [b](b.md#part)\n\
+             [mine](my%20note.md)\n\
+             [[LICENSE]]\n\
+             ![pic](../img/pic.png)\n\
+             [[todo]]\n\
+             [[att/shot.png]]\n\
+             [[docs/leaf.md]]\n\
+             [docs](../docs/)\n",
+        ),
+        (
+            "notes/sub/deep.md",
+            "# Deep\n\n\
+             [[notes/b]]\n\
+             [spec](../../docs/spec.log)\n\
+             [[beside.log]]\n\
+             [[up.log]]\n\
+             [[keys/key.secret]]\n\
+             [[node_modules/pkg/index.js]]\n\
+             [[alias/spec.log]]\n\
+             [[docs/gone.log]]\n",
+        ),
+        ("notes/b.md", "# B\n\n## Part\n"),
+        ("notes/my note.md", "# My note\n"),
+        ("docs/leaf.md", "# Leaf\n"),
+    ];
+
+    /// A workspace app over `workspace/` in a temporary directory that also
+    /// holds `outside.log`, for the backlinks route. Beside the notes of
+    /// `BACKLINKS_NOTES` it holds files the index does not: `LICENSE` at
+    /// the root, a log in a folder, an image, a text file over the
+    /// indexer's size limit, logs and an image that sit in a linking note's
+    /// folder, below it or in its parent, and an extensionless file beside
+    /// its `.md` twin. It also holds what the whole-tree walk does not
+    /// list: a file the `.gitignore` names, one in an excluded directory,
+    /// and on Unix a symlinked directory inside the root and one to the
+    /// directory above.
+    ///
+    /// Two of the differences the per-target lookup's doc comment names
+    /// are not made here, as no test can count on them: a wrong-case
+    /// spelling on a case-folding volume (`[[license]]`, which the walk's
+    /// set holds no file for and a stat there finds), and a file inside a
+    /// mount point inside the root (which the walk does not descend into
+    /// and a stat finds; a mount needs privileges).
+    fn backlinks_route_app() -> GraphRouteApp {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let outer = tempfile::TempDir::new().unwrap();
+        let root = outer.path().join("workspace");
+        put(outer.path(), "outside.log", b"outside\n");
+        for (note, body) in BACKLINKS_NOTES {
+            put(&root, note, body.as_bytes());
+        }
+        put(&root, "LICENSE", b"license\n");
+        put(&root, "docs/spec.log", b"spec\n");
+        put(&root, "docs/leaf", b"leaf\n");
+        put(&root, "img/pic.png", b"png");
+        let over_the_index_limit =
+            usize::try_from(chan_workspace::workspace::TEXT_WRITE_LIMIT).unwrap() + 1;
+        put(&root, "todo.txt", &vec![b'x'; over_the_index_limit]);
+        put(&root, "notes/sub/beside.log", b"beside\n");
+        put(&root, "notes/up.log", b"up\n");
+        put(&root, "notes/att/shot.png", b"png");
+        put(&root, ".gitignore", b"*.secret\n");
+        put(&root, "keys/key.secret", b"key\n");
+        put(&root, "node_modules/pkg/index.js", b"dep\n");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("docs", root.join("alias")).unwrap();
+            std::os::unix::fs::symlink(outer.path(), root.join("out")).unwrap();
+        }
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&root).unwrap();
+        let workspace = lib.open_workspace(&root).unwrap();
+        for (note, _) in BACKLINKS_NOTES {
+            workspace.index_file(note).unwrap();
+        }
+        // Declined by the indexer for its size, as a text file that large
+        // is in any workspace.
+        workspace.index_file("todo.txt").unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(lib, root, workspace)
+        });
+        GraphRouteApp {
+            _cfg: cfg,
+            _root: outer,
+            state,
+        }
+    }
+
+    /// A path with the anchor of the link it is read from.
+    type Anchored = (&'static str, Option<&'static str>);
+
+    /// The links the index stores for each note of `BACKLINKS_NOTES`, as
+    /// `(dst, anchor)`: a wikilink workspace-rooted, a Markdown link joined
+    /// to its note's folder with `..` collapsed, neither decoded, and an
+    /// anchor kept only on a `.md` target.
+    const BACKLINKS_STORED: [(&str, &[Anchored]); 6] = [
+        (
+            "top.md",
+            &[
+                ("%2e%2e/outside.log", None),
+                ("LICENSE", None),
+                ("docs/leaf", None),
+                ("docs/spec.log", None),
+                ("notes/b.md", None),
+                ("out/outside.log", None),
+            ],
+        ),
+        (
+            "notes/a.md",
+            &[
+                ("LICENSE", None),
+                ("att/shot.png", None),
+                ("docs", None),
+                ("docs/leaf.md", None),
+                ("img/pic.png", None),
+                ("notes/b.md", Some("part")),
+                ("notes/my%20note.md", None),
+                ("todo", None),
+            ],
+        ),
+        (
+            "notes/sub/deep.md",
+            &[
+                ("alias/spec.log", None),
+                ("beside.log", None),
+                ("docs/gone.log", None),
+                ("docs/spec.log", None),
+                ("keys/key.secret", None),
+                ("node_modules/pkg/index.js", None),
+                ("notes/b", None),
+                ("up.log", None),
+            ],
+        ),
+        ("notes/b.md", &[]),
+        ("notes/my note.md", &[]),
+        ("docs/leaf.md", &[]),
+    ];
+
+    /// Wait for `backlinks_route_app`'s recovery to settle and read its
+    /// fixture: the files the index holds, the links it stores per note,
+    /// and the files the whole-tree walk lists, which must be under the
+    /// listing cap.
+    async fn backlinks_fixture_read(app: &GraphRouteApp) -> Arc<chan_workspace::Workspace> {
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let graph = workspace.graph().unwrap();
+        let indexed: std::collections::BTreeSet<String> =
+            graph.files().unwrap().into_iter().collect();
+        assert_eq!(
+            indexed,
+            BACKLINKS_NOTES.map(|(note, _)| note.to_string()).into(),
+            "fixture: the files the index holds"
+        );
+        for (note, expected) in BACKLINKS_STORED {
+            let stored: std::collections::BTreeSet<(String, Option<String>)> = graph
+                .neighbors(note)
+                .unwrap()
+                .into_iter()
+                .filter(|edge| matches!(edge.kind, EdgeKind::Link))
+                .map(|edge| (edge.dst, edge.anchor))
+                .collect();
+            let expected: std::collections::BTreeSet<(String, Option<String>)> = expected
+                .iter()
+                .map(|(dst, anchor)| (dst.to_string(), anchor.map(String::from)))
+                .collect();
+            assert_eq!(stored, expected, "fixture: the links {note} stores");
+        }
+        let (files, _) = listed(&workspace);
+        assert_eq!(
+            files,
+            [
+                ".gitignore",
+                "LICENSE",
+                "docs/leaf",
+                "docs/leaf.md",
+                "docs/spec.log",
+                "img/pic.png",
+                "notes/a.md",
+                "notes/att/shot.png",
+                "notes/b.md",
+                "notes/my note.md",
+                "notes/sub/beside.log",
+                "notes/sub/deep.md",
+                "notes/up.log",
+                "todo.txt",
+                "top.md",
+            ]
+            .map(String::from)
+            .into(),
+            "fixture: the files the whole-tree walk lists"
+        );
+        workspace
+    }
+
+    /// A backlink as the route answers it: `(src, dst, kind, anchor)`.
+    type Backlink = (String, String, String, Option<String>);
+
+    /// The backlinks of `target` through `GET /api/backlinks/<target>`, in
+    /// the order the route answers them, after showing its `?stream=1` form
+    /// answers the same edges between a `meta` that names `target` and a
+    /// `done`.
+    async fn backlinks_answer(app: &GraphRouteApp, target: &str) -> Vec<Backlink> {
+        let backlink = |edge: &serde_json::Value| -> Backlink {
+            (
+                edge["src"].as_str().unwrap().to_string(),
+                edge["dst"].as_str().unwrap().to_string(),
+                edge["kind"].as_str().unwrap().to_string(),
+                edge.get("anchor").map(|a| a.as_str().unwrap().to_string()),
+            )
+        };
+        // A space and the slash after a leading `..` are percent-encoded, so
+        // the route's capture is `target` itself.
+        let spelled = target.replace(' ', "%20");
+        let uri = match spelled.strip_prefix("../") {
+            Some(rest) => format!("/api/backlinks/..%2F{rest}"),
+            None => format!("/api/backlinks/{spelled}"),
+        };
+        let body = graph_route_body(app, &uri).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let answer: Vec<Backlink> = json
+            .as_array()
+            .unwrap_or_else(|| panic!("GET {uri}: not an array: {body}"))
+            .iter()
+            .map(backlink)
+            .collect();
+
+        let stream = graph_route_body(app, &format!("{uri}?stream=1")).await;
+        let events = graph_stream_events(&stream);
+        let (Some(meta), Some(done)) = (events.first(), events.last()) else {
+            panic!("GET {uri}?stream=1: no events");
+        };
+        assert_eq!(
+            (meta["type"].as_str(), meta["path"].as_str()),
+            (Some("meta"), Some(target)),
+            "GET {uri}?stream=1: {stream}"
+        );
+        assert_eq!(done["type"], "done", "GET {uri}?stream=1: {stream}");
+        let mut streamed: Vec<Backlink> = events[1..events.len() - 1]
+            .iter()
+            .map(|event| {
+                assert_eq!(event["type"], "edge", "GET {uri}?stream=1: {stream}");
+                backlink(&event["edge"])
+            })
+            .collect();
+        streamed.sort();
+        let mut sorted = answer.clone();
+        sorted.sort();
+        assert_eq!(streamed, sorted, "GET {uri}?stream=1 against GET {uri}");
+        answer
+    }
+
+    /// The backlinks of every target of `backlinks_pinned`.
+    async fn backlinks_answers(
+        app: &GraphRouteApp,
+    ) -> std::collections::BTreeMap<String, Vec<Backlink>> {
+        let mut answers = std::collections::BTreeMap::new();
+        for target in backlinks_pinned().into_keys() {
+            let answer = backlinks_answer(app, &target).await;
+            answers.insert(target, answer);
+        }
+        answers
+    }
+
+    /// What the backlinks route answers for each target of
+    /// `backlinks_route_app` under the listing cap, written from the stored
+    /// links and the resolver: the links whose resolution against the walk's
+    /// files and the index's lands on the target, sorted by source.
+    fn backlinks_pinned() -> std::collections::BTreeMap<String, Vec<Backlink>> {
+        let pinned: [(&str, &[Anchored]); 22] = [
+            // An indexed note: by its workspace-rooted path, by a
+            // source-relative Markdown link with a heading anchor, and by
+            // an extensionless wikilink (the `.md` form).
+            (
+                "notes/b.md",
+                &[
+                    ("notes/a.md", Some("part")),
+                    ("notes/sub/deep.md", None),
+                    ("top.md", None),
+                ],
+            ),
+            // An indexed note by a percent-encoded Markdown link.
+            ("notes/my note.md", &[("notes/a.md", None)]),
+            // Files the index does not hold, at the root and in a folder,
+            // by a wikilink and by a Markdown link, and an image.
+            ("LICENSE", &[("notes/a.md", None), ("top.md", None)]),
+            (
+                "docs/spec.log",
+                &[("notes/sub/deep.md", None), ("top.md", None)],
+            ),
+            ("img/pic.png", &[("notes/a.md", None)]),
+            // The `.txt` form of an extensionless link, for a text file the
+            // indexer declined; the link's own spelling answers nothing.
+            ("todo.txt", &[("notes/a.md", None)]),
+            ("todo", &[]),
+            // A bare wikilink to a file beside the linking note, in its
+            // parent, and below it: the source folder's candidates find
+            // them, and the root spellings answer nothing.
+            ("notes/sub/beside.log", &[("notes/sub/deep.md", None)]),
+            ("beside.log", &[]),
+            ("notes/up.log", &[("notes/sub/deep.md", None)]),
+            ("up.log", &[]),
+            ("notes/att/shot.png", &[("notes/a.md", None)]),
+            ("att/shot.png", &[]),
+            // Linked by two notes, but the exact spelling `docs/leaf` comes
+            // before its `.md` form, so `top.md`'s `[[docs/leaf]]` lands on
+            // the extensionless file and not on the note.
+            ("docs/leaf", &[("top.md", None)]),
+            ("docs/leaf.md", &[("notes/a.md", None)]),
+            // What the walk does not list: a file the `.gitignore` names,
+            // one in an excluded directory, one through a symlinked
+            // directory, paths out of the root, a missing file and a
+            // folder. A link that resolves to no file answers under its
+            // decoded spelling, so each answers the link that spells it.
+            ("keys/key.secret", &[("notes/sub/deep.md", None)]),
+            ("node_modules/pkg/index.js", &[("notes/sub/deep.md", None)]),
+            ("alias/spec.log", &[("notes/sub/deep.md", None)]),
+            ("../outside.log", &[("top.md", None)]),
+            ("out/outside.log", &[("top.md", None)]),
+            ("docs/gone.log", &[("notes/sub/deep.md", None)]),
+            ("docs", &[("notes/a.md", None)]),
+        ];
+        pinned
+            .into_iter()
+            .map(|(target, sources)| {
+                let answer = sources
+                    .iter()
+                    .map(|(src, anchor)| {
+                        (
+                            src.to_string(),
+                            target.to_string(),
+                            "link".to_string(),
+                            anchor.map(String::from),
+                        )
+                    })
+                    .collect();
+                (target.to_string(), answer)
+            })
+            .collect()
+    }
+
+    // Under the listing cap each target's backlinks, through both forms of
+    // the route, are pinned as `backlinks_pinned` writes them from the
+    // links the index stores.
+    #[tokio::test]
+    async fn backlinks_answers_under_the_listing_cap() {
+        let app = backlinks_route_app();
+        backlinks_fixture_read(&app).await;
+        assert_eq!(backlinks_answers(&app).await, backlinks_pinned());
+    }
+
     // Over the listing cap one graph load reads each node's class at most
     // once, and looks up on disk only the link targets the walks cannot
     // answer for. The tree layer merges every walked folder and joins each
