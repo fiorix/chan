@@ -920,6 +920,56 @@ describe("a reconciling answer that names its replay's start screen", () => {
     expect(ghosttyLineText(term, 4), "the replay drew on it").toContain("restored frame");
   });
 
+  /// A view whose normal screen holds five lines and a prompt, with a
+  /// cursor the shell saved at the start of the third line, and whose
+  /// program then entered its alternate screen by `enter` and drew there.
+  async function viewWithAnOlderSave(enter: string, drawn: string) {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    socket.onopen?.();
+    await receive(socket, session(ATTACHED_AT, 0, 0));
+    await receive(socket, READY);
+    const shown = `one\r\ntwo\r\n\x1b7three\r\nfour\r\nfive\r\n$ ${enter}${drawn}`;
+    await output(socket, shown);
+    expect(ghosttyAlternateScreen(term), "fixture: the program's alternate screen").toBe(true);
+    return { term, socket, cursor: ATTACHED_AT + shown.length };
+  }
+
+  test("a program that entered by 1049 and left in the lost span has its tail below the prompt line, as its own exit restores", async () => {
+    const { term, socket, cursor } = await viewWithAnOlderSave("\x1b[?1049h", "\x1b[1;1Htui");
+    // A loss that keeps the program on its alternate screen: its suffix
+    // switches by 1047, which leaves the 1049 entry in place.
+    const second = await redialed(socket, cursor);
+    const replay1 = "\x1b[2;1Htui still here";
+    const end1 = cursor + 10 + replay1.length;
+    await deliver(second, { frame: session(end1, 10, replay1.length, "alternate"), replay: replay1, after: LOST_ALT_SUFFIX });
+    expect(ghosttyMode(term, 1049), "fixture: still entered by 1049").toBe(true);
+    // Then the program left in the lost span.
+    const third = await redialed(second, end1);
+    const replay2 = "after tui\r\n$ ";
+    const end2 = end1 + 16 + replay2.length;
+    await deliver(third, { frame: session(end2, 16, replay2.length, "normal"), replay: replay2, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen").toBe(false);
+    expect(rows(term.buffer.normal).slice(0, 9), "the notice and tail below the prompt line, not over the older save's line").toEqual([
+      "one", "two", "three", "four", "five", "$", "terminal replay missed 16 bytes", "after tui", "$",
+    ]);
+  });
+
+  test("a program that entered by 1047 and left in the lost span leaves the cursor where it drew, not at the older save", async () => {
+    // The program draws its status line below the shell's lines.
+    const { term, socket, cursor } = await viewWithAnOlderSave("\x1b[?1047h", "\x1b[8;1Hstatus");
+    const next = await redialed(socket, cursor);
+    const lost = "\x1b[?1047l".length;
+    const replay = "after tui\r\n$ ";
+    const end = cursor + lost + replay.length;
+    await deliver(next, { frame: session(end, lost, replay.length, "normal"), replay, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen").toBe(false);
+    expect(rows(term.buffer.normal).slice(0, 11), "the notice and tail from the program's line, the shell's lines kept").toEqual([
+      "one", "two", "three", "four", "five", "$", "", "", "terminal replay missed 8 bytes", "after tui", "$",
+    ]);
+  });
+
   /// A view on its program's alternate screen with kitty keyboard flags
   /// pushed there, whose redial is cut inside a replay that continued it, so
   /// the next answer, in another generation, goes on a reset screen.
