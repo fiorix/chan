@@ -1,6 +1,6 @@
 # The Markdown sanitizer keeps a style element whose rules reach the whole app
 
-Status: accepted by the owner on 2026-11-26 (the last section); not started. Not built in v0.135.0, so the GA commit moves it to the next version (D125). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27.
+Status: accepted by the owner on 2026-11-26 (the last section); not started. Not built in v0.135.0, so the GA commit moves it to the next version (D125). Moved to v0.136.0 at the v0.135.0 GA on 2026-11-27. Built in v0.136.0 on 2026-11-27 (the last section): no caller but Copy as HTML keeps a `<style>` element; read red at the base and green at the tip in a guest's Chrome.
 
 Record: A1 of the review of the unfocused-survey row's hardening, outside that range and older than it (`dev/v0135-team/reviews/review-u5-h.md`, "A1"). The lead sent it to the owner as a candidate row, "the sanitizer's style policy per caller" (`dev/v0135-team/decisions.md`, D63; `dev/v0135-team/status.md`, For Alex, "U5 adjacent (review-u5-h A1, probe and reading)"). The same review's S1 found that a kept `<style>` element is also a spelling of the survey body's stated limit; [the unfocused-survey row](../done/a-survey-over-an-unfocused-pane-takes-tab-and-its-keys.md) states that limit and leaves the policy to this row ("The stated limits, 2026-11-26").
 
@@ -63,3 +63,13 @@ Read at `3d6b76cf1` by following each sanitized string from its render call, wit
 | Copy as HTML (`editor/copy_html.ts`) | Detached elements whose `outerHTML` goes to the clipboard or the desktop's IPC; never connected | Keeps `<style>` |
 
 Nothing chan ships, tests or documents relies on a `<style>` element in a deck or a document. The export carries an author's `<style>` into each page's image today, and one whose `url()` cannot be inlined fails the export. The renderers drop a leading HTML `<style>` but keep one after other content, one inside an inline `<svg>`, and, in the inline renderer, one led by whitespace; DOMPurify's `FORBID_TAGS` drops every one of those spellings with its text.
+
+## Built, 2026-11-27
+
+Built on `v0136/u3-style` (`b681e9faa..db4a39ec1`), merged into `v0136/int` as `a9f0a9369`, with its review's wording fixes merged with the survey body's links as `b8c2cb15c`. The shared sanitizer config in `api/markdown.ts` forbids `<style>`, an inline `<svg>`'s included; `renderMarkdown` takes a named option that keeps it, and Copy as HTML is the one caller that passes it. So a survey body, the link preview, a table cell, a slide in the outline, the preview, the player and the PDF, and a printable document's PDF drop the element with its rules (owner answers 2 and 10). The survey's design text and the overlay comment drop the `<style>` spelling from the stated limit; the limit still names the inline `style` attribute and a class or another attribute the markup carries that an app rule matches later (contract 3).
+
+- Acceptance 1: unit and mounted tests per caller, red at the base, among them a survey body's `<style>` leaving the other pane's look unchanged.
+- Acceptance 2: browser check 352 in a guest's Chrome 156. At the base both legs failed: while a survey whose body carries `.pane{outline: 7px dashed ...}` showed, pane B read `outline-style` dashed, width 7px and color rgb(255, 0, 170) against none, 3px and rgb(28, 28, 30) before; the preview popover over a note with the same rule did the same to the note's pane. At the tip both legs read the pane unchanged before, while and after, with no `<style>` element in the card or the popover; green alone and with its neighbours.
+- Acceptance 3: the callers' reading is the section above.
+
+Not read: WebKitGTK and WKWebView (the acceptance names only a guest's Chrome). Outside this row and not changed: a diagram's own `<style>` in a slide's SVG (Mermaid, Excalidraw) does not go through this sanitizer; whether an author can make one reach outside its SVG is unread.

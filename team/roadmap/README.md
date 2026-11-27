@@ -74,7 +74,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | --- | --- | --- |
 | [Tab lands in another pane's terminal][tabpanes] | not started | build |
 | [the mode tracker misses a reset][trackris] | not started | build |
-| [a kept style element restyles the app][stylereach] | not started | build |
+| [a kept style element restyles the app][stylereach] | built | GA |
 | [a survey's overlay press and body links][surveypress] | not started | build |
 | [an inverted find match paints a band][invrange] | not started | build |
 | [a graph tab on an unheld file over cap][capselect] | not started | build |
@@ -131,7 +131,7 @@ Shipped 2026-11-27; see [release-v0.135.0](../release/release-v0.135.0.md). A no
 - [the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer](done/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md) - The graph walks a workspace over the listing cap three times per load and shows no folder layer (shipped; read on the owner's Mac and on WebKitGTK, a case-folding volume unread).
 - [the-half-scale-wake-fix-is-unread-on-macos](v0.136.0/the-half-scale-wake-fix-is-unread-on-macos.md) - The half-scale wake fix is unread on macOS (moved to v0.136.0 at the GA, not started).
 - [the-index-status-pill-covers-a-terminal-notices-dismiss-button](done/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md) - The index status pill covers a terminal notice's Dismiss button (closed by the owner at the GA on 2026-11-27; built on `v0132/pillcover` and never merged, it did not ship).
-- [the-markdown-sanitizer-keeps-a-style-element-whose-rules-reach-the-whole-app](v0.136.0/the-markdown-sanitizer-keeps-a-style-element-whose-rules-reach-the-whole-app.md) - The Markdown sanitizer keeps a style element whose rules reach the whole app (accepted on 2026-11-26; moved to v0.136.0 at the GA, not started).
+- [the-markdown-sanitizer-keeps-a-style-element-whose-rules-reach-the-whole-app](v0.136.0/the-markdown-sanitizer-keeps-a-style-element-whose-rules-reach-the-whole-app.md) - The Markdown sanitizer keeps a style element whose rules reach the whole app (accepted on 2026-11-26; moved to v0.136.0 at the GA; built 2026-11-27).
 - [the-minimized-window-raise-is-unread-on-windows](done/the-minimized-window-raise-is-unread-on-windows.md) - The minimized-window raise is unread on Windows (closed by the owner at the GA on 2026-11-27, read in part on the Windows VM; it did not ship).
 - [the-retired-terminal-ghostty-key-is-accepted-with-a-warning](v0.136.0/the-retired-terminal-ghostty-key-is-accepted-with-a-warning.md) - The retired terminal.ghostty key is accepted with a warning (moved to v0.136.0 at the GA, not started; it waits for the warning period).
 - [the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited](done/the-rich-prompt-says-to-try-again-over-a-terminal-that-has-exited.md) - The Rich Prompt says to try again over a terminal that has exited (closed by the owner on 2026-11-26; its branch stays unmerged, and it did not ship).
