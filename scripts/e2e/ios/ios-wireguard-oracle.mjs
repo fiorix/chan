@@ -143,16 +143,21 @@ export function verifyWindowNavigationParams(rawUrl, spec) {
     }
 }
 
+const STOPPED_TUNNEL_STATUS = "stopped; connect the gateway again";
+
 export function verifyStoppedTunnelView(gatewayRow, expectedStoppedIngressId) {
     assert.ok(gatewayRow, "gateway row must exist");
     assert.equal(
         gatewayRow.wireguard_status,
-        "stopped; connect the gateway again",
+        STOPPED_TUNNEL_STATUS,
         "stopped gateway view must report stopped message",
     );
     if (expectedStoppedIngressId) {
         const ing = (gatewayRow.wireguard_ingresses ?? []).find((x) => x.id === expectedStoppedIngressId);
-        assert.ok(ing && ing.status === "stopped", `ingress ${expectedStoppedIngressId} must report stopped`);
+        assert.ok(
+            ing && ing.status === STOPPED_TUNNEL_STATUS,
+            `ingress ${expectedStoppedIngressId} must report ${STOPPED_TUNNEL_STATUS}`,
+        );
     }
 }
 

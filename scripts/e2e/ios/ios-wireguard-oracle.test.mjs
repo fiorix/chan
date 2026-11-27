@@ -149,14 +149,49 @@ test("verifyStoppedTunnelView validates stopped status string", () => {
         {
             wireguard_status: "stopped; connect the gateway again",
             wireguard_ingresses: [
-                { id: "p1", status: "stopped" },
-                { id: "p2", status: "up" },
+                { id: "p1", status: "stopped; connect the gateway again" },
+                { id: "p2", status: "connected" },
             ],
         },
         "p1",
     );
     assert.throws(
-        () => verifyStoppedTunnelView({ wireguard_status: "up" }, "p1"),
+        () =>
+            verifyStoppedTunnelView(
+                {
+                    wireguard_status: "connecting",
+                    wireguard_ingresses: [{ id: "p1", status: "connected" }],
+                },
+                "p1",
+            ),
         /stopped gateway view/,
+    );
+    assert.throws(
+        () =>
+            verifyStoppedTunnelView(
+                {
+                    wireguard_status: "stopped; connect the gateway again",
+                    wireguard_ingresses: [
+                        { id: "p1", status: "stopped" },
+                        { id: "p2", status: "connected" },
+                    ],
+                },
+                "p1",
+            ),
+        /must report stopped; connect the gateway again/,
+    );
+    assert.throws(
+        () =>
+            verifyStoppedTunnelView(
+                {
+                    wireguard_status: "stopped; connect the gateway again",
+                    wireguard_ingresses: [
+                        { id: "p1", status: "connected" },
+                        { id: "p2", status: "stopped; connect the gateway again" },
+                    ],
+                },
+                "p1",
+            ),
+        /must report stopped; connect the gateway again/,
     );
 });

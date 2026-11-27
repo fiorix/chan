@@ -103,6 +103,8 @@ test("F2 negative: rejects invalid redirect_uri, bad WG key, PKCE mismatch, and 
     for (const badRedirect of [
         "http://127.0.0.1:8080/auth/callback",
         "chan:///auth/callback",
+        "chan://auth/callback?",
+        "chan://auth/callback#",
         "chan://auth/callback?x=1",
         "chan://auth:443/callback",
         "chan://user@auth/callback",

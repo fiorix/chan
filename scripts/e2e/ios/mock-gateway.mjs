@@ -32,24 +32,7 @@ function validWgPublicKey(raw) {
 }
 
 function validMobileRedirectUri(raw) {
-    if (typeof raw !== "string" || raw !== raw.trim()) return false;
-    if (/[\x00-\x1f\x7f]/.test(raw)) return false;
-    if (!raw.startsWith("chan://") || raw.startsWith("chan:///")) return false;
-    try {
-        const u = new URL(raw);
-        return (
-            u.protocol === "chan:" &&
-            u.hostname === "auth" &&
-            u.pathname === "/callback" &&
-            u.port === "" &&
-            u.search === "" &&
-            u.hash === "" &&
-            u.username === "" &&
-            u.password === ""
-        );
-    } catch {
-        return false;
-    }
+    return raw === "chan://auth/callback";
 }
 
 function hasControlChars(text) {

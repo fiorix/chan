@@ -484,17 +484,19 @@ function main(argv) {
 
         // F2 negative (5)
         check("tier2", "f2-neg-bad-redirect-uri", () => {
-            const q = new URLSearchParams({
-                redirect_uri: "http://127.0.0.1/auth/callback",
-                state: "s",
-                label: "ios",
-                code_challenge: s256("v"),
-                code_challenge_method: "S256",
-                scopes: "mobile.account",
-                expires_in: "60",
-            });
-            assert.equal(invoke(server, "GET", `/mobile/authorize?${q}`).status, 400);
-            return "non-chan redirect_uri refused 400";
+            for (const badRedirect of ["http://127.0.0.1/auth/callback", "chan://auth/callback?"]) {
+                const q = new URLSearchParams({
+                    redirect_uri: badRedirect,
+                    state: "s",
+                    label: "ios",
+                    code_challenge: s256("v"),
+                    code_challenge_method: "S256",
+                    scopes: "mobile.account",
+                    expires_in: "60",
+                });
+                assert.equal(invoke(server, "GET", `/mobile/authorize?${q}`).status, 400);
+            }
+            return "invalid redirect_uri refused 400";
         });
         check("tier2", "f2-neg-bad-wg-pubkey", () => {
             const q = new URLSearchParams({
@@ -558,7 +560,39 @@ function main(argv) {
         });
         check("tier2", "f3-neg-stopped-tunnel-reconcile-status", () => {
             assertTestOk(libResults, "wireguard::tests::local_enrollment_routing_and_stopped_recovery_e2e");
-            return "local enrollment and stopped status e2e passed";
+            verifyStoppedTunnelView(
+                {
+                    wireguard_status: "stopped; connect the gateway again",
+                    wireguard_ingresses: [
+                        { id: "p1", status: "stopped; connect the gateway again" },
+                        { id: "p2", status: "connected" },
+                    ],
+                },
+                "p1",
+            );
+            assert.throws(
+                () =>
+                    verifyStoppedTunnelView(
+                        {
+                            wireguard_status: "connecting",
+                            wireguard_ingresses: [{ id: "p1", status: "connected" }],
+                        },
+                        "p1",
+                    ),
+                /stopped gateway view/,
+            );
+            assert.throws(
+                () =>
+                    verifyStoppedTunnelView(
+                        {
+                            wireguard_status: "stopped; connect the gateway again",
+                            wireguard_ingresses: [{ id: "p1", status: "connected" }],
+                        },
+                        "p1",
+                    ),
+                /must report stopped; connect the gateway again/,
+            );
+            return "local enrollment, stopped status e2e, and stopped-tunnel oracle passed";
         });
         check("tier2", "f3-neg-duplicate-ingress-rejected", () => {
             const p1 = { endpoint: "127.0.0.1:51001", public_key: Buffer.alloc(32, 1).toString("base64") };
@@ -648,9 +682,13 @@ function main(argv) {
         check("tier2", "f6-neg-unminted-gateway-denies-8-cmds", () => {
             assertTestOk(
                 libResults,
+                "runtime_capability::tests::mint_exact_origin_grant_resolves_deduplicates_and_enforces_acl",
+            );
+            assertTestOk(
+                libResults,
                 "runtime_capability::tests::gateway_window_commands_match_exact_origin_grant_app_toml_and_invoke_handler",
             );
-            return "gateway-window command set matches exact_origin_capability_json";
+            return "unminted remote origin denies all 8 gateway commands via runtime ACL";
         });
         check("tier2", "f6-neg-remote-origin-denies-loopback-delivery", () => {
             assertTestOk(
@@ -739,8 +777,28 @@ function main(argv) {
             return "route oracle rejects wrong-peer leak";
         });
         check("tier2", "f8-neg-oracle-rejects-skewed-redeem", () => {
-            assert.throws(() => verifyStoppedTunnelView({ wireguard_status: "connecting" }, "p1"), /stopped gateway view/);
-            return "stopped-tunnel oracle rejects non-stopped view";
+            const disc = JSON.parse(invoke(server, "GET", "/.well-known/chan-gateway").body);
+            const verifier = "t2-f8-skewed-redeem-0123456789abcdefghijk";
+            const q = new URLSearchParams({
+                redirect_uri: "chan://auth/callback",
+                state: "st-skew",
+                label: "ios",
+                code_challenge_method: "S256",
+                code_challenge: s256(verifier),
+                scopes: "mobile.account",
+                expires_in: "60",
+                wireguard_public_key: Buffer.alloc(32, 11).toString("base64"),
+            });
+            const a = invoke(server, "GET", `/mobile/authorize?${q}`);
+            const code = new URL(a.headers.location).searchParams.get("code");
+            const r = invoke(server, "POST", "/mobile/authorize/redeem", { code, code_verifier: verifier });
+            assert.equal(r.status, 200);
+            const redeemPayload = JSON.parse(r.body);
+            verifyEnrollmentRedeemMatch(disc, redeemPayload);
+            const skewed = structuredClone(redeemPayload);
+            skewed.wireguard.ingresses[0].endpoint = "127.0.0.1:59999";
+            assert.throws(() => verifyEnrollmentRedeemMatch(disc, skewed), /must match discovery/);
+            return "enrollment oracle rejects skewed redeem payload";
         });
     }
 
