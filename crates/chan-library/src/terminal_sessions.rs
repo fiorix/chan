@@ -227,47 +227,6 @@ fn is_screen_switch(mode: u16) -> bool {
     matches!(mode, 47 | 1047 | 1049)
 }
 
-/// Whether `replay` switches screens, read as a view parses it after the
-/// lost-tail reconciliation's CAN: a switch the ring's start cut short is
-/// not one.
-fn switches_screens(replay: &[Vec<u8>]) -> bool {
-    let mut tail = Vec::new();
-    let mut switches = false;
-    for chunk in replay {
-        scan_private_modes(&mut tail, chunk, |mode, _| {
-            switches |= is_screen_switch(mode);
-        });
-        if switches {
-            return true;
-        }
-    }
-    false
-}
-
-/// The head of the lost-tail reconciliation: CAN ends any incomplete
-/// escape, then the switch to `alt_screen`'s screen keeps both screens'
-/// contents.
-///
-/// The normal-screen head saves the cursor first: the terminal's core,
-/// libghostty-vt, restores the saved cursor on ?1049l even on the normal
-/// screen (to the top left when nothing was saved), so the resume would
-/// otherwise jump to a stale saved position instead of where the view's
-/// output ended. The alt head is ?1047h rather than ?1049h: the core's
-/// ?1049h saves the cursor into the active screen's slot and erases the
-/// alternate screen, from either screen, so over a view already on the
-/// alternate screen it clobbers the program's own saved cursor and wipes
-/// the frame the view shows. ?1047h switches screens without touching any
-/// saved slot or the alternate screen's contents, and the guest suite
-/// exercises exactly that switch; the core also honors ?47h (shown by the
-/// app's recovery tests on the core), which the product does not use.
-fn recovery_screen_switch(alt_screen: bool) -> &'static [u8] {
-    if alt_screen {
-        b"\x18\x1b[?1047h"
-    } else {
-        b"\x18\x1b7\x1b[?1049;1047;47l"
-    }
-}
-
 /// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
 /// reads. This recognizes private-mode toggles, not the full terminal grammar.
 fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
@@ -1790,16 +1749,6 @@ pub struct AttachHandle {
     /// delta carries every mode change. Any other attach, a fresh view's
     /// included, re-asserts enabled input modes.
     pub mode_reassert: Vec<u8>,
-    /// The switch a view resuming past missed bytes needs ahead of its
-    /// replay, to the screen that replay starts on: the missed span can hold
-    /// the program's switch away from the screen the view still shows, and
-    /// a replay drawn there would be dropped again by the switch in
-    /// [`Self::mode_reassert`]. It is the reconciliation's head for the
-    /// screen the ring ends on, which is the screen a replay that switches
-    /// none starts on. Empty when the replay switches screens, since the
-    /// session keeps no screen for its start, and for every attach that
-    /// gets no reconciliation.
-    pub replay_screen: Vec<u8>,
     /// The replay continues the client's own screen from its cursor, as a
     /// live recovery does: the raw delta, alternate-screen bytes included,
     /// so the view is neither cleared nor moved onto a fresh alternate
@@ -6275,7 +6224,6 @@ impl Session {
             missed_bytes,
             seq,
             mode_reassert,
-            reconciles,
             initial_program_status,
             program_status_rx,
             initial_program,
@@ -6339,19 +6287,11 @@ impl Session {
                 missed_bytes,
                 ring.end_seq(),
                 mode_reassert,
-                reconciles,
                 initial_program_status,
                 program_status_rx,
                 initial_program,
                 program_rx,
             )
-        };
-        // The replay is this attach's own copy, so it is read outside the
-        // ring lock.
-        let replay_screen = if reconciles && !switches_screens(&replay) {
-            recovery_screen_switch(alt_screen).to_vec()
-        } else {
-            Vec::new()
         };
         self.request_program_refresh();
         #[cfg(any(test, feature = "test-util"))]
@@ -6382,7 +6322,6 @@ impl Session {
             alt_screen,
             exit,
             mode_reassert,
-            replay_screen,
             continues_view: matches!(resume, Resume::Live(_)),
             stale_generation: matches!(resume, Resume::OtherLife),
         }
@@ -7992,7 +7931,24 @@ impl Session {
             .private_modes
             .lock()
             .expect("terminal private modes poisoned");
-        let mut out = recovery_screen_switch(alt_screen).to_vec();
+        // The normal-screen head saves the cursor first: the terminal's core,
+        // libghostty-vt, restores the saved cursor on ?1049l even on the
+        // normal screen (to the top left when nothing was saved), so the
+        // resume would otherwise jump to a stale saved position instead of
+        // where the replay ended. The alt head is ?1047h rather than ?1049h:
+        // the core's ?1049h saves the cursor into the active screen's slot
+        // and erases the alternate screen, from either screen, so over a view
+        // already on the alternate screen it clobbers the program's own saved
+        // cursor and wipes the frame the replay left. ?1047h switches screens
+        // without touching any saved slot or the alternate screen's contents,
+        // and the guest suite exercises exactly that switch; the core also
+        // honors ?47h (shown by the app's recovery tests on the core), which
+        // the product does not use.
+        let mut out = if alt_screen {
+            b"\x18\x1b[?1047h".to_vec()
+        } else {
+            b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
+        };
         // Mouse protocols and encodings can share renderer state: a reset
         // of an absent mode must precede the enable that restores its peer.
         for enabled in [false, true] {

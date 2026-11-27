@@ -31,10 +31,6 @@ const CHUNK_BYTES: usize = 32;
 const CHILD_READY: &[u8] = b"__STREAM_READY__";
 const LOST_PLAIN_SUFFIX: &[u8] = b"\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
 const LOST_ALT_SUFFIX: &[u8] = b"\x18\x1b[?1047h\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
-/// The switch a redial past missed bytes gets ahead of its session frame,
-/// to the screen its replay starts on.
-const PLAIN_SCREEN_SWITCH: &[u8] = b"\x18\x1b7\x1b[?1049;1047;47l";
-const ALT_SCREEN_SWITCH: &[u8] = b"\x18\x1b[?1047h";
 
 /// Observe an actual pending binary write, without holding or changing it.
 pub(super) fn send_pending(id: &str, binary_bytes: usize) {
@@ -1397,128 +1393,15 @@ async fn a_redial_past_a_lost_mode_reset_gets_the_live_recovery_suffix() {
     );
     let replay = number(&session, "replay_bytes") as usize;
     assert_eq!(replay, RING, "fixture: the ring's tail is replayed");
-    assert_eq!(
-        String::from_utf8_lossy(&before),
-        String::from_utf8_lossy(PLAIN_SCREEN_SWITCH),
-        "a redial of the same PTY life gets no reset before its session frame, only the \
-         switch to the screen its replay starts on"
+    assert!(
+        before.is_empty(),
+        "a redial of the same PTY life gets no reset before its session frame"
     );
     assert_eq!(after[..replay], shell.repeat(4)[..]);
     assert_eq!(
         String::from_utf8_lossy(&after[replay..]),
         String::from_utf8_lossy(LOST_PLAIN_SUFFIX),
         "a redial that lost bytes gets the live recovery suffix after its replay"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_redial_past_a_lost_alternate_screen_exit_shows_the_retained_tail() {
-    const RING: usize = 4096;
-    let _gate = pty_test_lock();
-    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
-    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000hthe probe's frame";
-    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
-    // While the socket is down the program resets its mode, leaves its
-    // alternate screen, writes past the ring and exits, and the shell
-    // prints its prompt. The ring moves past the switch, so the replay
-    // holds normal-screen output only.
-    let lost = b"\x1b[?1000l\x1b[?1049l";
-    rig.output(lost);
-    let filler = b"filler\r\n".repeat(RING / 4 / 8);
-    for _ in 0..4 {
-        rig.output(&filler);
-    }
-    let tail = b"probe exited\r\n$ ";
-    rig.output(tail);
-    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
-    assert_eq!(
-        number(&session, "generation"),
-        generation,
-        "fixture: the same PTY life"
-    );
-    assert_eq!(
-        number(&session, "missed_bytes"),
-        (lost.len() + filler.len()) as u64,
-        "fixture: the ring moved past the switch to the normal screen"
-    );
-    let replay = number(&session, "replay_bytes") as usize;
-    assert_eq!(
-        String::from_utf8_lossy(&after[..replay]),
-        String::from_utf8_lossy(&[filler.repeat(3), tail.to_vec()].concat()),
-        "fixture: the replay is the retained normal-screen output"
-    );
-    let received = [&before[..], &after[..]].concat();
-    let screens = drawn_screens(&[&shown[..], &received].concat());
-    assert!(
-        !screens.alternate_shown,
-        "the view ends on the normal screen"
-    );
-    assert!(
-        screens.normal.ends_with(tail),
-        "the retained output, the program's last line and the prompt, is drawn on the \
-         normal screen the view ends on, not on the alternate screen the view still showed: \
-         the normal screen ends {:?}",
-        String::from_utf8_lossy(&screens.normal[screens.normal.len().saturating_sub(32)..])
-    );
-    assert_redial_holds_the_program_state(
-        shown,
-        &received,
-        false,
-        &[],
-        "a redial past an alternate-screen exit",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lossy_redial_whose_replay_leaves_the_alternate_screen_draws_its_frames_there() {
-    const RING: usize = 4096;
-    let _gate = pty_test_lock();
-    let rig = Rig::new(RING, "while IFS= read -r line; do :; done").await;
-    let shown = b"$ probe\r\n\x1b[?1049h\x1b[?1000h";
-    let (generation, cursor) = view_modes_then_drop(&rig, shown).await;
-    // The program draws past the ring on its alternate screen while the
-    // socket is down, then resets its mode, leaves the alternate screen and
-    // exits inside the retained tail. The session keeps no screen for the
-    // replay's start, so the view's own screen takes the frames.
-    let frames = b"\x1b[Hframe".repeat(RING / 4 / 8);
-    for _ in 0..4 {
-        rig.output(&frames);
-    }
-    let tail = b"\x1b[?1000l\x1b[?1049lprobe exited\r\n$ ";
-    rig.output(tail);
-    let (_redial, session, before, after) = redial(&rig, cursor, generation).await;
-    assert_eq!(
-        number(&session, "generation"),
-        generation,
-        "fixture: the same PTY life"
-    );
-    assert_eq!(
-        number(&session, "missed_bytes"),
-        frames.len() as u64,
-        "fixture: the ring moved past the cursor"
-    );
-    assert!(
-        before.is_empty(),
-        "a replay that switches screens gets no switch ahead of it"
-    );
-    let received = [&before[..], &after[..]].concat();
-    let screens = drawn_screens(&[&shown[..], &received].concat());
-    assert!(
-        !screens.alternate_shown,
-        "the view ends on the normal screen"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&screens.normal),
-        "$ probe\r\nprobe exited\r\n$ ",
-        "the program's frames are drawn on the alternate screen it left, and its last output \
-         on the normal screen"
-    );
-    assert_redial_holds_the_program_state(
-        shown,
-        &received,
-        false,
-        &[],
-        "a redial whose replay leaves the alternate screen",
     );
 }
 
@@ -2052,14 +1935,10 @@ async fn a_lossy_alternate_screen_redial_holds_no_mode_its_program_reset_while_a
         generation,
         "fixture: the same PTY life"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&before),
-        String::from_utf8_lossy(ALT_SCREEN_SWITCH),
-        "fixture: no reset for the same life, only the switch to the replay's screen"
-    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
     assert_redial_holds_the_program_state(
         shown,
-        &[&before[..], &after[..]].concat(),
+        &after,
         true,
         &[],
         "an alternate-screen redial that lost bytes",
@@ -2106,14 +1985,10 @@ async fn an_alternate_screen_view_closed_for_its_short_ack_redials_with_no_dead_
         generation,
         "fixture: the same PTY life"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&before),
-        String::from_utf8_lossy(ALT_SCREEN_SWITCH),
-        "fixture: no reset for the same life, only the switch to the replay's screen"
-    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
     assert_redial_holds_the_program_state(
         &received,
-        &[&before[..], &after[..]].concat(),
+        &after,
         true,
         &[],
         "a redial after a stall close",
@@ -2236,12 +2111,7 @@ async fn live_redial_redraws(lost: bool) -> usize {
         generation,
         "fixture: the same PTY life"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&before),
-        String::from_utf8_lossy(if lost { PLAIN_SCREEN_SWITCH } else { b"" }),
-        "fixture: no reset for the same life, and a switch to the replay's screen only past \
-         missed bytes"
-    );
+    assert!(before.is_empty(), "fixture: no reset for the same life");
     assert_eq!(
         number(&session, "missed_bytes") > 0,
         lost,
