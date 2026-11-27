@@ -2,15 +2,21 @@
 // body, the link preview popover, and Copy as HTML. Each face asserts
 // the positive (the label is there) and the negative (no `[[` in that
 // surface); the table face also carries the code-span guard once (a
-// wikilink inside backticks stays as typed) and an escaped alias. Table
-// cells render through the grid widget, which carries no pills, so that
-// face waits for the grid; a caret inside a wikilink suppresses its
-// pill, so every face parks the caret at the document's end first. The
-// preview target lives at the workspace root, where the popover reads
-// a bare target. A missing precondition is a skip, never a pass and
-// never a fail: no rendered grid, no survey overlay, no preview
-// content, or a refused clipboard read ends the face inconclusive. At
-// the base every face fails with its brackets line; at the tip all pass.
+// wikilink inside backticks stays as typed) and an escaped alias. The
+// survey face reads four paragraphs from the card: a link to a note
+// that exists shows its label, an aliased link its alias, and two shell
+// tests read character for character as typed, since a survey body is
+// an agent's prose about code. Table cells render through the grid
+// widget, which carries no pills, so that face waits for the grid; a
+// caret inside a wikilink suppresses its pill, so every face parks the
+// caret at the document's end first. The preview target lives at the
+// workspace root, where the popover reads a bare target, and the face
+// asserts the label that note renders. A missing precondition is a
+// skip, never a pass and never a fail: no rendered grid, no survey
+// overlay, no preview content, or a refused clipboard read ends that
+// face inconclusive, and the next face still runs. Any face's fault
+// fails the check whatever another face reads; the check skips only
+// when no face failed and at least one skipped.
 
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -42,6 +48,16 @@ const COPY_BODY = "[[note|alias]] and more\n\n![](img.png)\n";
 // popover reads a bare `[[note]]` target there, and the face asserts
 // labels, not resolution.
 const ROOT_NOTE_BODY = "# Note\n\nSee [[note|alias]] here.\n";
+const ROOT_NOTE_LABELLED = "See alias here.";
+
+// Each source is one paragraph of the survey body, with what the card
+// shows for it.
+const SURVEY_CASES = [
+  ["Open [[note]] now.", "Open note now."],
+  ["Open [[note|alias]] now.", "Open alias now."],
+  ["Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?", "Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?"],
+  ['if [[ "$a" == "$b" || -z "$c" ]]; then', 'if [[ "$a" == "$b" || -z "$c" ]]; then'],
+];
 
 async function focusedPane(page) {
   const id = await page.evaluate(() =>
@@ -102,6 +118,20 @@ async function openRendered(page, path, pane, ready) {
   return active;
 }
 
+/// Close a menu or the preview popover a face left open when it stopped
+/// early, so the next face's editor takes its clicks.
+async function closeStray(page) {
+  for (let i = 0; i < 3; i++) {
+    const open = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="menu"], .md-preview-popover')]
+        .some((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden"),
+    ).catch(() => false);
+    if (!open) return;
+    await page.keyboard.press("Escape").catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function waitPopover(page, timeout = 15_000) {
   try {
     await page.waitForSelector(".md-preview-md", { visible: true, timeout });
@@ -115,12 +145,28 @@ export default {
   name: "wikilink-labels",
   async run(ctx) {
     const faults = [];
+    const skips = [];
     const evidence = { faces: {}, artifacts: [] };
     const directory = join(ctx.workspaceDir, DIRECTORY);
     const face = (name, lines) => { evidence.faces[name] = lines; };
     const fail = (name, lines) => {
       face(name, lines);
       faults.push(`${name}: ${lines.join("; ")}`);
+    };
+    // A face runs to its own verdict: a skip is recorded as that face's
+    // and the next face still runs, so no skip hides another face's fault.
+    const runFace = async (name, body) => {
+      try {
+        await body();
+      } catch (error) {
+        if (error.smokeSkip) {
+          face(name, [`skipped: ${error.message}`]);
+          skips.push(`${name}: ${error.message}`);
+        } else {
+          fail(name, [`error: ${error.message}`]);
+        }
+        await closeStray(ctx.page);
+      }
     };
     mkdirSync(directory, { recursive: true });
     try {
@@ -135,7 +181,7 @@ export default {
       // Face 1: table cells show labels (and an escaped alias), and code stays typed.
       // Table cells render through the grid widget, which carries no pills,
       // so this face waits for the grid itself.
-      try {
+      await runFace("table", async () => {
         const active = await openRendered(ctx.page, `${DIRECTORY}/${TABLE_DOC}`, pane, ".cm-md-table td");
         const cells = await ctx.page.$$eval(
           `${active} .cm-md-table td`,
@@ -149,71 +195,78 @@ export default {
         if (cells[1] !== "[[note]]") lines.push(`code cell shows ${JSON.stringify(cells[1])}, not its brackets`);
         if (cells[2] !== "alias") lines.push(`escaped-alias cell shows ${JSON.stringify(cells[2])}, not "alias"`);
         if (lines.length > 1) fail("table", lines); else face("table", lines);
-      } catch (error) {
-        if (error.smokeSkip) throw error;
-        fail("table", [`error: ${error.message}`]);
-      }
+      });
 
-      // Face 2: a survey body shows the alias.
-      const socket = ctx.controlSocket;
-      if (!socket) ctx.skip("control socket not found for the server pid");
-      const windowId = await ctx.page.evaluate(() =>
-        new URL(location.href).searchParams.get("w")?.trim() ||
-        window.sessionStorage.getItem("chan.session.window")?.trim() || "",
-      );
-      if (!windowId) throw new Error("could not resolve the page's window id");
-      const env = { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
-      const cs = (args, opts = {}) =>
-        ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
-          cwd: ctx.workspaceDir, env, timeout: 90_000, ...opts,
-        });
-      const TAB = "SmokeWikiplaces293";
-      try {
-        await cs(["new", "--tab-name", TAB]);
-        const deadline = Date.now() + 30_000;
-        for (;;) {
-          const { stdout } = await cs(["list", "--json"]);
-          if (Object.values(JSON.parse(stdout).groups ?? {}).flat().some((s) => s.name === TAB)) break;
-          if (Date.now() > deadline) throw new Error(`session ${TAB} never registered`);
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-        await ctx.waitWindowLive(windowId);
-        const pending = cs([
-          "survey", "--tab-name", TAB, "--timeout", "60",
-          "--option", "Alpha", "--option", "Beta",
-          "Open [[note|alias]] now",
-        ]);
-        const surveyExit = pending.then(
-          () => ({ code: 0, stdout: "" }),
-          (error) => ({ code: error.code ?? "unknown", stdout: "" }),
+      // Face 2: a survey body shows a link's label and an alias, and shell
+      // tests as typed.
+      await runFace("survey", async () => {
+        const socket = ctx.controlSocket;
+        if (!socket) ctx.skip("control socket not found for the server pid");
+        const windowId = await ctx.page.evaluate(() =>
+          new URL(location.href).searchParams.get("w")?.trim() ||
+          window.sessionStorage.getItem("chan.session.window")?.trim() || "",
         );
-        const first = await Promise.race([
-          ctx.page.waitForSelector(".survey-card", { visible: true, timeout: 30_000 })
-            .then(() => ({ kind: "card" })),
-          surveyExit.then((result) => ({ kind: "exit", ...result })),
-        ]);
-        if (first.kind === "exit") ctx.skip("the survey overlay never raised its card");
-        const body = await ctx.page.$eval(".survey-body", (el) => el.textContent);
-        const lines = [`body: ${JSON.stringify(body)}`];
-        evidence.artifacts.push(await ctx.shot("survey-label"));
-        if (!body.includes("alias")) lines.push(`body misses the alias: ${JSON.stringify(body)}`);
-        if (body.includes("[["))
-          lines.push(`body keeps brackets: ${JSON.stringify(body)}`);
-        await ctx.page.click(".survey-card .survey-dismiss");
-        await ctx.page.waitForFunction(
-          () => !document.querySelector(".survey-card"), { timeout: 15_000 },
-        );
-        await pending.catch(() => {});
-        if (lines.length > 1) fail("survey", lines); else face("survey", lines);
-      } finally {
+        if (!windowId) throw new Error("could not resolve the page's window id");
+        const env = { ...process.env, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
+        const cs = (args, opts = {}) =>
+          ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+            cwd: ctx.workspaceDir, env, timeout: 90_000, ...opts,
+          });
+        const TAB = "SmokeWikiplaces293";
         try {
-          if (await ctx.page.$(".survey-card")) await ctx.page.click(".survey-card .survey-dismiss");
-        } catch {}
-        try { await cs(["close", "--tab-name", TAB]); } catch {}
-      }
+          await cs(["new", "--tab-name", TAB]);
+          const deadline = Date.now() + 30_000;
+          for (;;) {
+            const { stdout } = await cs(["list", "--json"]);
+            if (Object.values(JSON.parse(stdout).groups ?? {}).flat().some((s) => s.name === TAB)) break;
+            if (Date.now() > deadline) throw new Error(`session ${TAB} never registered`);
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          await ctx.waitWindowLive(windowId);
+          // One positional word keeps its blank lines, so each case is a
+          // paragraph of its own.
+          const pending = cs([
+            "survey", "--tab-name", TAB, "--timeout", "60",
+            "--option", "Alpha", "--option", "Beta",
+            SURVEY_CASES.map(([source]) => source).join("\n\n"),
+          ]);
+          const surveyExit = pending.then(
+            () => ({ code: 0, stdout: "" }),
+            (error) => ({ code: error.code ?? "unknown", stdout: "" }),
+          );
+          const first = await Promise.race([
+            ctx.page.waitForSelector(".survey-card", { visible: true, timeout: 30_000 })
+              .then(() => ({ kind: "card" })),
+            surveyExit.then((result) => ({ kind: "exit", ...result })),
+          ]);
+          if (first.kind === "exit") ctx.skip("the survey overlay never raised its card");
+          const paragraphs = await ctx.page.$$eval(
+            ".survey-card .survey-body p", (items) => items.map((el) => el.textContent),
+          );
+          const lines = [`paragraphs: ${JSON.stringify(paragraphs)}`];
+          evidence.artifacts.push(await ctx.shot("survey-label"));
+          if (paragraphs.length !== SURVEY_CASES.length)
+            lines.push(`body has ${paragraphs.length} paragraphs, not ${SURVEY_CASES.length}`);
+          SURVEY_CASES.forEach(([source, shown], i) => {
+            if (paragraphs[i] !== shown)
+              lines.push(`${JSON.stringify(source)} shows ${JSON.stringify(paragraphs[i])}, not ${JSON.stringify(shown)}`);
+          });
+          await ctx.page.click(".survey-card .survey-dismiss");
+          await ctx.page.waitForFunction(
+            () => !document.querySelector(".survey-card"), { timeout: 15_000 },
+          );
+          await pending.catch(() => {});
+          if (lines.length > 1) fail("survey", lines); else face("survey", lines);
+        } finally {
+          try {
+            if (await ctx.page.$(".survey-card")) await ctx.page.click(".survey-card .survey-dismiss");
+          } catch {}
+          try { await cs(["close", "--tab-name", TAB]); } catch {}
+        }
+      });
 
-      // Face 3: the link preview shows labels.
-      try {
+      // Face 3: the link preview shows the label its note renders.
+      await runFace("preview", async () => {
         const active = await openRendered(ctx.page, `${DIRECTORY}/${LINK_DOC}`, pane, ".cm-md-wiki-pill");
         const pill = `${active} .cm-md-wiki-pill`;
         await ctx.page.click(pill, { button: "right" });
@@ -228,7 +281,8 @@ export default {
         const text = await ctx.page.$eval(".md-preview-md", (el) => el.textContent);
         const lines = [`preview: ${JSON.stringify(text)}`];
         evidence.artifacts.push(await ctx.shot("preview-labels"));
-        if (!text.includes("note")) lines.push(`preview misses the label: ${JSON.stringify(text)}`);
+        if (!text.includes(ROOT_NOTE_LABELLED))
+          lines.push(`preview misses ${JSON.stringify(ROOT_NOTE_LABELLED)}: ${JSON.stringify(text)}`);
         if (text.includes("[["))
           lines.push(`preview keeps brackets: ${JSON.stringify(text)}`);
         await ctx.page.keyboard.press("Escape");
@@ -236,13 +290,10 @@ export default {
           () => !document.querySelector(".md-preview-popover"), { timeout: 15_000 },
         );
         if (lines.length > 1) fail("preview", lines); else face("preview", lines);
-      } catch (error) {
-        if (error.smokeSkip) throw error;
-        fail("preview", [`error: ${error.message}`]);
-      }
+      });
 
       // Face 4: Copy as HTML labels the HTML flavour, brackets in text.
-      try {
+      await runFace("copy", async () => {
         const active = await openRendered(ctx.page, `${DIRECTORY}/${COPY_DOC}`, pane, ".cm-md-wiki-pill");
         const content = `${active} .cm-content`;
         await ctx.page.click(content);
@@ -300,12 +351,10 @@ export default {
         if (parsed.body?.includes("[["))
           lines.push(`HTML flavour keeps brackets: ${JSON.stringify(parsed.body)}`);
         if (lines.length > 1) fail("copy", lines); else face("copy", lines);
-      } catch (error) {
-        if (error.smokeSkip) throw error;
-        fail("copy", [`error: ${error.message}`]);
-      }
+      });
 
       assert.equal(faults.length, 0, faults.join("\n"));
+      if (skips.length) ctx.skip(`no face failed; skipped: ${skips.join("; ")}`);
       return evidence;
     } catch (error) {
       error.smokeDetails = { faces: evidence.faces };
