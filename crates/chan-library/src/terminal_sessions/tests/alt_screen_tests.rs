@@ -537,3 +537,90 @@ fn an_escape_inside_a_switch_cancels_it_and_starts_the_next() {
          sequence it starts switches and resets"
     );
 }
+
+/// Byte streams with the vendored terminal core's reading of each, recorded
+/// from the core by `web/packages/workspace-app/src/terminal/coreScreenModes.test.ts`.
+const CORE_SCREEN_MODES: &str = include_str!("../../../tests/fixtures/core-screen-modes.json");
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModes {
+    tracked: Vec<u16>,
+    cases: Vec<CoreScreenModesCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct CoreScreenModesCase {
+    name: String,
+    /// The PTY reads in order; each character is one byte.
+    chunks: Vec<String>,
+    core: ScreenReading,
+}
+
+/// Whether the alternate screen is active, and the tracked modes on.
+#[derive(PartialEq, Eq, serde::Deserialize)]
+struct ScreenReading {
+    alternate: bool,
+    modes: Vec<u16>,
+}
+
+impl std::fmt::Display for ScreenReading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let screen = if self.alternate {
+            "alternate"
+        } else {
+            "normal"
+        };
+        write!(f, "{screen} {:?}", self.modes)
+    }
+}
+
+// A view's core and the session's tracker read the same bytes, so they must
+// agree on the screen and the modes, or a fresh view is told a state the
+// program's own view does not have. Every case is read and the differing
+// ones are reported together; the whole table is the test's output.
+#[test]
+fn the_tracker_reads_each_recorded_stream_as_the_terminal_core_does() {
+    let fixture: CoreScreenModes =
+        serde_json::from_str(CORE_SCREEN_MODES).expect("the core reading fixture parses");
+    assert_eq!(
+        fixture.tracked, TRACKED_PRIVATE_MODES,
+        "the fixture reads the tracked modes"
+    );
+    let mut differing = Vec::new();
+    for case in &fixture.cases {
+        let session = test_session_with_ring(4096);
+        for chunk in &case.chunks {
+            let bytes: Vec<u8> = chunk
+                .chars()
+                .map(|c| {
+                    u8::try_from(c).unwrap_or_else(|_| panic!("{}: {c:?} is no byte", case.name))
+                })
+                .collect();
+            session.record_output(&bytes);
+        }
+        let tracker = ScreenReading {
+            alternate: session.in_alt_screen.load(Ordering::Relaxed),
+            modes: modes_on(&session),
+        };
+        let same = tracker == case.core;
+        println!(
+            "{} | core {} | tracker {tracker} | {}",
+            if same { "same     " } else { "DIFFERENT" },
+            case.core,
+            case.name
+        );
+        if !same {
+            differing.push(format!(
+                "{}: core {}, tracker {tracker}",
+                case.name, case.core
+            ));
+        }
+    }
+    assert!(
+        differing.is_empty(),
+        "{} of {} streams read differently by the tracker and the terminal core:\n{}",
+        differing.len(),
+        fixture.cases.len(),
+        differing.join("\n")
+    );
+}
