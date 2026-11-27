@@ -17,6 +17,7 @@ vi.mock("../terminal/backend", async (importOriginal) =>
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { seatedGhostty } from "../__tests__/ghosttyTab";
+import { press, release } from "../__tests__/pressFocus";
 import { terminalTab } from "../__tests__/tabs";
 import { api } from "../api/client";
 import { resetSurveysForTest, showSurvey, surveyFor } from "../state/survey.svelte";
@@ -150,17 +151,17 @@ function kindTabIndexes(card: HTMLElement): Record<string, string | null> {
     .map((el) => [el.getAttribute("data-kind") ?? el.localName, el.getAttribute("tabindex")]));
 }
 
-/// A primary press and release as a browser runs them for a trusted event:
-/// each listener's microtasks run before the press's default action, which
-/// focuses the pressed element's nearest focusable ancestor.
+/// A primary press and release as a browser runs them for a trusted event,
+/// the press's default focus move included (`press`).
 async function click(el: HTMLElement): Promise<void> {
-  const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
-  el.dispatchEvent(down);
-  await settle();
-  if (!down.defaultPrevented) el.closest<HTMLElement>("a[href], [tabindex], button")?.focus();
-  el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
-  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+  await press(el);
+  release(el);
   await settleLong();
+}
+
+/// An answer key typed where the keyboard is.
+function typeKey(key: string, code: string): void {
+  (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true }));
 }
 
 describe("a survey over a terminal whose pane is not focused", () => {
@@ -345,5 +346,59 @@ describe("a survey over a terminal whose pane is not focused", () => {
     expect(link.tabIndex, "the link is back in the Tab order with its pane").toBe(0);
     expect(reply, "a link answers nothing").not.toHaveBeenCalled();
     expect(surveyFor(TERMINAL)?.surveyId).toBe(LINKED.surveyId);
+  });
+});
+
+// The overlay covers its terminal around the card, so a press anywhere in the
+// terminal outside the card lands on the overlay itself.
+describe("a press on a survey's overlay beside its card", () => {
+  function overlayOf(card: HTMLElement): HTMLElement {
+    const overlay = card.closest<HTMLElement>(".survey-overlay");
+    if (!overlay) throw new Error("the card is in no survey overlay");
+    return overlay;
+  }
+
+  test("over an unfocused pane, makes its pane the focused one and leaves the keyboard on the card", async () => {
+    const card = await surveyOverUnfocusedPane();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    await click(overlayOf(card));
+    expect(layout.activePaneId, "the press makes the survey's pane the focused one").toBe(TOP);
+    expect(document.activeElement, "the keyboard is on the card").toBe(card);
+
+    typeKey("2", "Digit2");
+    await settleLong();
+    expect(reply, "a 2 answers the survey's second option")
+      .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
+  });
+
+  test("with its pane focused, leaves the keyboard on the card", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+
+    await click(overlayOf(card));
+    expect(layout.activePaneId, "its pane stays the focused one").toBe(TOP);
+    expect(document.activeElement, "the keyboard stays on the card").toBe(card);
+
+    typeKey("2", "Digit2");
+    await settleLong();
+    expect(reply, "a 2 answers the survey's second option")
+      .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
+  });
+
+  // Only a press on the overlay itself is held: one on the card or in it
+  // keeps its default, as here an option takes the keyboard from the card.
+  test("leaves a press inside the card its own default", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    const option = card.querySelector<HTMLButtonElement>(".survey-option")!;
+
+    const down = await press(option);
+    expect(down.defaultPrevented, "the press on the option keeps its default").toBe(false);
+    expect(document.activeElement, "the option takes the keyboard").toBe(option);
   });
 });

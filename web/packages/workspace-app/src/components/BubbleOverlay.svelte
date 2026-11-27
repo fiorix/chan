@@ -202,6 +202,19 @@
     });
   });
 
+  // The overlay covers its terminal, or the window, around the card, so a
+  // press outside the card lands on the overlay itself, which no element
+  // focuses: the press's default would blur the card and drop the keyboard
+  // to the page, where an answer key answers nothing. Cancelling it keeps
+  // the keyboard on the card, which a terminal's survey takes by the focus
+  // effect once its pane makes itself the focused one on the same press. A
+  // press on the card or in it keeps its default, so a body link or a
+  // button takes focus and the body's text can be selected. A press of any
+  // button is held, since the pane makes itself the focused one on any.
+  function holdKeyboardOnCard(e: MouseEvent): void {
+    if (e.target === e.currentTarget) e.preventDefault();
+  }
+
   // Number keys 1..N pick an option; F follows up; X or Escape dismisses. F
   // and X/Escape are standard on every survey. Scoped to the focused
   // card (NOT the window) so each terminal's survey handles its own keys, a
@@ -238,6 +251,9 @@
 </script>
 
 {#if active && shown}
+  <!-- A pointer target only, so it takes no tabindex: the card is the
+       survey's focusable surface and answers its keys. -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div
     bind:this={overlay}
     class="survey-overlay"
@@ -245,6 +261,7 @@
     role="dialog"
     aria-modal="true"
     data-keyboard-owner={slot === null ? ownerTag("modal") : ownerTag("terminal-survey", slot)}
+    onmousedown={holdKeyboardOnCard}
   >
     <!-- The card is the focusable survey surface (tabindex -1, focused on
          appear); its keydown is the 1..N / F / X shortcut handler, scoped here
