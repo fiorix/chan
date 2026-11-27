@@ -2204,55 +2204,135 @@ async fn a_restart_overtakes_a_redial_at(seam: AttachSeam) {
     );
 }
 
+/// The most parameters the terminal core keeps for one CSI. It drops a
+/// sequence with more whole, at its final byte; an empty parameter counts.
+const CORE_CSI_MAX_PARAMS: usize = 24;
+
+/// What a byte of a terminal's output does, as far as the test models read
+/// it.
+enum Parsed {
+    /// The byte lands on the screen shown: a printed byte, a CR or an LF.
+    Drawn(u8),
+    /// A full reset (RIS, `ESC c`).
+    Reset,
+    /// A DECSET (`true`) or DECRST of these private modes, in order.
+    Modes(bool, Vec<u16>),
+}
+
+/// Where a parse stands between two bytes.
+enum ParseState {
+    Ground,
+    /// After an ESC: a `c` next is a full reset and a `[` begins a CSI.
+    Escape,
+    /// After `ESC [`, with the parameter and intermediate bytes so far.
+    Csi(Vec<u8>),
+}
+
+/// Read `bytes` as the terminal core reads them, as far as the screens and
+/// the private modes go, and pass what each byte does to `each`. ESC ends
+/// any sequence and begins another, and CAN or SUB ends it. Any other C0
+/// control acts where it stands, inside an escape or a CSI too, and the
+/// sequence goes on after it; of those, the models follow a CR or an LF,
+/// which lands on the screen shown. DEL does nothing. A CSI is a DECSET or
+/// DECRST when its bytes are `?`, digits and semicolons, then `h` or `l`,
+/// and it has at most [`CORE_CSI_MAX_PARAMS`] parameters. Any other CSI
+/// does nothing the models read, and any other escape ends at its first
+/// byte. A byte above 0x7f ends a CSI unfinished and is read as text, where
+/// the core skips a whole UTF-8 character and goes on.
+fn parse_output(bytes: &[u8], mut each: impl FnMut(Parsed)) {
+    let mut state = ParseState::Ground;
+    for &byte in bytes {
+        state = match (state, byte) {
+            (_, 0x1b) => ParseState::Escape,
+            (_, 0x18 | 0x1a) => ParseState::Ground,
+            (state, 0x7f) => state,
+            (state, control @ 0x00..=0x1f) => {
+                if matches!(control, b'\r' | b'\n') {
+                    each(Parsed::Drawn(control));
+                }
+                state
+            }
+            (ParseState::Ground, byte) => {
+                each(Parsed::Drawn(byte));
+                ParseState::Ground
+            }
+            (ParseState::Escape, b'c') => {
+                each(Parsed::Reset);
+                ParseState::Ground
+            }
+            (ParseState::Escape, b'[') => ParseState::Csi(Vec::new()),
+            (ParseState::Escape, _) => ParseState::Ground,
+            (ParseState::Csi(mut csi), byte @ 0x20..=0x3f) => {
+                csi.push(byte);
+                ParseState::Csi(csi)
+            }
+            (ParseState::Csi(csi), final_byte @ 0x40..=0x7e) => {
+                if let Some((on, modes)) = private_modes(&csi, final_byte) {
+                    each(Parsed::Modes(on, modes));
+                }
+                ParseState::Ground
+            }
+            (ParseState::Csi(_), byte) => {
+                each(Parsed::Drawn(byte));
+                ParseState::Ground
+            }
+        };
+    }
+}
+
+/// The DECSET (`true`) or DECRST a CSI makes and the modes it names, from
+/// `csi`, its bytes between `[` and its final byte, and `final_byte`; `None`
+/// for any other CSI, and for one with more parameters than the core keeps.
+/// A parameter that is empty or above 65535 names no mode.
+fn private_modes(csi: &[u8], final_byte: u8) -> Option<(bool, Vec<u16>)> {
+    let on = match final_byte {
+        b'h' => true,
+        b'l' => false,
+        _ => return None,
+    };
+    let params = csi.strip_prefix(b"?")?;
+    if !params
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || *byte == b';')
+    {
+        return None;
+    }
+    let params = params.split(|byte| *byte == b';');
+    if params.clone().count() > CORE_CSI_MAX_PARAMS {
+        return None;
+    }
+    let modes = params
+        .filter_map(|param| std::str::from_utf8(param).ok()?.parse().ok())
+        .collect();
+    Some((on, modes))
+}
+
+/// Whether DEC private mode `mode` switches the screen.
+fn switches_screen(mode: u16) -> bool {
+    matches!(mode, 47 | 1047 | 1049)
+}
+
 /// What a terminal holds after parsing `bytes` of the state a redial must
 /// not leave stale: whether it is on the alternate screen, and which other
-/// DEC private modes are on. CAN, an escape or the end cuts a partial
-/// sequence short, a final other than `h` or `l` (a DECRQM query) changes
-/// nothing, and RIS resets the terminal, as in the client's core.
+/// DEC private modes are on, read by [`parse_output`]. A full reset shows
+/// the normal screen and turns every mode off.
 fn parsed_modes(bytes: &[u8]) -> (bool, BTreeSet<u16>) {
     let (mut alt_screen, mut modes) = (false, BTreeSet::new());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at..].starts_with(b"\x1bc") {
-            (alt_screen, modes) = (false, BTreeSet::new());
-            at += 2;
-            continue;
-        }
-        if !bytes[at..].starts_with(b"\x1b[?") {
-            at += 1;
-            continue;
-        }
-        let start = at + 3;
-        let end = start
-            + bytes[start..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
-                .count();
-        at = end;
-        let on = match bytes.get(end) {
-            Some(b'h') => true,
-            Some(b'l') => false,
-            _ => continue,
-        };
-        at = end + 1;
-        for param in bytes[start..end].split(|byte| *byte == b';') {
-            let Some(mode) = std::str::from_utf8(param)
-                .ok()
-                .and_then(|param| param.parse::<u16>().ok())
-            else {
-                continue;
-            };
-            match mode {
-                47 | 1047 | 1049 => alt_screen = on,
-                _ if on => {
+    parse_output(bytes, |parsed| match parsed {
+        Parsed::Drawn(_) => {}
+        Parsed::Reset => (alt_screen, modes) = (false, BTreeSet::new()),
+        Parsed::Modes(on, changed) => {
+            for mode in changed {
+                if switches_screen(mode) {
+                    alt_screen = on;
+                } else if on {
                     modes.insert(mode);
-                }
-                _ => {
+                } else {
                     modes.remove(&mode);
                 }
             }
         }
-    }
+    });
     (alt_screen, modes)
 }
 
@@ -2308,66 +2388,23 @@ struct DrawnScreens {
     alternate_shown: bool,
 }
 
-/// Follow the screen switches in `bytes` (47, 1047 and 1049) and put every
-/// printed byte, CR and LF included, on the screen shown when it arrives.
-/// Escapes print nothing, CAN or an escape cuts a partial CSI short, a
-/// switch takes only digits and semicolons after its `?`, and RIS clears
-/// both screens and shows the normal one. Cursor motion and erases are not
-/// followed: the redial tests read where output lands, not the grid it
-/// makes.
+/// Follow the screen switches in `bytes` (47, 1047 and 1049), read by
+/// [`parse_output`], and put every printed byte, CR and LF included, on the
+/// screen shown when it arrives; RIS clears both screens and shows the
+/// normal one. Cursor motion and erases are not followed: the redial tests
+/// read where output lands, not the grid it makes.
 fn drawn_screens(bytes: &[u8]) -> DrawnScreens {
     let mut screens = DrawnScreens::default();
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            0x1b if bytes.get(at + 1) == Some(&b'[') => {
-                let start = at + 2;
-                let end = start
-                    + bytes[start..]
-                        .iter()
-                        .take_while(|byte| (0x20..=0x3f).contains(*byte))
-                        .count();
-                at = end;
-                let Some(&last) = bytes.get(end).filter(|byte| (0x40..=0x7e).contains(*byte))
-                else {
-                    continue;
-                };
-                at = end + 1;
-                let Some(params) = bytes[start..end].strip_prefix(b"?") else {
-                    continue;
-                };
-                if !matches!(last, b'h' | b'l') {
-                    continue;
-                }
-                let switches = params
-                    .iter()
-                    .all(|byte| byte.is_ascii_digit() || *byte == b';')
-                    && params
-                        .split(|byte| *byte == b';')
-                        .any(|param| matches!(param, b"47" | b"1047" | b"1049"));
-                if switches {
-                    screens.alternate_shown = last == b'h';
-                }
+    parse_output(bytes, |parsed| match parsed {
+        Parsed::Drawn(byte) if screens.alternate_shown => screens.alternate.push(byte),
+        Parsed::Drawn(byte) => screens.normal.push(byte),
+        Parsed::Reset => screens = DrawnScreens::default(),
+        Parsed::Modes(on, modes) => {
+            if modes.into_iter().any(switches_screen) {
+                screens.alternate_shown = on;
             }
-            0x1b if bytes.get(at + 1) == Some(&b'c') => {
-                screens = DrawnScreens::default();
-                at += 2;
-            }
-            // An escape before another starts nothing: the second begins
-            // its own sequence.
-            0x1b if bytes.get(at + 1) == Some(&0x1b) => at += 1,
-            0x1b => at += 2,
-            byte if byte >= 0x20 || matches!(byte, b'\r' | b'\n') => {
-                if screens.alternate_shown {
-                    screens.alternate.push(byte);
-                } else {
-                    screens.normal.push(byte);
-                }
-                at += 1;
-            }
-            _ => at += 1,
         }
-    }
+    });
     screens
 }
 
