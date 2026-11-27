@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMockGatewayServer } from "./mock-gateway.mjs";
@@ -14,6 +14,7 @@ import {
     verifyEnrollmentRedeemMatch,
     verifyPeerRouting,
     verifyStoppedTunnelView,
+    verifyWindowNavigationParams,
 } from "./ios-wireguard-oracle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -158,7 +159,7 @@ function main(argv) {
     const podfile = readRepo("mobile/ios/gen/apple/Podfile");
 
     const libResults = runCargoTests(["--lib"]);
-    const harnessResults = runCargoTests(["--test", "ios_e2e_harness"]);
+    const harnessResults = selectedTier === "3" ? new Map() : runCargoTests(["--test", "ios_e2e_harness"]);
 
     const { server } = createMockGatewayServer({ autoConfirm: true });
     server.address = () => ({ port: 45555 });
@@ -803,97 +804,384 @@ function main(argv) {
     }
 
     if (selectedTier === "3" || selectedTier === "all") {
-        // Tier 3: 10 pairwise cross-feature combinations across F1-F9.
+        // Tier 3: 8 pairwise cross-feature checks (paired with 2 Vitest checks = 10 total).
         check("tier3", "t3-f1-f2-ios17-floor-and-wg-enroll", () => {
+            assertTestOk(
+                libResults,
+                "wireguard::tests::ios17_floor_gates_mobile_enrollment_key_generation_and_routes",
+            );
             assert.equal(tauriConf.bundle?.iOS?.minimumSystemVersion, probeRed ? "15.0" : "17.0");
             const disc = JSON.parse(invoke(server, "GET", "/.well-known/chan-gateway").body);
             assert.equal(disc.wireguard.mobile_enrollment, true);
-            return "iOS 17 floor + mobile WireGuard discovery aligned";
+            return "F1+F2 iOS 17 floor gates WG enrollment and routes";
         });
         check("tier3", "t3-f2-f3-enroll-two-ingresses-and-retire-one", () => {
-            assertTestOk(harnessResults, "f3_route_retirement_preserves_sibling_tunnel");
             assertTestOk(
                 libResults,
-                "wireguard::tests::enrolled_reconcile_restarts_only_the_ingress_whose_driver_stopped",
+                "wireguard::tests::enrolled_two_ingress_discovery_retire_and_reconcile_recovery",
             );
-            return "F2+F3 enrollment & sibling retirement aligned";
+            assertTestOk(
+                libResults,
+                "wireguard::tests::local_enrollment_routing_and_stopped_recovery_e2e",
+            );
+            return "F2+F3 two-ingress discovery retirement and reconcile recovery passed";
         });
         check("tier3", "t3-f2-f4-wg-proxy-to-entry-exchange-and-window-url", () => {
-            assertTestOk(harnessResults, "f4_gateway_entry_exchange_sets_gate_and_csrf_cookies");
             assertTestOk(
                 libResults,
-                "mobile_auth::tests::mobile_open_devserver_with_app_mints_refreshes_feed_and_navigates",
+                "mobile_auth::tests::wg_proxy_entry_exchange_cookies_and_window_url_e2e",
             );
-            return "F2+F4 proxy entry + window URL contract aligned";
+            return "F2+F4 WireGuard proxy -> entry exchange -> cookies -> window URL passed";
         });
         check("tier3", "t3-f3-f6-stopped-tunnel-reconnect-command", () => {
-            assertTestOk(libResults, "wireguard::tests::reconcile_replaces_a_tunnel_whose_driver_stopped");
             assertTestOk(
                 libResults,
-                "tests::reconnect_devserver_for_window_reconnects_and_reopens_active_window",
+                "tests::f3_f6_stopped_tunnel_refuses_reconnect_until_reconcile_saved_recovers",
             );
-            return "F3+F6 stopped tunnel + reconnect command aligned";
-        });
-        check("tier3", "t3-f4-f5-ios-launcher-remote-open-unhides-and-stamps-url", () => {
-            assertTestOk(
-                libResults,
-                "mobile_auth::tests::mobile_open_existing_window_unhides_refreshes_feed_and_stamps_url",
-            );
-            return "F4+F5 unhide + URL stamping aligned";
+            return "F3+F6 stopped tunnel refuses reconnect until reconcile_saved recovers";
         });
         check("tier3", "t3-f4-f7-unhide-then-label-then-tmux-then-delete", () => {
-            const { server: s2 } = createMockGatewayServer({ requireSession: false });
+            const { server: s2 } = createMockGatewayServer({ autoConfirm: false, requireSession: true });
             s2.address = () => ({ port: 45555 });
-            assert.equal(invoke(s2, "POST", "/api/library/windows/w-hidden-ws/visibility", { hidden: false }).status, 204);
-            assert.equal(invoke(s2, "PUT", "/api/library/windows/w-hidden-ws/label", { label: "pair-label" }).status, 204);
-            assert.equal(invoke(s2, "POST", "/api/library/tmux/term%2Fone/request", { request: "new-window" }).status, 204);
-            assert.equal(invoke(s2, "DELETE", "/api/library/windows/w-hidden-ws").status, 204);
+
+            // 1. Discovery + interactive OAuth consent + PKCE S256 redeem
+            const discResp = invoke(s2, "GET", "/.well-known/chan-gateway");
+            assert.equal(discResp.status, 200);
+            const disc = JSON.parse(discResp.body);
+
+            const verifier = "t3-f4-f7-pkce-verifier-0123456789abcdefghijk";
+            const wgPubKey = Buffer.alloc(32, 7).toString("base64");
+            const authQuery = new URLSearchParams({
+                redirect_uri: "chan://auth/callback",
+                state: "st-t3-f4-f7",
+                label: "ios",
+                code_challenge_method: "S256",
+                code_challenge: s256(verifier),
+                scopes: "mobile.account",
+                expires_in: "3600",
+                wireguard_public_key: wgPubKey,
+            });
+            const authResp = invoke(s2, "GET", `/mobile/authorize?${authQuery}`);
+            assert.equal(authResp.status, 302);
+            const consentResp = invoke(s2, "GET", authResp.headers.location);
+            assert.equal(consentResp.status, 200);
+            const consentId = /name="id" value="([^"]+)"/.exec(consentResp.body)?.[1];
+            const consentCsrf = /name="csrf" value="([^"]+)"/.exec(consentResp.body)?.[1];
+            assert.ok(consentId && consentCsrf, "consent form must carry id and csrf");
+
+            const confirmResp = invoke(
+                s2,
+                "POST",
+                "/mobile/authorize/confirm",
+                new URLSearchParams({ id: consentId, csrf: consentCsrf, action: "allow" }).toString(),
+            );
+            assert.equal(confirmResp.status, 200);
+            const callbackHref = /chan:\/\/auth\/callback\?[^"'<\s]+/.exec(confirmResp.body)?.[0];
+            assert.ok(callbackHref, "confirm response must emit callback URL");
+            const code = new URL(callbackHref).searchParams.get("code");
+            assert.ok(code, "callback URL must carry authorization code");
+
+            const redeemResp = invoke(s2, "POST", "/mobile/authorize/redeem", {
+                code,
+                code_verifier: verifier,
+            });
+            assert.equal(redeemResp.status, 200);
+            const redeemPayload = JSON.parse(redeemResp.body);
+            verifyEnrollmentRedeemMatch(disc, redeemPayload);
+            const pat = redeemPayload.secret;
+
+            // 2. Roster + devserver entry mint + /_chan/entry exchange + credential replay 401
+            const rosterResp = invoke(s2, "GET", "/mobile/v1/devservers", null, {
+                authorization: `Bearer ${pat}`,
+            });
+            assert.equal(rosterResp.status, 200);
+            const roster = JSON.parse(rosterResp.body);
+            const devserverId = roster.devservers?.[0]?.devserver_id;
+            assert.ok(devserverId, "roster must list devserver_id");
+
+            const entryResp = invoke(
+                s2,
+                "POST",
+                "/mobile/v1/devserver/entry",
+                { path: "/", devserver_id: devserverId },
+                { authorization: `Bearer ${pat}` },
+            );
+            assert.equal(entryResp.status, 200);
+            const entry = JSON.parse(entryResp.body);
+
+            const exchResp = invoke(
+                s2,
+                "POST",
+                "/_chan/entry",
+                new URLSearchParams({ credential: entry.entry_credential }).toString(),
+            );
+            assert.equal(exchResp.status, 303);
+            const setCookies = Array.isArray(exchResp.headers["set-cookie"])
+                ? exchResp.headers["set-cookie"]
+                : [exchResp.headers["set-cookie"]].filter(Boolean);
+            const readCookie = (name) => {
+                for (const raw of setCookies) {
+                    const pair = String(raw).split(";")[0]?.trim() ?? "";
+                    const eq = pair.indexOf("=");
+                    if (eq > 0 && pair.slice(0, eq) === name) return pair.slice(eq + 1);
+                }
+                return null;
+            };
+            const gate = readCookie("__Host-devserver_gate");
+            const csrf = readCookie("__Host-devserver_csrf");
+            assert.ok(gate && csrf, "/_chan/entry must set gate and csrf cookies");
+
+            const replayResp = invoke(
+                s2,
+                "POST",
+                "/_chan/entry",
+                new URLSearchParams({ credential: entry.entry_credential }).toString(),
+            );
+            assert.equal(replayResp.status, 401, "replayed entry credential must return 401");
+
+            const sessionCookie = `__Host-devserver_gate=${gate}; __Host-devserver_csrf=${csrf}`;
+
+            // 3. Negative CSRF checks
+            assert.equal(
+                invoke(
+                    s2,
+                    "POST",
+                    "/api/library/windows/w-hidden-ws/visibility",
+                    { hidden: false },
+                    { cookie: sessionCookie },
+                ).status,
+                401,
+                "missing X-Chan-CSRF must return 401",
+            );
+            assert.equal(
+                invoke(
+                    s2,
+                    "POST",
+                    "/api/library/windows/w-hidden-ws/visibility",
+                    { hidden: false },
+                    { cookie: sessionCookie, "x-chan-csrf": `${csrf}-skewed` },
+                ).status,
+                401,
+                "skewed X-Chan-CSRF must return 401",
+            );
+
+            // 4. Read initial hidden window, unhide (or keep hidden in probeRed), and readback
+            const initialWins = JSON.parse(
+                invoke(s2, "GET", "/api/library/windows", null, { cookie: sessionCookie }).body,
+            );
+            const beforeUnhide = initialWins.find((w) => w.window_id === "w-hidden-ws");
+            assert.equal(beforeUnhide?.hidden, true, "w-hidden-ws must start hidden");
+
+            assert.equal(
+                invoke(
+                    s2,
+                    "POST",
+                    "/api/library/windows/w-hidden-ws/visibility",
+                    { hidden: probeRed },
+                    { cookie: sessionCookie, "x-chan-csrf": csrf },
+                ).status,
+                204,
+            );
+
+            const afterUnhideWins = JSON.parse(
+                invoke(s2, "GET", "/api/library/windows", null, { cookie: sessionCookie }).body,
+            );
+            const afterUnhide = afterUnhideWins.find((w) => w.window_id === "w-hidden-ws");
+            assert.equal(afterUnhide?.hidden, false, "unhiding must persist hidden=false on readback");
+
+            // 5. Navigate to unhidden window and verify URL parameters via oracle
+            const navQuery = new URLSearchParams({
+                w: afterUnhide.window_id,
+                start: "terminal",
+                lib: afterUnhide.library_id,
+                h: "0123456789abcdef0123456789abcdef",
+                client_name: "iPhone",
+                pane: "#3b82f6",
+            });
+            const navPath = `${afterUnhide.prefix}/index.html?${navQuery}`;
+            const navResp = invoke(s2, "GET", navPath, null, { cookie: sessionCookie });
+            assert.equal(navResp.status, 200);
+            verifyWindowNavigationParams(`http://alice--0123456789ab.p1.localtest.me:45555${navPath}`, {
+                windowId: "w-hidden-ws",
+                kind: "workspace",
+                startTerminal: true,
+                libraryId: "lib-e2e001",
+                clientName: "iPhone",
+                pane: "#3b82f6",
+            });
+
+            // 6. Rename window + readback
+            assert.equal(
+                invoke(
+                    s2,
+                    "PUT",
+                    "/api/library/windows/w-hidden-ws/label",
+                    { label: "pair-label" },
+                    { cookie: sessionCookie, "x-chan-csrf": csrf },
+                ).status,
+                204,
+            );
+            const afterLabelWins = JSON.parse(
+                invoke(s2, "GET", "/api/library/windows", null, { cookie: sessionCookie }).body,
+            );
+            assert.equal(
+                afterLabelWins.find((w) => w.window_id === "w-hidden-ws")?.label,
+                "pair-label",
+            );
+
+            // 7. Tmux request
+            assert.equal(
+                invoke(
+                    s2,
+                    "POST",
+                    "/api/library/tmux/term%2Fone/request",
+                    { request: "new-window" },
+                    { cookie: sessionCookie, "x-chan-csrf": csrf },
+                ).status,
+                204,
+            );
+
+            // 8. Delete + readback absence + 404 replay + ledger check
+            assert.equal(
+                invoke(
+                    s2,
+                    "DELETE",
+                    "/api/library/windows/w-hidden-ws",
+                    null,
+                    { cookie: sessionCookie, "x-chan-csrf": csrf },
+                ).status,
+                204,
+            );
+            const afterDelWins = JSON.parse(
+                invoke(s2, "GET", "/api/library/windows", null, { cookie: sessionCookie }).body,
+            );
+            assert.equal(
+                afterDelWins.find((w) => w.window_id === "w-hidden-ws"),
+                undefined,
+            );
+            assert.equal(
+                invoke(
+                    s2,
+                    "DELETE",
+                    "/api/library/windows/w-hidden-ws",
+                    null,
+                    { cookie: sessionCookie, "x-chan-csrf": csrf },
+                ).status,
+                404,
+            );
+
+            const ledgerResp = invoke(s2, "GET", "/_test/ledger");
+            assert.equal(ledgerResp.status, 200);
+            const ledger = JSON.parse(ledgerResp.body);
+            assert.ok(
+                ledger.navigations.some((n) => n.params?.w === "w-hidden-ws" && n.params?.start === "terminal"),
+                "ledger must record w-hidden-ws navigation",
+            );
+            assert.ok(
+                ledger.windowOps.some((op) => op.op === "visibility" && op.hidden === false),
+                "ledger must record visibility unhide",
+            );
+            assert.ok(
+                ledger.windowOps.some((op) => op.op === "label" && op.label === "pair-label"),
+                "ledger must record label update",
+            );
+            assert.ok(
+                ledger.windowOps.some((op) => op.op === "delete" && op.deleted === true),
+                "ledger must record window deletion",
+            );
+            assert.ok(
+                ledger.tmuxRequests.some(
+                    (t) =>
+                        t.rawSegment === "term%2Fone" &&
+                        t.connection === "term/one" &&
+                        t.request?.request === "new-window",
+                ),
+                "ledger must record percent-encoded tmux request",
+            );
+
             assertTestOk(
                 libResults,
                 "window_ops::tests::remote_hide_close_label_and_tmux_mutate_devserver_and_refresh_feed",
             );
-            return "F4+F7 full remote window lifecycle wired";
-        });
-        check("tier3", "t3-f5-f8-ios-launcher-to-window-and-all-computers-back", () => {
-            assertTestOk(
-                libResults,
-                "tests::toggle_launcher_and_show_computers_and_abandon_and_reconnect_flow",
-            );
-            assert.ok(iosCapJson.permissions.includes("allow-toggle-launcher-panel"));
-            return "F5+F8 launcher return navigation aligned";
+            return "F2+F4+F7 authenticated lifecycle + CSRF + readback + ledger passed";
         });
         check("tier3", "t3-f6-f7-single-webview-create-and-remote-close-refresh", () => {
             assertTestOk(
                 libResults,
-                "tests::create_library_window_and_open_new_window_handle_tmux_workspace_and_terminal",
+                "tests::f6_f7_create_mutate_close_and_focus_observe_shared_feed",
             );
-            assertTestOk(
-                libResults,
-                "window_ops::tests::remote_hide_close_label_and_tmux_mutate_devserver_and_refresh_feed",
-            );
-            assertTestOk(libResults, "tests::refresh_devserver_windows_updates_feed_and_signals_library_change");
-            return "F6+F7 single-webview window ops + refresh aligned";
+            return "F6+F7 single-webview create/hide/label/focus/close shared feed passed";
         });
         check("tier3", "t3-f6-f8-main-edge-gesture-and-toggle-launcher-panel", () => {
-            assert.deepEqual(iosCapJson.windows, ["main"]);
-            assert.ok(iosCapJson.permissions.includes("allow-toggle-launcher-panel"));
-            assert.ok(
-                appTomlPerms.get("allow-show-computers-for-window")?.includes("show_computers_for_window"),
-                "permissions/app.toml missing allow-show-computers-for-window",
-            );
             assertTestOk(
                 libResults,
-                "runtime_capability::tests::gateway_window_commands_match_exact_origin_grant_app_toml_and_invoke_handler",
+                "tests::f6_f8_runtime_acl_show_computers_delivery_and_launcher_toggle",
             );
-            return "F6+F8 main window grants aligned";
+            assertTestOk(libResults, "window_ops::tests::ios_setup_spawns_the_window_ops_consumer");
+            return "F6+F8 runtime ACL, show_computers card delivery, toggle_launcher, and edge gesture aligned";
         });
         check("tier3", "t3-f1-f9-ios17-sim-plist-and-webview-boot", () => {
-            assert.equal(tauriConf.version, "0.135.0");
-            assert.equal(tauriConf.bundle?.iOS?.minimumSystemVersion, "17.0");
-            assert.equal(infoPlistJson.CFBundleShortVersionString, "0.135.0");
-            assert.ok(projectYml.includes("iOS: 17.0"));
-            assertTestOk(harnessResults, "f1_permissions_and_ios_capability_schemas_are_valid");
-            return "F1+F9 Simulator plist and iOS 17 config aligned";
+            assertTestOk(
+                libResults,
+                "tests::f1_f9_context_boot_webview_and_embedded_launcher_align",
+            );
+
+            const sdkPathRes = spawnSync("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-path"], {
+                encoding: "utf8",
+                timeout: 15_000,
+            });
+            const platPathRes = spawnSync(
+                "xcrun",
+                ["--sdk", "iphonesimulator", "--show-sdk-platform-path"],
+                { encoding: "utf8", timeout: 15_000 },
+            );
+            if (sdkPathRes.status !== 0 || platPathRes.status !== 0) {
+                throw new Error("xcrun --sdk iphonesimulator lookup failed");
+            }
+            const sdkPath = sdkPathRes.stdout.trim();
+            const platPath = platPathRes.stdout.trim();
+            const scratchRoot = join(repoRoot, "target/e2e-ios");
+            mkdirSync(scratchRoot, { recursive: true });
+            const cacheDir = mkdtempSync(join(scratchRoot, "swift-cache-"));
+            try {
+                const swiftRes = spawnSync(
+                    "xcrun",
+                    [
+                        "swiftc",
+                        "-typecheck",
+                        "-module-cache-path",
+                        cacheDir,
+                        "-sdk",
+                        sdkPath,
+                        "-target",
+                        "arm64-apple-ios17.0-simulator",
+                        "-F",
+                        join(platPath, "Developer/Library/Frameworks"),
+                        "-I",
+                        join(platPath, "Developer/usr/lib"),
+                        join(repoRoot, "scripts/e2e/ios/ChanUITests/Tests/ChanSmokeUITests.swift"),
+                    ],
+                    { cwd: repoRoot, encoding: "utf8", timeout: 60_000 },
+                );
+                assert.equal(
+                    swiftRes.status,
+                    0,
+                    `swiftc -typecheck failed: ${(swiftRes.stderr || swiftRes.stdout || "").trim()}`,
+                );
+            } finally {
+                rmSync(cacheDir, { recursive: true, force: true });
+            }
+
+            const builtPlist = join(repoRoot, "mobile/ios/gen/apple/build/arm64-sim/Chan.app/Info.plist");
+            if (existsSync(builtPlist)) {
+                const builtInfo = parseInfoPlist(builtPlist);
+                assert.equal(builtInfo.MinimumOSVersion, "17.0");
+                assert.equal(builtInfo.CFBundleShortVersionString, "0.135.0");
+                assert.equal(builtInfo.CFBundleVersion, "0.135.0");
+                assert.equal(builtInfo.CFBundleIdentifier, "app.chan.ios");
+                assert.equal(builtInfo.NSAppTransportSecurity?.NSAllowsLocalNetworking, true);
+            }
+            return "F1+F9 context boot, embedded launcher, swiftc typecheck, and app bundle plist aligned";
         });
     }
 

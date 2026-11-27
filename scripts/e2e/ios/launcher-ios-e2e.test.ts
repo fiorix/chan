@@ -126,6 +126,7 @@ beforeEach(() => {
 afterEach(() => {
     cleanupMount();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     document.head.querySelectorAll('meta[name="chan-launcher-surface"]').forEach((el) => el.remove());
     if (originalUa) Object.defineProperty(Navigator.prototype, "userAgent", originalUa);
     if (originalPlatform) Object.defineProperty(Navigator.prototype, "platform", originalPlatform);
@@ -628,5 +629,351 @@ describe("tier2", () => {
         expect(activeCommandLauncherDraft().visible).toBe(false);
 
         stopWatching();
+    });
+});
+
+describe("tier3", () => {
+    it("t3-f4-f5-ios-launcher-remote-open-unhides-and-stamps-url", async () => {
+        setNavigatorProfile({ userAgent: IPHONE_UA, platform: "iPhone", maxTouchPoints: 5 });
+        setSurfaceMeta("desktop");
+        const { flushSync, mount, tick, unmount } = await import("svelte");
+        cleanupUnmount = unmount;
+        const caps = await import("../../../web/packages/launcher/src/state/capabilities");
+        expect(caps.isIOS).toBe(true);
+        expect(caps.hasDesktopBridge).toBe(true);
+
+        const { backend, stopWatching } = await setupSeededLibrary();
+        const { default: Library } = await import(
+            "../../../web/packages/launcher/src/components/Library.svelte"
+        );
+        const { windowUrl } = await import(
+            "../../../web/packages/launcher/src/lib/windowUrl"
+        );
+        const { verifyWindowNavigationParams } = await import("./ios-wireguard-oracle.mjs");
+        type WindowSet = import("../../../web/packages/launcher/src/api/library").WindowSet;
+
+        const openWindowSpy = vi.spyOn(backend, "openWindow");
+        const openWsSpy = vi.spyOn(backend, "openDevserverWorkspace");
+        const openTermSpy = vi.spyOn(backend, "openDevserverTerminal");
+
+        const feedSnapshots: WindowSet[] = [];
+        const unwatch = backend.watchWindows((set) => {
+            feedSnapshots.push(structuredClone(set));
+        });
+
+        try {
+            mountTarget = document.createElement("div");
+            document.body.appendChild(mountTarget);
+            mountedApp = mount(Library, { target: mountTarget });
+            flushSync();
+            await tick();
+
+            expect(mountTarget.querySelector('.slot[data-key="local"]')).toBeNull();
+            expect(mountTarget.textContent ?? "").not.toContain("This machine");
+
+            const allWindowsSlot = mountTarget.querySelector('.slot.active[data-key="all-windows"]');
+            expect(allWindowsSlot).not.toBeNull();
+            expect(allWindowsSlot?.getAttribute("aria-current")).toBe("true");
+
+            const hiddenRow = mountTarget.querySelector<HTMLLIElement>(
+                'li[data-window-id="w-ds1-term-1"]',
+            );
+            expect(hiddenRow).not.toBeNull();
+            expect(hiddenRow?.textContent ?? "").toContain("prod · Hidden");
+            const showBtn = hiddenRow!.querySelector<HTMLButtonElement>(
+                'button[aria-label="Show window"]',
+            );
+            expect(showBtn).not.toBeNull();
+
+            showBtn!.click();
+            await new Promise((r) => setTimeout(r, 20));
+            flushSync();
+            await tick();
+
+            expect(openWindowSpy).toHaveBeenCalledWith("w-ds1-term-1");
+            const latestAfterOpen = feedSnapshots.at(-1);
+            expect(latestAfterOpen).toBeDefined();
+            const unhiddenRec = latestAfterOpen!.windows.find(
+                (w) => w.window_id === "w-ds1-term-1",
+            );
+            expect(unhiddenRec).toBeDefined();
+            expect(unhiddenRec!.hidden).toBe(false);
+            expect(unhiddenRec!.connected).toBe(true);
+
+            const updatedRow = mountTarget.querySelector<HTMLLIElement>(
+                'li[data-window-id="w-ds1-term-1"]',
+            );
+            expect(updatedRow?.textContent ?? "").toContain("prod · Shown");
+            expect(
+                updatedRow?.querySelector('button[aria-label="Hide window"]'),
+            ).not.toBeNull();
+
+            const remoteOrigin = "https://alice--0123456789ab.p1.localtest.me";
+            verifyWindowNavigationParams(windowUrl(unhiddenRec!, remoteOrigin), {
+                windowId: "w-ds1-term-1",
+                kind: "terminal",
+                libraryId: "lib-7f3a9c21b40d8e65",
+            });
+
+            const prodDot = mountTarget.querySelector<HTMLButtonElement>('.dot[title="prod"]');
+            expect(prodDot).not.toBeNull();
+            prodDot!.click();
+            flushSync();
+            await tick();
+            const prodSlot = mountTarget.querySelector('.slot.active[data-key="ds-1"]');
+            expect(prodSlot).not.toBeNull();
+            expect(prodSlot?.getAttribute("aria-current")).toBe("true");
+
+            const newWsBtn = mountTarget.querySelector<HTMLButtonElement>(
+                'button[aria-label="New terminal window of api"]',
+            );
+            const newTermBtn = mountTarget.querySelector<HTMLButtonElement>(
+                'button[aria-label="New terminal on prod"]',
+            );
+            expect(newWsBtn).not.toBeNull();
+            expect(newTermBtn).not.toBeNull();
+
+            newWsBtn!.click();
+            newTermBtn!.click();
+            await new Promise((r) => setTimeout(r, 20));
+            flushSync();
+            await tick();
+
+            expect(openWsSpy).toHaveBeenCalledWith("ds-1", "/srv/api", true);
+            expect(openTermSpy).toHaveBeenCalledWith("ds-1");
+
+            const latestAfterMint = feedSnapshots.at(-1)!;
+            const wsRec = latestAfterMint.windows.find(
+                (w) =>
+                    w.library_id === "lib-7f3a9c21b40d8e65" &&
+                    w.kind === "workspace" &&
+                    w.start_terminal === true &&
+                    w.workspace_path === "/srv/api",
+            );
+            const termRec = latestAfterMint.windows.find(
+                (w) =>
+                    w.library_id === "lib-7f3a9c21b40d8e65" &&
+                    w.kind === "terminal" &&
+                    w.token === "tok_remote_term",
+            );
+            const ctrlRec = latestAfterMint.windows.find(
+                (w) => w.window_id === "w-ds1-control",
+            );
+            expect(wsRec).toBeDefined();
+            expect(termRec).toBeDefined();
+            expect(ctrlRec).toBeDefined();
+
+            const expandApi = prodSlot!.querySelector<HTMLButtonElement>(
+                'button[aria-label="Expand api"]',
+            );
+            expect(expandApi).not.toBeNull();
+            expandApi!.click();
+            flushSync();
+            await tick();
+            const wsWindows = prodSlot!.querySelector(".ws-windows");
+            expect(wsWindows).not.toBeNull();
+            expect(wsWindows!.querySelectorAll(".row[data-deck-row]")).toHaveLength(2);
+            expect(wsWindows!.textContent ?? "").toContain("Window 1");
+
+            verifyWindowNavigationParams(windowUrl(wsRec!, remoteOrigin), {
+                windowId: wsRec!.window_id,
+                kind: "workspace",
+                startTerminal: true,
+                libraryId: "lib-7f3a9c21b40d8e65",
+                preservedToken: "tok_remote_ws",
+            });
+            verifyWindowNavigationParams(windowUrl(termRec!, remoteOrigin), {
+                windowId: termRec!.window_id,
+                kind: "terminal",
+                libraryId: "lib-7f3a9c21b40d8e65",
+                preservedToken: "tok_remote_term",
+            });
+            verifyWindowNavigationParams(windowUrl(ctrlRec!, remoteOrigin), {
+                windowId: "w-ds1-control",
+                kind: "control",
+                libraryId: "lib-7f3a9c21b40d8e65",
+                preservedToken: "tok_ds1_control",
+            });
+        } finally {
+            unwatch();
+            stopWatching();
+        }
+    });
+
+    it("t3-f5-f8-ios-launcher-to-window-and-all-computers-back", async () => {
+        setNavigatorProfile({ userAgent: IPHONE_UA, platform: "iPhone", maxTouchPoints: 5 });
+        setSurfaceMeta("desktop");
+        const { flushSync, mount, tick, unmount } = await import("svelte");
+        cleanupUnmount = unmount;
+
+        const backendMod = await import(
+            "../../../web/packages/launcher/src/api/backend"
+        );
+        const { mockApi, resetMockRemoteWorkspaces } = await import(
+            "../../../web/packages/launcher/src/api/mock"
+        );
+        const { library, stopWatching } = await import(
+            "../../../web/packages/launcher/src/state/library.svelte"
+        );
+        const { decks, resetDeck } = await import(
+            "../../../web/packages/launcher/src/state/deck.svelte"
+        );
+        const { screen } = await import(
+            "../../../web/packages/launcher/src/state/screen.svelte"
+        );
+        const {
+            activeCommandLauncherDraft,
+            clearCommandLauncherDraft,
+            clearRecentWindows,
+            closeCommandLauncher,
+        } = await import("../../../web/packages/launcher/src/state/commandLauncher.svelte");
+        const { clearNotices } = await import(
+            "../../../web/packages/launcher/src/state/notices.svelte"
+        );
+        const { default: App } = await import(
+            "../../../web/packages/launcher/src/App.svelte"
+        );
+
+        resetDeck();
+        screen.current = "computers";
+        screen.flips = 0;
+        clearCommandLauncherDraft();
+        closeCommandLauncher();
+        clearRecentWindows();
+        clearNotices();
+        resetMockRemoteWorkspaces();
+        backendMod.setBackend(mockApi);
+
+        const openTermSpy = vi.spyOn(backendMod.backend, "openDevserverTerminal");
+
+        let pendingCard: string | null = "ds-1";
+        let cardListener: ((event: { payload: { devserverId: string | null } }) => void) | null =
+            null;
+        const invoke = vi.fn(async (cmd: string) => {
+            if (cmd === "mobile_deliver_pending_show_card") {
+                if (pendingCard !== null && cardListener) {
+                    const id = pendingCard;
+                    pendingCard = null;
+                    cardListener({ payload: { devserverId: id } });
+                }
+                return null;
+            }
+            return null;
+        });
+        const listen = vi.fn(
+            async (
+                eventName: string,
+                cb: (event: { payload: { devserverId: string | null } }) => void,
+            ) => {
+                if (eventName === "launcher-show-devserver-card") {
+                    cardListener = cb;
+                }
+                return () => {
+                    if (eventName === "launcher-show-devserver-card" && cardListener === cb) {
+                        cardListener = null;
+                    }
+                };
+            },
+        );
+        vi.stubGlobal("__TAURI__", { core: { invoke }, event: { listen } });
+
+        mountTarget = document.createElement("div");
+        document.body.appendChild(mountTarget);
+        mountedApp = mount(App, { target: mountTarget, props: { animatedBackground: false } });
+        flushSync();
+
+        try {
+            expect(library.loaded).toBe(false);
+            await tick();
+            expect(cardListener).not.toBeNull();
+
+            await invoke("mobile_deliver_pending_show_card");
+            flushSync();
+            expect(decks.computers.activeKey).toBe("ds-1");
+
+            await new Promise((r) => setTimeout(r, 20));
+            flushSync();
+            await tick();
+
+            expect(library.loaded).toBe(true);
+            expect(mountTarget.querySelector(".key-bar")).toBeNull();
+            expect(mountTarget.querySelector('.slot[data-key="local"]')).toBeNull();
+            expect(screen.current).toBe("computers");
+            expect(decks.computers.activeKey).toBe("ds-1");
+            const prodSlot = mountTarget.querySelector('.slot.active[data-key="ds-1"]');
+            expect(prodSlot).not.toBeNull();
+            expect(prodSlot?.getAttribute("aria-current")).toBe("true");
+
+            const titleToggle = mountTarget.querySelector<HTMLButtonElement>("button.title-toggle");
+            expect(titleToggle).not.toBeNull();
+            titleToggle!.click();
+            flushSync();
+            await tick();
+            expect(screen.current).toBe("gateways");
+            expect(mountTarget.querySelector(".gateways-screen")).not.toBeNull();
+
+            pendingCard = "local";
+            await invoke("mobile_deliver_pending_show_card");
+            flushSync();
+            await tick();
+            expect(screen.current).toBe("computers");
+            expect(decks.computers.activeKey).toBe("all-windows");
+            const allWinSlot = mountTarget.querySelector('.slot.active[data-key="all-windows"]');
+            expect(allWinSlot).not.toBeNull();
+            expect(allWinSlot?.getAttribute("aria-current")).toBe("true");
+            expect(mountTarget.querySelector('.slot[data-key="local"]')).toBeNull();
+
+            const openLauncherBtn = mountTarget.querySelector<HTMLButtonElement>(
+                'button[aria-label="Open command launcher"]',
+            );
+            expect(openLauncherBtn).not.toBeNull();
+            openLauncherBtn!.click();
+            flushSync();
+            await tick();
+
+            const dialog = mountTarget.querySelector('[role="dialog"][aria-label="Command launcher"]');
+            expect(dialog).not.toBeNull();
+
+            await queryDeck(mountTarget, "new terminal");
+            const titles = deckTitles(mountTarget);
+            for (const forbidden of [
+                "New terminal",
+                "New local terminal",
+                "New workspace",
+                "This machine",
+            ]) {
+                expect(titles).not.toContain(forbidden);
+            }
+            const prodBtn = [...mountTarget.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+                (btn) => btn.querySelector(".deck-result-title")?.textContent?.trim() === "New terminal on prod",
+            );
+            expect(prodBtn).toBeDefined();
+
+            const beforeCount = library.windows.length;
+            prodBtn!.click();
+            await new Promise((r) => setTimeout(r, 20));
+            flushSync();
+            await tick();
+
+            expect(openTermSpy).toHaveBeenCalledTimes(1);
+            expect(openTermSpy).toHaveBeenCalledWith("ds-1");
+            expect(activeCommandLauncherDraft().visible).toBe(false);
+            expect(library.windows.length).toBeGreaterThan(beforeCount);
+
+            const esc = new KeyboardEvent("keydown", {
+                key: "Escape",
+                bubbles: true,
+                cancelable: true,
+            });
+            window.dispatchEvent(esc);
+            expect(esc.defaultPrevented).toBe(true);
+            expect(invoke).toHaveBeenCalledWith("toggle_launcher_panel", undefined);
+        } finally {
+            stopWatching();
+            closeCommandLauncher();
+            clearCommandLauncherDraft();
+            clearNotices();
+            vi.unstubAllGlobals();
+        }
     });
 });

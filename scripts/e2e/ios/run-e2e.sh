@@ -123,7 +123,7 @@ run_stream_verdicts() {
 
 run_vitest_ios() {
     local target_tier="$1"
-    local expected_count=5
+    local expected_count="${2:-5}"
     local vitest_bin="${CHAN_E2E_VITEST_BIN:-$REPO/web/node_modules/.bin/vitest}"
     if [ ! -x "$vitest_bin" ]; then
         PREREQ_COUNT=$((PREREQ_COUNT + 1))
@@ -142,6 +142,10 @@ run_vitest_ios() {
 const fs = require("node:fs");
 const [tier, expectedStr, jsonPath, rcStr, sha, logPath] = process.argv.slice(1);
 const expected = Number(expectedStr);
+if (!Number.isInteger(expected) || expected <= 0) {
+    console.log(`verdict ${tier} f5-vitest-runner-${tier} 1 FAIL invalid expected count ${expectedStr} (${sha})`);
+    process.exit(1);
+}
 const rc = Number(rcStr);
 const cleanLine = (s) => String(s || "").replace(/\s+/g, " ").trim().slice(0, 180);
 
@@ -304,13 +308,13 @@ run_tier1() {
     run_make_verdict tier1 f9-ios-check-aarch64 ios-check
     run_make_verdict tier1 f9-ios-lint-clippy ios-lint
     run_make_verdict tier1 f9-ios-unit-suite ios-test
-    if ! run_vitest_ios tier1; then :; fi
+    if ! run_vitest_ios tier1 5; then :; fi
     run_stream_verdicts node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 1
 }
 
 run_tier2() {
     echo "=== Tier 2: Boundary, Negative, and Live Loopback WireGuard ($SHA) ==="
-    if ! run_vitest_ios tier2; then :; fi
+    if ! run_vitest_ios tier2 5; then :; fi
     run_stream_verdicts "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
     run_stream_verdicts node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 2
     run_cmd_verdict tier2 f9-neg-probe-red-wg-live bash -c "rc=0; '$SCRIPT_DIR/run-wireguard-mock-e2e.sh' --probe-red >/dev/null 2>&1 || rc=\$?; [ \"\$rc\" -eq 1 ]"
@@ -322,6 +326,7 @@ run_tier2() {
 
 run_tier3() {
     echo "=== Tier 3: Pairwise Cross-Feature Matrix ($SHA) ==="
+    if ! run_vitest_ios tier3 2; then :; fi
     run_stream_verdicts node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 3
 }
 
