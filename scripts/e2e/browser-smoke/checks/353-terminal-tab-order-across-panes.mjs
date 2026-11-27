@@ -25,7 +25,9 @@
 // - control: A made the active pane by a press, Tab from A's tab label lands
 //   in A's terminal and the typed keys reach A's PTY. Without it a pass could
 //   not tell a terminal that is out of the Tab order from a walk that never
-//   lands in any terminal in this engine.
+//   lands in any terminal in this engine. The press is on A's terminal with
+//   B active and both terminals attached and recording, so a press that
+//   leaves pane A inactive or the keyboard outside A's terminal fails it.
 //
 // A setup the check could not make (no control socket, a terminal that did
 // not attach or record, a survey that did not appear, a start the script
@@ -117,6 +119,9 @@ async function where(page, targetTab, awayTab, start = null) {
       awayPane: away?.closest(".pane")?.getAttribute("data-pane-id") ?? null,
       inTargetHost: relation === "inside",
       inAwayHost: Boolean(awayHost && !onBody && awayHost.contains(active)),
+      // A terminal is attached while its widget's input is in its host.
+      targetAttached: Boolean(targetHost?.querySelector("textarea")),
+      awayAttached: Boolean(awayHost?.querySelector("textarea")),
       inTargetTab: Boolean(target && !onBody && target.contains(active)),
       relation,
       atStart: Boolean(start) && !onBody && active === document.querySelector(start),
@@ -131,15 +136,32 @@ async function where(page, targetTab, awayTab, start = null) {
   }, { targetTab, awayTab, start });
 }
 
-async function clickTerminal(page, tab) {
+const PRESS_MS = 10_000;
+
+/// Press a terminal's host: true once its pane is the active one and its
+/// host holds the keyboard, false when that is not so within the wait. A
+/// press that cannot be made throws.
+async function pressTerminal(page, tab) {
   await page.click(`${terminalSelector(tab)} .terminal-host`);
-  await page.waitForFunction((selector) => {
-    const terminal = document.querySelector(selector);
-    const pane = terminal?.closest(".pane");
-    const focused = pane && (document.querySelectorAll(".pane").length === 1 || pane.classList.contains("focused"));
-    return focused &&
-      terminal.querySelector(".terminal-host")?.contains(document.activeElement);
-  }, { timeout: 10_000 }, terminalSelector(tab));
+  try {
+    await page.waitForFunction((selector) => {
+      const terminal = document.querySelector(selector);
+      const pane = terminal?.closest(".pane");
+      const focused = pane && (document.querySelectorAll(".pane").length === 1 || pane.classList.contains("focused"));
+      return focused &&
+        terminal.querySelector(".terminal-host")?.contains(document.activeElement);
+    }, { timeout: PRESS_MS }, terminalSelector(tab));
+    return true;
+  } catch (error) {
+    if (error?.name === "TimeoutError") return false;
+    throw error;
+  }
+}
+
+async function clickTerminal(page, tab) {
+  if (!(await pressTerminal(page, tab))) {
+    throw new Error(`a press on ${tab} did not make its pane active with the keyboard in its terminal within ${PRESS_MS} ms`);
+  }
 }
 
 /// Script focus on the walk's start, as assistive technology can place it;
@@ -323,12 +345,26 @@ async function runTabOrder(ctx, directory, save) {
     result.screenshot = await shot(`353-${leg.kind}`);
   }
 
-  /// With A made the active pane by a press, Tab from A's tab label lands in
-  /// A's terminal and the typed keys reach A's PTY.
+  /// A press on A's terminal with B the active pane makes A the active pane
+  /// and gives A's terminal the keyboard; then Tab from A's tab label lands
+  /// in A's terminal and the typed keys reach A's PTY.
   async function control(result) {
-    await clickTerminal(page, target.tab).catch((error) => {
-      throw environment(`a press did not give pane A's terminal the keyboard: ${firstLine(error)}`);
+    result.beforePress = await read();
+    const ready = result.beforePress.targetAttached && result.beforePress.awayAttached &&
+      existsSync(files.target) && existsSync(files.away);
+    if (!ready || result.beforePress.focusedPane !== run.panes.away) {
+      throw environment(`the press on pane A's terminal is not set up (both terminals attached and recording, pane B active): ${JSON.stringify(result.beforePress)}`);
+    }
+    const took = await pressTerminal(page, target.tab).catch((error) => {
+      throw environment(`the press on pane A's terminal could not be made: ${firstLine(error)}`);
     });
+    if (!took) {
+      result.afterPress = await read();
+      const { focusedPane, inTargetHost, name, element } = result.afterPress;
+      result.failures.push(`a press on pane A's terminal with pane B active left the active pane ${focusedPane} (pane A is ${run.panes.target}) and the keyboard ${inTargetHost ? "in A's terminal" : `on ${name || element}`} after ${PRESS_MS} ms`);
+      result.screenshot = await shot("353-control-press");
+      return;
+    }
     const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
     await walk(result, run.panes.target, run.panes.target, "Tab");
     if (result.ended !== "A's terminal") {
