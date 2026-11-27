@@ -289,8 +289,8 @@ pub fn is_workspace_webview_label(label: &str) -> bool {
 
 /// The URL of a local window's page: its serving tenant's shell on the
 /// embedded loopback server at `addr`, with the record's token for the page to
-/// take. The window's build and its system-browser copy both start from this
-/// string.
+/// take. The window's build, its system-browser copy and its Reload all start
+/// from this string.
 fn local_window_url(addr: SocketAddr, record: &WindowRecord) -> String {
     format!(
         "http://{addr}{}/index.html?t={}",
@@ -331,6 +331,43 @@ pub(crate) fn open_watched_local_window(
         },
         completion,
     )
+}
+
+/// Navigate the open local window of `record` to its page's URL again, for a
+/// Reload. The page keeps its token only in session storage, where an in-page
+/// reload looks for it and where WebKit can lose it with its network process;
+/// the URL carries the record's token, the serving tenant's live one, which
+/// the window watcher shows a window only with. The target is the one the
+/// window was built with: its session, kind and seed parameters, this
+/// desktop's holder tag and the transparency mark. A window that is not open
+/// is gone, and none is built here.
+pub(crate) fn reload_watched_local_window<R: Runtime>(
+    app: &AppHandle<R>,
+    addr: SocketAddr,
+    record: &WindowRecord,
+) -> Result<RetargetOutcome, String> {
+    let label = crate::window_watcher::native_label(record);
+    let Some(window) = app.get_webview_window(&label) else {
+        return Ok(RetargetOutcome::Gone);
+    };
+    let mut target = workspace_window_target_url(
+        app,
+        &label,
+        &record.window_id,
+        &record.library_id,
+        &local_window_url(addr, record),
+        watched_window_kind(record),
+        WindowTargetOptions {
+            holder: desktop_holder_tag(),
+            start_terminal: record.start_terminal,
+        },
+    )?;
+    // The window was built transparent; the page it navigates to must know.
+    mark_transparent_window(&mut target);
+    window
+        .navigate(target)
+        .map_err(|e| format!("reloading {label}: {e}"))?;
+    Ok(RetargetOutcome::Navigated)
 }
 
 /// Open a watched REMOTE (devserver) window -- the watcher's analog of
@@ -2469,6 +2506,10 @@ mod tests {
                 "/// Mint a standalone terminal window",
             ),
             ("fn browser_window_url", "fn workspace_window_target_url"),
+            (
+                "fn reload_watched_local_window",
+                "/// Open a watched REMOTE (devserver) window",
+            ),
         ] {
             let body = SERVE_RS
                 .split(function)
@@ -2756,6 +2797,10 @@ mod tests {
                 "fn build_workspace_window_with_completion(",
                 "/// Compose the browser-facing URL",
             ),
+            (
+                "pub(crate) fn reload_watched_local_window<R: Runtime>(",
+                "/// Open a watched REMOTE (devserver) window",
+            ),
         ] {
             let body = SOURCE
                 .split(start)
@@ -2769,6 +2814,142 @@ mod tests {
                 "{start} passes the desktop holder tag"
             );
         }
+    }
+
+    /// A local window's Reload navigates the same webview to the URL its build
+    /// loads, so the page gets its token from the URL and not from session
+    /// storage, with the window's session, holder tag, kind and transparency
+    /// mark; a workspace window minted to start a terminal is told so again. A
+    /// window that is not open is gone and nothing is built for it.
+    #[test]
+    fn a_local_reload_navigates_the_window_to_its_tokened_url() {
+        let app = tauri::test::mock_app();
+        app.manage(empty_state());
+        let addr: SocketAddr = "127.0.0.1:1234".parse().expect("address");
+        let tag = desktop_holder_tag().expect("desktop entropy");
+        let terminal = WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "local".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        let workspace = WindowRecord {
+            window_id: "w-2".into(),
+            kind: chan_server::WindowKind::Workspace,
+            workspace_path: Some("/notes".into()),
+            prefix: "/notes".into(),
+            token: "ws-tok".into(),
+            start_terminal: true,
+            ..terminal.clone()
+        };
+        for (record, kind, start) in [
+            (&terminal, Some("terminal"), None),
+            (&workspace, None, Some("terminal")),
+        ] {
+            let label = crate::window_watcher::native_label(record);
+            // The page has taken its token out of the URL, as it does on load.
+            let loaded: tauri::Url = format!(
+                "http://{addr}{}/index.html?w={}&transparent=1",
+                record.prefix, record.window_id
+            )
+            .parse()
+            .expect("the loaded URL");
+            let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(loaded))
+                .build()
+                .expect("a mock window");
+            assert_eq!(
+                reload_watched_local_window(app.handle(), addr, record),
+                Ok(RetargetOutcome::Navigated),
+                "{label}: the Reload navigates the open window"
+            );
+            let navigated = window.url().expect("the navigated URL");
+            assert_eq!(
+                navigated.path(),
+                format!("{}/index.html", record.prefix),
+                "{label}: the serving tenant's shell"
+            );
+            let value = |key: &str| {
+                let values = navigated
+                    .query_pairs()
+                    .filter(|(name, _)| name == key)
+                    .map(|(_, value)| value.into_owned())
+                    .collect::<Vec<_>>();
+                assert!(values.len() <= 1, "{label}: one {key} in {navigated}");
+                values.into_iter().next()
+            };
+            assert_eq!(
+                value("t").as_deref(),
+                Some(record.token.as_str()),
+                "{label}: token"
+            );
+            assert_eq!(
+                value("w").as_deref(),
+                Some(record.window_id.as_str()),
+                "{label}: session"
+            );
+            assert_eq!(value("h").as_deref(), Some(tag), "{label}: holder tag");
+            assert_eq!(value("kind").as_deref(), kind, "{label}: kind");
+            assert_eq!(value("start").as_deref(), start, "{label}: start");
+            assert_eq!(value("lib").as_deref(), Some("local"), "{label}: library");
+            assert_eq!(
+                value("transparent").as_deref(),
+                Some("1"),
+                "{label}: transparency"
+            );
+        }
+
+        let closed = WindowRecord {
+            window_id: "w-3".into(),
+            ..terminal.clone()
+        };
+        assert_eq!(
+            reload_watched_local_window(app.handle(), addr, &closed),
+            Ok(RetargetOutcome::Gone),
+            "a Reload of a window that is not open navigates nothing"
+        );
+        assert!(
+            app.get_webview_window("local::w-3").is_none(),
+            "a Reload builds no window"
+        );
+    }
+
+    // The native surface needs a Wry `AppHandle`, which no test builds, so the
+    // watcher's side of a local Reload is read from its source: a refresh of a
+    // local window navigates only for a Reload, through the function above.
+    #[test]
+    fn a_local_windows_refresh_navigates_only_for_a_reload() {
+        let wiring = include_str!("window_watcher_wiring.rs");
+        let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
+        let local = source_section(
+            refresh,
+            "if let WindowOpener::Local { addr } = &self.opener {",
+            "let label = native_label(record);",
+        );
+        let flat = local.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(
+                "if reload { match serve::reload_watched_local_window(&self.app, *addr, record)"
+            ),
+            "a local refresh navigates only for a Reload"
+        );
+        assert!(
+            flat.trim_end().ends_with("} return; }"),
+            "a local refresh never reaches the remote admission"
+        );
     }
 
     #[test]
@@ -4407,6 +4588,18 @@ mod tests {
         assert!(
             marked < navigated,
             "the target is marked before it is navigated"
+        );
+
+        let reload = section("\npub(crate) fn reload_watched_local_window<R: Runtime>(");
+        let marked = reload
+            .find("mark_transparent_window(&mut target);")
+            .expect("the local Reload marks its target");
+        let navigated = reload
+            .find(".navigate(target)")
+            .expect("the local Reload navigates the target");
+        assert!(
+            marked < navigated,
+            "the local Reload marks its target before it navigates"
         );
 
         let browser = section("\npub(crate) fn browser_window_url<R: Runtime>(");

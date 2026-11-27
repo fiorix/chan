@@ -4613,10 +4613,35 @@ fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> R
 }
 
 /// Hand a Reload of the window `label` to the window watcher that owns it.
-/// `Ok(true)` when a watcher took it; `Ok(false)` leaves the Reload to the
-/// page's own `location.reload()`.
+/// `Ok(true)` when a watcher took it and navigates the window to its record's
+/// URL; `Ok(false)` leaves the Reload to the page's own `location.reload()`.
 fn route_window_reload(state: &Arc<AppState>, label: &str) -> Result<bool, String> {
+    if reload_local_window_from_feed(state, label) {
+        return Ok(true);
+    }
     reload_devserver_window_from_feed(state, label)
+}
+
+/// Ask the local window watcher to navigate this existing native window to
+/// its record's URL, token included. The page keeps its token only in session
+/// storage, which WebKit can lose with its network process, so an in-page
+/// reload of a local window can come back with no token; the record carries
+/// the serving tenant's live token at every snapshot. A desktop whose watcher
+/// has not started, a label with no record in the local feed (an off
+/// workspace's windows are not in it) and a record with no token (no tenant
+/// serves it yet) leave Reload in page.
+fn reload_local_window_from_feed(state: &AppState, label: &str) -> bool {
+    if !label.starts_with("local::") {
+        return false;
+    }
+    let (Some(view), Some(embedded)) = (state.local_watcher_view(), state.embedded()) else {
+        return false;
+    };
+    let tokened = embedded
+        .local_window_records()
+        .iter()
+        .any(|record| window_watcher::native_label(record) == label && !record.token.is_empty());
+    tokened && view.request_reload(label)
 }
 
 /// Ask the connection's watcher to retarget this existing native window from

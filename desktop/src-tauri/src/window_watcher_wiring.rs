@@ -90,10 +90,6 @@ enum WindowOpener {
 }
 
 impl WindowOpener {
-    fn is_remote(&self) -> bool {
-        matches!(self, WindowOpener::Remote { .. })
-    }
-
     fn is_gateway(&self) -> bool {
         matches!(self, WindowOpener::Remote { conn } if conn.gateway.is_some())
     }
@@ -903,10 +899,28 @@ impl NativeSurface for TauriNativeSurface {
 
     fn refresh(&self, record: &WindowRecord, reload: bool) {
         // The caption is editable while the window is open, so every reconcile
-        // reconciles the OS title too -- for local windows as well, which have
-        // no other reason to be refreshed.
+        // reconciles the OS title too -- for local windows as well, which are
+        // otherwise refreshed only for a Reload.
         self.sync_title(record);
-        if !self.opener.is_remote() {
+        if let WindowOpener::Local { addr } = &self.opener {
+            // A local tenant is in-process and up whenever the record carries
+            // its token, so a Reload navigates at once: no probe, no gateway
+            // session, no retry.
+            if reload {
+                match serve::reload_watched_local_window(&self.app, *addr, record) {
+                    Ok(serve::RetargetOutcome::Navigated) => {}
+                    Ok(outcome) => tracing::debug!(
+                        window = %native_label(record),
+                        ?outcome,
+                        "window watcher: a local Reload navigated nothing"
+                    ),
+                    Err(error) => tracing::warn!(
+                        window = %native_label(record),
+                        %error,
+                        "window watcher: reloading a local window failed"
+                    ),
+                }
+            }
             return;
         }
         let label = native_label(record);
