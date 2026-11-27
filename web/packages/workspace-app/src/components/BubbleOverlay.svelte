@@ -66,7 +66,7 @@
   // media with controls, the embed frame the markdown makes of a video link,
   // an element with a tabindex of its own, and a scroll container, which
   // Chrome and Firefox put in the Tab order. A negative tabindex still lets
-  // a press focus and follow them. Two shapes stay in the Tab order. The
+  // a press focus them. Two shapes stay in the Tab order. The
   // sanitizer strips `contenteditable` but keeps the `style` attribute, so
   // an element made editable by `-webkit-user-modify` stays: the property
   // is non-standard, and focus that reaches such an element answers nothing
@@ -243,14 +243,55 @@
   // and opens in the focused pane, the survey's own after the press. The
   // drop-down's keys come through the card's keydown, never through the
   // link's focus, which WebKit for macOS does not give a pressed link.
-  const LINK = "[*|href]";
+  //
+  // The cancel covers every element that carries an href, so no engine's
+  // reading of one can follow it; the drop-down's target is the nearest
+  // element an engine follows as a link (an HTML link or image map area,
+  // an SVG link by either spelling, a MathML element with an href), so an
+  // SVG image inside an SVG link shows the link's target, and an element
+  // that only carries the attribute shows nothing.
+  const HREF_CARRIER = "[*|href]";
   const XLINK = "http://www.w3.org/1999/xlink";
+  const HTML_NS = "http://www.w3.org/1999/xhtml";
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
   const openPath: OpenPath = (target) => void openLinkTarget(target);
   let linkMenu: { link: Element; handle: BubbleHandle } | null = null;
 
+  function isLink(el: Element): boolean {
+    switch (el.namespaceURI) {
+      case HTML_NS:
+        return (el.localName === "a" || el.localName === "area") && el.hasAttribute("href");
+      case SVG_NS:
+        return el.localName === "a" && (el.hasAttribute("href") || el.hasAttributeNS(XLINK, "href"));
+      case MATHML_NS:
+        return el.hasAttribute("href");
+      default:
+        return false;
+    }
+  }
+
+  function hrefCarrierOf(e: Event): Element | null {
+    const carrier = (e.target as Element | null)?.closest?.(HREF_CARRIER) ?? null;
+    return carrier && body?.contains(carrier) ? carrier : null;
+  }
+
+  // The body's listeners hear only events inside the body, so the walk
+  // ends there.
   function linkOf(e: Event): Element | null {
-    const link = (e.target as Element | null)?.closest?.(LINK) ?? null;
-    return link && body?.contains(link) ? link : null;
+    for (let el = e.target as Element | null; el && el !== body; el = el.parentElement) {
+      if (isLink(el)) return el;
+    }
+    return null;
+  }
+
+  // The survey holds the keyboard where the keyboard's owner lets its card
+  // take it: its pane is the focused one and nothing above holds it (a
+  // window-wide survey over a terminal's, a dialog, an overlay such as
+  // Search, Settings or the command deck, the Computers launcher, a cover
+  // over the window).
+  function holdsKeyboard(): boolean {
+    return shown && active !== null && card !== null && mayFocus(card);
   }
 
   function closeLinkMenu(): void {
@@ -260,10 +301,10 @@
   }
 
   function onBodyClick(e: MouseEvent): void {
-    const link = linkOf(e);
-    if (!link) return;
+    if (!hrefCarrierOf(e)) return;
     e.preventDefault();
-    if (!shown || !active || !ownsKeyboard()) return;
+    const link = linkOf(e);
+    if (!link || !holdsKeyboard()) return;
     const href = link.getAttribute("href") ?? link.getAttributeNS(XLINK, "href") ?? "";
     const opensPaths = windowCaps.workspace;
     if (e.metaKey || e.ctrlKey) {
@@ -288,7 +329,7 @@
   }
 
   function onBodyAuxclick(e: MouseEvent): void {
-    if (linkOf(e)) e.preventDefault();
+    if (hrefCarrierOf(e)) e.preventDefault();
   }
 
   // Listened on the body itself rather than through Svelte's delegation at
@@ -305,14 +346,27 @@
     };
   });
 
-  // The drop-down lasts while its survey shows where it owns the keyboard:
-  // a survey answered, replaced or hidden, or no longer in the focused pane,
-  // takes its drop-down with it, as the overlay's unmount does.
-  const linkMenuOwner = $derived(shown && active && ownsKeyboard() ? active.surveyId : null);
+  // The drop-down lasts while its survey shows and holds the keyboard: a
+  // survey answered, replaced or hidden, or one whose pane stops being the
+  // focused one or that an owner above takes the keyboard from, takes its
+  // drop-down with it, as the overlay's unmount does. One left open under
+  // an owner above would answer Enter at the card once that owner let go.
+  const linkMenuOwner = $derived(holdsKeyboard() ? (active?.surveyId ?? null) : null);
   $effect(() => {
     linkMenuOwner;
     return closeLinkMenu;
   });
+
+  // As the editor's drop-down closes when the caret leaves its link, the
+  // card's closes when the keyboard moves to another control in the card
+  // (an answer, Follow up, Dismiss, another body link), so Enter there is
+  // that control's. The keyboard moving onto the card itself or onto the
+  // link keeps it.
+  function onCardFocusin(e: FocusEvent): void {
+    const menu = linkMenu;
+    if (!menu || e.target === card || menu.link.contains(e.target as Node)) return;
+    closeLinkMenu();
+  }
 
   // Number keys 1..N pick an option; F follows up; X or Escape dismisses. F
   // and X/Escape are standard on every survey. Scoped to the focused
@@ -377,6 +431,7 @@
       tabindex="-1"
       bind:this={card}
       onkeydown={onCardKeydown}
+      onfocusin={onCardFocusin}
       onscrollcapture={closeLinkMenu}
     >
       {#if active.title}
