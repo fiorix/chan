@@ -387,8 +387,8 @@ export class SearchOwner {
   // core cannot place reads as a page ahead of the page above, which only
   // makes a press wait.
   #orderedFrom(head: number): number {
-    const first = this.#search!.matchAt(0);
-    const last = this.#search!.matchAt(head - 1);
+    const first = this.#matchAt(0);
+    const last = this.#matchAt(head - 1);
     if (!first || !last) return head + 1;
     if (order(last, highlight(first)) <= 0) return 0;
     return first.endRow >= this.#core.getScrollbackLength() ? head : head + 1;
@@ -409,20 +409,26 @@ export class SearchOwner {
     if (this.#complete) return null;
     const head = this.#activeEntries();
     if (head === 0 || this.#readCursor > head) return null;
-    const search = this.#search!;
-    const last = search.matchAt(head - 1);
+    const last = this.#matchAt(head - 1);
     if (!last) return null;
     const oldest = highlight(last);
     let lo = 0;
     let hi = head - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      const range = search.matchAt(mid);
+      const range = this.#matchAt(mid);
       if (!range) return null;
       if (order(range, oldest) >= 0) hi = mid;
       else lo = mid + 1;
     }
-    return search.matchAt(lo);
+    return this.#matchAt(lo);
+  }
+
+  // The core's entry `index`; null past the listing's end, where the core
+  // cannot place it, and where it lists it ending before its start.
+  #matchAt(index: number): MatchRange | null {
+    const range = this.#search!.matchAt(index);
+    return range && forward(range) ? range : null;
   }
 
   #checked(): number {
@@ -489,6 +495,9 @@ export class SearchOwner {
       // The canonical list persists across scan pumps, but never across a
       // terminal mutation, which may move rows.
       for (const range of batch.ranges) {
+        // The read cursor passes an entry listed ending before its start,
+        // as it passes one the core cannot place.
+        if (!forward(range)) continue;
         this.#firstListed ??= range;
         if (!this.#lastListed || compare(range, this.#lastListed) > 0) {
           this.#pageAbove = this.#listedPage;
@@ -805,6 +814,13 @@ function searchStyles(theme: ITheme): Styles {
     all,
     active: { background: theme.searchActiveMatchBackground ?? '#ffb454', foreground: theme.searchActiveMatchForeground ?? '#000000' },
   };
+}
+// Whether `range` ends at or after its start. At some sizes the core lists
+// a match wrapped across a page boundary on the screen as a range whose end
+// lies rows above its start; the owner reads that entry as one the core
+// cannot place, so find neither counts, paints, steps to nor keeps it.
+function forward(range: MatchRange): boolean {
+  return range.endRow > range.startRow || (range.endRow === range.startRow && range.endCol >= range.startCol);
 }
 function matchRange(range: HighlightRange): MatchRange {
   return { startRow: range.start.absoluteRow, startCol: range.start.col, endRow: range.end.absoluteRow, endCol: range.end.col };
