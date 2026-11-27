@@ -275,13 +275,17 @@ fn replay_start_screen(mark: &ScreenMark, replay: &[Vec<u8>]) -> Option<bool> {
 
 /// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
 /// reads. This recognizes private-mode toggles, not the full terminal grammar.
+/// It does not follow a reset (`ESC c`), nor a sequence a terminal finishes
+/// across a C0 control or DEL inside it, which this scan ends there (CAN, SUB
+/// and ESC end it in both), so after either the screen and modes read here
+/// can differ from the view's.
 fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
     scan_private_mode_sequences(tail, bytes, |mode, on, _| change(mode, on));
 }
 
 /// [`scan_private_modes`], also passing where each change's sequence starts
 /// in `tail` followed by `bytes`: 0 for the sequence `tail` holds the start
-/// of.
+/// of. `tail` only ever holds a sequence's start, never a byte before it.
 fn scan_private_mode_sequences(
     tail: &mut Vec<u8>,
     bytes: &[u8],
@@ -299,14 +303,18 @@ fn scan_private_mode_sequences(
             i += 1;
             continue;
         }
-        // An incomplete prefix can still become a private-mode CSI next read.
-        if n - i < 3 {
-            tail.extend_from_slice(&scan[i..]);
-            break;
-        }
-        if scan[i + 1] != b'[' || scan[i + 2] != b'?' {
+        // Only a true prefix of `ESC [ ?` can still become a private-mode
+        // CSI next read. Carrying anything else, such as a bare ESC before
+        // the one that starts a sequence, would place that start after the
+        // carried bytes' first.
+        let head = &scan[i..n.min(i + 3)];
+        if !b"\x1b[?".starts_with(head) {
             i += 1;
             continue;
+        }
+        if head.len() < 3 {
+            tail.extend_from_slice(head);
+            break;
         }
         let mut j = i + 3;
         while j < n && (scan[j].is_ascii_digit() || scan[j] == b';') {
