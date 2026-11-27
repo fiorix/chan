@@ -17164,6 +17164,12 @@ mod tests {
                 String::from_utf8_lossy(SUFFIX),
                 "a cursor past the restore gets the recovery suffix"
             );
+            assert_eq!(
+                ahead.replay_screen,
+                Some(TerminalScreen::Normal),
+                "a cursor past the restore names the screen the restored bytes, which switch \
+                 none, leave"
+            );
             assert!(!ahead.stale_generation);
             drop(ahead);
 
@@ -17176,6 +17182,10 @@ mod tests {
                 String::from_utf8_lossy(&behind.mode_reassert),
                 "\x1b[?2004h",
                 "a cursor the restore honours gets the enables-only prelude"
+            );
+            assert_eq!(
+                behind.replay_screen, None,
+                "a cursor the restore honours names no screen"
             );
             assert!(!behind.stale_generation);
             drop(behind);
@@ -17190,6 +17200,74 @@ mod tests {
             assert!(
                 !bare.stale_generation,
                 "the lossy-restore generation with no cursor is not an earlier life's"
+            );
+            assert_eq!(bare.replay_screen, None, "no cursor names no screen");
+        }
+
+        // A lossy restore whose bytes switch screens cannot tell which screen
+        // they start on, so a client past the restore gets the recovery
+        // suffix and no replay screen.
+        #[test]
+        fn a_lossy_restore_client_past_a_ring_that_switches_screens_gets_no_replay_screen() {
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            let id = "lossy-restore-switches";
+            let restored = [
+                numbered_lines(400),
+                b"\x1b[?1049htui\x1b[?1049l".to_vec(),
+                numbered_lines(400),
+            ]
+            .concat();
+            let (import, _pair) = ringless_import(id, 5, &restored);
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let ahead = registry
+                .get_or_create_for_ws(
+                    Some(id),
+                    Some(restored.len() as u64 + 500),
+                    opts(Some("w1"), None),
+                    TerminalPlacement::default(),
+                    Some(5),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                ahead.missed_bytes, 500,
+                "fixture: a cursor past the restore"
+            );
+            assert!(
+                ahead.mode_reassert.starts_with(b"\x18\x1b7"),
+                "fixture: it gets the recovery suffix"
+            );
+            assert_eq!(ahead.replay_screen, None);
+        }
+
+        // A restore whose manifest kept no bytes starts its ring empty on the
+        // screen the manifest names. On the alternate screen only a live
+        // recovery reconciles, and this one's cursor stands for any the empty
+        // ring cannot place.
+        #[test]
+        fn a_lossy_recovery_on_an_empty_restored_ring_names_the_screen_it_was_restored_on() {
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            let id = "empty-ring-on-the-alternate-screen";
+            let (mut import, _pair) = ringless_import(id, 5, b"");
+            import.meta.seq = 600;
+            import.meta.alt_screen = true;
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            let viewer = registry.attach(id, None).unwrap();
+            assert!(
+                viewer.alt_screen && viewer.replay.is_empty(),
+                "fixture: an empty ring on the alternate screen"
+            );
+            let recovered = viewer.replay_from(viewer.seq + 5);
+            assert!(
+                recovered.missed_bytes > 0 && recovered.replay.is_empty(),
+                "fixture: a cursor past the empty ring"
+            );
+            assert_eq!(
+                recovered.replay_screen,
+                Some(TerminalScreen::Alternate),
+                "an empty ring starts on the screen the session is on"
             );
         }
     }

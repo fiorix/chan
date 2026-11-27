@@ -285,6 +285,58 @@ fn a_switch_the_ring_start_cut_counts_as_made() {
 }
 
 #[test]
+fn a_switch_the_ring_start_cut_counts_as_made_across_the_reads_that_finish_it() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(&[b'f'; 20]);
+    // Three reads split the switch to the normal screen, and the ring
+    // keeps the last two.
+    session.record_output(b"\x1b[?");
+    session.record_output(b"10");
+    session.record_output(b"49lBETWEEN_TUIS\r\n\x1b[?1049htui2");
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        live.replay,
+        [
+            b"10".to_vec(),
+            b"49lBETWEEN_TUIS\r\n\x1b[?1049htui2".to_vec()
+        ],
+        "fixture: the ring starts inside the switch"
+    );
+    assert_eq!(
+        live.replay_screen,
+        Some(TerminalScreen::Normal),
+        "the screen the cut switch selects in the replay's second write"
+    );
+}
+
+#[test]
+fn a_mode_change_the_ring_start_cut_keeps_the_screen_it_was_made_on() {
+    let session = test_session_with_ring(32);
+    let viewer = session.clone().attach(None);
+    session.record_output(b"\x1b[?1049h\x1b[?1000h");
+    let cursor = session.clone().attach(None).seq;
+    session.record_output(&[b'f'; 20]);
+    // Two reads split the program's mouse-mode reset on its alternate
+    // screen, and the ring keeps only the second.
+    session.record_output(b"\x1b[?10");
+    session.record_output(b"00lthe frame after the reset\r\n");
+    let live = viewer.replay_from(cursor);
+    assert_eq!(
+        String::from_utf8_lossy(&live.replay.concat()),
+        "00lthe frame after the reset\r\n",
+        "fixture: the ring starts inside the reset"
+    );
+    assert_eq!(
+        live.replay_screen,
+        Some(TerminalScreen::Alternate),
+        "a cut sequence that switches no screen leaves the screen of the ring's start"
+    );
+}
+
+#[test]
 fn a_switch_carried_into_the_ring_ends_with_its_own_sequence() {
     let session = test_session_with_ring(64);
     let viewer = session.clone().attach(None);
