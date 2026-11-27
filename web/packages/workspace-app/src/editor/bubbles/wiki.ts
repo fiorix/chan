@@ -28,13 +28,9 @@ import { createCaretAnchor } from "./anchor";
 import { api } from "../../api/client";
 import { errorText } from "../../api/errors";
 import type { LinkTarget, TreeEntry } from "../../api/types";
-import { copyTextToClipboard, indexStatus, openGraphFromLink, tree } from "../../state/store.svelte";
+import { indexStatus, tree } from "../../state/store.svelte";
 import { windowCaps } from "../../state/windowCaps";
-import { GRAPH_LINK_PREFIX } from "../../state/tabs.svelte";
-import { isOpenableExternalUrl, openExternalUrl } from "../external_links";
-import "../copy_button.css";
 import { decodePercent, encodeRelPath, relativizePath, wikiLinkToMarkdown } from "../links";
-import { parseInternalLink } from "../widgets/wikilink";
 import {
   filterBlocks,
   insertBlockAnchor,
@@ -47,6 +43,14 @@ import {
   indexInProgress,
   renderBubbleEmptyState,
 } from "./empty_state";
+import {
+  isOpenRow,
+  OPEN_ROW_HINT,
+  openRowFor,
+  openRowTarget,
+  renderOpenRow,
+  type OpenRow,
+} from "./open_row";
 
 export interface WikiBubbleOpts {
   view: EditorView;
@@ -138,24 +142,6 @@ interface HeadingHit {
   level: number;
   text: string;
   anchor: string;
-}
-
-/// A sentinel hit, prepended in raw `[label](url)` mode, that OPENS the link
-/// already in the URL slot rather than searching for a replacement. Without it
-/// the URL-slot autocomplete only lists /api/link-targets search results, so
-/// the link the user is sitting on can never be opened from the bubble.
-interface SelfHit {
-  kind: "Self";
-  /// Resolved workspace target or literal external URL.
-  target: string;
-  anchor: string | null;
-  /// The literal URL-slot text, shown in the row.
-  url: string;
-  external: boolean;
-}
-
-function isSelfHit(hit: unknown): hit is SelfHit {
-  return (hit as { kind?: string } | null)?.kind === "Self";
 }
 
 interface WikiBubbleHandle extends BubbleHandle {
@@ -271,30 +257,20 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   status.className = "md-bubble-status";
   shell.wrap.appendChild(status);
 
-  /// In raw URL mode, the literal slot's "OPEN <url>" row. Internal paths
-  /// need the host's open handler; external and graph URLs open here.
-  function selfHit(): SelfHit | null {
+  /// In a slot, the OPEN row that opens the link already there rather than
+  /// searching for a replacement; without it the slot's link could never be
+  /// opened from the bubble. Internal paths need the host's open handler;
+  /// external and graph URLs open without it.
+  function slotOpenRow(): OpenRow | null {
     if (!slotMode || mode.kind !== "file") return null;
     const literal = opts.view.state.doc.sliceString(opts.triggerStart, triggerEnd);
-    if (isOpenableExternalUrl(literal) || literal.startsWith(GRAPH_LINK_PREFIX)) {
-      return { kind: "Self", target: literal, anchor: null, url: literal, external: true };
-    }
-    if (!opts.onOpenLink) return null;
-    const parsed = parseInternalLink(literal, "", opts.fromPath ?? null);
-    if (!parsed) return null;
-    return {
-      kind: "Self",
-      target: parsed.target,
-      anchor: parsed.anchor ? parsed.anchor : null,
-      url: literal,
-      external: false,
-    };
+    return openRowFor(literal, opts.fromPath ?? null, Boolean(opts.onOpenLink));
   }
 
-  function activeHits(): Array<LinkTarget | HeadingHit | ParsedBlock | SelfHit> {
+  function activeHits(): Array<LinkTarget | HeadingHit | ParsedBlock | OpenRow> {
     if (mode.kind === "heading") return headingHits;
     if (mode.kind === "block") return blockHits;
-    // File mode: the raw-slot Self row first (so cmd+enter / ↵ opens the link
+    // File mode: the raw-slot OPEN row first (so cmd+enter / ↵ opens the link
     // the caret sits on), then /api/link-targets hits (names / titles /
     // headings), then the client-side PATH candidates, deduped against any file
     // row for the same path so a file matched by both name and path lists once.
@@ -302,7 +278,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       fileHits.filter((h) => h.kind !== "Heading").map((h) => h.path),
     );
     const extras = pathHits.filter((p) => !namedPaths.has(p.path));
-    const self = selfHit();
+    const self = slotOpenRow();
     return self ? [self, ...fileHits, ...extras] : [...fileHits, ...extras];
   }
 
@@ -364,8 +340,8 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       // target) while authoring a fresh `[[` link. Suppressed in raw
       // mode, where those separators are part of the URL being edited.
       const modeHint = slotMode ? "" : " - # heading - ^ block";
-      status.textContent = isSelfHit(hits[0]) && hits[0].external
-        ? "↵ open"
+      status.textContent = isOpenRow(hits[0]) && hits[0].external
+        ? OPEN_ROW_HINT
         : `${hits.length} result${hits.length === 1 ? "" : "s"} - ↵ insert${openHint}${modeHint}`;
     }
     for (let i = 0; i < hits.length; i++) {
@@ -395,36 +371,8 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         text.textContent = firstLine.replace(/\s*\^[A-Za-z0-9-]{4,}\s*$/, "");
         row.appendChild(tag);
         row.appendChild(text);
-      } else if (isSelfHit(hit)) {
-        // "OPEN <url>" row: opens the link already in the slot.
-        const tag = document.createElement("span");
-        tag.className = "md-bubble-row-level";
-        tag.textContent = "OPEN";
-        const text = document.createElement("span");
-        text.textContent = hit.url;
-        row.appendChild(tag);
-        row.appendChild(text);
-        if (hit.external) {
-          row.classList.add("md-bubble-row-external");
-          const copy = document.createElement("button");
-          copy.type = "button";
-          copy.className = "copy-btn";
-          copy.title = "Copy URL to clipboard";
-          copy.setAttribute("aria-label", "Copy URL to clipboard");
-          copy.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
-          copy.addEventListener("mousedown", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-          });
-          copy.addEventListener("click", (e) => {
-            e.stopPropagation();
-            void copyTextToClipboard(hit.url, {
-              onSuccess: () => { status.textContent = "Copied URL"; },
-              onError: (msg) => { status.textContent = `Copy failed: ${msg}`; },
-            });
-          });
-          row.appendChild(copy);
-        }
+      } else if (isOpenRow(hit)) {
+        renderOpenRow(row, hit, status);
       } else {
         const t = hit as LinkTarget;
         if (t.kind === "Heading") {
@@ -468,7 +416,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
 
   function fetchFile(): void {
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
-    if (selfHit()?.external) {
+    if (slotOpenRow()?.external) {
       ++reqSeq;
       fileHits = [];
       searchFailure = null;
@@ -492,7 +440,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
           if (!alive || seq !== reqSeq || mode.kind !== "file") return;
           fileHits = results;
           searchFailure = null;
-          // Clamp against the FULL list (a prepended Self row + path extras),
+          // Clamp against the FULL list (a prepended OPEN row + path extras),
           // not just fileHits, or the selection can land out of range.
           if (selectedIndex >= activeHits().length) selectedIndex = 0;
           render();
@@ -540,7 +488,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   /// tree); the only async cost is the one-time tree fetch.
   function fetchPaths(): void {
     const seq = ++pathSeq;
-    if (selfHit()?.external) {
+    if (slotOpenRow()?.external) {
       pathHits = [];
       render();
       return;
@@ -701,13 +649,13 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     }
   }
 
-  function commit(hit: LinkTarget | HeadingHit | ParsedBlock | SelfHit): void {
-    if (isSelfHit(hit)) {
-      // The Self row OPENS the link already in the slot instead of rewriting
-      // it. Mandatory guard: a SelfHit carries no `.path`, so falling through
+  function commit(hit: LinkTarget | HeadingHit | ParsedBlock | OpenRow): void {
+    if (isOpenRow(hit)) {
+      // The OPEN row opens the link already in the slot instead of rewriting
+      // it. Mandatory guard: an OpenRow carries no `.path`, so falling through
       // to the file-mode branch would call fileLinkInsert(undefined, ...) and
       // corrupt the document.
-      openSelfHit(hit);
+      openRowTarget(hit, opts.onOpenLink);
       dismiss();
       return;
     }
@@ -742,15 +690,6 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       selection: { anchor: opts.triggerStart + insert.length },
     });
     dismiss();
-  }
-
-  function openSelfHit(hit: SelfHit): void {
-    if (hit.external) {
-      if (hit.url.startsWith(GRAPH_LINK_PREFIX)) openGraphFromLink(hit.url);
-      else void openExternalUrl(hit.url);
-    } else {
-      opts.onOpenLink?.(hit.target, hit.anchor);
-    }
   }
 
   /// Format an on-disk file link for a resolved (path, anchor). `path`
@@ -840,11 +779,11 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   }
 
   function openSelected(): void {
-    if (!opts.onOpenLink && !selfHit()?.external) return;
+    if (!opts.onOpenLink && !slotOpenRow()?.external) return;
     const hits = activeHits();
     const hit = hits[selectedIndex];
-    if (isSelfHit(hit)) {
-      openSelfHit(hit);
+    if (isOpenRow(hit)) {
+      openRowTarget(hit, opts.onOpenLink);
       dismiss();
       return;
     }
@@ -899,7 +838,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         // instead of committing a replace. The host wires this to
         // openInActivePane via onOpenLink.
         if (event.metaKey || event.ctrlKey) {
-          if (opts.onOpenLink || selfHit()?.external) {
+          if (opts.onOpenLink || slotOpenRow()?.external) {
             openSelected();
             return true;
           }
