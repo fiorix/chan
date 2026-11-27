@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { GhosttyVt, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
+import { GhosttyVt, type MatchRange, VtSearch, VtTerminal, VtTrackedCell } from '../vt/ghosttyVt';
 import { Terminal } from './terminal';
 
 type Count = Readonly<{ index: number | null; total: number; partial: boolean }>;
@@ -2664,5 +2664,169 @@ describe('the cost model', () => {
     expect(frameAfter(term, 6_000)).toBe(false);
     settle(search);
     expect(search.state).toEqual({ index: 1, total: 1, partial: false });
+  });
+});
+
+describe('a listed match whose end precedes its start', () => {
+  const backwards = (r: Range) => r.end.absoluteRow < r.start.absoluteRow ||
+    (r.end.absoluteRow === r.start.absoluteRow && r.end.col < r.start.col);
+  const listedBackwards = (m: MatchRange) => m.endRow < m.startRow || (m.endRow === m.startRow && m.endCol < m.startCol);
+  // The rows of threePaged's matches, each the first six cells of a line.
+  const threePagedRows = Array.from({ length: 240 }, (_, i) => i).filter(i => i <= 220 || i >= 231).map(i => 2 * i);
+  const byRow = (rows: number[]) => [...rows].sort((a, b) => a - b);
+
+  // The core's listing with its match at `row`, column 0, read back with its
+  // end on a row above its start, through both reads the owner makes of the
+  // core's ranges, as the vendored core lists a needle wrapped across a page
+  // boundary on the screen at some sizes. Counts each read that handed it
+  // to the owner. `stopAt` stops placement as placementStopsAt does, which
+  // cannot wrap this stand-in.
+  function listedInverted(row: number) {
+    const handed = { batch: 0, at: 0 };
+    const stops: number[] = [];
+    const invert = (match: MatchRange) => match.startRow === row && match.startCol === 0
+      ? { ...match, endRow: row >> 1, endCol: 2 } : match;
+    const read = VtSearch.prototype.readMatches;
+    vi.spyOn(VtSearch.prototype, 'readMatches').mockImplementation(function (this: VtSearch, start: number, budget: number) {
+      const batch = read.call(this, start, budget);
+      let ranges = batch.ranges.map(invert);
+      let next = batch.next;
+      const cut = stops[0];
+      if (cut !== undefined && start <= cut && batch.next > cut) {
+        stops.shift();
+        now += 5;
+        ranges = ranges.slice(0, cut - start);
+        next = cut;
+      }
+      handed.batch += ranges.filter(listedBackwards).length;
+      return { ranges, next, total: batch.total };
+    });
+    const at = VtSearch.prototype.matchAt;
+    vi.spyOn(VtSearch.prototype, 'matchAt').mockImplementation(function (this: VtSearch, index: number) {
+      const match = at.call(this, index);
+      if (!match) return match;
+      const listed = invert(match);
+      if (listedBackwards(listed)) handed.at++;
+      return listed;
+    });
+    return { handed, stopAt: (...at: number[]) => { stops.push(...at); } };
+  }
+
+  // The active match is one of `rows`' matches, never the one at `skipped`,
+  // and Copy reads that match's text.
+  function expectActiveAmong(term: Terminal, rows: number[], skipped: number, label: string) {
+    const ranges = active(term);
+    if (!ranges) return;
+    expect(ranges, label).toHaveLength(1);
+    const row = ranges[0].start.absoluteRow;
+    expect(ranges[0], label).toEqual(range(row, 0));
+    expect(row, label).not.toBe(skipped);
+    expect(rows, label).toContain(row);
+    expect(activeText(term), label).toBe('needle');
+  }
+
+  test.each([
+    { name: 'in the middle of a batch', row: 130, entry: 50, read: 'batch' as const },
+    { name: 'as the newest match', row: 478, entry: 221, read: 'at' as const },
+    { name: 'as the first active-area entry', row: 230, entry: 0, read: 'at' as const },
+    { name: 'as the last active-area entry', row: 462, entry: 229, read: 'at' as const },
+  ])('find neither counts, highlights, steps to nor copies it, listed $name', async ({ row, entry, read }) => {
+    const { term } = await create(threePaged, 200, 20, 10_000_000);
+    expect(coreRows(term, 'needle', 230)[entry], `the core lists row ${row} as entry ${entry}`).toBe(row);
+    const kept = threePagedRows.filter(r => r !== row);
+    const { handed } = listedInverted(row);
+    const search = searchOf(term);
+    search.find('needle');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      expectActiveAmong(term, kept, row, `frame ${i}`);
+    }
+    expect(handed[read], `the stand-in handed the owner the range through ${read === 'at' ? 'matchAt' : 'readMatches'}`).toBeGreaterThan(0);
+    expect(search.state, 'the count leaves it out').toEqual({ index: 1, total: kept.length, partial: false });
+    const painted = all(term)!;
+    expect(painted.filter(r => backwards(r) || r.start.absoluteRow === row), 'the all-matches layer holds no such range').toEqual([]);
+    expect(byRow(painted.map(r => r.start.absoluteRow))).toEqual(byRow(kept));
+    for (const direction of ['older', 'newer'] as const) {
+      const visited: number[] = [];
+      for (let i = 0; i < kept.length; i++) {
+        search.step('needle', direction);
+        expectActiveAmong(term, kept, row, `${direction} step ${i}`);
+        visited.push(active(term)![0].start.absoluteRow);
+      }
+      expect(byRow(visited), `${direction} visits every other match once`).toEqual(byRow(kept));
+    }
+  });
+
+  // The middle page's newest match starts that page's entries. Read as a
+  // page's first entry, a range the owner never places would leave a window
+  // taken at a write with no end at that page, and a press would land past
+  // the matches of the page being placed.
+  test("a write after a press takes a window ended at the page above where the core lists that page's newest match ending before its start", async () => {
+    const { term } = await create(threePaged, 200, 20, 10_000_000);
+    expect(coreRows(term, 'needle', 230)[116], "the core lists the middle page's newest first among its entries").toBe(440);
+    const listing = listedInverted(440);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(474, 0)]);
+    // Placement stops right after the active match's entry. A press then
+    // places nothing more, reads the count of the active-area entries and
+    // waits; the next write takes the window from that list, and the frame
+    // after it places nothing.
+    listing.stopAt(224, 224, 0);
+    term.write('\x1b[m');
+    frame();
+    expect(search.state.index, 'placement reached the active match').toBe(3);
+    search.step('needle', 'older');
+    expect(active(term), 'the press waits').toEqual([range(474, 0)]);
+    term.write('\x1b[m');
+    for (let i = 0; i < 100 && search.state.partial; i++) {
+      expect([474, 472], `frame ${i}: the press waits on its match or lands on its neighbour`).toContain(active(term)?.[0].start.absoluteRow);
+      frame();
+    }
+    expect(listing.handed.batch, 'the stand-in handed the owner the range through readMatches').toBeGreaterThan(0);
+    expect(active(term)).toEqual([range(472, 0)]);
+    expect(search.state, 'the count leaves it out').toEqual({ index: 4, total: 229, partial: false });
+  });
+
+  test('at 400 by 120 on the real core, every range find keeps lies inside its own match', async () => {
+    // Every line wraps a needle across the end of its first row. At this
+    // size, with 173 such lines, the vendored core lists the newest line's
+    // match from row 344, column 397 to row 115, column 2.
+    const { term } = await create('', 400, 120, 10_000_000);
+    const line = 'plain '.padEnd(397, 'y') + 'needle' + 'z'.repeat(197);
+    for (let i = 0; i < 173; i++) term.write(`${line}\r\n`);
+    frame();
+    const raw = term.core!.createSearch();
+    raw.setNeedle('needle');
+    for (let i = 0; raw.step(0) !== 'complete'; i++) if (i > 100_000) throw new Error('raw search did not complete');
+    const listed = raw.matchesBetween(0, Number.MAX_SAFE_INTEGER, 1_000_000);
+    raw.free();
+    expect(listed.filter(listedBackwards), 'not exercised: the core lists no range whose end precedes its start here').not.toEqual([]);
+    const inside = (ranges: readonly Range[] | undefined, label: string) => {
+      for (const r of ranges ?? []) {
+        expect(backwards(r), `${label}: ${JSON.stringify(r)} ends before it starts`).toBe(false);
+        expect(r.end.absoluteRow - r.start.absoluteRow, `${label}: ${JSON.stringify(r)} spans rows outside its match`).toBeLessThanOrEqual(1);
+      }
+    };
+    const search = searchOf(term);
+    search.find('needle');
+    for (let i = 0; i < 1000 && search.state.partial; i++) {
+      frame();
+      inside(all(term), `frame ${i}, all matches`);
+      inside(active(term), `frame ${i}, active`);
+    }
+    expect(search.state.partial).toBe(false);
+    const painted = all(term)!;
+    expect(search.state.total, 'the count is the ranges highlighted').toBe(painted.length);
+    for (const direction of ['older', 'newer'] as const) {
+      for (let i = 0; i < painted.length; i++) {
+        search.step('needle', direction);
+        inside(active(term), `${direction} step ${i}`);
+        expect(activeText(term), `${direction} step ${i}`).toBe('needle');
+      }
+    }
   });
 });
