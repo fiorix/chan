@@ -267,6 +267,31 @@ describe("survey overlay", () => {
     expect(reply).toHaveBeenCalledWith({ surveyId: "survey-1", kind: "option", optionIndex: 0, optionLabel: "BM25" });
   });
 
+  test("a press on a window-wide survey's overlay beside its card gives the keyboard at large to the card", async () => {
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    surveyState.windowWide = { spec: spec(), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    expect(document.activeElement, "the card takes the keyboard as it shows").toBe(card);
+    card.blur();
+    expect(document.activeElement, "the keyboard at large, put there by script").toBe(document.body);
+
+    const overlay = target.querySelector<HTMLElement>(".survey-overlay")!;
+    await press(overlay);
+    release(overlay);
+    await tick();
+    expect(document.activeElement, "the card takes the keyboard").toBe(card);
+
+    const event = new KeyboardEvent("keydown", { key: "1", code: "Digit1", bubbles: true, cancelable: true });
+    (document.activeElement ?? document.body).dispatchEvent(event);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply).toHaveBeenCalledWith({ surveyId: "survey-1", kind: "option", optionIndex: 0, optionLabel: "BM25" });
+  });
+
   test("a hidden terminal survey leaves the visible tab's focus alone", async () => {
     const visibleTerminal = document.createElement("textarea");
     const hiddenTerminal = document.createElement("div");
