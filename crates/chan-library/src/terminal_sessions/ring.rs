@@ -97,17 +97,19 @@ impl RingBuffer {
             replay
         };
         // Cut to the capacity first: a chunk evicted from a longer tail would
-        // take bytes the ring has room for.
-        let replay = &replay[replay.len().saturating_sub(cap.max(1))..];
+        // take bytes the ring has room for. The bytes cut are still read for
+        // the screen and the switch they leave the kept ones on.
+        let cut = replay.len().saturating_sub(cap.max(1));
+        let mut screen = ScreenMark::default().after(&replay[..cut]);
+        let replay = &replay[cut..];
         let start_seq = end_seq.saturating_sub(replay.len() as u64);
         let mut ring = Self::new_at(cap, start_seq);
         // Eviction drops whole chunks, so a restored tail keeps the chunk size
         // of the reads it came from: one long chunk would empty the ring at
         // the first push past capacity. Nothing records the screen these
-        // bytes start on. From their first switch on, the switches tell; up
-        // to it, the screen they leave is the one they start on only when
-        // they make no switch at all.
-        let mut screen = ScreenMark::default();
+        // bytes, the cut ones included, start on. From their first switch on,
+        // the switches tell; up to it, the screen they leave is the one they
+        // start on only when they make no switch at all.
         let mut chunks = Vec::new();
         for chunk in replay.chunks(super::PTY_READ_BYTES) {
             let next = screen.after(chunk);
@@ -189,6 +191,16 @@ impl RingBuffer {
     /// empty ring.
     pub(super) fn start_screen(&self) -> Option<&ScreenMark> {
         self.chunks.front().map(|chunk| &chunk.screen)
+    }
+
+    /// The start of a private-mode sequence the ring's last bytes leave
+    /// open, which the next read may finish; empty when they leave none.
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_sequence(&self) -> Vec<u8> {
+        self.chunks
+            .back()
+            .map(|chunk| chunk.screen.after(&chunk.bytes).partial)
+            .unwrap_or_default()
     }
 
     #[cfg(target_os = "linux")]

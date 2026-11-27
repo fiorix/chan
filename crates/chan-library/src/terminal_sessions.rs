@@ -5825,6 +5825,14 @@ impl Session {
             },
             ring_fd,
         );
+        // A restore that ends where its previous process did continues that
+        // process's output, so the trackers carry on the sequence its last
+        // read began. One that may end behind it cannot tell what followed.
+        let open_sequence = if behind {
+            Vec::new()
+        } else {
+            ring.open_sequence()
+        };
         let mut output = SessionOutput::new(ring, config.terminal.program_status);
         if program_status_eligible && config.terminal.program_status {
             if let Some(stored) = meta.program_status {
@@ -5931,9 +5939,9 @@ impl Session {
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
-            alt_screen_tail: Mutex::new(Vec::new()),
+            alt_screen_tail: Mutex::new(open_sequence.clone()),
             private_modes: Mutex::new(state.private_modes),
-            private_mode_tail: Mutex::new(Vec::new()),
+            private_mode_tail: Mutex::new(open_sequence),
             dsr_query_at: AtomicI64::new(0),
             reply_forwarded_at: AtomicI64::new(0),
             dsr_tail: Mutex::new(Vec::new()),
@@ -16729,6 +16737,23 @@ mod tests {
                 String::from_utf8_lossy(&next.attach(id, Some(0)).unwrap().mode_reassert),
                 "",
                 "the same read ends the mouse mode"
+            );
+        }
+
+        // A restore that may end behind its previous process cannot tell
+        // what followed the sequence its tail leaves open, so it carries
+        // none: the first read after it starts no sequence there.
+        #[test]
+        fn a_restore_behind_its_previous_process_carries_no_open_sequence() {
+            let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+            let id = "behind-inside-a-sequence";
+            let (import, _pair) = ringless_import(id, 5, b"$ \x1b[?10");
+            let report = registry.restore_fdstore_sessions(vec![import]);
+            assert_eq!(report.restored, 1, "skipped: {:?}", report.skipped);
+            assert!(registry.inject_output(id, b"49h"));
+            assert!(
+                !registry.attach(id, None).unwrap().alt_screen,
+                "the read after the gap is text, not the rest of a switch"
             );
         }
 
