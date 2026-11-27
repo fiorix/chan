@@ -4,7 +4,8 @@ vi.mock("../terminal/backend", async (importOriginal) =>
   (await import("../__tests__/ghosttyTab")).ghosttyBackendModule(importOriginal));
 
 import TerminalTab from "./TerminalTab.svelte";
-import { ghosttyFixture, ghosttyMode, pressInGhostty, typeInGhostty } from "../__tests__/ghosttyTab";
+import { ghosttyCellMetrics, ghosttyFixture, ghosttyMode, ghosttyMouseTracking, ghosttySelection, pressInGhostty, typeInGhostty } from "../__tests__/ghosttyTab";
+import { modelPointerCapture, mousePointer } from "../__tests__/pointer";
 import { bytes as Buffer, caseName, emit, mountRealTerminal, observations, ReplaySocket, requiredSubcases, rpc, save, snapshot } from "../__tests__/terminalReplay";
 
 async function assertWireProvenance() {
@@ -896,5 +897,129 @@ if (caseName === "alternate-screen") test("an alternate-screen reconnect preserv
     throw error;
   } finally {
     try { await mounted?.close(); } finally { save("client-records.json", observations); save("alternate-screen.json", result); }
+  }
+});
+
+if (caseName === "lost-reset") test("a redial past a lost full reset shows the normal screen, where a press selects", async () => {
+  let mounted: Awaited<ReturnType<typeof mountRealTerminal>> | undefined;
+  const result: Record<string, unknown> = { name: "lost-reset", status: "failed" };
+  const sessionOf = (socket: ReplaySocket) => JSON.parse(Buffer.from(socket.deliveries.find((frame) => frame.type === "session")!.bytes, "base64").toString());
+  const binaryOf = (socket: ReplaySocket) => Buffer.concat(socket.deliveries.filter((frame) => frame.binary).map((frame) => Buffer.from(frame.bytes, "base64")));
+  // ghostty-web copies a selection on release through chan's writer, which
+  // writes text with navigator.clipboard.writeText.
+  const clipboard = { write: vi.fn(async () => {}), writeText: vi.fn(async (_text: string) => {}), readText: vi.fn(async () => "") };
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  try {
+    mounted = await mountRealTerminal(TerminalTab);
+    await mounted.socket.ready();
+    await emit("rows", { prefix: "SHELL", count: 3 });
+    await emit("marker", { name: "BEFORE_PROGRAM" });
+    await mounted.socket.bytesInclude("MARKER:BEFORE_PROGRAM\r\n");
+    const shell = await snapshot("the shell before the program");
+    expect(shell.active).toBe("normal");
+    // A full-screen program enters the alternate screen with mouse
+    // tracking on and draws its frame.
+    await emit("bytes", { base64: Buffer.from("\x1b[?1049h\x1b[?1000h\x1b[2J\x1b[HPROGRAM_FRAME\r\n").toString("base64") });
+    await emit("marker", { name: "PROGRAM_DRAWN" });
+    await mounted.socket.bytesInclude("MARKER:PROGRAM_DRAWN\r\n");
+    const drawn = await snapshot("the program's frame");
+    expect(drawn.active, "fixture: the program's view is on the alternate screen").toBe("alternate");
+    expect(ghosttyMouseTracking(mounted.term), "fixture: the program's view reports the mouse").toBe(true);
+    const shown = Buffer.from((await rpc("fixture-log")).bytes, "base64");
+
+    // While the socket is down the program resets the terminal, as `reset`
+    // does: the normal screen, every mode off. It writes past the ring and
+    // exits, and the shell prints its prompt. The page's first redial is cut
+    // after its session frame, with nothing new parsed, and its next one is
+    // held at the proxy, so no view of the server's holds the program while
+    // it writes. That redial then asks from the position the page parsed,
+    // which the ring, and the reset with it, has moved past.
+    ReplaySocket.acknowledge = async (message) => {
+      if (message.connection === 2 && message.type === "session") {
+        await rpc("ack", { connection: 2, frame: message.frame, drained: true });
+      }
+    };
+    await rpc("arm", { boundary: "after-session", ordinal: 2 });
+    await rpc("hold-redial");
+    mounted.socket.disconnect();
+    const cut = await rpc("cut");
+    expect(cut.boundary).toBe("after-session");
+    expect(cut.disconnect).toEqual({ client: "closed", upstream: "closed" });
+    expect(cut.replayBytes, "fixture: the cut redial's replay is empty, the page had parsed every byte").toBe(0);
+    const interrupted = await ReplaySocket.dial(2);
+    expect(interrupted.deliveries.map((frame) => frame.type)).toEqual(["session"]);
+    await rpc("held-redial");
+    const pad = Buffer.from("\r".repeat(262144)).toString("base64");
+    await emit("bytes", { base64: Buffer.from("\x1bc").toString("base64") });
+    for (let index = 0; index < 10; index++) await emit("bytes", { base64: pad });
+    await emit("rows", { prefix: "AFTER_RESET", count: 4 });
+    await emit("marker", { name: "LOST_RESET_PROMPT" });
+    const recovery = await ReplaySocket.dial(3);
+    const sent: string[] = [];
+    const send = recovery.send.bind(recovery);
+    recovery.send = (data: string) => { sent.push(data); send(data); };
+    await rpc("release-redial");
+    await recovery.ready();
+    await recovery.bytesInclude("MARKER:LOST_RESET_PROMPT\r\n");
+    const session = sessionOf(recovery);
+    const source = await rpc("fixture-log");
+    const emitted = Buffer.from(source.bytes, "base64");
+    expect(Buffer.from(emitted.subarray(shown.length, shown.length + 2)).toString(), "fixture: the reset follows the frame the view showed").toBe("\x1bc");
+    // The session frame counts the loss from the position the page asked
+    // from. Output the server read after the frame arrives live, after the
+    // replay and the recovery suffix.
+    const missed = session.missed_bytes;
+    const ringStart = shown.length + missed;
+    expect(missed, "fixture: the ring moved past the view's position and the reset").toBeGreaterThan(2);
+    expect(emitted[ringStart], "fixture: the ring starts inside the padding").toBe(13);
+    expect(ringStart + session.replay_bytes, "fixture: the replay runs to the session frame's position").toBe(session.seq);
+    const received = binaryOf(recovery);
+    const live = received.subarray(received.length - (emitted.length - session.seq));
+    const replay = received.subarray(0, session.replay_bytes);
+    const suffix = Buffer.from(received.subarray(session.replay_bytes, received.length - live.length)).toString();
+    const retained = Buffer.from(emitted.subarray(ringStart));
+    expect(Buffer.concat([replay, live]).toString("base64"), "fixture: the replay and the live output are the retained output").toBe(retained.toString("base64"));
+    const rows = retained.toString().replace(/\r(?!\n)/g, "").split("\r\n").filter(Boolean);
+    expect(rows).toEqual(["AFTER_RESET:00000003", "AFTER_RESET:00000004", "AFTER_RESET:00000005", "AFTER_RESET:00000006", "MARKER:LOST_RESET_PROMPT"]);
+
+    const notice = `terminal replay missed ${missed} bytes`;
+    const recovered = await snapshot("after the redial past the lost reset");
+    expect(recovered.active, "the view shows the normal screen the lost reset selected").toBe("normal");
+    expect(recovered.normal.rows.filter(Boolean), "the shell's rows, the loss notice, then the retained rows, on the normal screen")
+      .toEqual([...shell.normal.rows.filter(Boolean), notice, ...rows]);
+    expect(ghosttyMouseTracking(mounted.term), "no mouse mode the reset turned off is on in the view").toBe(false);
+
+    // A press and drag over the prompt's line selects its text and sends
+    // the program nothing.
+    const term = mounted.term;
+    const { width, height } = ghosttyCellMetrics(term);
+    const surface = term.element!.querySelector("canvas")!;
+    modelPointerCapture(surface);
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * width, term.rows * height));
+    const line = recovered.normal.rows.indexOf("MARKER:LOST_RESET_PROMPT") - recovered.normal.baseY;
+    expect(line, "the prompt's line is on the screen").toBeGreaterThanOrEqual(0);
+    const at = (col: number) => ({ clientX: col * width + 1, clientY: line * height + 1 });
+    sent.length = 0;
+    mousePointer(surface, "pointerdown", at(0));
+    mousePointer(surface, "pointermove", at(23));
+    mousePointer(surface, "pointerup", at(23));
+    await recovery.handled();
+    expect(ghosttySelection(term), "the press selects the prompt's text").toBe("MARKER:LOST_RESET_PROMPT");
+    expect(sent.filter((frame) => JSON.parse(frame).type === "input"), "no mouse report reaches the program").toEqual([]);
+
+    expect(session.replay_screen, "the session frame names the normal screen").toBe("normal");
+    expect(suffix, "the recovery suffix turns every mode off and reasserts none").not.toMatch(/\x1b\[\?\d+h/);
+    const records = await assertWireProvenance();
+    expect(records.filter((entry: any) => entry.event === "redial-held"), "the third dial was held while the program wrote").toHaveLength(1);
+    const dial = records.find((entry: any) => entry.event === "connection" && entry.connection === 3);
+    expect(dial.query.since, "the recovery asks from the position the page parsed").toBe(String(shown.length));
+    Object.assign(result, { status: "passed", cut, session, emittedBytes: emitted.length, shownBytes: shown.length, missedBytes: missed,
+      liveBytes: live.length, selection: ghosttySelection(term), copied: clipboard.writeText.mock.calls.map(([text]) => text),
+      fixtureSha256: source.sha256, receipts: ["client-records.json", "proxy-records.json", "fixture-records.json", "fixture.bin"] });
+  } catch (error) {
+    result.error = String(error);
+    throw error;
+  } finally {
+    try { await mounted?.close(); } finally { save("client-records.json", observations); save("lost-reset.json", result); }
   }
 });

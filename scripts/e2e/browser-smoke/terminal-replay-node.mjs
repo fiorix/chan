@@ -12,8 +12,8 @@ import { startTerminalFixture } from "./lib/terminal-fixture.mjs";
 import { launchServer, seedWorkspace, teardownServer } from "./lib/server.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
-const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart"];
+const required = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart", "lost-reset"];
+const implemented = ["alternate-screen", "normal-screen", "keyboard-modes", "overflow", "attach-windows", "restart", "lost-reset"];
 const requiredSubcases = {
   "keyboard-modes": ["normal-screen", "alternate-screen", "replayed-change"],
   "attach-windows": ["normal-before-session", "normal-interior-prefix", "normal-utf8-prefix", "normal-escape-prefix",
@@ -142,6 +142,9 @@ async function runCase(name) {
           result = true;
         }
         else if (op === "cuts") { assert(cutSequence, "no cut sequence armed"); result = await cutSequence; }
+        else if (op === "hold-redial") { proxy.holdRedial(); result = true; }
+        else if (op === "held-redial") { await proxy.waitForHeldRedial(); result = true; }
+        else if (op === "release-redial") { proxy.releaseRedial(); result = true; }
         else if (op === "ack") { proxy.acknowledge(args); result = true; }
         else if (op === "cut") result = await proxy.waitForCut();
         else if (op === "records") result = proxy.records;
