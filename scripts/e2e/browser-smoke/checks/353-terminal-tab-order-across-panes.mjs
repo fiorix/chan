@@ -10,7 +10,12 @@
 // a step limit. Then `zq` is typed and both recorders are read.
 //
 // Every leg starts by a press on B's terminal with no survey up, so it reads
-// the same whatever leg ran before it.
+// the same whatever leg ran before it. A survey leg's cleanup presses the
+// card's dismiss in pane A, which makes A the active pane, so the next leg's
+// start is itself a press on a terminal outside the active pane, as the
+// control's press is: with both terminals attached and recording, one that
+// leaves B inactive or the keyboard outside B's terminal fails the leg that
+// makes it.
 //
 // The legs other than the control keep B the active pane. Each fails if a
 // step lands in A's terminal, if the active pane moves, or if A's PTY reads
@@ -210,6 +215,8 @@ async function runTabOrder(ctx, directory, save) {
   const requested = [];
   const surveys = [];
   const read = (start = null) => where(page, target.tab, away.tab, start);
+  /// A pane id as the failure lines name it: pane A, pane B, or the id.
+  const paneName = (id) => id === run.panes?.target ? "pane A" : id === run.panes?.away ? "pane B" : id ?? "no pane";
   /// A screenshot is evidence, not a reading: one that fails is named so.
   const shot = (name) => ctx.shot(name, page).then((file) => basename(file), () => "unavailable");
 
@@ -248,7 +255,7 @@ async function runTabOrder(ctx, directory, save) {
     await placeFocus(page, start);
     result.start = await read(start);
     if (!result.start.atStart || result.start.focusedPane !== activePane) {
-      throw environment(`the walk's start is not pane ${pane}'s tab label with pane ${activePane} active: ${JSON.stringify(result.start)}`);
+      throw environment(`the walk's start is not ${paneName(pane)}'s tab label with ${paneName(activePane)} active: ${JSON.stringify(result.start)}`);
     }
     result.phase = "walk";
     result.walk = [];
@@ -275,9 +282,10 @@ async function runTabOrder(ctx, directory, save) {
         break;
       }
     }
-    result.moved = result.walk.filter((at) => at.focusedPane !== activePane).map((at) => `step ${at.step}: ${at.focusedPane}`);
-    if (result.moved.length) {
-      result.failures.push(`${key} from pane ${pane}'s tab label moved the active pane at ${result.moved.join(", ")}`);
+    const moved = result.walk.filter((at) => at.focusedPane !== activePane);
+    result.moved = moved.map((at) => `step ${at.step}: ${at.focusedPane}`);
+    if (moved.length) {
+      result.failures.push(`${key} from ${paneName(pane)}'s tab label moved the active pane at ${moved.map((at) => `step ${at.step}: ${paneName(at.focusedPane)}`).join(", ")}`);
     }
   }
 
@@ -300,27 +308,58 @@ async function runTabOrder(ctx, directory, save) {
   const walkLine = (result) => result.walk
     .map((at) => `${at.step}:${at.name || at.element}@${at.pane ?? "-"}/${at.relation}`).join(" > ");
 
+  /// Both terminals attached and recording, as a press across panes needs.
+  const ready = (at) => at.targetAttached && at.awayAttached && existsSync(files.target) && existsSync(files.away);
+
+  /// A press on the terminal of pane `side` ("target" is A, "away" is B)
+  /// with the other pane active and both terminals attached and recording:
+  /// true once its pane is the active one with the keyboard in its
+  /// terminal. A press that leaves its pane inactive or the keyboard
+  /// outside its terminal is the leg's failure, and false is returned; a
+  /// press that cannot be made is an environment result.
+  async function pressAcross(result, side) {
+    const [pane, other] = side === "target" ? ["A", "B"] : ["B", "A"];
+    const took = await pressTerminal(page, side === "target" ? target.tab : away.tab).catch((error) => {
+      throw environment(`the press on pane ${pane}'s terminal could not be made: ${firstLine(error)}`);
+    });
+    if (took) return true;
+    result.afterPress = await read();
+    const { focusedPane, inTargetHost, inAwayHost, name, element } = result.afterPress;
+    const inside = side === "target" ? inTargetHost : inAwayHost;
+    result.failures.push(`a press on pane ${pane}'s terminal with pane ${other} active left the active pane ${focusedPane} (pane ${pane} is ${run.panes[side]}) and the keyboard ${inside ? `in ${pane}'s terminal` : `on ${name || element}`} after ${PRESS_MS} ms`);
+    result.screenshot = await shot(`353-${result.kind}-press`);
+    return false;
+  }
+
   /// Every leg starts from B the active pane, made by a press on B's
   /// terminal, with no survey over A's terminal, whatever the leg before it
   /// left: a survey leg's cleanup presses the card's dismiss in pane A, which
   /// makes A the active pane, and a cleanup that could not close its survey
-  /// leaves the card up. A start that cannot be made is an environment
-  /// result.
-  async function startOnB() {
-    await clickTerminal(page, away.tab).catch((error) => {
-      throw environment(`a press did not give pane B's terminal the keyboard: ${firstLine(error)}`);
-    });
+  /// leaves the card up. With A active and both terminals attached and
+  /// recording, the press is a press across panes, and one that fails is
+  /// the leg's failure: false is returned and the leg goes no further. Any
+  /// other start that cannot be made is an environment result.
+  async function startOnB(result) {
+    result.beforeStart = await read();
+    if (result.beforeStart.focusedPane === run.panes.target && ready(result.beforeStart)) {
+      if (!(await pressAcross(result, "away"))) return false;
+    } else {
+      await clickTerminal(page, away.tab).catch((error) => {
+        throw environment(`a press did not give pane B's terminal the keyboard: ${firstLine(error)}`);
+      });
+    }
     const at = await read();
     if (at.surveyOpen) {
       throw environment(`a survey is up over pane A before the leg raised one: ${JSON.stringify(at)}`);
     }
+    return true;
   }
 
   /// A walk from B's or A's tab label with B the active pane, with or
   /// without a survey over A's terminal, which `slot` holds for the leg's
   /// cleanup.
   async function hold(result, leg, slot) {
-    await startOnB();
+    if (!(await startOnB(result))) return;
     if (leg.survey) {
       await raiseSurvey(leg.kind, slot);
       result.appeared = await read();
@@ -366,23 +405,12 @@ async function runTabOrder(ctx, directory, save) {
   /// and gives A's terminal the keyboard; then Tab from A's tab label lands
   /// in A's terminal and the typed keys reach A's PTY.
   async function control(result) {
-    await startOnB();
+    if (!(await startOnB(result))) return;
     result.beforePress = await read();
-    const ready = result.beforePress.targetAttached && result.beforePress.awayAttached &&
-      existsSync(files.target) && existsSync(files.away);
-    if (!ready || result.beforePress.focusedPane !== run.panes.away) {
+    if (!ready(result.beforePress) || result.beforePress.focusedPane !== run.panes.away) {
       throw environment(`the press on pane A's terminal is not set up (both terminals attached and recording, pane B active): ${JSON.stringify(result.beforePress)}`);
     }
-    const took = await pressTerminal(page, target.tab).catch((error) => {
-      throw environment(`the press on pane A's terminal could not be made: ${firstLine(error)}`);
-    });
-    if (!took) {
-      result.afterPress = await read();
-      const { focusedPane, inTargetHost, name, element } = result.afterPress;
-      result.failures.push(`a press on pane A's terminal with pane B active left the active pane ${focusedPane} (pane A is ${run.panes.target}) and the keyboard ${inTargetHost ? "in A's terminal" : `on ${name || element}`} after ${PRESS_MS} ms`);
-      result.screenshot = await shot("353-control-press");
-      return;
-    }
+    if (!(await pressAcross(result, "target"))) return;
     const offsets = { target: bytes(files.target).length, away: bytes(files.away).length };
     await walk(result, run.panes.target, run.panes.target, "Tab");
     if (result.ended !== "A's terminal") {
