@@ -33,6 +33,10 @@ use crate::{Report, ReportScope};
 
 pub use crate::fs_ops::{AtomicWriteKind, AtomicWriteSink};
 
+#[path = "workspace_listed_files.rs"]
+mod listed_files;
+pub use listed_files::ListedFiles;
+
 /// Canonical editable-content threshold. It caps new `write_text` content,
 /// buffered editor opens, and incremental indexing; the server reports this
 /// same value as `max_editable_bytes` so those paths cannot disagree.
@@ -841,24 +845,27 @@ pub mod subtree_test_hooks {
 
 /// Lowered bounds on the full rebuild's listing and on the scoped
 /// whole-tree walk, so a test can cross either with a few files instead of
-/// half a million.
+/// half a million, and a count of the scoped whole-tree walks taken.
 ///
 /// Compiled for this crate's tests and for downstream test builds that
-/// enable `test-hooks`. A bound is keyed by the workspace's graph directory,
-/// so tests over separate workspaces do not interfere, and holds until the
-/// guard `lower` or `lower_tree_walk` returns is dropped.
+/// enable `test-hooks`. A bound or a count is keyed by the workspace's
+/// graph directory, so tests over separate workspaces do not interfere. A
+/// bound holds until the guard `lower` or `lower_tree_walk` returns is
+/// dropped.
 #[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod listing_limit_test_hooks {
     use super::Workspace;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
     type Limits = LazyLock<Mutex<HashMap<PathBuf, usize>>>;
 
     static REBUILD_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
     static TREE_WALK_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TREE_WALKS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub struct LimitGuard(&'static Limits, PathBuf);
 
@@ -890,6 +897,53 @@ pub mod listing_limit_test_hooks {
 
     pub(super) fn tree_walk_limit(workspace: &Workspace) -> usize {
         limit_in(&TREE_WALK_LIMITS, workspace)
+    }
+
+    /// How many walks [`Workspace::list_tree_filtered_unified`] and its
+    /// cancelable form have taken of `workspace`, each counted as it starts,
+    /// so one that stops at the cap or fails counts too.
+    pub fn tree_walks_taken(workspace: &Workspace) -> usize {
+        TREE_WALKS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn record_tree_walk(workspace: &Workspace) {
+        *TREE_WALKS
+            .lock()
+            .unwrap()
+            .entry(workspace.paths.graph_dir.clone())
+            .or_default() += 1;
+    }
+
+    type PathReads = HashMap<PathBuf, BTreeMap<String, usize>>;
+
+    static LISTED_FILE_READS: LazyLock<Mutex<PathReads>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// How many times a [`super::ListedFiles`] of `workspace` has read each
+    /// path from the disk, a path it was asked about or a directory above
+    /// one, each counted as its lstat is made.
+    pub fn listed_file_reads(workspace: &Workspace) -> BTreeMap<String, usize> {
+        LISTED_FILE_READS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn record_listed_file_read(key: &Path, rel: &str) {
+        *LISTED_FILE_READS
+            .lock()
+            .unwrap()
+            .entry(key.to_path_buf())
+            .or_default()
+            .entry(rel.to_owned())
+            .or_default() += 1;
     }
 
     fn limit_in(limits: &Limits, workspace: &Workspace) -> usize {
@@ -2343,6 +2397,13 @@ impl Workspace {
         ListedNames::new(self.fs.dir()).lists(rel) == Some(true)
     }
 
+    /// Per-path answers to whether [`Self::list_tree_filtered_unified`]
+    /// lists a path as a file, read from the disk with no walk; see
+    /// [`ListedFiles`] for what each answer reads.
+    pub fn listed_files(&self) -> ListedFiles {
+        ListedFiles::new(self)
+    }
+
     /// Stat the path using `lstat` semantics (so a symlink reports
     /// as such, not as its target). Refuses paths that escape the
     /// workspace root through a mid-path symlink. Sidecar drafts have
@@ -2455,6 +2516,8 @@ impl Workspace {
         &self,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<TreeEntry>> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        listing_limit_test_hooks::record_tree_walk(self);
         let policy = self.scope_policy();
         #[cfg(any(test, feature = "test-hooks"))]
         let limit = listing_limit_test_hooks::tree_walk_limit(self);

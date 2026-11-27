@@ -89,8 +89,8 @@ pub use graph::{
     NodeKind, Tag,
 };
 pub use graph_normalize::{
-    normalize_graph_edges, resolve_link_target, GraphNormalization, MentionContactResolution,
-    MentionContactResolver,
+    normalize_graph_edges, resolve_link_target, GraphNormalization, LinkSpellings,
+    MentionContactResolution, MentionContactResolver,
 };
 pub use index::{
     BuildOptions, BuildSummary, Chunking, Hit, IndexConfig, IndexOpenOptions, IndexStats,
@@ -117,10 +117,10 @@ pub use watch::{WatchCallback, WatchEvent, WatchHandle, WatchHealth, WatchHealth
 pub use workspace::ReconcileReport;
 pub use workspace::{
     semantic_write_budget, AtomicWriteKind, AtomicWriteSink, BoundedFileReader, CopyOutcome,
-    DirEntry, FileStat, ForgetSubtreeOutcome, RecoveryAction, RecoveryDriver, RecoveryOutcome,
-    RecoveryPass, RecoveryStatus, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent,
-    TreeEntry, Workspace, WorkspaceGeneration, WorkspacePath, WorkspaceReadiness, WritableFile,
-    BINARY_STREAM_CHUNK_SIZE, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
+    DirEntry, FileStat, ForgetSubtreeOutcome, ListedFiles, RecoveryAction, RecoveryDriver,
+    RecoveryOutcome, RecoveryPass, RecoveryStatus, RenameOutcome, ResolvedLink, SearchOpts,
+    TextReadEvent, TreeEntry, Workspace, WorkspaceGeneration, WorkspacePath, WorkspaceReadiness,
+    WritableFile, BINARY_STREAM_CHUNK_SIZE, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
 };
 pub use workspace_search::{
     EffectiveSearchMode, EffectiveWorkspaceTraversal, WorkspaceContentHit, WorkspaceEntityMatch,
