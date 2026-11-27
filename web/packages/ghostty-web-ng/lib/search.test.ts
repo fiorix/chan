@@ -2885,7 +2885,7 @@ describe('a listed match whose end precedes its start', () => {
     { name: 'as the newest match', row: 478, entry: 221, read: 'at' as const },
     { name: 'as the first active-area entry', row: 230, entry: 0, read: 'at' as const },
     { name: 'as the last active-area entry', row: 462, entry: 229, read: 'at' as const },
-    { name: 'in the middle of a batch, ending on its own row', row: 130, entry: 50, read: 'batch' as const, sameRow: true },
+    { name: 'in a batch, ending on its own row', row: 130, entry: 50, read: 'batch' as const, sameRow: true },
   ])('find neither counts, highlights, steps to nor copies it, listed $name', async ({ row, entry, read, sameRow }) => {
     const { term } = await create(threePaged, 200, 20, 10_000_000);
     expect(coreRows(term, 'needle', 230)[entry], `the core lists row ${row} as entry ${entry}`).toBe(row);
