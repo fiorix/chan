@@ -830,47 +830,50 @@ describe("a reconciling answer that names its replay's start screen", () => {
     expect(dialed(next).since, "the cursor counts no switch").toBe(String(end));
   });
 
-  test.each([
-    {
-      name: "leaves the alternate screen and later enters another",
-      view: viewOnTheAlternateScreen,
-      start: "normal" as const,
-      // The shell's lines on the normal screen, then a second program's
-      // frame on its own alternate screen.
-      replay: "between\r\n$ tui2\r\n\x1b[?1049h\x1b[5;1Hframe two",
-      after: LOST_ALT_SUFFIX,
-      normal: ["between", "$ tui2"],
-      alternate: "frame two",
-      ends: true,
-    },
-    {
-      name: "enters the alternate screen and later leaves it",
-      view: viewOnTheNormalScreen,
-      start: "alternate" as const,
-      // A program's frame on its alternate screen, its exit, and the shell.
-      replay: "\x1b[5;1Hframe one\x1b[?1049l\r\nback\r\n$ ",
-      after: LOST_PLAIN_SUFFIX,
-      normal: ["back"],
-      alternate: null,
-      ends: false,
-    },
-  ])("a redial whose replay $name draws each part on its own screen", async ({ view, start, replay, after, normal, alternate, ends }) => {
-    const opened = await view();
-    const { term, socket } = opened;
-    const cursor = "cursor" in opened && typeof opened.cursor === "number" ? opened.cursor : VIEW_AT;
-    const next = await redialed(socket, cursor);
-    const lost = 8;
-    const end = cursor + lost + replay.length;
-    await deliver(next, { frame: session(end, lost, replay.length, start), replay, after });
-    expect(ghosttyAlternateScreen(term), "the screen the program ends on").toBe(ends);
+  test("a redial whose replay leaves the alternate screen and later enters another draws each part on its own screen", async () => {
+    const { term, socket } = await viewOnTheAlternateScreen();
+    const next = await redialed(socket);
+    // The shell's lines on the normal screen, then a second program's frame
+    // on its own alternate screen.
+    const replay = "between\r\n$ tui2\r\n\x1b[?1049h\x1b[5;1Hframe two";
+    const end = VIEW_AT + LOST_EXIT.length + replay.length;
+    await deliver(next, { frame: session(end, LOST_EXIT.length, replay.length, "normal"), replay, after: LOST_ALT_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the second program's alternate screen").toBe(true);
     expect(ghosttyMode(term, 1000), "no mouse tracking from the dead program").toBe(false);
-    if (alternate) expect(ghosttyLineText(term, 4), "the frame on the alternate screen").toContain(alternate);
-    // The normal screen's rows read the screen shown, so a program still on
-    // its alternate screen leaves it first.
-    if (ends) await output(next, "\x1b[?1049l");
-    const normalRows = rows(term.buffer.normal);
-    for (const line of normal) expect(normalRows, "the normal screen's part").toContain(line);
-    expect(normalRows.some((row) => row.includes("frame")), "no frame on the normal screen").toBe(false);
+    expect(ghosttyLineText(term, 4), "its frame there").toContain("frame two");
+    // The normal screen's rows read the screen shown, so the program leaves
+    // its alternate screen first.
+    await output(next, "\x1b[?1049l");
+    const normal = rows(term.buffer.normal);
+    expect(normal, "the shell's lines on the normal screen").toEqual(expect.arrayContaining(["between", "$ tui2"]));
+    expect(normal.some((row) => row.includes("frame")), "no frame on the normal screen").toBe(false);
+  });
+
+  test("a redial whose replay enters the alternate screen and later leaves it puts the shell's tail below the view's cursor line", async () => {
+    const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+    const { term } = await mountGhosttyTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    socket.onopen?.();
+    await receive(socket, session(ATTACHED_AT, 0, 0));
+    await receive(socket, READY);
+    // Five lines and a prompt on the normal screen, with a cursor the shell
+    // saved at the start of the third line: the view's cursor stands on the
+    // prompt's line.
+    const shown = "one\r\ntwo\r\n\x1b7three\r\nfour\r\nfive\r\n$ ";
+    await output(socket, shown);
+    const cursor = ATTACHED_AT + shown.length;
+    const next = await redialed(socket, cursor);
+    // A program entered its alternate screen in the lost span; the replay
+    // holds its frame, its exit and the shell's tail.
+    const lost = "\x1b[?1049h".length;
+    const replay = "\x1b[5;1Hframe one\x1b[?1049l\r\nback\r\n$ ";
+    const end = cursor + lost + replay.length;
+    await deliver(next, { frame: session(end, lost, replay.length, "alternate"), replay, after: LOST_PLAIN_SUFFIX });
+    expect(ghosttyAlternateScreen(term), "the normal screen the program left for").toBe(false);
+    expect(
+      rows(term.buffer.normal).slice(0, 8),
+      "the tail on the line below the prompt the view's cursor stood on, not over the older save's line or the top",
+    ).toEqual(["one", "two", "three", "four", "five", "$", "back", "$"]);
   });
 
   test("a re-ask after a cut inside a sequence, past a switch in its replay, writes no switch and no literal text", async () => {

@@ -67,13 +67,17 @@ describe("replayScreenSwitch", () => {
     expect(term.isAlternateScreen(), "a later entry still switches").toBe(true);
   });
 
-  test("takes a view on the normal screen to the alternate screen without saving its cursor", async () => {
+  // The program's lost entry was almost always by 1049, which saved the
+  // cursor where the view stands.
+  test("takes a view on the normal screen to the alternate screen as a 1049 entry, so a 1049 exit returns to the view's cursor", async () => {
     const term = await shell();
     term.write(replayScreenSwitch(view(term), "alternate"));
     expect(term.isAlternateScreen(), "the alternate screen").toBe(true);
     expect(cursor(term), "the cursor stays").toEqual({ x: 4, y: 9 });
-    term.write("\x1b[?1047l\x1b8");
-    expect(cursor(term), "the normal screen's saved cursor is the one it had").toEqual({ x: 2, y: 6 });
+    // The program draws on its alternate screen and leaves it.
+    term.write("\x1b[3;6Hframe\x1b[?1049l");
+    expect(term.isAlternateScreen(), "the normal screen").toBe(false);
+    expect(cursor(term), "the cursor where the view stood at the switch, not the older save").toEqual({ x: 4, y: 9 });
   });
 
   test("ends a sequence the view was left inside before it switches", async () => {

@@ -17,17 +17,21 @@ export type ViewScreen = { alternate: boolean; mode1049: boolean };
 /// The bytes that take a view on `view` to the screen `to` before a replay
 /// is written, or "" when the view is already there, so a redundant switch
 /// is never written. Each starts with CAN, which ends any sequence the view
-/// was left inside. Neither saves a cursor: the view's saved cursors are
-/// the program's, and a replay may restore one.
+/// was left inside.
 ///
 /// To the normal screen, a view that entered by 1049 leaves by 1049, which
 /// restores the cursor its own entry saved, as the program's exit would.
 /// Any other view leaves by 1047 and 47, which restore none: a 1049 exit
-/// there would move the cursor to whatever the normal screen saved last.
-/// To the alternate screen, 1047 switches without saving and the erase
-/// clears what an earlier program left there, as an entry by 1049 would.
+/// there would move the cursor to whatever the normal screen saved last. No
+/// exit saves a cursor, since the normal screen's saved cursor is the
+/// program's and the replay may restore it.
+///
+/// To the alternate screen, the view enters by 1049, as a program almost
+/// always does: its lost entry saved the cursor where the view stands, so a
+/// 1049 exit later in the replay returns there, and the entry clears what
+/// an earlier program left on that screen.
 export function replayScreenSwitch(view: ViewScreen, to: ReplayScreen): string {
   if (view.alternate === (to === "alternate")) return "";
-  if (to === "alternate") return "\x18\x1b[?1047h\x1b[2J";
+  if (to === "alternate") return "\x18\x1b[?1049h";
   return `\x18${view.mode1049 ? "\x1b[?1049l" : ""}\x1b[?1047;47l`;
 }
