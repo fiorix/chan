@@ -69,10 +69,11 @@
   // is non-standard, and focus that reaches such an element answers nothing
   // and is let go at the next pulse, though keys typed there before it is
   // let go edit its text. A scroll container that one of the app's own
-  // stylesheet rules makes of a body element by its class only after the
-  // hold ran (a rule of the stylesheet a deck's outline connects while it
-  // shows) stays too, since `scrolls` reads the computed style only when
-  // the body or the panes change.
+  // stylesheet rules makes of a body element, by a class or another
+  // attribute its markup carries, only after the hold ran (a rule of the
+  // stylesheet a deck's outline connects while it shows) stays too, since
+  // `scrolls` reads the computed style only when the body or the panes
+  // change.
   const BODY_FOCUSABLE =
     "[*|href], button, input, select, textarea, iframe, details, summary, " +
     "audio[controls], video[controls], [tabindex]";
