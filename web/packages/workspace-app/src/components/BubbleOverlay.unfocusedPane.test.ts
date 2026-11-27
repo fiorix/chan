@@ -388,6 +388,67 @@ describe("a press on a survey's overlay beside its card", () => {
       .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
   });
 
+  // A press on the pane's tab strip beside its tabs lands on an element no
+  // engine focuses, so its default drops the keyboard to the page.
+  test("with its pane focused and the keyboard at large, gives the keyboard to the card", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    const strip = pane(TOP).querySelector<HTMLElement>(".tabs");
+    if (!strip) throw new Error("no tab strip in the survey's pane");
+    await click(strip);
+    expect(layout.activePaneId, "the press on the strip leaves its pane the focused one").toBe(TOP);
+    expect(document.activeElement, "the press on the strip drops the keyboard to the page").toBe(document.body);
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+
+    await click(overlayOf(card));
+    expect(layout.activePaneId, "its pane stays the focused one").toBe(TOP);
+    expect(document.activeElement, "the card takes the keyboard").toBe(card);
+
+    typeKey("2", "Digit2");
+    await settleLong();
+    expect(reply, "a 2 answers the survey's second option")
+      .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
+  });
+
+  // The pane's menu button takes the keyboard on its press, as Chrome and
+  // WebKitGTK focus a pressed button; WebKit for macOS focuses none.
+  test("with its pane focused and the keyboard on a control outside the card, gives the keyboard to the card", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement, "its pane focused, the survey takes the keyboard").toBe(card);
+    const menuButton = pane(TOP).querySelector<HTMLButtonElement>(".tabs .actions .hamburger-trigger");
+    if (!menuButton) throw new Error("no menu button in the survey's pane");
+    await click(menuButton);
+    expect(document.activeElement, "the pane's menu button holds the keyboard").toBe(menuButton);
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+
+    await click(overlayOf(card));
+    expect(layout.activePaneId, "its pane stays the focused one").toBe(TOP);
+    expect(document.activeElement, "the card takes the keyboard").toBe(card);
+
+    typeKey("2", "Digit2");
+    await settleLong();
+    expect(reply, "a 2 answers the survey's second option")
+      .toHaveBeenCalledWith({ surveyId: SURVEY.surveyId, kind: "option", optionIndex: 1, optionLabel: "B" });
+  });
+
+  // Tab from the card places the keyboard on an option; jsdom runs no Tab
+  // default, so the case places it by script.
+  test("with the keyboard on an option, leaves it on the option", async () => {
+    const card = await surveyOverUnfocusedPane();
+    setActivePane(TOP);
+    await settleLong();
+    const option = card.querySelector<HTMLButtonElement>(".survey-option")!;
+    option.focus();
+    expect(document.activeElement, "focus placed on the option by script").toBe(option);
+
+    await click(overlayOf(card));
+    expect(document.activeElement, "the option keeps the keyboard").toBe(option);
+  });
+
   // Only a press on the overlay itself is held: one on the card or in it
   // keeps its default, as here an option takes the keyboard from the card.
   test("leaves a press inside the card its own default", async () => {
