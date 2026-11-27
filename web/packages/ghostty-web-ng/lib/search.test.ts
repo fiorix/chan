@@ -2048,6 +2048,38 @@ describe('widget search', () => {
     expect(active(term)?.[0].start.absoluteRow).toBeLessThan(901);
   });
 
+  // A line feed at the bottom of a scroll region whose top row is a
+  // wrapped match's second row drops that row; the core moves the end's
+  // tracked cell to the row above at its own column and leaves the start's,
+  // so the pair reads 2:37 to 2:2.
+  test('output that leaves the active match ending before its start loses it in that write', async () => {
+    const { term } = await create(`needle 0\r\nr1\r\n${'x'.repeat(37)}needle\r\nneedle 4\r\nr5`);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(2, 37, 3, 2)]);
+    const start = term.core!.trackCell(2, 37)!;
+    const end = term.core!.trackCell(3, 2)!;
+    term.write('\x1b[4;6r\x1b[6;1H\n');
+    const moved = { start: start.point(), end: end.point() };
+    start.free();
+    end.free();
+    expect(moved, 'not exercised: the core no longer moves one cell of the pair above the other here; ' +
+      'after a core update, find a write that does, or this case guards nothing').toEqual({
+      start: { row: 2, col: 37 }, end: { row: 2, col: 2 },
+    });
+    expect(active(term), 'find shows no active match and paints no band').toBeUndefined();
+    expect(activeText(term), 'Copy reads nothing of it').toBeUndefined();
+    expect(search.state.index, 'no active match has a position').toBeNull();
+    search.step('needle', 'older');
+    expect(active(term), 'older from no active match lands on the newest').toEqual([range(3, 0)]);
+    expect(activeText(term)).toBe('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 2, partial: false });
+    expect(active(term)).toEqual([range(3, 0)]);
+  });
+
   test('a predicted expensive feed restarts the scan and preserves the kept match', async () => {
     const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(20_000), 200, 5, 60_000);
     const search = searchOf(term);
