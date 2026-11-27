@@ -8,6 +8,13 @@
 // real tab model with the api served from a fixed tree; the assertions read
 // the selection the canvas is handed, the tab's pending selection and opened
 // folders, and the level reads the api saw.
+//
+// Every case ends within CASE_MS and runs no loop of microtasks. The
+// selection's rule waits on reads it asks for, and a rule that asks again for
+// a folder it already asked for loops on microtasks alone, which no timer
+// interrupts: the worker would hang with no case named.
+// `yieldRunawayMicrotasks` makes such a loop yield and counts it, and every
+// wait of a case reads the count and the clock.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -32,9 +39,10 @@ import {
   installGraphDom,
   mountGraphPanel,
   resetGraphServer,
-  settle,
+  settle as settleTurns,
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
+import { yieldRunawayMicrotasks, type MicrotaskYield } from "../__tests__/microtaskYield";
 import { directoryNodeId } from "../graph/canvasNodes";
 import { graphData, invalidateGraph, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
@@ -45,43 +53,66 @@ import { layout, type GraphTab } from "../state/tabs.svelte";
 
 installGraphDom();
 
+const CASE_MS = 10_000;
+let deadline = Infinity;
+let microtasks: MicrotaskYield;
+
+/// The fixture's settle, a turn at a time, failing the case once a loop of
+/// microtasks has run or the case has run past its bound.
+async function settle(turns = 10): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await settleTurns(1);
+    if (microtasks.yielded > 0) throw new Error("a loop of microtasks ran with no timer turn");
+    if (performance.now() > deadline) throw new Error(`the case did not finish within its ${CASE_MS} ms bound`);
+  }
+}
+
 let timers: TimerTrack;
 beforeEach(() => {
+  microtasks = yieldRunawayMicrotasks();
   timers = trackTimers();
   resetGraphServer();
   invalidateGraph();
+  deadline = performance.now() + CASE_MS;
 });
 afterEach(() => {
   closeTabMenu();
   unmountGraphPanels();
   timers.release();
+  const yielded = microtasks.yielded;
+  microtasks.release();
+  // A loop that began after the case's last wait.
+  expect(yielded, "a loop of microtasks ran with no timer turn").toBe(0);
 });
 
 const DIRS = ["", "a", "a/b", "a/b/c"];
 const FILES = ["top.md", "a/x.rs", "a/b/c/y.rs"];
 
 /// The tree on disk: folders a, a/b and a/b/c, with top.md at the root,
-/// a/x.rs and a/b/c/y.rs. Under an answer of the whole tree the shared graph
-/// holds all of it; over the listing cap it holds every folder and none of
-/// the three files, with the tag, mention and language nodes either way.
-function serve(tree: GraphTreeCoverage | null): void {
-  const files = tree === null ? FILES : [];
+/// a/x.rs and a/b/c/y.rs, and the folders and files `more` names. Under an
+/// answer of the whole tree the shared graph holds all of it; over the listing
+/// cap it holds every folder and none of the files, with the tag, mention and
+/// language nodes either way.
+function serve(tree: GraphTreeCoverage | null, more: { dirs?: string[]; files?: string[] } = {}): void {
+  const dirs = [...DIRS, ...(more.dirs ?? [])];
+  const onDisk = [...FILES, ...(more.files ?? [])];
+  const files = tree === null ? onDisk : [];
   graphServer.view = {
     nodes: [
-      ...DIRS.map((dir) => g.dir(dir)),
+      ...dirs.map((dir) => g.dir(dir)),
       ...files.map((file) => g.file(file)),
       g.tag("t"),
       g.mention("alice"),
       g.language("rust"),
     ],
     edges: [
-      ...DIRS.filter(Boolean).map((dir) => g.edge(directoryNodeId(parentDir(dir)), directoryNodeId(dir), "contains")),
+      ...dirs.filter(Boolean).map((dir) => g.edge(directoryNodeId(parentDir(dir)), directoryNodeId(dir), "contains")),
       ...files.map((file) => g.edge(directoryNodeId(parentDir(file)), file, "contains")),
     ],
   };
   graphServer.fs = {
-    nodes: [...DIRS.map((dir) => fsg.dir(dir)), ...FILES.map((file) => fsg.file(file))],
-    edges: [...DIRS.filter(Boolean), ...FILES].map((path) => fsg.contains(parentDir(path), path)),
+    nodes: [...dirs.map((dir) => fsg.dir(dir)), ...onDisk.map((file) => fsg.file(file))],
+    edges: [...dirs.filter(Boolean), ...onDisk].map((path) => fsg.contains(parentDir(path), path)),
   };
   graphServer.tree = tree;
 }
@@ -348,5 +379,48 @@ describe.each(["folders", "depth"] as const)("over the listing cap (%s)", (tree)
     await settle(30);
     expect(state(tab)).toEqual({ selected: "a/x.rs", pending: null, opened: ["", "a"] });
     expect(reads(), "the patch's read is superseded; the landing reads the chain").toEqual(["", "a", "", "a"]);
+  });
+
+  // A restored tab with the folder q opened, whose read always fails. The
+  // whole fetch fails it and its retry fails it again; the chain's read
+  // leaves it to that retry rather than reading it once more, which would
+  // fail into a whole fetch of its own.
+  test("the chain's read leaves an opened folder whose read failed to its retry", async () => {
+    serve(tree, { dirs: ["q"] });
+    graphServer.fsFail = (path) => (path === "q" ? new ApiError(500, "boom", { error: "boom" }) : null);
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      openerTab({ pendingSelectId: "a/x.rs", selectedNodeId: "a/x.rs", expanded: { "": true, q: true } }),
+    );
+    await settle(30);
+    expect(state(tab)).toEqual({ selected: "a/x.rs", pending: null, opened: ["", "a", "q"] });
+    expect({ root: levelReads(""), q: levelReads("q"), a: levelReads("a") }).toEqual({ root: 1, q: 2, a: 1 });
+  });
+
+  // The first spine is in while the window's answer is held. A change that
+  // names no path fetches the spine whole again, which fails at the root, and
+  // then the answer completes over a spine in error: there is no spine to
+  // read the chain into, and asking would only begin another whole fetch.
+  test("over a spine in error the selection is dropped and no read is begun for its chain", async () => {
+    serve(tree);
+    let releaseStream!: () => void;
+    graphServer.streamGate = new Promise<void>((resolve) => (releaseStream = resolve));
+    graphServer.fsFail = (path) =>
+      path === "" && levelReads("") === 2 ? new ApiError(500, "boom", { error: "boom" }) : null;
+    const tab = await open("a/x.rs");
+    expect(graphData.loading, "the answer is held").toBe(true);
+    graphReloadSignal.paths = [];
+    graphReloadSignal.nonce += 1;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await settle(30);
+    expect(levelReads(""), "the reload failed at the root").toBe(2);
+    graphServer.streamGate = null;
+    releaseStream();
+    await settle(30);
+    expect(graphData.tree, "the answer is in").toBe(tree);
+    expect(state(tab)).toEqual({ selected: null, pending: null, opened: [""] });
+    await settle(30);
+    expect({ root: levelReads(""), a: levelReads("a") }).toEqual({ root: 2, a: 0 });
   });
 });
