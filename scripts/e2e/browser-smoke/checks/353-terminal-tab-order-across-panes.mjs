@@ -9,6 +9,9 @@
 // and a further step would write a byte rather than move the keyboard, or at
 // a step limit. Then `zq` is typed and both recorders are read.
 //
+// Every leg starts by a press on B's terminal with no survey up, so it reads
+// the same whatever leg ran before it.
+//
 // The legs other than the control keep B the active pane. Each fails if a
 // step lands in A's terminal, if the active pane moves, or if A's PTY reads
 // a byte; a walk toward A's terminal must also pass its place, so that its
@@ -297,13 +300,27 @@ async function runTabOrder(ctx, directory, save) {
   const walkLine = (result) => result.walk
     .map((at) => `${at.step}:${at.name || at.element}@${at.pane ?? "-"}/${at.relation}`).join(" > ");
 
+  /// Every leg starts from B the active pane, made by a press on B's
+  /// terminal, with no survey over A's terminal, whatever the leg before it
+  /// left: a survey leg's cleanup presses the card's dismiss in pane A, which
+  /// makes A the active pane, and a cleanup that could not close its survey
+  /// leaves the card up. A start that cannot be made is an environment
+  /// result.
+  async function startOnB() {
+    await clickTerminal(page, away.tab).catch((error) => {
+      throw environment(`a press did not give pane B's terminal the keyboard: ${firstLine(error)}`);
+    });
+    const at = await read();
+    if (at.surveyOpen) {
+      throw environment(`a survey is up over pane A before the leg raised one: ${JSON.stringify(at)}`);
+    }
+  }
+
   /// A walk from B's or A's tab label with B the active pane, with or
   /// without a survey over A's terminal, which `slot` holds for the leg's
   /// cleanup.
   async function hold(result, leg, slot) {
-    await clickTerminal(page, away.tab).catch((error) => {
-      throw environment(`a press did not give pane B's terminal the keyboard: ${firstLine(error)}`);
-    });
+    await startOnB();
     if (leg.survey) {
       await raiseSurvey(leg.kind, slot);
       result.appeared = await read();
@@ -349,6 +366,7 @@ async function runTabOrder(ctx, directory, save) {
   /// and gives A's terminal the keyboard; then Tab from A's tab label lands
   /// in A's terminal and the typed keys reach A's PTY.
   async function control(result) {
+    await startOnB();
     result.beforePress = await read();
     const ready = result.beforePress.targetAttached && result.beforePress.awayAttached &&
       existsSync(files.target) && existsSync(files.away);
