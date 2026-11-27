@@ -58,6 +58,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [livetail]: done/a-live-sockets-lossy-recovery-past-a-lost-alternate-screen-exit-drops-the-retained-tail.md
 [trackris]: v0.136.0/the-servers-screen-and-mode-tracker-misses-a-reset-and-control-bytes-inside-a-switch.md
 [invrange]: v0.136.0/a-find-match-whose-end-precedes-its-start-paints-a-band-across-the-rows-between.md
+[wgmacwait]: v0.136.0/a-wireguard-resolution-test-times-out-on-the-macos-runner-at-a-tagged-release.md
 
 ### v0.136.0
 
@@ -89,6 +90,7 @@ In v0.133.0, which opened on 2026-11-18, these rows came in as follows: the owne
 | [the app terminal's xterm-era scaffolding][termwrites] | not started | later |
 | [the mode tracker misses a reset][trackris] | not started | later |
 | [an inverted find match paints a band][invrange] | not started | later |
+| [a WireGuard test times out on macOS][wgmacwait] | not started | build |
 
 
 ## Completed
