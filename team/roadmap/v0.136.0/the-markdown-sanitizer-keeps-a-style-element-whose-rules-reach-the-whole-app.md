@@ -48,3 +48,18 @@ The owner chose option (a) on 2026-11-27 ("2. option a"), asked by the session t
 ## Decided, 2026-11-27: the exports forbid it too
 
 By the preparation's reading at `0672d1499` (not yet accepted by a build), the slide and document export renders its Markdown inside the app's own document while the export runs, and its output leaves as an image; nothing in a test, a fixture or a document relies on a `<style>` element in a deck or a document, though the export carries one to paper today. Asked whether option (a) forbids `<style>` for the exports too, so that the slide preview and the PDF agree and a deck's own `<style>` block stops styling its PDF, or keeps it for the exports only, the owner answered on 2026-11-27: "2. as recommended", the recommendation being to forbid it. Under option (a) the one caller that keeps a `<style>` element is Copy as HTML, whose HTML never enters the app's document. The release that ships this says in its changelog that a `<style>` block in a deck or a document no longer styles its preview or its PDF.
+
+## Read, 2026-11-27: where each caller's HTML goes (acceptance 3)
+
+Read at `3d6b76cf1` by following each sanitized string from its render call, with three jsdom probes (jsdom 29.1.1, DOMPurify 3.4.17, marked 18.1.1); the preparation's reading of the same callers agreed on every verdict. No browser ran.
+
+| Caller | Where its HTML goes | Policy under option (a) |
+| --- | --- | --- |
+| Survey body (`components/BubbleOverlay.svelte`) | The app's document, while the survey shows | No `<style>` |
+| Link preview (`editor/overlays/preview_popover.ts`) | The app's document, under a wrapper on `document.body` until dismissed | No `<style>` |
+| Table cell (`editor/widgets/table.ts`) | The app's document, in the editor while the grid is drawn | No `<style>` |
+| Slide thumbnail, preview and PDF page (`editor/slide_dom.ts`) | The app's document: the outline, a backdrop on `document.body`, and each PDF page while it is rasterized | No `<style>` (owner answer 10) |
+| Printable document (`editor/doc_dom.ts`) | The app's document for the whole export; pages leave as rasterized images | No `<style>` (owner answer 10) |
+| Copy as HTML (`editor/copy_html.ts`) | Detached elements whose `outerHTML` goes to the clipboard or the desktop's IPC; never connected | Keeps `<style>` |
+
+Nothing chan ships, tests or documents relies on a `<style>` element in a deck or a document. The export carries an author's `<style>` into each page's image today, and one whose `url()` cannot be inlined fails the export. The renderers drop a leading HTML `<style>` but keep one after other content, one inside an inline `<svg>`, and, in the inline renderer, one led by whitespace; DOMPurify's `FORBID_TAGS` drops every one of those spellings with its text.
