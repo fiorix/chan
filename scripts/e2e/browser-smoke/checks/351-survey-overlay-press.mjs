@@ -23,6 +23,11 @@
 // "the 2 left the survey unanswered". Where the overlay cancels the default
 // but the card does not take the keyboard after the press, the at-large leg
 // fails on the same two lines and the other legs pass.
+//
+// Each leg's silence on both PTYs is read against recorders that took a
+// control byte at setup. After the last leg, one more key typed into each
+// terminal must reach that terminal's own recorder, so a recorder that
+// stopped after setup cannot read as a leg's silence.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -175,6 +180,26 @@ async function runSurvey(ctx, directory, save) {
     return handle;
   }
 
+  /// One key typed into each terminal reaches that terminal's own
+  /// recorder.
+  async function controlAfterLegs() {
+    const control = { observed: false, errors: [] };
+    run.afterLegs = control;
+    try {
+      for (const [side, tab, key, byte] of [["target", target.tab, "u", "75"], ["away", away.tab, "v", "76"]]) {
+        const offset = bytes(files[side]).length;
+        await clickTerminal(page, tab);
+        await page.keyboard.press(key);
+        control[side] = await recordedSince(`${side} control after the legs`, files[side], offset, byte);
+        if (!same(control[side], [byte])) throw new Error(`${side} control bytes after the legs ${JSON.stringify(control[side])}`);
+      }
+      control.observed = true;
+    } catch (error) {
+      control.errors.push(describeError(error));
+    }
+    save();
+  }
+
   async function runLeg(kind) {
     const result = { kind, observed: false, failures: [], interactionErrors: [], cleanupErrors: [] };
     run.legs.push(result);
@@ -284,6 +309,7 @@ async function runSurvey(ctx, directory, save) {
     }
     run.setup = "observed";
     for (const kind of LEGS) await runLeg(kind);
+    await controlAfterLegs();
   } catch (error) {
     run.setupErrors.push(describeError(error));
     run.setup = "incomplete";
@@ -324,11 +350,13 @@ export default {
     const { run } = report;
     const failed = !run || run.setup !== "observed" || run.setupErrors.length || run.pageErrors.length || run.cleanupErrors.length ||
       run.legs.length !== LEGS.length ||
-      run.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length);
+      run.legs.some((leg) => !leg.observed || leg.failures.length || leg.interactionErrors.length || leg.cleanupErrors.length) ||
+      !run.afterLegs?.observed;
     if (failed || report.cleanupErrors.length) {
       const reasons = run ? [
         ...run.setupErrors.map((error) => `setup: ${error.split("\n")[0]}`),
         ...run.legs.flatMap((leg) => [...leg.failures, ...leg.interactionErrors.map((error) => error.split("\n")[0])].map((reason) => `${leg.kind}: ${reason}`)),
+        ...(run.afterLegs?.errors ?? []).map((error) => `after the legs: ${error.split("\n")[0]}`),
       ] : [];
       throw Object.assign(new Error(`survey overlay press contract failed: ${reasons.join("; ") || "incomplete run or cleanup"}`), { smokeDetails: report });
     }
