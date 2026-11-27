@@ -590,17 +590,21 @@ fn missed_tail_mouse_enables_follow_every_competing_reset() {
             assert!(recovered.missed_bytes > 0, "fixture must require recovery");
             let mut last_protocol = None;
             let mut last_encoding = None;
-            scan_private_modes(&mut Vec::new(), &recovered.mode_reassert, |change| {
-                let ModeChange::Mode(mode, on) = change else {
-                    return;
-                };
-                if [9, 1000, 1002, 1003].contains(&mode) {
-                    last_protocol = Some((mode, on));
-                }
-                if [1006, 1016].contains(&mode) {
-                    last_encoding = Some((mode, on));
-                }
-            });
+            scan_private_modes(
+                &mut OpenSequence::None,
+                &recovered.mode_reassert,
+                |change| {
+                    let ModeChange::Mode(mode, on) = change else {
+                        return;
+                    };
+                    if [9, 1000, 1002, 1003].contains(&mode) {
+                        last_protocol = Some((mode, on));
+                    }
+                    if [1006, 1016].contains(&mode) {
+                        last_encoding = Some((mode, on));
+                    }
+                },
+            );
             assert_eq!(
                 last_protocol,
                 Some((protocol, true)),

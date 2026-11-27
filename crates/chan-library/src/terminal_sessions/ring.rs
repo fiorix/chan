@@ -21,14 +21,15 @@ pub(super) struct ScreenMark {
     /// says which screen they started on.
     pub(super) alt_screen: Option<bool>,
     /// A switch or a full reset the tracker had begun and not finished
-    /// before the chunk, which the chunk's first bytes may finish.
-    pub(super) partial: Vec<u8>,
+    /// before the chunk, which the chunk's first bytes may finish: the
+    /// scan's parse state, of fixed size, not the sequence's bytes.
+    pub(super) partial: super::OpenSequence,
 }
 
 impl ScreenMark {
     /// Where the tracker stands after `bytes`, from this mark.
     pub(super) fn after(&self, bytes: &[u8]) -> Self {
-        let mut partial = self.partial.clone();
+        let mut partial = self.partial;
         let mut alt_screen = self.alt_screen;
         super::scan_private_modes(&mut partial, bytes, |change| {
             if let Some(on) = change.screen() {
@@ -195,10 +196,10 @@ impl RingBuffer {
         self.chunks.front().map(|chunk| &chunk.screen)
     }
 
-    /// The start of a private-mode sequence the ring's last bytes leave
-    /// open, which the next read may finish; empty when they leave none.
+    /// The private-mode sequence or reset the ring's last bytes leave open,
+    /// which the next read may finish.
     #[cfg(target_os = "linux")]
-    pub(super) fn open_sequence(&self) -> Vec<u8> {
+    pub(super) fn open_sequence(&self) -> super::OpenSequence {
         self.chunks
             .back()
             .map(|chunk| chunk.screen.after(&chunk.bytes).partial)
