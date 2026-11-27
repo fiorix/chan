@@ -167,6 +167,10 @@ export function openLinkBubble(opts: LinkBubbleOpts): BubbleHandle | null {
     e.stopPropagation();
     open();
   });
+  // The drop-down never takes the keyboard, so a press anywhere in it, its
+  // footer and its frame too, leaves the keyboard where it was; the press's
+  // default would focus nothing and drop the keyboard to the page.
+  shell.wrap.addEventListener("mousedown", (e) => e.preventDefault());
 
   return {
     handleKey(event: KeyboardEvent): boolean {
