@@ -72,7 +72,8 @@
 // Output, in the output directory: preconditions.json; per leg
 // <leg>-opened.png and <leg>-settled.png (the tab as it appeared and as it
 // settled, or <leg>-failed.png when the leg stopped short) and <leg>.json
-// (both readings, the requests, `pageErrors`, `consoleErrors`, and
+// (both readings, when the tab was asked for on the request log's clock,
+// `openAtMs`, the requests, `pageErrors`, `consoleErrors`, and
 // `failedResponses` with their set, `failedResponseSet`); verdict.json, which
 // carries per leg the page errors and the failed-response set, so a job can
 // compare one build's sets with another's. The last stdout line is the
@@ -431,12 +432,20 @@ function describe(href) {
 /// order received: its method, its route (the URL's path below the window's
 /// own, `api/inspector`, or the whole URL without its query for another
 /// origin or path), the workspace path its `path` parameter names, its
-/// status, when it came, and whether the tab had been asked for by then. No
-/// other part of the query is kept, so no token is.
+/// status, when its request was made (`requestAtMs`) and when it came
+/// (`atMs`), both on the request log's clock, and whether its request was
+/// made after the tab was asked for (`afterOpen`), by the request log's own
+/// rule. A request made before the menu command whose response comes after
+/// it reads as before the open, as it does in the request log; a request
+/// the page never reported reads `null` for both. No other part of the query
+/// is kept, so no token is.
 function watchFailedResponses(page, windowUrl, requests) {
   const base = new URL(".", windowUrl);
   const entries = [];
-  const started = Date.now();
+  const made = new WeakMap();
+  page.on("request", (request) => {
+    made.set(request, { atMs: Date.now() - requests.started, afterOpen: requests.mark !== null });
+  });
   page.on("response", (response) => {
     const status = response.status();
     if (status < 400) return;
@@ -447,13 +456,16 @@ function watchFailedResponses(page, windowUrl, requests) {
       return;
     }
     const below = url.origin === base.origin && url.pathname.startsWith(base.pathname);
+    const request = response.request();
+    const start = made.get(request) ?? null;
     entries.push({
-      method: response.request().method(),
+      method: request.method(),
       route: maskTokens(below ? url.pathname.slice(base.pathname.length) : `${url.origin}${url.pathname}`),
       path: url.searchParams.has("path") ? maskTokens(url.searchParams.get("path")) : null,
       status,
-      atMs: Date.now() - started,
-      afterOpen: requests.mark !== null,
+      requestAtMs: start?.atMs ?? null,
+      atMs: Date.now() - requests.started,
+      afterOpen: start?.afterOpen ?? null,
     });
   });
   return entries;
@@ -673,6 +685,7 @@ async function runLeg(browser, inputs, leg, file) {
 
     await openRowMenu(page, file);
     requests.open();
+    record.openAtMs = requests.mark;
     await pressNewGraphHere(page, file);
     try {
       await page.waitForSelector(".graph-tab.active canvas", { timeout: 60_000 });
