@@ -83,9 +83,9 @@ async function launcher(page, title) {
   await page.keyboard.up("Control");
   await page.waitForSelector(LAUNCHER_INPUT, { visible: true });
   await page.type(LAUNCHER_INPUT, title);
-  await page.waitForFunction((wanted) =>
-    [...document.querySelectorAll(`${LAUNCHER} [role="option"][aria-selected="true"] .deck-result-title`)]
-      .some((row) => row.textContent?.trim() === wanted), { timeout: 15_000 }, title);
+  await page.waitForFunction((dialog, wanted) =>
+    [...document.querySelectorAll(`${dialog} [role="option"][aria-selected="true"] .deck-result-title`)]
+      .some((row) => row.textContent?.trim() === wanted), { timeout: 15_000 }, LAUNCHER, title);
   await page.keyboard.press("Enter");
   await page.waitForSelector(LAUNCHER, { hidden: true });
 }
