@@ -1274,6 +1274,11 @@ CAVEATS:
     group).
   - [F] is a deferral signal, not an answer: do not act on the surveyed
     question until the host's follow-up prompt arrives.
+  - In the body, [[note]] and [[note|alias]] show as the label, as in
+    the editor. Shown as typed: [[ ... ]] with a space after "[[" (a
+    shell test) and any [[...]] inside one, a POSIX class such as
+    [[:space:]], and [[...]] with a bracket inside. Put other literal
+    double brackets, such as TOML's [[bin]], in a code span.
 
 SEE ALSO:
   cs terminal write (queued poke), cs terminal team (spawn the team whose
