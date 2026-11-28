@@ -49,25 +49,41 @@ interface WikiSpan {
   to: number;
 }
 
+/// An inline `<style>` tag and its closing tag, in any case.
+const STYLE_OPEN = /^<style[\s/>]/i;
+const STYLE_CLOSE = /^<\/style[\s>]/i;
+
 /// The `[[...]]` spans to label. The block parse handles emphasis and
 /// the document structure; for the inline renderer the source is read
 /// as one paragraph (a `| ` prefix the offsets account for), so a cell
 /// that opens with a block-level tag still yields its links beside the
 /// tags. The walk visits spans in order. The inline renderer's one
 /// caller sends one line, so the paragraph reading holds there.
+///
+/// A link after an inline `<style>` tag and before its closing tag stays
+/// as typed: the HTML parser reads that text as the element's rules, so a
+/// label span would become part of them, and DOMPurify drops a style
+/// element whose text holds markup, which Copy as HTML would otherwise keep.
 function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): WikiSpan[] {
   if (!input.includes("[[")) return [];
   const source = inline ? `| ${input}` : input;
   const base = inline ? 2 : 0;
   const finder = !inline && frontmatter ? wikiFrontmatterParser : wikiParser;
   const spans: WikiSpan[] = [];
+  let inStyle = false;
   // Parse the original source so code, URLs and HTML cannot manufacture
   // wikilinks by hiding delimiters from a later Markdown pass.
   finder.parse(source).iterate({
     enter(node) {
+      if (node.name === "HTMLTag") {
+        const tag = source.slice(node.from, node.to);
+        if (STYLE_OPEN.test(tag)) inStyle = true;
+        else if (STYLE_CLOSE.test(tag)) inStyle = false;
+        return false;
+      }
       if (node.name === "Image") return false; // Alt text becomes an attribute; keep span markup out of it.
       if (node.name !== "WikiLink") return;
-      spans.push({ from: node.from - base, to: node.to - base });
+      if (!inStyle) spans.push({ from: node.from - base, to: node.to - base });
       return false;
     },
   });

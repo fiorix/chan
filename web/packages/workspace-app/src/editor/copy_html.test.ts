@@ -110,6 +110,26 @@ test("copy body leaves inline code and fenced code as typed", () => {
   expect(root.querySelector("pre code")?.textContent).toBe("[[note]]\n");
 });
 
+// The copy is the one caller that keeps an author's style element, and a
+// label span inside one would turn its rules into markup.
+test("copy body keeps an inline style element's text as typed and labels the links around it", () => {
+  const md = 'See [[a]] <style>a::after{content:"[[x]]"}</style> then [[b]] ![](./a.png)';
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml(md, "notes/doc.md", "/ws");
+  // marked escapes the quotes of text between inline tags; the copy kept
+  // that text so before it showed labels.
+  expect(root.querySelector("[data-chan-doc] style")?.textContent).toBe("a::after{content:&quot;[[x]]&quot;}");
+  expect([...root.querySelectorAll("span")].map((el) => el.textContent)).toEqual(["a", "b"]);
+});
+
+test("copy body keeps an inline SVG's style element whole", () => {
+  const md = 'Text <svg><style>a{content:"[[x]]"}</style></svg> after ![](./a.png)';
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml(md, "notes/doc.md", "/ws");
+  expect(root.querySelector("svg style")?.textContent).toBe('a{content:"[[x]]"}');
+  expect(root.querySelector("p")?.textContent).toBe('Text a{content:"[[x]]"} after ');
+});
+
 test("copy body gives a markup-carrying label no element", () => {
   const label = '<img src=x onerror="alert(1)">';
   const root = document.createElement("div");
