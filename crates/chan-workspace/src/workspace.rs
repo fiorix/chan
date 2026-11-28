@@ -2539,6 +2539,10 @@ impl Workspace {
     /// semantic graph does not surface dependency trees as nodes. The
     /// raw `list_tree_unified` stays unfiltered for the editor's
     /// on-demand open-inside-a-noisy-dir path.
+    ///
+    /// [`ListedFiles`] answers, path by path and with no walk, whether this
+    /// lists a path as a file: a change to what this walk enters or lists
+    /// is a change to what it must answer, and its tests compare the two.
     pub fn list_tree_filtered_unified(&self) -> Result<Vec<TreeEntry>> {
         self.list_tree_filtered_unified_cancelable(None)
     }

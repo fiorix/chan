@@ -832,6 +832,10 @@ pub fn walk_workspace_filtered<'a>(
 }
 
 /// Recursive workspace walk governed by one generated scope policy.
+///
+/// [`crate::ListedFiles`] answers per path, with no walk, what the
+/// whole-tree listing built on this walk lists as a file, so what this
+/// enters and keeps is what it must answer.
 pub fn walk_workspace_scoped<'a>(
     root: &'a Path,
     policy: &'a IndexScopePolicy,

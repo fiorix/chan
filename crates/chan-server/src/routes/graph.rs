@@ -2866,9 +2866,9 @@ where
     // note's folder), and resolution can still move it: a
     // source-relative wikilink, an extensionless one, a percent-encoded
     // one. So the SQL backlinks(dst=?) query would miss links. Every
-    // link of every indexed file is resolved as a graph load resolves
-    // it, against the indexed files and every file the whole-tree
-    // listing lists, and kept when it lands on `path`. Neither set is
+    // link of every indexed file is resolved as a graph load under the
+    // cap resolves it, against the indexed files and every file the
+    // whole-tree listing lists, and kept when it lands on `path`. Neither set is
     // built: a link none of whose spellings is `path` is skipped
     // unread, and for the others each spelling up to `path` is looked
     // up, in the index first and then on the disk, once per call. The

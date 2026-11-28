@@ -23,13 +23,17 @@ use crate::fs_ops::{self, IndexScopePolicy};
 /// does not store is not listed, nor is a path under a directory that
 /// cannot be read.
 ///
-/// Every read goes through the workspace's capability sandbox and is made
-/// once for the life of the value, which holds each answer: one lstat per
-/// path asked, then for a regular file one lstat per directory above it
-/// and one listing per directory on its path. A path not spelled as the
-/// listing spells it reads nothing, and a path that names no regular file
-/// reads nothing past its own lstat. A file whose name is not UTF-8 is
-/// listed under a lossy spelling that no lookup finds.
+/// Its own reads (lstats and listings) go through the workspace's
+/// capability sandbox and are made once for the life of the value, which
+/// holds each answer: one lstat per path asked, then for a regular file one
+/// lstat per directory above it and one listing per directory on its path.
+/// A path not spelled as the listing spells it reads nothing, and a path
+/// that names no regular file reads nothing past its own lstat. The scope
+/// policy it asks reads `.gitignore` files by plain path, as it does for
+/// the walk, and only in the root and in directories those lstats found to
+/// be real directories the walk reaches, so it reads nothing the walk would
+/// not. A file whose name is not UTF-8 is listed under a lossy spelling
+/// that no lookup finds.
 pub struct ListedFiles {
     /// The key the test hooks count this workspace's reads under.
     #[cfg(any(test, feature = "test-hooks"))]
