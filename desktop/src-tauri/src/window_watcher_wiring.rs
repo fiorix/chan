@@ -941,30 +941,39 @@ impl NativeSurface for TauriNativeSurface {
 /// A local window's share of a watcher pass beyond its title: it is navigated
 /// only for a Reload, to its record's URL. A local tenant is in-process and up
 /// whenever the record carries its token, so the navigation is at once: no
-/// probe, no gateway session, no retry. Generic over the runtime so that the
+/// probe, no gateway session, no retry. The desktop answered the Reload before
+/// this pass, so the page's own fallback will not run: a Reload that cannot be
+/// navigated (no target can be composed, or the navigation is refused) reloads
+/// the window with `in_page` instead. Generic over the runtime so that the
 /// mock runtime can drive it.
 fn refresh_local_window<R: Runtime>(
     app: &AppHandle<R>,
     addr: SocketAddr,
     record: &WindowRecord,
     reload: bool,
-    _in_page: impl FnOnce(&WebviewWindow<R>),
+    in_page: impl FnOnce(&WebviewWindow<R>),
 ) {
     if !reload {
         return;
     }
+    let label = native_label(record);
     match serve::reload_watched_local_window(app, addr, record) {
         Ok(serve::RetargetOutcome::Navigated) => {}
         Ok(outcome) => tracing::debug!(
-            window = %native_label(record),
+            window = %label,
             ?outcome,
             "window watcher: a local Reload navigated nothing"
         ),
-        Err(error) => tracing::warn!(
-            window = %native_label(record),
-            %error,
-            "window watcher: reloading a local window failed"
-        ),
+        Err(error) => {
+            tracing::warn!(
+                window = %label,
+                %error,
+                "window watcher: navigating a local window for its Reload failed; reloading it in page"
+            );
+            if let Some(window) = app.get_webview_window(&label) {
+                in_page(&window);
+            }
+        }
     }
 }
 

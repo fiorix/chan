@@ -20,7 +20,7 @@ import {
 import type { ScopedWindowKind } from "./libraryCommand";
 import { transferSuffix, type TransferRoot } from "./client";
 import { errorText } from "./errors";
-import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
+import { hasStoredToken, setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type UnlistenFn = () => void;
 
@@ -369,14 +369,16 @@ export async function writeTerminalBackgroundOpacity(percent: number): Promise<n
   return await tauriInvoke<number>("set_terminal_background_opacity", { percent });
 }
 
-/// Reload the chan window. On chan-desktop calls the
-/// `reload_window` IPC which fires `WebviewWindow::reload()`.
-/// Falls back to `window.location.reload()` on web or on IPC
-/// failure so the user still gets the reload they asked for.
+/// Reload the chan window. On chan-desktop calls the `reload_window` IPC
+/// with whether the page still holds its token in session storage: the
+/// desktop reloads the page in place, navigates a local window whose stored
+/// token is gone to its tokened URL, or retargets a devserver window from its
+/// feed. Falls back to `window.location.reload()` on web or on IPC failure so
+/// the user still gets the reload they asked for.
 export async function reloadWindow(): Promise<void> {
   if (isTauriDesktop()) {
     try {
-      await tauriInvoke("reload_window");
+      await tauriInvoke("reload_window", { tokenStored: hasStoredToken() });
       return;
     } catch (err) {
       console.warn(

@@ -4644,19 +4644,22 @@ fn route_window_reload(
 }
 
 /// Ask the local window watcher to navigate this existing native window to
-/// its record's URL, token included. The page keeps its token only in session
-/// storage, which WebKit can lose with its network process, so an in-page
-/// reload of a local window can come back with no token; the record carries
-/// the serving tenant's live token at every snapshot. A desktop whose watcher
-/// has not started, a label with no record in the local feed (an off
-/// workspace's windows are not in it) and a record with no token (no tenant
-/// serves it yet) leave Reload in page.
+/// its record's URL, token included, when its page says its stored token is
+/// gone. The page keeps its token only in session storage, which WebKit can
+/// lose with its network process while the page runs on with the token in
+/// memory, so its own reload would come back with none; the record carries the
+/// serving tenant's live token at every snapshot. A page that still holds its
+/// token, or does not say, reloads in page, which keeps what only a reload
+/// keeps: its fragment and the state it left in session storage. A desktop
+/// whose watcher has not started, a label with no record in the local feed
+/// (an off workspace's windows are not in it) and a record with no token (no
+/// tenant serves it yet) leave the Reload in page too.
 fn reload_local_window_from_feed(
     state: &AppState,
     label: &str,
-    _token_stored: Option<bool>,
+    token_stored: Option<bool>,
 ) -> bool {
-    if !label.starts_with("local::") {
+    if token_stored != Some(false) || !label.starts_with("local::") {
         return false;
     }
     let (Some(view), Some(embedded)) = (state.local_watcher_view(), state.embedded()) else {

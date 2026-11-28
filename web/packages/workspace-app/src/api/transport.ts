@@ -93,6 +93,19 @@ function loadToken(): string | null {
 
 const token = loadToken();
 
+/// Whether this page's token is still in session storage, where a reload of
+/// the page looks for it. WebKit can lose session storage with its network
+/// process while the page runs on with its token in memory; chan-desktop is
+/// told with a Reload, so it navigates a local window to its tokened URL
+/// rather than reloading it in page. False when storage cannot be read.
+export function hasStoredToken(): boolean {
+  try {
+    return Boolean(sessionStorage.getItem(TOKEN_KEY));
+  } catch {
+    return false;
+  }
+}
+
 /// Append the auth token as a `?t=...` query and apply the server
 /// URL prefix. Use only for paths that can't carry an Authorization
 /// header (WebSocket upgrade, `<img src>` rendered by the browser).

@@ -27,6 +27,22 @@
       console.error('[chan] IPC ' + cmd + ' failed:', err);
     });
   }
+  // The arguments of a Reload: whether the page still holds its access token
+  // where its own reload looks for it, which the workspace app keeps in
+  // session storage under `chan.token` (`api/transport.ts`). WebKit can lose
+  // session storage with its network process while the page runs on with the
+  // token in memory; told so, chan-desktop navigates a local window to its
+  // tokened URL instead of reloading it in page. Storage that cannot be read
+  // holds no token.
+  function reloadArgs() {
+    let tokenStored = false;
+    try {
+      tokenStored = Boolean(window.sessionStorage.getItem('chan.token'));
+    } catch (_) {
+      tokenStored = false;
+    }
+    return { tokenStored: tokenStored };
+  }
   // True while the keyboard belongs to a terminal. This script shares the
   // SPA's document, so the focused element answers that with no protocol
   // between the two: the terminal widget mounts inside `.terminal-host`,
@@ -174,7 +190,7 @@
         // here leaves Linux/macOS plain Ctrl+R untouched (no
         // preventDefault -> falls through to the terminal), mirroring the
         // Cmd+W idiom below.
-        case 'KeyR': if (e.metaKey) invokeIpc(e, 'reload_window'); return;
+        case 'KeyR': if (e.metaKey) invokeIpc(e, 'reload_window', reloadArgs()); return;
         // New terminal: Cmd+T on macOS. Off-mac the chord is Ctrl+Shift+T
         // (shift branch below), so gate on metaKey and leave plain Ctrl+T
         // to a focused terminal, mirroring the reload idiom above.
@@ -288,7 +304,7 @@
         // macOS Cmd+Shift+R does NOT reload (macOS reloads on Cmd+R in
         // the !shift branch above); the !metaKey form fires only for the
         // Ctrl+Shift+R that Linux/Windows users press.
-        case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window'); return;
+        case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window', reloadArgs()); return;
         // Cmd+Shift+W (macOS) stays window close (app.window.close).
         // Ctrl+Shift+W (Linux, Windows) is the chord a user reaches for
         // to close a TAB, so it fires app.tab.close; window close moved

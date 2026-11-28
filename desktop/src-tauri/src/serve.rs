@@ -3876,15 +3876,15 @@ mod tests {
         // `invokeIpc(...)` (not the `chan:command` `fire(...)`
         // bridge), so the contract pin checks both the IPC command
         // names and the case-label they're bound from.
-        assert!(KEY_BRIDGE_JS.contains("invokeIpc(e, 'reload_window')"));
+        assert!(KEY_BRIDGE_JS.contains("invokeIpc(e, 'reload_window', reloadArgs())"));
         assert!(KEY_BRIDGE_JS.contains("invokeIpc(e, 'open_devtools')"));
         // Reload is per-OS: Cmd+R (metaKey, no-shift branch) on macOS and
         // Ctrl+Shift+R (!metaKey, shift branch) on Linux/Windows, so plain
         // Ctrl+R is never claimed and reaches the terminal's reverse-search.
-        assert!(KEY_BRIDGE_JS.contains("case 'KeyR': if (e.metaKey) invokeIpc(e, 'reload_window')"));
-        assert!(
-            KEY_BRIDGE_JS.contains("case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window')")
-        );
+        assert!(KEY_BRIDGE_JS
+            .contains("case 'KeyR': if (e.metaKey) invokeIpc(e, 'reload_window', reloadArgs())"));
+        assert!(KEY_BRIDGE_JS
+            .contains("case 'KeyR': if (!e.metaKey) invokeIpc(e, 'reload_window', reloadArgs())"));
         assert!(KEY_BRIDGE_JS.contains("code === 'KeyI'"));
     }
 
