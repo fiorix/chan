@@ -166,7 +166,7 @@ impl LinkSpellings {
 
     /// The first spelling that `is_file` accepts, asking in resolution
     /// order and stopping there, or the decoded target when it accepts none.
-    pub fn resolve(self, mut is_file: impl FnMut(&str) -> bool) -> String {
+    pub(crate) fn resolve(self, mut is_file: impl FnMut(&str) -> bool) -> String {
         for candidate in &self.candidates {
             for path in FORM_SUFFIXES.map(|suffix| format!("{candidate}{suffix}")) {
                 if is_file(&path) {
@@ -177,8 +177,9 @@ impl LinkSpellings {
         self.decoded
     }
 
-    /// Whether [`resolve`](Self::resolve) with the same `is_file` answers
-    /// `path`, asking `is_file` of as few spellings as that takes.
+    /// Whether the link resolves to `path`, as [`resolve_link_target`]
+    /// resolves it over the files `is_file` accepts, asking `is_file` of as
+    /// few spellings as that takes.
     ///
     /// A link whose spellings and decoded target all differ from `path`
     /// cannot answer it, and `is_file` is not asked at all. Otherwise it is
