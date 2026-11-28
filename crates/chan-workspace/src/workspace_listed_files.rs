@@ -193,7 +193,9 @@ mod tests {
     // folder it names or a folder the configuration excludes, a file
     // through a symlinked folder, a symlink, a socket, a file below a
     // folder that cannot be read, a path out of the root, nor a spelling
-    // the listing does not use for a file it lists.
+    // the listing does not use for a file it lists. A file is asked of the
+    // scope as a file: one named as a folder the configuration excludes,
+    // and one a folder-only `.gitignore` pattern names, are listed.
     #[test]
     fn listed_files_answer_as_the_listing_lists() {
         let outer = TempDir::new().unwrap();
@@ -209,6 +211,8 @@ mod tests {
             "keys/key.secret",
             "build/keep.txt",
             "node_modules/pkg/index.js",
+            "pkg/node_modules",
+            "logs",
             "locked/in.md",
         ] {
             put(&root, rel, b"x\n");
@@ -216,7 +220,7 @@ mod tests {
         put(
             &root,
             ".gitignore",
-            b"*.secret\n/hidden.log\nbuild/\n!build/keep.txt\n",
+            b"*.secret\n/hidden.log\nbuild/\n!build/keep.txt\nlogs/\n",
         );
         #[cfg(unix)]
         let _restore = {
@@ -238,9 +242,11 @@ mod tests {
         let mut expected: BTreeSet<String> = [
             ".gitignore",
             "LICENSE",
+            "logs",
             "notes/a.md",
             "notes/hidden.log",
             "notes/sub/deep.log",
+            "pkg/node_modules",
             "top.md",
         ]
         .map(String::from)
@@ -251,9 +257,15 @@ mod tests {
             expected.insert("locked/in.md".to_string());
         }
         assert_eq!(files, expected, "fixture: the files the listing lists");
+        let policy = workspace.scope_policy();
         assert!(
-            workspace.scope_policy().includes("build/keep.txt", false),
+            policy.includes("build/keep.txt", false),
             "fixture: the scope keeps the file below the folder it leaves out"
+        );
+        assert_eq!(
+            ["pkg/node_modules", "logs"].map(|rel| policy.includes(rel, true)),
+            [false, false],
+            "fixture: the scope leaves out a folder spelled as either file"
         );
 
         let mut probes: Vec<String> = files.iter().chain(&dirs).cloned().collect();
