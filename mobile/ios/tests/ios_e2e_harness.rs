@@ -1981,7 +1981,7 @@ async fn live_wg_peer_matrix() {
                     hosts: tunnels[1].2.clone(),
                 },
             )],
-            protected,
+            protected.clone(),
         )
         .unwrap()
         .wait()
@@ -2010,4 +2010,66 @@ async fn live_wg_peer_matrix() {
         .await
         .expect("sibling p2 still live");
     assert_eq!(p2_after.status(), StatusCode::OK);
+
+    // 6. Restart p1 and verify traffic recovers on both p1 and p2.
+    let conf_p1 = client_tunnel_config(
+        &client_secret,
+        &wg.ingresses[0].server_public_key,
+        &wg.ingresses[0].endpoint,
+        &wg.addresses[0],
+        &wg.allowed_ips[0],
+        wg.persistent_keepalive,
+    )
+    .unwrap();
+    let t1_restarted = Tunnel::start(conf_p1).expect("restart live p1 tunnel");
+    proxy
+        .replace_protected_routes(
+            vec![
+                (
+                    "gw/p1".into(),
+                    ProxyRoute {
+                        tunnel: t1_restarted.clone(),
+                        hosts: tunnels[0].2.clone(),
+                    },
+                ),
+                (
+                    "gw/p2".into(),
+                    ProxyRoute {
+                        tunnel: tunnels[1].1.clone(),
+                        hosts: tunnels[1].2.clone(),
+                    },
+                ),
+            ],
+            protected,
+        )
+        .unwrap()
+        .wait()
+        .await;
+
+    assert!(
+        !t1_restarted.is_closed(),
+        "restarted p1 tunnel must be open"
+    );
+    assert!(
+        !tunnels[1].1.is_closed(),
+        "sibling p2 tunnel must remain open after p1 restart"
+    );
+
+    let p1_recovered = proxied
+        .get(format!(
+            "http://{p1_host}:8080/api/library/windows?via=p1-recovered"
+        ))
+        .send()
+        .await
+        .expect("recovered p1 live");
+    assert_eq!(p1_recovered.status(), StatusCode::OK);
+
+    let p2_recovered = proxied
+        .get(format!(
+            "http://{p2_host}:8080/api/library/windows?via=p2-recovered"
+        ))
+        .send()
+        .await
+        .expect("p2 still live after p1 restart");
+    assert_eq!(p2_recovered.status(), StatusCode::OK);
 }

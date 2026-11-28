@@ -2200,6 +2200,40 @@ pub async fn fetch_library_windows(
     ))
 }
 
+/// The live tmux control-mode connections a connected devserver serves at
+/// `GET /api/library/tmux`. Returns an empty list on `404 Not Found` so older
+/// devservers and minimal stubs without the route degrade cleanly.
+pub async fn fetch_library_tmux(
+    devserver_id: &str,
+    conn: &DevserverConn,
+) -> Result<Vec<chan_server::TmuxConnectionRecord>, String> {
+    let label = PerArmLabel {
+        gateway: "gateway library tmux connections",
+        raw: "library tmux connections",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::GET,
+        "/api/library/tmux",
+        None::<&()>,
+        "listing library tmux connections",
+    )
+    .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        tracing::debug!(
+            devserver = %devserver_id,
+            "devserver returned 404 for /api/library/tmux; treating as empty",
+        );
+        return Ok(Vec::new());
+    }
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(conn, resp, label).await);
+    }
+    resp.json::<Vec<chan_server::TmuxConnectionRecord>>()
+        .await
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))
+}
+
 /// Mint a window on a connected devserver's library (`POST /api/library/windows`).
 #[cfg(test)]
 pub async fn mint_library_window(

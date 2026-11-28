@@ -830,8 +830,14 @@ pub(crate) async fn refresh_devserver_windows(
     conn: &devserver::DevserverConn,
 ) -> Result<(), String> {
     let windows = devserver::fetch_library_windows(id, conn).await?;
+    let tmux = devserver::fetch_library_tmux(id, conn).await;
     let mut changed = state.devserver_feed.set_down(id, false);
     changed |= state.devserver_feed.replace_windows(id, windows);
+    if let Ok(tmux_connections) = tmux {
+        changed |= state
+            .devserver_feed
+            .replace_tmux_connections(id, tmux_connections);
+    }
     if changed {
         if let Some(embedded) = state.embedded() {
             embedded.signal_library_change();
@@ -860,10 +866,13 @@ fn spawn_rostered_devserver_poll(
                 return;
             }
             let ws_res = devserver::fetch_workspaces(&conn).await;
-            let win_res = if ws_res.is_ok() {
-                Some(devserver::fetch_library_windows(&id, &conn).await)
+            let (win_res, tmux_res) = if ws_res.is_ok() {
+                (
+                    Some(devserver::fetch_library_windows(&id, &conn).await),
+                    Some(devserver::fetch_library_tmux(&id, &conn).await),
+                )
             } else {
-                None
+                (None, None)
             };
             if !state.devservers.is_same_gateway_conn(&id, &conn) {
                 return;
@@ -881,6 +890,28 @@ fn spawn_rostered_devserver_poll(
                         let mut snap = snapshot.lock().unwrap();
                         if snap.windows != windows {
                             snap.windows = windows;
+                            changed = true;
+                        }
+                    }
+                    if let Some(Ok(tmux_connections)) = tmux_res {
+                        if state
+                            .devserver_feed
+                            .library_id_of(&id)
+                            .as_deref()
+                            .unwrap_or("")
+                            .is_empty()
+                        {
+                            if let Some(lib_id) = tmux_connections
+                                .first()
+                                .map(|t| t.library_id.clone())
+                                .filter(|lib_id| !lib_id.is_empty())
+                            {
+                                state.devserver_feed.seed_library_id(id.clone(), lib_id);
+                            }
+                        }
+                        let mut snap = snapshot.lock().unwrap();
+                        if snap.tmux_connections != tmux_connections {
+                            snap.tmux_connections = tmux_connections;
                             changed = true;
                         }
                     }
@@ -1020,6 +1051,19 @@ async fn connect_rostered_devserver_inner<R: tauri::Runtime>(
     };
     recheck()?;
 
+    let tmux_connections = match devserver::fetch_library_tmux(id, &conn).await {
+        Ok(tmux_connections) => tmux_connections,
+        Err(e) => {
+            tracing::debug!(
+                devserver = %id,
+                error = %e,
+                "eager gateway library tmux fetch failed; the poll loop will retry",
+            );
+            Vec::new()
+        }
+    };
+    recheck()?;
+
     let color = match devserver::fetch_local_color(&conn).await {
         Ok(color) => Some(color),
         Err(e) => {
@@ -1048,12 +1092,23 @@ async fn connect_rostered_devserver_inner<R: tauri::Runtime>(
 
     state.devservers.set(id.to_string(), conn.clone());
     state.devserver_feed.set_down(id, false);
-    if let Some(lib_id) = windows.first().map(|w| w.library_id.clone()) {
+    if let Some(lib_id) = windows
+        .first()
+        .map(|w| w.library_id.clone())
+        .filter(|lib_id| !lib_id.is_empty())
+        .or_else(|| {
+            tmux_connections
+                .first()
+                .map(|t| t.library_id.clone())
+                .filter(|lib_id| !lib_id.is_empty())
+        })
+    {
         state.devserver_feed.seed_library_id(id.to_string(), lib_id);
     }
-    let snapshot = Arc::new(std::sync::Mutex::new(state::DevserverWindowSnapshot::from(
-        windows.clone(),
-    )));
+    let snapshot = Arc::new(std::sync::Mutex::new(state::DevserverWindowSnapshot {
+        windows: windows.clone(),
+        tmux_connections,
+    }));
     state
         .devserver_feed
         .register_windows(id.to_string(), Arc::clone(&snapshot));
@@ -2074,6 +2129,222 @@ mod tests {
             "unchanged snapshot should not re-signal"
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_and_connect_fetch_library_tmux_into_devserver_feed() {
+        use chan_server::DevserverFeedSource;
+
+        let tmux_record = chan_server::TmuxConnectionRecord {
+            connection: "term/one".into(),
+            library_id: "lib-tmux".into(),
+            origin: chan_server::TmuxOrigin {
+                program: "tmux".into(),
+                command: Some("tmux -CC".into()),
+                local: true,
+            },
+            version: "3.4".into(),
+            session: Some(chan_server::TmuxSessionStatus {
+                id: "$0".into(),
+                name: "main".into(),
+            }),
+            windows: Vec::new(),
+            window_cap: 8,
+            errors: Vec::new(),
+            control_window: "w-ctrl".into(),
+        };
+        let tmux_store = Arc::new(Mutex::new(vec![tmux_record.clone()]));
+        let tmux_get = Arc::clone(&tmux_store);
+        let ds64 = "c".repeat(64);
+        let owner_user_id = uuid::Uuid::from_u128(9);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proxy_origin = format!("http://alice--cccccccccccc.p1.localtest.me:{}", addr.port());
+        let proxy_for_entry = proxy_origin.clone();
+        let ds64_entry = ds64.clone();
+
+        let router = axum::Router::new()
+            .route(
+                "/mobile/v1/devserver/entry",
+                axum::routing::post(move || {
+                    let ds64 = ds64_entry.clone();
+                    let proxy_origin = proxy_for_entry.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "owner_user_id": owner_user_id,
+                            "username": "alice",
+                            "devserver_id": ds64,
+                            "proxy_origin": proxy_origin,
+                            "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                            "entry_credential": "cred-tmux",
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post(|| async {
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::SEE_OTHER)
+                        .header("location", "/")
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_gate=gate-tmux; Path=/; HttpOnly; Max-Age=120",
+                        )
+                        .header(
+                            "set-cookie",
+                            "__Host-devserver_csrf=csrf-tmux; Path=/; Max-Age=120",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/library/workspaces",
+                axum::routing::get(|| async {
+                    axum::Json(Vec::<chan_server::LauncherWorkspace>::new())
+                }),
+            )
+            .route(
+                "/api/library/windows",
+                axum::routing::get(|| async { axum::Json(Vec::<chan_server::WindowRecord>::new()) }),
+            )
+            .route(
+                "/api/library/tmux",
+                axum::routing::get(move || {
+                    let store = Arc::clone(&tmux_get);
+                    async move { axum::Json(store.lock().unwrap().clone()) }
+                }),
+            )
+            .route(
+                "/api/library/local-color",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({ "color": "#3b82f6" })) }),
+            )
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    r#"<!doctype html><html><head><meta name="chan-launcher-host-os" content="linux"></head></html>"#
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let (_dir, state) = test_state();
+        let (_lib_home, notify) = install_test_embedded(&state).await;
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let gw = devserver::GatewayConn::new(
+            origin.clone(),
+            format!("{origin}/mobile/v1/devserver/entry"),
+            origin,
+            "pat".into(),
+        );
+        gw.seed_fresh_session_for_test("csrf-tmux");
+        let conn = devserver::DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: String::new(),
+            name: "box".into(),
+            gateway: Some(Box::new(gw)),
+        };
+        state.devservers.set("gw:tmux".into(), conn.clone());
+        state.devserver_feed.register_windows(
+            "gw:tmux".into(),
+            Arc::new(Mutex::new(state::DevserverWindowSnapshot::default())),
+        );
+
+        let notified = notify.notified();
+        refresh_devserver_windows(&state, "gw:tmux", &conn)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), notified)
+            .await
+            .expect("tmux refresh signals library change");
+        assert_eq!(
+            state.devserver_feed.tmux_connections(),
+            vec![tmux_record.clone()]
+        );
+        assert_eq!(
+            state.devserver_feed.library_id_of("gw:tmux").as_deref(),
+            Some("lib-tmux")
+        );
+
+        // connect_rostered_devserver_inner also seeds tmux_connections on initial connect.
+        let gateway_id = "gw-tmux2";
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways.push(config::Gateway {
+                id: gateway_id.into(),
+                url: format!("http://127.0.0.1:{}", addr.port()),
+                label: "Gateway".into(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+                wireguard: None,
+                wireguard_public_key: None,
+                wireguard_key_file: None,
+                wireguard_pending_enrollment: None,
+                wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
+                wireguard_cleanup: None,
+                wireguard_protection: Default::default(),
+                wireguard_hosts: Vec::new(),
+            });
+            store.save(&cfg).unwrap();
+        }
+        let local_origin = format!("http://127.0.0.1:{}", addr.port());
+        let proxy_apex = format!("http://localtest.me:{}", addr.port());
+        state.gateway_manager.seed_test_runtime(
+            gateway_id,
+            devserver::GatewayDiscovery {
+                kind: "chan-gateway".into(),
+                api_version: 1,
+                identity_origin: local_origin.clone(),
+                mobile_authorize_url: format!("{local_origin}/mobile/authorize"),
+                mobile_entry_url: format!("{local_origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{local_origin}/mobile/v1/devservers"),
+                devserver_proxy_origin: proxy_apex,
+                devserver_proxy_host_depth: 2,
+                wireguard: None,
+            },
+            vec![gateway::RosterDevserver {
+                owner_user_id,
+                owner: "alice".into(),
+                devserver_id: ds64.clone(),
+                label: "box".into(),
+                online: true,
+                shared: false,
+                proxy_origin: None,
+            }],
+        );
+        auth::test_gateway_pats().lock().unwrap().insert(
+            local_origin.clone(),
+            auth::StoredPat {
+                id: "pat-tmux".into(),
+                secret: "secret-tmux".into(),
+                label: "tmux".into(),
+                expires_at: String::new(),
+            },
+        );
+        let app = runtime_capability::tests::mock_app_with_context();
+        let synth_id = gateway::synthesized_row_id(gateway_id, "alice", &ds64);
+        connect_rostered_devserver(app.handle().clone(), Arc::clone(&state), synth_id.clone())
+            .await
+            .expect("connect_rostered_devserver populates tmux_connections");
+        assert!(state
+            .devserver_feed
+            .tmux_connections()
+            .contains(&tmux_record));
+        assert_eq!(
+            state.devserver_feed.library_id_of(&synth_id).as_deref(),
+            Some("lib-tmux")
+        );
+
+        auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&local_origin);
         server.abort();
     }
 

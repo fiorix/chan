@@ -394,6 +394,34 @@ impl DevserverFeed {
         true
     }
 
+    /// Replace a connected devserver's cached tmux connections in place while
+    /// preserving its window list. Returns whether the tmux connection list
+    /// changed.
+    pub(crate) fn replace_tmux_connections(
+        &self,
+        id: &str,
+        tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
+    ) -> bool {
+        let Some(snapshot) = self.windows.lock().unwrap().get(id).cloned() else {
+            return false;
+        };
+        if self.library_id_of(id).as_deref().unwrap_or("").is_empty() {
+            if let Some(lib_id) = tmux_connections
+                .first()
+                .map(|t| t.library_id.clone())
+                .filter(|lib_id| !lib_id.is_empty())
+            {
+                self.seed_library_id(id.to_string(), lib_id);
+            }
+        }
+        let mut snap = snapshot.lock().unwrap();
+        if snap.tmux_connections == tmux_connections {
+            return false;
+        }
+        snap.tmux_connections = tmux_connections;
+        true
+    }
+
     /// Seed a devserver's remote `library_id` into the cache so `library_id_of`
     /// resolves even when the live window snapshot is empty.
     pub(crate) fn seed_library_id(&self, id: String, library_id: String) {
@@ -810,5 +838,38 @@ mod tests {
         assert_eq!(feed.windows(), vec![updated]);
         assert_eq!(feed.tmux_connections(), vec![tmux]);
         assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-bb22"));
+    }
+
+    #[test]
+    fn replace_tmux_connections_updates_snapshot_seeds_library_id_and_reports_change() {
+        let feed = DevserverFeed::default();
+        let snap = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+        feed.register_windows("gw:1".into(), Arc::clone(&snap));
+        assert_eq!(feed.library_id_of("gw:1"), None);
+
+        let tmux = chan_server::TmuxConnectionRecord {
+            connection: "term/one".into(),
+            library_id: "lib-tmux1".into(),
+            origin: chan_server::TmuxOrigin {
+                program: "tmux".into(),
+                command: Some("tmux -CC".into()),
+                local: true,
+            },
+            version: "3.4".into(),
+            session: Some(chan_server::TmuxSessionStatus {
+                id: "$0".into(),
+                name: "main".into(),
+            }),
+            windows: Vec::new(),
+            window_cap: 8,
+            errors: Vec::new(),
+            control_window: "w-ctrl".into(),
+        };
+
+        assert!(feed.replace_tmux_connections("gw:1", vec![tmux.clone()]));
+        assert!(!feed.replace_tmux_connections("gw:1", vec![tmux.clone()]));
+        assert!(!feed.replace_tmux_connections("gw:unknown", vec![tmux.clone()]));
+        assert_eq!(feed.tmux_connections(), vec![tmux]);
+        assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-tmux1"));
     }
 }
