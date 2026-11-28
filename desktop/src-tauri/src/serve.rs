@@ -2927,11 +2927,12 @@ mod tests {
         );
     }
 
-    // The native surface needs a Wry `AppHandle`, which no test builds, so the
-    // watcher's side of a local Reload is read from its source: a refresh of a
-    // local window navigates only for a Reload, through the function above.
+    // The native surface holds a Wry `AppHandle`, which no test builds, so the
+    // one line it adds to a local window's refresh is read from its source: it
+    // hands the pass's Reload flag to `refresh_local_window` unchanged, where
+    // the mock runtime drives what a local refresh does, and stops there.
     #[test]
-    fn a_local_windows_refresh_navigates_only_for_a_reload() {
+    fn the_local_surface_hands_its_reload_flag_to_the_local_refresh() {
         let wiring = include_str!("window_watcher_wiring.rs");
         let refresh = source_section(wiring, "fn refresh(&self, record", "fn close(&self, label");
         let local = source_section(
@@ -2940,15 +2941,10 @@ mod tests {
             "let label = native_label(record);",
         );
         let flat = local.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            flat.contains(
-                "if reload { match serve::reload_watched_local_window(&self.app, *addr, record)"
-            ),
-            "a local refresh navigates only for a Reload"
-        );
-        assert!(
-            flat.trim_end().ends_with("} return; }"),
-            "a local refresh never reaches the remote admission"
+        assert_eq!(
+            flat,
+            "refresh_local_window(&self.app, *addr, record, reload, reload_in_page_or_log); return; }",
+            "a local refresh hands its Reload flag on and never reaches the remote admission"
         );
     }
 

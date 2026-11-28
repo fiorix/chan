@@ -4600,23 +4600,44 @@ fn devserver_card_for_window(feed: &DevserverFeed, label: &str) -> Result<Option
 /// path bypasses the SPA event bus and invokes this command
 /// directly so a SPA-side fault (frozen Svelte runtime, JS error
 /// in the chord handler) doesn't lock the dev affordance away.
+///
+/// `token_stored` says whether the page, as it asked, still held its access
+/// token in session storage, where an in-page reload looks for it; `None`
+/// from a page that does not say.
 #[tauri::command]
-fn reload_window(state: State<Arc<AppState>>, window: tauri::WebviewWindow) -> Result<(), String> {
-    if route_window_reload(state.inner(), window.label())? {
+fn reload_window(
+    state: State<Arc<AppState>>,
+    window: tauri::WebviewWindow,
+    token_stored: Option<bool>,
+) -> Result<(), String> {
+    if route_window_reload(state.inner(), window.label(), token_stored)? {
         return Ok(());
     }
-    // Tauri 2's `WebviewWindow::eval` runs JS inside the webview;
-    // we use it instead of the missing-in-2 `reload()` method.
+    reload_in_page(&window)
+}
+
+/// Reload `window` in page, through the page's own `location.reload()` rather
+/// than the webview's native reload, so the page reloads as it would by
+/// itself: the same URL with its fragment, and its session storage kept.
+pub(crate) fn reload_in_page<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Result<(), String> {
     window
         .eval("window.location.reload()")
         .map_err(|e| format!("reloading window: {e}"))
 }
 
 /// Hand a Reload of the window `label` to the window watcher that owns it.
-/// `Ok(true)` when a watcher took it and navigates the window to its record's
-/// URL; `Ok(false)` leaves the Reload to the page's own `location.reload()`.
-fn route_window_reload(state: &Arc<AppState>, label: &str) -> Result<bool, String> {
-    if reload_local_window_from_feed(state, label) {
+/// `token_stored` is the page's reading of its stored token (see
+/// [`reload_window`]). `Ok(true)` when a watcher took it and navigates the
+/// window to its record's URL; `Ok(false)` leaves the Reload to the page's own
+/// `location.reload()`.
+fn route_window_reload(
+    state: &Arc<AppState>,
+    label: &str,
+    token_stored: Option<bool>,
+) -> Result<bool, String> {
+    if reload_local_window_from_feed(state, label, token_stored) {
         return Ok(true);
     }
     reload_devserver_window_from_feed(state, label)
@@ -4630,7 +4651,11 @@ fn route_window_reload(state: &Arc<AppState>, label: &str) -> Result<bool, Strin
 /// has not started, a label with no record in the local feed (an off
 /// workspace's windows are not in it) and a record with no token (no tenant
 /// serves it yet) leave Reload in page.
-fn reload_local_window_from_feed(state: &AppState, label: &str) -> bool {
+fn reload_local_window_from_feed(
+    state: &AppState,
+    label: &str,
+    _token_stored: Option<bool>,
+) -> bool {
     if !label.starts_with("local::") {
         return false;
     }
@@ -15366,7 +15391,7 @@ mod tests {
                 "fixture: the window's record carries its tenant's token"
             );
             assert!(
-                !route_window_reload(&state, &label).expect("routing"),
+                !route_window_reload(&state, &label, Some(false)).expect("routing"),
                 "with no local watcher the Reload stays in page"
             );
             runtime
@@ -15380,7 +15405,8 @@ mod tests {
                 return;
             }
             let (runtime, state) = desktop();
-            let routed = |label: &str| route_window_reload(&state, label).expect("routing");
+            let routed =
+                |label: &str| route_window_reload(&state, label, Some(false)).expect("routing");
             let view = Arc::new(window_watcher::WatcherViewState::default());
             state.set_local_watcher_view(Arc::clone(&view));
 

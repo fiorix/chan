@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chan_server::WindowRecord;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use tokio::sync::{watch, Notify};
 
 use crate::connection_health::{Clock, ConnectionReading, ProbePace, SystemClock};
@@ -903,24 +903,7 @@ impl NativeSurface for TauriNativeSurface {
         // otherwise refreshed only for a Reload.
         self.sync_title(record);
         if let WindowOpener::Local { addr } = &self.opener {
-            // A local tenant is in-process and up whenever the record carries
-            // its token, so a Reload navigates at once: no probe, no gateway
-            // session, no retry.
-            if reload {
-                match serve::reload_watched_local_window(&self.app, *addr, record) {
-                    Ok(serve::RetargetOutcome::Navigated) => {}
-                    Ok(outcome) => tracing::debug!(
-                        window = %native_label(record),
-                        ?outcome,
-                        "window watcher: a local Reload navigated nothing"
-                    ),
-                    Err(error) => tracing::warn!(
-                        window = %native_label(record),
-                        %error,
-                        "window watcher: reloading a local window failed"
-                    ),
-                }
-            }
+            refresh_local_window(&self.app, *addr, record, reload, reload_in_page_or_log);
             return;
         }
         let label = native_label(record);
@@ -952,6 +935,47 @@ impl NativeSurface for TauriNativeSurface {
         if let Err(e) = result {
             tracing::warn!(window = %label, error = %e, "window watcher: closing a local window failed");
         }
+    }
+}
+
+/// A local window's share of a watcher pass beyond its title: it is navigated
+/// only for a Reload, to its record's URL. A local tenant is in-process and up
+/// whenever the record carries its token, so the navigation is at once: no
+/// probe, no gateway session, no retry. Generic over the runtime so that the
+/// mock runtime can drive it.
+fn refresh_local_window<R: Runtime>(
+    app: &AppHandle<R>,
+    addr: SocketAddr,
+    record: &WindowRecord,
+    reload: bool,
+    _in_page: impl FnOnce(&WebviewWindow<R>),
+) {
+    if !reload {
+        return;
+    }
+    match serve::reload_watched_local_window(app, addr, record) {
+        Ok(serve::RetargetOutcome::Navigated) => {}
+        Ok(outcome) => tracing::debug!(
+            window = %native_label(record),
+            ?outcome,
+            "window watcher: a local Reload navigated nothing"
+        ),
+        Err(error) => tracing::warn!(
+            window = %native_label(record),
+            %error,
+            "window watcher: reloading a local window failed"
+        ),
+    }
+}
+
+/// The in-page reload a local window's Reload falls back to.
+fn reload_in_page_or_log<R: Runtime>(window: &WebviewWindow<R>) {
+    if let Err(error) = crate::reload_in_page(window) {
+        tracing::warn!(
+            window = %window.label(),
+            %error,
+            "window watcher: reloading a local window in page failed"
+        );
     }
 }
 
