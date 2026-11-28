@@ -26,7 +26,7 @@ export async function readTerminalPrefs(page, token) {
 
 export function writeTerminalPrefs(page, token, changes) {
   if (Object.hasOwn(changes, "ghostty")) {
-    throw new Error("retired terminal preference ghostty; use openLegacyConfiguredTerminal for compatibility checks");
+    throw new Error("retired terminal preference ghostty; the server refuses a write that names it");
   }
   // The page receives the changes as JSON. An undefined value would be left
   // out there, the stored value written back, and the wait for its removal
@@ -151,39 +151,32 @@ export async function restoreTerminalPrefs(ctx, page, token, original) {
   await assertTerminalPrefs(ctx, { mouse_capture: original.mouse_capture, ...optional });
 }
 
-// Undefined sends no legacy key; booleans deliberately carry it. Prove the
-// canonical response omits it before opening a fresh Ghostty surface.
-export function openLegacyConfiguredTerminal(ctx, page, cs, windowId, name, ghostty, newArgs = []) {
-  if (ghostty !== undefined && typeof ghostty !== "boolean") {
-    throw new TypeError("legacy terminal.ghostty must be a boolean or undefined (absent)");
-  }
-  return openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArgs);
-}
-
-async function openLegacyTerminal(ctx, page, cs, windowId, name, ghostty, newArgs) {
+// Writes the terminal preferences back as read, without the retired key the
+// server refuses, and proves the canonical response omits it before opening a
+// fresh Ghostty surface.
+export async function openConfiguredTerminal(ctx, page, cs, windowId, name, newArgs = []) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
-  await page.evaluate(async ({ token, ghostty }) => {
+  await page.evaluate(async ({ token }) => {
     const headers = { "content-type": "application/json" };
     if (token) headers.authorization = `Bearer ${token}`;
     const got = await fetch("/api/config", { headers });
     if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
     const config = await got.json();
     const { ghostty: _legacy, ...current } = config.preferences.terminal;
-    const terminalPatch = ghostty === undefined ? current : { ...current, ghostty };
     const response = await fetch("/api/config", {
       method: "PATCH", headers,
       body: JSON.stringify({
         expected_revision: config.revision,
-        preferences: { terminal: terminalPatch },
+        preferences: { terminal: current },
       }),
     });
-    if (!response.ok) throw new Error(`legacy terminal.ghostty PATCH -> ${response.status}`);
+    if (!response.ok) throw new Error(`terminal PATCH -> ${response.status}`);
     const canonical = await fetch("/api/config", { headers });
     if (!canonical.ok) throw new Error(`canonical GET /api/config -> ${canonical.status}`);
     const terminal = (await canonical.json()).preferences?.terminal;
     if (!terminal || Object.hasOwn(terminal, "ghostty")) {
-      throw new Error("legacy terminal.ghostty survived canonical readback");
+      throw new Error("retired terminal.ghostty survived canonical readback");
     }
-  }, { token, ghostty });
+  }, { token });
   return openAttachedTerminal(ctx, page, cs, windowId, name, newArgs);
 }

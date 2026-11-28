@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assertTerminalPrefs, openLegacyConfiguredTerminal, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
+import { assertTerminalPrefs, openConfiguredTerminal, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
 
 for (const ghostty of [true, false, undefined, null]) {
   test(`ordinary writes refuse an explicit retired key ${ghostty} before reads`, () => {
@@ -12,14 +12,9 @@ for (const ghostty of [true, false, undefined, null]) {
   });
 }
 
-for (const ghostty of ["false", 0, null]) {
-  test(`legacy writes refuse non-boolean ${JSON.stringify(ghostty)} before reads`, () => {
-    assert.throws(() => openLegacyConfiguredTerminal({}, {}, () => assert.fail("no spawn"), "w", "n", ghostty),
-      /must be a boolean/);
-  });
-}
-
-function legacyFixture(t, { echo = false, surface = true, status = 200 } = {}) {
+// The first read carries the retired key, as an older server's answer did,
+// so a write that echoed what it read would carry it too.
+function openFixture(t, { echo = false, surface = true, status = 200 } = {}) {
   const requests = [], commands = [];
   let reads = 0;
   t.mock.method(globalThis, "fetch", async (url, options) => {
@@ -50,34 +45,31 @@ function legacyFixture(t, { echo = false, surface = true, status = 200 } = {}) {
   };
 }
 
-for (const ghostty of [undefined, true, false]) {
-  test(`legacy ${ghostty} is accepted, absent from readback, and opens Ghostty`, async (t) => {
-    const f = legacyFixture(t);
-    assert.deepEqual(await openLegacyConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy", ghostty), f.row);
-    assert.equal(f.requests.length, 3);
-    assert.equal(JSON.parse(f.requests[1].body).preferences.terminal.ghostty, ghostty);
-    assert.equal(Object.hasOwn(JSON.parse(f.requests[1].body).preferences.terminal, "ghostty"), ghostty !== undefined);
-    assert.equal(JSON.parse(f.requests[1].body).preferences.terminal.mouse_capture, true);
-    assert.equal(JSON.parse(f.requests[1].body).expected_revision, 3);
-    assert.deepEqual(f.commands, [["new", "--tab-name", "legacy"], ["list", "--json"]]);
-  });
-}
+test("a configured terminal writes without the retired key it read, and opens Ghostty", async (t) => {
+  const f = openFixture(t);
+  assert.deepEqual(await openConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy"), f.row);
+  assert.equal(f.requests.length, 3);
+  assert.equal(Object.hasOwn(JSON.parse(f.requests[1].body).preferences.terminal, "ghostty"), false);
+  assert.equal(JSON.parse(f.requests[1].body).preferences.terminal.mouse_capture, true);
+  assert.equal(JSON.parse(f.requests[1].body).expected_revision, 3);
+  assert.deepEqual(f.commands, [["new", "--tab-name", "legacy"], ["list", "--json"]]);
+});
 
-test("a retained legacy key fails canonical readback before spawn", async (t) => {
-  const f = legacyFixture(t, { echo: true });
-  await assert.rejects(openLegacyConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy", false), /survived canonical readback/);
+test("a retained retired key fails canonical readback before spawn", async (t) => {
+  const f = openFixture(t, { echo: true });
+  await assert.rejects(openConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy"), /survived canonical readback/);
   assert.deepEqual(f.commands, []);
 });
 
-test("a rejected legacy PATCH fails before spawn", async (t) => {
-  const f = legacyFixture(t, { status: 400 });
-  await assert.rejects(openLegacyConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy", false), /PATCH -> 400/);
+test("a refused PATCH fails before spawn", async (t) => {
+  const f = openFixture(t, { status: 422 });
+  await assert.rejects(openConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy"), /PATCH -> 422/);
   assert.deepEqual(f.commands, []);
 });
 
-test("legacy acceptance without a visible Ghostty canvas is not a pass", async (t) => {
-  const f = legacyFixture(t, { surface: false });
-  await assert.rejects(openLegacyConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy", false), /terminal not attached/);
+test("a write without a visible Ghostty canvas is not a pass", async (t) => {
+  const f = openFixture(t, { surface: false });
+  await assert.rejects(openConfiguredTerminal(f.ctx, f.page, f.cs, "w", "legacy"), /terminal not attached/);
 });
 
 function patchFixture(t, terminal) {

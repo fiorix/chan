@@ -1,6 +1,8 @@
-// Ghostty loading and compatibility with the retired terminal.ghostty key.
-// Absent and boolean API patches must open Ghostty. A stored false must be
-// ignored on load, survive that read unchanged, and disappear on normal save.
+// Ghostty loading and the retired terminal.ghostty key. An API patch carrying
+// the key, true or false, is refused and changes nothing, while the same patch
+// without it is accepted; a patch without it opens Ghostty. A stored false
+// still loads with the other settings and the server's one warning, survives
+// that read unchanged, and disappears on normal save.
 // Reload must retain the PTY. The real wasm, full-width initial fit, macOS
 // host chords, OSC 52, paste bytes and mouse capture/selection stay required.
 // PTY output and cat -v witness the byte contracts independently of paint;
@@ -14,7 +16,8 @@ import { join } from "node:path";
 import { openAttachedTerminal, TERMINAL_SURFACE } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { capturePointerTerminals, copyPointerChord, copyPointerSelection, drainPointerInput, pointerGrid, pointerReports, pointerTerminal, seedPointerClipboard, settlePointer } from "../lib/terminal-pointer.mjs";
-import { assertTerminalPrefs, openLegacyConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { assertTerminalPrefs, openConfiguredTerminal, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { maskTokens } from "../lib/token-mask.mjs";
 import { waitRestoredTerminal, waitSaved } from "./290-rich-prompt-disconnected.mjs";
 
 const TAB_G = "SmokeGhostty98";
@@ -571,6 +574,42 @@ export default {
         }
       }
     }
+
+    /// A terminal write that names the retired key, with program_status
+    /// turned off beside it, so a server that dropped the key and kept the
+    /// write would show the change. Reads the config before and after.
+    function patchNamingRetiredKey(ghostty) {
+      return page.evaluate(async ({ token, ghostty }) => {
+        const headers = { "content-type": "application/json" };
+        if (token) headers.authorization = `Bearer ${token}`;
+        const read = async () => {
+          const response = await fetch("/api/config", { headers });
+          if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+          const config = await response.json();
+          return { revision: config.revision, terminal: config.preferences.terminal };
+        };
+        const before = await read();
+        const response = await fetch("/api/config", {
+          method: "PATCH", headers,
+          body: JSON.stringify({
+            expected_revision: before.revision,
+            preferences: { terminal: { ...before.terminal, program_status: false, ghostty } },
+          }),
+        });
+        return { before, status: response.status, body: await response.text(), after: await read() };
+      }, { token: authToken, ghostty });
+    }
+
+    // The shared server's stderr from its start. It warns once per process
+    // for a stored false, so earlier checks that stored the key can have
+    // spent the warning before this check runs.
+    const retiredKeyWarnings = () => ctx.stderrLines
+      .filter((line) => /\bWARN\b/.test(line) && line.includes("terminal.ghostty"));
+    function assertRetiredKeyWarning(line) {
+      for (const pattern of [/terminal\.ghostty/, /deprecated/i, /has no effect/i, /remove/i, /future release will reject/i]) {
+        assert.match(line, pattern, "the server logs the complete deprecation warning");
+      }
+    }
     let runError = null;
     try {
       await writeTerminalPrefs(page, authToken, { mouse_capture: true, program_status: true });
@@ -579,10 +618,20 @@ export default {
       details.mouse1000Leg = await probePressOnlyTracking();
       for (const ghostty of [true, false]) {
         await compatibilityArm(`api-${ghostty}`, async () => {
-          const row = await openLegacyConfiguredTerminal(ctx, page, cs, windowId, TAB_G, ghostty);
-          await assertOneTerminal();
-          await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: true });
-          return { ghostty, canonicalKeyAbsent: true, session: row.session_id };
+          await writeTerminalPrefs(page, authToken, { mouse_capture: true, program_status: true });
+          const path = join(ctx.chanHome, "server.toml");
+          const stored = readFileSync(path, "utf8");
+          const write = await patchNamingRetiredKey(ghostty);
+          assert.equal(write.status, 422, `a terminal write carrying ghostty = ${ghostty} is refused`);
+          assert.deepEqual(JSON.parse(write.body), { error: "the request body does not match what this route accepts" });
+          assert.equal(write.after.revision, write.before.revision, "the refused write does not move the revision");
+          assert.deepEqual(write.after.terminal, write.before.terminal, "the refused write changes no terminal preference");
+          assert.equal(readFileSync(path, "utf8"), stored, "the refused write leaves server.toml as it was");
+          // The same write without the key is accepted, so the key alone
+          // was refused.
+          await writeTerminalPrefs(page, authToken, { program_status: false });
+          await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: false });
+          return { ghostty, status: write.status, revision: write.before.revision, sameWriteWithoutKeyAccepted: true };
         });
       }
 
@@ -599,6 +648,8 @@ export default {
         const body = match[1].replace(/^ghostty = (?:true|false)\r?\n/m, "")
           .replace(/^program_status = true$/m, "program_status = false");
         const seeded = canonical.replace(section, () => `[terminal]\nghostty = false\n${body}`);
+        // Recorded so a run shows whether this load or an earlier one warned.
+        const warningsBeforeSeed = retiredKeyWarnings().length;
         const staged = `${path}.smoke94`;
         writeFileSync(staged, seeded);
         renameSync(staged, path);
@@ -609,6 +660,16 @@ export default {
           if (!response.ok) throw new Error(`GET /api/workspace -> ${response.status}`);
           return (await response.json()).preferences?.terminal?.program_status === false;
         }, { timeout: 20_000, polling: 100 }, authToken);
+        // This load warned for the stored false, or an earlier one in this
+        // process did: either way the server has logged the warning once.
+        const warningDeadline = Date.now() + 5_000;
+        while (retiredKeyWarnings().length === 0) {
+          assert.ok(Date.now() < warningDeadline, "no terminal.ghostty warning 5s after the stored false loaded");
+          await sleep(25);
+        }
+        const warnings = retiredKeyWarnings().map(maskTokens);
+        assert.equal(warnings.length, 1, "the server logs the terminal.ghostty warning once");
+        assertRetiredKeyWarning(warnings[0]);
         // A fresh page must read the consumed config before constructing a
         // terminal, rather than relying on the old page's preference cache.
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -630,8 +691,12 @@ export default {
         await assertTerminalPrefs(ctx, { ghostty: null, program_status: false, mouse_capture: true });
         assert.equal(readFileSync(path, "utf8"), seeded.replace("ghostty = false\n", ""),
           "normal save drops only the retired key and preserves unrelated settings");
+        // Read again once the stderr pipe has had the leg's time to deliver:
+        // when an earlier check spent the warning, the count above was met
+        // before this load could have repeated it.
+        assert.equal(retiredKeyWarnings().length, 1, "the server logs the terminal.ghostty warning once per process");
         await ctx.shot("ghostty-stored-false-reloaded");
-        return { before: before.session_id, after: after.session_id,
+        return { before: before.session_id, after: after.session_id, warningsBeforeSeed, warning: warnings[0],
           watcherConsumedFile: true, loadDidNotRewrite: true, saveDroppedOnlyLegacyKey: true };
       });
 
@@ -643,7 +708,7 @@ export default {
       const ghosttyResizeStart = resizeFrames.length;
       const ghosttySocketStart = terminalSocketUrls.length;
       await compatibilityArm("api-absent", async () => {
-        const row = await openLegacyConfiguredTerminal(ctx, page, cs, windowId, TAB_G, undefined);
+        const row = await openConfiguredTerminal(ctx, page, cs, windowId, TAB_G);
         await assertOneTerminal();
         await assertTerminalPrefs(ctx, { ghostty: null, mouse_capture: true, program_status: true });
         return { canonicalKeyAbsent: true, session: row.session_id };
