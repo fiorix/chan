@@ -180,9 +180,9 @@ struct PreferencesPatch {
 /// the key out keeps the stored value. `tmux` is the third, for the same
 /// reason, and a `tmux` object that leaves `trust` out keeps the stored
 /// list, since Settings edits only the switch. `ghostty`, the retired engine
-/// choice, is not a setting: a page loaded before its retirement still sends
-/// it with every terminal write, so a boolean is accepted and dropped, and any
-/// other value is refused as it was while the setting existed.
+/// choice, is refused by name as an unknown field: the reader of the object
+/// passes over fields it does not know, so that a `server.toml` still holding
+/// the key loads.
 #[derive(Debug, Clone)]
 struct TerminalPatch {
     config: TerminalConfig,
@@ -197,10 +197,9 @@ impl<'de> Deserialize<'de> for TerminalPatch {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
-        if let Some(ghostty) = object.remove("ghostty") {
-            bool::deserialize(ghostty)
-                .map_err(|e| serde::de::Error::custom(format!("terminal.ghostty: {e}")))?;
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        if object.contains_key("ghostty") {
+            return Err(serde::de::Error::custom("unknown field `terminal.ghostty`"));
         }
         let names_secret_masking = object.contains_key("secret_masking");
         let names_program_status = object.contains_key("program_status");

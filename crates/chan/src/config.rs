@@ -319,56 +319,20 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
 ];
 
-/// The retired terminal engine choice. Every terminal is Ghostty, so `get`
-/// answers `true` and `set` writes nothing, each with
-/// [`RETIRED_ENGINE_WARNING`], and listings leave the key out. Both are
-/// answered before any config file is read, so neither loads or saves one.
-const RETIRED_ENGINE_KEY: &str = "server.terminal.ghostty";
-
-const RETIRED_ENGINE_WARNING: &str = "warning: `server.terminal.ghostty` is deprecated and \
-     has no effect: every terminal uses Ghostty. Remove it from scripts and server.toml; a \
-     future release will reject it.";
-
-/// `chan config get server.terminal.ghostty`: the value every terminal has.
-fn get_retired_engine_key(
-    out: &mut impl std::io::Write,
-    err: &mut impl std::io::Write,
-) -> Result<()> {
-    writeln!(err, "{RETIRED_ENGINE_WARNING}")?;
-    writeln!(out, "true")?;
-    Ok(())
-}
-
-/// `chan config set server.terminal.ghostty <bool>`: the value keeps the type
-/// check it had, and nothing is written.
-fn set_retired_engine_key(raw: &str, err: &mut impl std::io::Write) -> Result<()> {
-    let spec = ConfigKeySpec {
-        key: RETIRED_ENGINE_KEY,
-        kind: ConfigValueKind::Bool,
-    };
-    parse_config_scalar(spec, raw)?;
-    writeln!(err, "{RETIRED_ENGINE_WARNING}")?;
-    Ok(())
-}
-
 pub(super) fn cmd_config(action: ConfigAction) -> Result<()> {
-    config_command(action, &mut std::io::stdout(), &mut std::io::stderr())
+    config_command(action, &mut std::io::stdout())
 }
 
-/// [`cmd_config`] over the streams it writes, so a test reads which line
-/// goes to which: a script captures `out`, and a warning must not land in it.
-fn config_command(
-    action: ConfigAction,
-    out: &mut impl std::io::Write,
-    err: &mut impl std::io::Write,
-) -> Result<()> {
+/// [`cmd_config`] over the stream it writes, so a test reads what a script
+/// captures.
+fn config_command(action: ConfigAction, out: &mut impl std::io::Write) -> Result<()> {
+    // An unknown key is refused before either file is read, so a file that
+    // does not load cannot answer for it.
     match action {
-        ConfigAction::Get { key: Some(key), .. }
-            if canonical_config_key(&key) == RETIRED_ENGINE_KEY =>
-        {
-            get_retired_engine_key(out, err)
-        }
         ConfigAction::Get { key, json } => {
+            if let Some(key) = key.as_deref().filter(|key| !key.is_empty()) {
+                config_key_spec(&canonical_config_key(key))?;
+            }
             let editor = EditorPrefs::load().context("loading editor preferences")?;
             let server = ServerConfig::load().context("loading server config")?;
             match key.as_deref() {
@@ -395,9 +359,7 @@ fn config_command(
         ConfigAction::Set { key, value } => {
             let (key, raw_value) = split_assignment(&key, value.as_deref())?;
             let key = canonical_config_key(&key);
-            if key == RETIRED_ENGINE_KEY {
-                return set_retired_engine_key(&raw_value, err);
-            }
+            config_key_spec(&key)?;
             if key.starts_with("server.") {
                 let mut cfg = ServerConfig::load().context("loading server config")?;
                 write_server_config_key(&mut cfg, &key, &raw_value)?;
@@ -908,10 +870,10 @@ mod tests {
     use crate::test_env;
     use chan_workspace::SearchAggression;
 
-    /// [`config_command`] with both streams thrown away, for a test that
+    /// [`config_command`] with its stream thrown away, for a test that
     /// reads what a command leaves rather than what it prints.
     fn config_quietly(action: ConfigAction) -> Result<()> {
-        config_command(action, &mut std::io::sink(), &mut std::io::sink())
+        config_command(action, &mut std::io::sink())
     }
 
     #[test]
@@ -1028,8 +990,8 @@ mod tests {
             }
             for action in actions() {
                 let label = format!("{action:?} over {files:?}");
-                let (mut out, mut err) = (Vec::new(), Vec::new());
-                let error = config_command(action, &mut out, &mut err)
+                let mut out = Vec::new();
+                let error = config_command(action, &mut out)
                     .err()
                     .map(|error| format!("{error:#}"));
                 assert!(
@@ -1039,7 +1001,6 @@ mod tests {
                     "{label}: {error:?}"
                 );
                 assert!(out.is_empty(), "{label}: {out:?}");
-                assert!(err.is_empty(), "{label}: {err:?}");
                 assert_eq!(
                     std::fs::read_to_string(&server).ok().as_deref(),
                     files.map(|(body, _)| body),
@@ -1055,53 +1016,44 @@ mod tests {
     }
 
     #[test]
-    fn config_answers_on_stdout_alone() {
+    fn config_writes_its_answers_to_stdout() {
         let _env = test_env::ChanTestEnv::new();
         let run = |action| {
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            config_command(action, &mut out, &mut err).unwrap();
-            (
-                String::from_utf8(out).unwrap(),
-                String::from_utf8(err).unwrap(),
-            )
+            let mut out = Vec::new();
+            config_command(action, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
         };
-        // A key's whole answer goes to stdout.
         let set = ConfigAction::Set {
             key: "terminal.font_size".into(),
             value: Some("13".into()),
         };
-        assert_eq!(
-            run(set),
-            ("server.terminal.font_size = 13\n".into(), String::new())
-        );
+        assert_eq!(run(set), "server.terminal.font_size = 13\n");
         let get = ConfigAction::Get {
             key: Some("terminal.font_size".into()),
             json: false,
         };
-        assert_eq!(run(get), ("13\n".into(), String::new()));
+        assert_eq!(run(get), "13\n");
         let get = ConfigAction::Get {
             key: Some("terminal.font_size".into()),
             json: true,
         };
-        assert_eq!(run(get), ("13\n".into(), String::new()));
+        assert_eq!(run(get), "13\n");
 
-        // So does the listing of every key, in each format.
-        let (out, err) = run(ConfigAction::Get {
+        // And the listing of every key, in each format.
+        let out = run(ConfigAction::Get {
             key: None,
             json: false,
         });
-        assert_eq!(err, "");
         let listing: toml::Value = toml::from_str(&out).unwrap();
         assert_eq!(
             listing["server"]["terminal"]["font_size"].as_integer(),
             Some(13),
             "{out}"
         );
-        let (out, err) = run(ConfigAction::Get {
+        let out = run(ConfigAction::Get {
             key: None,
             json: true,
         });
-        assert_eq!(err, "");
         let listing: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(listing["server"]["terminal"]["font_size"], 13, "{out}");
     }
@@ -1143,8 +1095,7 @@ mod tests {
             font_size(true),
         ] {
             let label = format!("{action:?}");
-            let error = config_command(action, &mut RefusingWriter, &mut std::io::sink())
-                .expect_err(&label);
+            let error = config_command(action, &mut RefusingWriter).expect_err(&label);
             assert_eq!(
                 error.downcast_ref::<std::io::Error>().map(|e| e.kind()),
                 Some(std::io::ErrorKind::BrokenPipe),
