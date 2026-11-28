@@ -4,6 +4,7 @@
 // returned completion promises so every diagram and image is painted
 // before rasterization).
 
+import { isYouTubeEmbedSrc } from "../api/embed";
 import { renderMarkdown } from "../api/markdown";
 import { type DiagramResult } from "./diagram_render";
 import {
@@ -484,7 +485,7 @@ function imageSettled(img: HTMLImageElement): Promise<void> {
 export function replaceEmbedsWithLinks(root: ParentNode): void {
   for (const frame of Array.from(root.querySelectorAll("iframe"))) {
     const link = document.createElement("a");
-    const src = frame.getAttribute("src") ?? "";
+    const src = printedEmbedAddress(frame.getAttribute("src") ?? "");
     const title = frame.getAttribute("title");
     link.setAttribute("href", src);
     link.setAttribute("target", "_blank");
@@ -492,6 +493,22 @@ export function replaceEmbedsWithLinks(root: ParentNode): void {
     link.textContent = title ? `${title}: ${src}` : src;
     frame.replaceWith(link);
   }
+}
+
+/// The address a stand-in prints for an embed frame's src. A YouTube
+/// frame's src enables the player API so the screen lock can pause it,
+/// which means nothing to a reader, so that parameter is left out. The
+/// rest of the query is kept as written, since `searchParams` would
+/// re-encode it. Any other origin's src is its own address.
+function printedEmbedAddress(src: string): string {
+  if (!isYouTubeEmbedSrc(src)) return src;
+  const u = new URL(src);
+  u.search = u.search
+    .slice(1)
+    .split("&")
+    .filter((pair) => pair.split("=")[0] !== "enablejsapi")
+    .join("&");
+  return u.href;
 }
 
 /// Fire the image hook only for a load that actually succeeded. A
