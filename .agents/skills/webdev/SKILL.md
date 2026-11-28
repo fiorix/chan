@@ -145,6 +145,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 - `node:fs` readers that read no source are outside this rule. They read a document, fixtures, or a script as it ships and execute it:
   - `components/settings/settingsDocInventory.test.ts` reads `docs/config-reference.md`.
   - `graph/workspaceSearchParity.test.ts` reads its JSON fixtures.
+  - `terminal/coreScreenModes.test.ts` reads the vendored terminal core's wasm and the JSON fixture of its readings, `crates/chan-library/tests/fixtures/core-screen-modes.json`, and with `CHAN_RECORD_CORE_MODES=1` writes the recorded readings into that fixture.
   - `state/desktopBridgeLayout.test.ts`: the desktop's injected keyboard scripts follow the same layout contract as the workspace app's `shortcutKey` over the shared layout vectors. It runs the key bridge and the launcher's bridge from `desktop/src-tauri/src/key_bridge.js` and `launcher_bridge.js`, which the desktop includes with `include_str!`, and the connecting page from `desktop/src/connecting.js` and `connecting.html`.
   - `state/keyboardLayout.test.ts`: the key bridge dispatches a letter chord by the layout's letter; it runs `key_bridge.js`.
   - `state/shortcuts.inspector.test.ts`: the inspector chord a menu shows is the chord the key bridge opens the inspector on; it runs `key_bridge.js`.

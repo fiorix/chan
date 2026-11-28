@@ -35,9 +35,11 @@ describe("the fresh-shell reset list", () => {
     // The sorted comparison runs before the count so a drift names its mode.
     expect([...FRESH_SHELL_RESET_MODES].sort((a, b) => a - b)).toEqual([...server].sort((a, b) => a - b));
     expect(server.length, "the server tracks twelve modes").toBe(12);
-    // The reset is one sequence of parameters. No source in the tree states
-    // the vendored core's parameter cap, so 16 stays the bound: past a
-    // core's cap the tail would drop silently while this tie stays green.
+    // The reset is one sequence of parameters, and the vendored core drops
+    // a sequence of more than 24 whole (the server's CSI_MAX_PARAMS, read
+    // from the core in the core-screen-modes fixture), so past that the
+    // reset would clear nothing while this tie stays green. 16 stays the
+    // bound, well under it.
     expect(FRESH_SHELL_RESET_MODES.length).toBeLessThanOrEqual(16);
   });
 });

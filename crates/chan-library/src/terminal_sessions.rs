@@ -9893,6 +9893,11 @@ mod tests {
             "a chunk's mark is {} bytes",
             std::mem::size_of::<ScreenMark>()
         );
+        assert_eq!(
+            std::mem::size_of::<OpenSequence>(),
+            52,
+            "the open sequence's size, which its doc and the crate's design notes state"
+        );
     }
 
     /// The start of a switch to the normal screen of 24 parameters,
