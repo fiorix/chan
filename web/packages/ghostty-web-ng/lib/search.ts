@@ -235,10 +235,9 @@ export class SearchOwner {
     } else {
       this.#forget();
       if (switched && !alternate) this.#unpark();
-      // A press waiting on a match a write loses, by pruning or by leaving
-      // its end before its start, applies from no active match, as one that
-      // waited its second does.
-      if (switched || kind === 'resize') this.#waiting = this.#waiting.filter(step => step.newest);
+      // Presses still waiting stay queued: they apply from no active match,
+      // as one that waited its second does, or at the switch back from the
+      // primary's returned match, as a press made then does.
     }
     this.#schedule();
     this.#publish();
