@@ -54,7 +54,7 @@ const YOUTUBE_RAW = '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9W
 /// Excalidraw board's video embed.
 const NOT_YOUTUBE = [
   embedIframeHtml("https://www.google.com/maps/embed?pb=!1m18!1m12!1m3")!,
-  '<iframe src="/ext/echo/index.html" sandbox="allow-forms allow-scripts"></iframe>',
+  `<iframe src="/_chan/extensions/echo/${"a".repeat(64)}/" sandbox="allow-forms allow-scripts"></iframe>`,
   '<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ?enablejsapi=1"></iframe>',
 ];
 
