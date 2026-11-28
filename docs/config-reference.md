@@ -37,7 +37,7 @@ The CLI serializes these under the `server.*` namespace, so terminal fields are 
 
 `attachments_dir` is a retired key: a value in the file has no effect, the next save drops it, and the CLI and the API reject it.
 
-`terminal.ghostty` is a retired key with a warning period: every terminal uses Ghostty. A stored `false` warns once per process that the key has no effect and a future release will reject it; a stored `true` is silent, and a value that is not a boolean is a load error. Loading never rewrites the file, and the next save drops the key. `PATCH /api/config` accepts a boolean `ghostty` in the terminal object and ignores it. `chan config get server.terminal.ghostty` prints `true`, and `chan config set server.terminal.ghostty true|false` writes nothing; both print the deprecation warning on stderr.
+`terminal.ghostty` is a retired key: every terminal uses Ghostty. The file tolerates it: a stored `false` warns once per process that the key has no effect, a stored `true` is silent, and a value that is not a boolean is a load error. Loading never rewrites the file, and the next save drops the key. `PATCH /api/config` rejects a terminal object that holds `ghostty`, whatever its value, as an unknown field, and `chan config get` and `set` of `server.terminal.ghostty` fail as an unknown key, as they do for `attachments_dir`.
 
 #### Authoring terminal profiles
 
