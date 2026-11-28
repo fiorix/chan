@@ -286,7 +286,7 @@ describe("reloadWindow dispatch", () => {
     const invokeSpy = vi.fn().mockResolvedValue(undefined);
     setTauriInternals(invokeSpy);
     await reloadWindow();
-    expect(invokeSpy).toHaveBeenCalledWith("reload_window", undefined);
+    expect(invokeSpy).toHaveBeenCalledWith("reload_window", { tokenStored: false });
     expect(reloadSpy).not.toHaveBeenCalled();
   });
 
@@ -295,9 +295,40 @@ describe("reloadWindow dispatch", () => {
     setTauriInternals(invokeSpy);
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await reloadWindow();
-    expect(invokeSpy).toHaveBeenCalledWith("reload_window", undefined);
+    expect(invokeSpy).toHaveBeenCalledWith("reload_window", { tokenStored: false });
     expect(reloadSpy).toHaveBeenCalledTimes(1);
     consoleWarn.mockRestore();
+  });
+});
+
+// chan-desktop reloads a page in place only while the page still holds its
+// token where its own reload looks for it; a local window whose session
+// storage was lost is navigated to its tokened URL instead. The page loads
+// fresh here, so its transport takes the token from the URL into session
+// storage itself, and the reading follows that storage, not the copy the
+// page keeps in memory.
+describe("reloadWindow reports whether the page still holds its token", () => {
+  afterEach(() => {
+    clearTauriGlobals();
+    sessionStorage.clear();
+    window.history.replaceState({}, "", "/");
+  });
+
+  test("held after the page takes it from its URL, gone once session storage loses it", async () => {
+    window.history.replaceState({}, "", "/?t=tok-1");
+    vi.resetModules();
+    const page = await import("./desktop");
+    expect(window.location.search, "fixture: the page took its token out of the URL").toBe("");
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    setTauriInternals(invoke);
+
+    await page.reloadWindow();
+    expect(invoke).toHaveBeenLastCalledWith("reload_window", { tokenStored: true });
+
+    sessionStorage.clear();
+    await page.reloadWindow();
+    expect(invoke).toHaveBeenLastCalledWith("reload_window", { tokenStored: false });
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 });
 

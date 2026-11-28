@@ -10297,6 +10297,65 @@ mod tests {
         }
     }
 
+    /// A devserver window's Reload goes to its connection's watcher whatever
+    /// the page says of its stored token: the page's reading decides only a
+    /// local window's Reload.
+    #[test]
+    fn a_devserver_reload_is_routed_whatever_the_page_says_of_its_token() {
+        let state = empty_state();
+        let record = chan_server::WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "lib-fed".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        state.devserver_feed.register_windows(
+            "ds-1".to_string(),
+            Arc::new(Mutex::new(vec![record].into())),
+        );
+        state.devservers.set(
+            "ds-1".to_string(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: 1,
+                token: "ds-token".into(),
+                name: "ds".into(),
+                gateway: None,
+            },
+        );
+        let view = Arc::new(window_watcher::WatcherViewState::default());
+        state
+            .devserver_watcher_views
+            .lock()
+            .unwrap()
+            .insert("ds-1".to_string(), Arc::clone(&view));
+        for token_stored in [Some(true), None, Some(false)] {
+            assert!(
+                route_window_reload(&state, "lib-fed::w-1", token_stored).expect("routing"),
+                "{token_stored:?}: the devserver's watcher takes the Reload"
+            );
+            assert_eq!(
+                view.take_reload_requests(),
+                std::collections::HashSet::from(["lib-fed::w-1".to_string()]),
+                "{token_stored:?}: the Reload is queued for that window"
+            );
+        }
+    }
+
     #[test]
     fn every_devserver_connect_wires_its_watcher_through_one_helper() {
         const MAIN_RS: &str = include_str!("main.rs");
@@ -15393,6 +15452,48 @@ mod tests {
             assert!(
                 !route_window_reload(&state, &label, Some(false)).expect("routing"),
                 "with no local watcher the Reload stays in page"
+            );
+            runtime
+                .block_on(state.embedded().expect("embedded").shutdown_all())
+                .expect("shut the tenants down");
+        }
+
+        /// Only a page that says its stored token is gone is navigated: one
+        /// that still holds it, or does not say, reloads in page, which keeps
+        /// what only a reload keeps, with the watcher up and the record
+        /// tokened.
+        #[test]
+        fn a_page_that_holds_its_token_reloads_in_page() {
+            if !own_home("a_page_that_holds_its_token_reloads_in_page") {
+                return;
+            }
+            let (runtime, state) = desktop();
+            let view = Arc::new(window_watcher::WatcherViewState::default());
+            state.set_local_watcher_view(Arc::clone(&view));
+            mount_terminal_tenant(&runtime, &state);
+            let label = mint_terminal_window(&state);
+            assert!(
+                fed_token(&state, &label).is_some_and(|token| !token.is_empty()),
+                "fixture: the window's record carries its tenant's token"
+            );
+            for token_stored in [Some(true), None] {
+                assert!(
+                    !route_window_reload(&state, &label, token_stored).expect("routing"),
+                    "{token_stored:?}: the Reload stays in page"
+                );
+            }
+            assert!(
+                view.take_reload_requests().is_empty(),
+                "a Reload left to the page queues nothing"
+            );
+            assert!(
+                route_window_reload(&state, &label, Some(false)).expect("routing"),
+                "fixture: the watcher takes the same window's Reload once its page has lost its token"
+            );
+            assert_eq!(
+                view.take_reload_requests(),
+                std::collections::HashSet::from([label.clone()]),
+                "fixture: that Reload is queued for the window"
             );
             runtime
                 .block_on(state.embedded().expect("embedded").shutdown_all())

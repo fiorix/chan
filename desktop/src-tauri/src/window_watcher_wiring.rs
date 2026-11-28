@@ -2215,6 +2215,142 @@ mod tests {
         }
     }
 
+    /// A mock app whose desktop config is the file at `config`, holding one
+    /// open window of the local `record` at `loaded`, the URL its page shows
+    /// once it has taken its token out of it.
+    fn local_window_app(
+        config: &std::path::Path,
+        record: &WindowRecord,
+        loaded: &tauri::Url,
+    ) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            config.to_path_buf(),
+        )));
+        app.manage(Arc::new(AppState::with_store(store)));
+        tauri::WebviewWindowBuilder::new(
+            &app,
+            native_label(record),
+            tauri::WebviewUrl::External(loaded.clone()),
+        )
+        .build()
+        .expect("a mock window");
+        app
+    }
+
+    fn local_record() -> WindowRecord {
+        WindowRecord {
+            library_id: LOCAL_LIBRARY_ID.into(),
+            token: "tok".into(),
+            ..rec()
+        }
+    }
+
+    const LOCAL_ADDR: &str = "127.0.0.1:1234";
+    const LOADED: &str = "http://127.0.0.1:1234/terminal/index.html?w=w-1&transparent=1";
+
+    /// A local window is navigated by a Reload and by nothing else: a pass
+    /// without one leaves its page alone, a Reload navigates it once to the
+    /// URL its record's token rides on, and the passes after it leave it
+    /// alone again, so a feed change never navigates every local window.
+    #[test]
+    fn a_local_refresh_navigates_only_for_a_reload() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let record = local_record();
+        let loaded: tauri::Url = LOADED.parse().expect("the loaded URL");
+        let app = local_window_app(&dir.path().join("config.json"), &record, &loaded);
+        let addr: SocketAddr = LOCAL_ADDR.parse().expect("address");
+        let window = app
+            .get_webview_window(&native_label(&record))
+            .expect("the window");
+        let in_page = std::cell::Cell::new(0);
+        let pass = |reload: bool| {
+            refresh_local_window(app.handle(), addr, &record, reload, |_| {
+                in_page.set(in_page.get() + 1)
+            })
+        };
+
+        pass(false);
+        assert_eq!(
+            window.url().expect("url"),
+            loaded,
+            "a pass without a Reload navigates nothing"
+        );
+        pass(true);
+        let navigated = window.url().expect("url");
+        assert_eq!(navigated.path(), "/terminal/index.html", "{navigated}");
+        assert!(
+            navigated
+                .query_pairs()
+                .any(|(key, value)| key == "t" && value == "tok"),
+            "a Reload navigates to the URL with the record's token: {navigated}"
+        );
+        // The page takes its token out of the URL again.
+        window.navigate(loaded.clone()).expect("mock navigation");
+        for _ in 0..3 {
+            pass(false);
+        }
+        assert_eq!(
+            window.url().expect("url"),
+            loaded,
+            "the passes after a Reload navigate nothing"
+        );
+        assert_eq!(
+            in_page.get(),
+            0,
+            "a navigated Reload is not reloaded in page too"
+        );
+    }
+
+    /// The desktop answered the Reload before the watcher's pass, so one the
+    /// pass cannot navigate (here the desktop config cannot be read, so no
+    /// target can be composed) reloads the window in page instead of leaving
+    /// the user with nothing. A Reload of a window that is not open reloads
+    /// nothing and builds nothing.
+    #[test]
+    fn a_local_reload_that_cannot_navigate_reloads_in_page() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "not json").expect("a config that cannot be read");
+        let record = local_record();
+        let loaded: tauri::Url = LOADED.parse().expect("the loaded URL");
+        let app = local_window_app(&config, &record, &loaded);
+        let addr: SocketAddr = LOCAL_ADDR.parse().expect("address");
+        let label = native_label(&record);
+        let in_page = std::cell::RefCell::new(Vec::new());
+
+        refresh_local_window(app.handle(), addr, &record, true, |window| {
+            in_page.borrow_mut().push(window.label().to_string())
+        });
+        assert_eq!(
+            *in_page.borrow(),
+            [label.as_str()],
+            "the Reload reloads that window in page"
+        );
+        let window = app.get_webview_window(&label).expect("the window");
+        assert_eq!(window.url().expect("url"), loaded, "and navigates nothing");
+
+        refresh_local_window(app.handle(), addr, &record, false, |window| {
+            in_page.borrow_mut().push(window.label().to_string())
+        });
+        let closed = WindowRecord {
+            window_id: "w-2".into(),
+            ..record.clone()
+        };
+        refresh_local_window(app.handle(), addr, &closed, true, |window| {
+            in_page.borrow_mut().push(window.label().to_string())
+        });
+        assert_eq!(
+            in_page.borrow().len(),
+            1,
+            "a pass without a Reload, and a Reload of a window that is not open, reload nothing"
+        );
+        assert!(
+            app.get_webview_window(&native_label(&closed)).is_none(),
+            "a Reload builds no window"
+        );
+    }
+
     #[derive(Default)]
     struct CaptionSurface {
         titles: std::cell::RefCell<HashMap<String, String>>,
