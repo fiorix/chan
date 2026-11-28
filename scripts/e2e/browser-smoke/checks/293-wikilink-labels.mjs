@@ -3,9 +3,10 @@
 // the positive (the label is there) and the negative (no `[[` in that
 // surface); the table face also carries the code-span guard once (a
 // wikilink inside backticks stays as typed) and an escaped alias. The
-// survey face reads four paragraphs from the card: a link to a note
-// that exists shows its label, an aliased link its alias, and two shell
-// tests read character for character as typed, since a survey body is
+// survey face reads eight paragraphs from the card: a link to a note
+// that exists shows its label, an aliased link its alias, and four shell
+// tests (one holding a POSIX class, one a link) and two bare POSIX
+// classes read character for character as typed, since a survey body is
 // an agent's prose about code. Table cells render through the grid
 // widget, which carries no pills, so that face waits for the grid; a
 // caret inside a wikilink suppresses its pill, so every face parks the
@@ -57,6 +58,10 @@ const SURVEY_CASES = [
   ["Open [[note|alias]] now.", "Open alias now."],
   ["Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?", "Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?"],
   ['if [[ "$a" == "$b" || -z "$c" ]]; then', 'if [[ "$a" == "$b" || -z "$c" ]]; then'],
+  ["Use [[ $x =~ ^[[:digit:]]+$ ]] here", "Use [[ $x =~ ^[[:digit:]]+$ ]] here"],
+  ["nested [[ $x == [[note]] ]] end", "nested [[ $x == [[note]] ]] end"],
+  ["Strip it with sed 's/[[:space:]]*$//' first?", "Strip it with sed 's/[[:space:]]*$//' first?"],
+  ["grep -E '^[[:space:]]*#' conf", "grep -E '^[[:space:]]*#' conf"],
 ];
 
 async function focusedPane(page) {
@@ -198,7 +203,7 @@ export default {
       });
 
       // Face 2: a survey body shows a link's label and an alias, and shell
-      // tests as typed.
+      // tests and POSIX classes as typed.
       await runFace("survey", async () => {
         const socket = ctx.controlSocket;
         if (!socket) ctx.skip("control socket not found for the server pid");
