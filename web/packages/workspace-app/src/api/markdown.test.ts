@@ -155,6 +155,8 @@ describe("strict wikilink labels", () => {
     ["Open [[note]] now", "Open note now"],
     ["Open [[note|alias]] now", "Open alias now"],
     ["Open [[folder/note.md#heading]] now", "Open note now"],
+    ["Open [[My Note]] now", "Open My Note now"],
+    ["Open [[note ]] now", "Open note now"],
   ])("labels a plain link: %s", (source, label) => {
     expect(strict(source).textContent?.trim()).toBe(label);
   });
@@ -164,6 +166,7 @@ describe("strict wikilink labels", () => {
     'if [[ "$a" == "$b" || -z "$c" ]]; then',
     "Use [[ $x =~ ^v#1 ]] here",
     "Padded [[ note ]] here",
+    "Run [[\t-f a ]] now",
   ])("leaves a body that opens with whitespace as typed: %s", (source) => {
     expect(strict(source).textContent?.trim()).toBe(source);
   });
@@ -171,6 +174,8 @@ describe("strict wikilink labels", () => {
   test.each([
     "Matrix [[1, 2], [3, 4]] here",
     "Open [[note|a [b] c]] now",
+    "Open [[a] b]] now",
+    "Open [[a [b]] now",
   ])("leaves a body that holds a bracket as typed: %s", (source) => {
     expect(strict(source).textContent?.trim()).toBe(source);
   });

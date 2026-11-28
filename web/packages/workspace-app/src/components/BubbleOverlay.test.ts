@@ -203,6 +203,11 @@ describe("survey overlay", () => {
     expect((await surveyBody(source)).textContent?.trim()).toBe(source);
   });
 
+  test("a survey body shows bracket text holding a bracket as typed", async () => {
+    const source = "Matrix [[1, 2], [3, 4]] here";
+    expect((await surveyBody(source)).textContent?.trim()).toBe(source);
+  });
+
   test("a survey body skips the frontmatter rule", async () => {
     const text = (await surveyBody('---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]')).textContent ?? "";
     expect(text).toContain('up: "Parent"');
