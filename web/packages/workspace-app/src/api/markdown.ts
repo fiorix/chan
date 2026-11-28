@@ -90,28 +90,46 @@ function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): Wi
   return spans;
 }
 
-/// Whether a wikilink body is plainly a link, for prose with no note behind
+/// A POSIX class in a bracket expression, such as `[[:space:]]`.
+const POSIX_CLASS = /^:[a-z]+:$/;
+
+/// A shell test on one line: `[[` and a blank, up to the first blank and
+/// `]]`, which is the word that ends it.
+const SHELL_TEST = /\[\[[ \t].*?[ \t]\]\]/g;
+
+/// Whether a wikilink span is plainly a link, for prose with no note behind
 /// it. A shell conditional always has a blank after its `[[`, which the
 /// shell reads as a word of its own, and the link syntax has no escape for
 /// a bracket, so a body that opens with whitespace or holds a bracket is a
-/// shell test or a nested array, not a link chan's pickers write.
-function isPlainLinkBody(body: string): boolean {
-  return !/^\s/.test(body) && !/[[\]]/.test(body);
+/// shell test or a nested array, not a link chan's pickers write. The
+/// grammar refuses a `[[` whose body holds another, so the `[[...]]` inside
+/// a shell test (a regex's POSIX class, a pattern) reaches here alone: a
+/// POSIX class anywhere and any span inside a shell test are shell text too.
+function isPlainLink(input: string, span: WikiSpan): boolean {
+  const body = input.slice(span.from + 2, span.to - 2);
+  if (/^\s/.test(body) || /[[\]]/.test(body) || POSIX_CLASS.test(body)) return false;
+  const start = input.lastIndexOf("\n", span.from) + 1;
+  const newline = input.indexOf("\n", span.to);
+  const line = input.slice(start, newline < 0 ? input.length : newline);
+  for (const test of line.matchAll(SHELL_TEST)) {
+    const from = start + test.index;
+    if (from <= span.from && span.to <= from + test[0].length) return false;
+  }
+  return true;
 }
 
 function renderWikiLabels(
   input: string,
   inline: boolean,
   frontmatter: boolean,
-  isLink: (body: string) => boolean = () => true,
+  isLink: (input: string, span: WikiSpan) => boolean = () => true,
 ): string {
   let output = "";
   let end = 0;
   for (const span of wikiLinkSpans(input, inline, frontmatter)) {
-    const body = input.slice(span.from + 2, span.to - 2);
     // A span left out stays in the source as typed, up to the next label.
-    if (!isLink(body)) continue;
-    const { label } = parseWikiBody(body);
+    if (!isLink(input, span)) continue;
+    const { label } = parseWikiBody(input.slice(span.from + 2, span.to - 2));
     // Character references keep every label literal to marked, including
     // emphasis and URL syntax. The span preserves the inline boundary
     // even for an empty alias; it carries no export-control attributes.
@@ -199,13 +217,14 @@ export function renderMarkdown(
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
 /// labels; a call without the option keeps the authored syntax.
 /// `{ wikilinks: "strict" }` labels only a plain link and keeps as typed a
-/// `[[...]]` whose body opens with whitespace or holds a bracket: for prose
-/// with no note behind it, such as a survey body, where double brackets
-/// are as likely a shell test as a link.
+/// `[[...]]` whose body opens with whitespace, holds a bracket or is a
+/// POSIX class (`[[:space:]]`), and any `[[...]]` inside a shell test: for
+/// prose with no note behind it, such as a survey body, where double
+/// brackets are as likely a shell test as a link.
 export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean | "strict" } = {}): string {
   const source = input ?? "";
   const labelled = opts.wikilinks
-    ? renderWikiLabels(source, false, false, opts.wikilinks === "strict" ? isPlainLinkBody : undefined)
+    ? renderWikiLabels(source, false, false, opts.wikilinks === "strict" ? isPlainLink : undefined)
     : source;
   const raw = marked.parse(labelled, {
     async: false,
