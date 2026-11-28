@@ -4595,42 +4595,67 @@ mod tests {
     // spelling the index holds is not read; the spellings before the path
     // are read, and none after it once the path names no file and is not
     // the link's decoded target. `LICENSE` is spelled by two links, and
-    // read once.
+    // read once. A folder is listed only on the path of a spelling found as
+    // a file, once: the root for `LICENSE`, the root and `docs` for
+    // `docs/leaf`, and none for `notes/sub/up.log`, whose spellings name no
+    // file.
     #[tokio::test]
     async fn a_backlinks_call_reads_only_the_spellings_that_decide() {
-        use chan_workspace::workspace::listing_limit_test_hooks::listed_file_reads;
+        use chan_workspace::workspace::listing_limit_test_hooks::{
+            listed_file_listings, listed_file_reads,
+        };
+        type Reads = std::collections::BTreeMap<String, usize>;
 
         let app = backlinks_route_app();
         let workspace = backlinks_fixture_read(&app).await;
+        let since = |before: &Reads, after: Reads| -> Reads {
+            after
+                .into_iter()
+                .map(|(path, n)| {
+                    let earlier = before.get(&path).copied().unwrap_or(0);
+                    (path, n - earlier)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect()
+        };
         let mut reads = std::collections::BTreeMap::new();
         for target in ["LICENSE", "notes/sub/up.log", "docs/leaf.md"] {
             for form in ["", "?stream=1"] {
-                let before = listed_file_reads(&workspace);
+                let (lstats, listings) = (
+                    listed_file_reads(&workspace),
+                    listed_file_listings(&workspace),
+                );
                 graph_route_body(&app, &format!("/api/backlinks/{target}{form}")).await;
-                let read: std::collections::BTreeMap<String, usize> = listed_file_reads(&workspace)
-                    .into_iter()
-                    .map(|(path, n)| {
-                        let earlier = before.get(&path).copied().unwrap_or(0);
-                        (path, n - earlier)
-                    })
-                    .filter(|(_, n)| *n > 0)
-                    .collect();
-                reads.insert((target, form), read);
+                reads.insert(
+                    (target, form),
+                    (
+                        since(&lstats, listed_file_reads(&workspace)),
+                        since(&listings, listed_file_listings(&workspace)),
+                    ),
+                );
             }
         }
-        let expected = |paths: &[&str]| -> std::collections::BTreeMap<String, usize> {
-            paths.iter().map(|path| (path.to_string(), 1)).collect()
-        };
+        let once =
+            |paths: &[&str]| -> Reads { paths.iter().map(|path| (path.to_string(), 1)).collect() };
         let mut pinned = std::collections::BTreeMap::new();
         for form in ["", "?stream=1"] {
-            pinned.insert(("LICENSE", form), expected(&["LICENSE"]));
+            pinned.insert(("LICENSE", form), (once(&["LICENSE"]), once(&[""])));
             pinned.insert(
                 ("notes/sub/up.log", form),
-                expected(&["notes/sub/up.log", "up.log", "up.log.md", "up.log.txt"]),
+                (
+                    once(&["notes/sub/up.log", "up.log", "up.log.md", "up.log.txt"]),
+                    once(&[]),
+                ),
             );
-            pinned.insert(("docs/leaf.md", form), expected(&["docs", "docs/leaf"]));
+            pinned.insert(
+                ("docs/leaf.md", form),
+                (once(&["docs", "docs/leaf"]), once(&["", "docs"])),
+            );
         }
-        assert_eq!(reads, pinned);
+        assert_eq!(
+            reads, pinned,
+            "per call, the paths read and the folders listed"
+        );
     }
 
     // Over the listing cap one graph load reads each node's class at most

@@ -948,7 +948,29 @@ pub mod listing_limit_test_hooks {
     }
 
     pub(super) fn record_listed_file_read(key: &Path, rel: &str) {
-        *LISTED_FILE_READS
+        record_path_read(&LISTED_FILE_READS, key, rel);
+    }
+
+    static LISTED_FILE_LISTINGS: LazyLock<Mutex<PathReads>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// How many times a [`super::ListedFiles`] of `workspace` has listed each
+    /// directory, `""` for the root, each counted as its listing is read.
+    pub fn listed_file_listings(workspace: &Workspace) -> BTreeMap<String, usize> {
+        LISTED_FILE_LISTINGS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn record_listed_file_listing(key: &Path, dir: &str) {
+        record_path_read(&LISTED_FILE_LISTINGS, key, dir);
+    }
+
+    fn record_path_read(reads: &Mutex<PathReads>, key: &Path, rel: &str) {
+        *reads
             .lock()
             .unwrap()
             .entry(key.to_path_buf())
@@ -5927,6 +5949,10 @@ struct ListedNames {
     /// Entry names by directory path, `""` for the root; `None` for a
     /// directory that could not be listed.
     parents: HashMap<String, Option<HashSet<std::ffi::OsString>>>,
+    /// The key the test hooks count this value's listings under, set by a
+    /// [`ListedFiles`] that owns it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    hooks_key: Option<std::path::PathBuf>,
 }
 
 impl ListedNames {
@@ -5934,6 +5960,8 @@ impl ListedNames {
         Self {
             dir,
             parents: HashMap::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            hooks_key: None,
         }
     }
 
@@ -5945,6 +5973,8 @@ impl ListedNames {
     /// alone.
     fn lists(&mut self, rel: &str) -> Option<bool> {
         let dir = &self.dir;
+        #[cfg(any(test, feature = "test-hooks"))]
+        let hooks_key = self.hooks_key.as_deref();
         let mut start = 0;
         loop {
             let end = rel[start..].find('/').map_or(rel.len(), |at| start + at);
@@ -5952,7 +5982,13 @@ impl ListedNames {
             let names = self
                 .parents
                 .entry(parent.to_owned())
-                .or_insert_with(|| list_names(dir, parent))
+                .or_insert_with(|| {
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    if let Some(key) = hooks_key {
+                        listing_limit_test_hooks::record_listed_file_listing(key, parent);
+                    }
+                    list_names(dir, parent)
+                })
                 .as_ref()?;
             if !names.contains(std::ffi::OsStr::new(&rel[start..end])) {
                 return Some(false);

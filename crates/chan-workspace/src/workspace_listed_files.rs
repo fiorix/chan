@@ -58,7 +58,11 @@ impl ListedFiles {
         Self {
             #[cfg(any(test, feature = "test-hooks"))]
             hooks_key: workspace.paths.graph_dir.clone(),
-            names: ListedNames::new(Arc::clone(&dir)),
+            names: ListedNames {
+                #[cfg(any(test, feature = "test-hooks"))]
+                hooks_key: Some(workspace.paths.graph_dir.clone()),
+                ..ListedNames::new(Arc::clone(&dir))
+            },
             dir,
             policy: workspace.scope_policy(),
             #[cfg(unix)]
@@ -139,7 +143,7 @@ impl ListedFiles {
 mod tests {
     use super::*;
     use crate::library::Library;
-    use crate::workspace::listing_limit_test_hooks::listed_file_reads;
+    use crate::workspace::listing_limit_test_hooks::{listed_file_listings, listed_file_reads};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use tempfile::TempDir;
@@ -324,8 +328,12 @@ mod tests {
 
     // Each path is read once per value: a path asked again, a folder above
     // two paths and a path that names no file. A path the listing does not
-    // spell reads nothing, and a path that names no file reads no folder
-    // above it.
+    // spell reads nothing, a path that names no file reads no folder above
+    // it, and a file below a folder the walk does not enter reads no folder
+    // below that one. A folder is listed once per value, and only on the
+    // path of a regular file whose folders the walk enters and which is in
+    // scope: a missing path, a file the scope leaves out and a file below a
+    // folder the walk does not enter list nothing.
     #[test]
     fn listed_files_read_each_path_once() {
         let root = TempDir::new().unwrap();
@@ -333,11 +341,27 @@ mod tests {
         put(root.path(), "notes/a.md", b"x\n");
         put(root.path(), "notes/sub/deep.log", b"x\n");
         put(root.path(), "docs/leaf.md", b"x\n");
+        put(root.path(), "keys/key.secret", b"x\n");
+        put(root.path(), "node_modules/pkg/index.js", b"x\n");
+        put(root.path(), ".gitignore", b"*.secret\n");
         let (_config, workspace) = open(root.path());
-        let before = listed_file_reads(&workspace);
+        let since = |before: &BTreeMap<String, usize>, after: BTreeMap<String, usize>| {
+            after
+                .into_iter()
+                .map(|(rel, n)| {
+                    let earlier = before.get(&rel).copied().unwrap_or(0);
+                    (rel, n - earlier)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect::<BTreeMap<String, usize>>()
+        };
+        let reads_before = listed_file_reads(&workspace);
+        let listings_before = listed_file_listings(&workspace);
         let mut listed = workspace.listed_files();
         for _ in 0..2 {
             for rel in [
+                "keys/key.secret",
+                "node_modules/pkg/index.js",
                 "notes/sub/deep.log",
                 "notes/a.md",
                 "notes/missing.md",
@@ -347,23 +371,31 @@ mod tests {
                 listed.lists(rel);
             }
         }
-        let after = listed_file_reads(&workspace);
-        let read: BTreeMap<&str, usize> = after
-            .iter()
-            .map(|(rel, n)| (rel.as_str(), n - before.get(rel).copied().unwrap_or(0)))
-            .filter(|(_, n)| *n > 0)
-            .collect();
+        let reads = since(&reads_before, listed_file_reads(&workspace));
+        let listings = since(&listings_before, listed_file_listings(&workspace));
+        let once = |paths: &[&str]| -> BTreeMap<String, usize> {
+            paths.iter().map(|path| (path.to_string(), 1)).collect()
+        };
         assert_eq!(
-            read,
-            [
-                ("docs/missing.md", 1),
-                ("notes", 1),
-                ("notes/a.md", 1),
-                ("notes/missing.md", 1),
-                ("notes/sub", 1),
-                ("notes/sub/deep.log", 1),
-            ]
-            .into(),
+            reads,
+            once(&[
+                "docs/missing.md",
+                "keys",
+                "keys/key.secret",
+                "node_modules",
+                "node_modules/pkg/index.js",
+                "notes",
+                "notes/a.md",
+                "notes/missing.md",
+                "notes/sub",
+                "notes/sub/deep.log",
+            ]),
+            "the paths read, each with its lstats"
+        );
+        assert_eq!(
+            listings,
+            once(&["", "notes", "notes/sub"]),
+            "the folders listed, each with its listings"
         );
     }
 
