@@ -4,9 +4,14 @@
 // or the lock would paint underneath it. Chrome has no WebKit presentation
 // modes and a headless one no picture-in-picture window, so the browser check
 // cannot raise these; it covers the pause, a play under the lock and autoplay.
+//
+// A YouTube embed is paused by a command posted to its cross-origin frame. The
+// tests here read what the page posts and to which frames; that a real player
+// obeys it is the networked reading's.
 
 import { flushSync } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { embedIframeHtml } from "../api/embed";
 import { installLockMediaPause } from "./lockMedia.svelte";
 import { screensaver } from "./screensaver.svelte";
 
@@ -30,6 +35,35 @@ afterEach(() => {
 function lock(): void {
   screensaver.locked = true;
   flushSync();
+}
+
+function unlock(): void {
+  screensaver.locked = false;
+  flushSync();
+}
+
+/// YouTube's player API pause, which a probe of a real embed showed the
+/// player obeys at once with no handshake, and the origin it is addressed to.
+const PAUSE = '{"event":"command","func":"pauseVideo","args":[]}';
+const EMBED_ORIGIN = "https://www.youtube-nocookie.com";
+
+const YOUTUBE = embedIframeHtml("https://youtu.be/dQw4w9WgXcQ")!;
+/// An author's raw iframe the sanitizer keeps, with no player parameter.
+const YOUTUBE_RAW = '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1"></iframe>';
+/// A map, an extension's tab, and a frame on another origin: the shape of an
+/// Excalidraw board's video embed.
+const NOT_YOUTUBE = [
+  embedIframeHtml("https://www.google.com/maps/embed?pb=!1m18!1m12!1m3")!,
+  '<iframe src="/ext/echo/index.html" sandbox="allow-forms allow-scripts"></iframe>',
+  '<iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ?enablejsapi=1"></iframe>',
+];
+
+/// A frame in the page, with every message posted to its window recorded.
+function frame(html: string) {
+  const holder = document.body.appendChild(document.createElement("div"));
+  holder.innerHTML = html;
+  const element = holder.querySelector("iframe")!;
+  return { element, posts: vi.spyOn(element.contentWindow!, "postMessage") };
 }
 
 function video(fields: Record<string, unknown>): HTMLVideoElement {
@@ -76,4 +110,29 @@ test("a picture-in-picture window closes", () => {
   Object.defineProperty(document, "exitPictureInPicture", { configurable: true, value: exitPictureInPicture });
   lock();
   expect(exitPictureInPicture).toHaveBeenCalledTimes(1);
+});
+
+test("at the lock every YouTube embed frame is sent the player's pause, addressed to the embed origin", () => {
+  const rendered = frame(YOUTUBE);
+  const raw = frame(YOUTUBE_RAW);
+  expect(rendered.posts).not.toHaveBeenCalled();
+  lock();
+  expect(rendered.posts.mock.calls).toEqual([[PAUSE, EMBED_ORIGIN]]);
+  expect(raw.posts.mock.calls).toEqual([[PAUSE, EMBED_ORIGIN]]);
+});
+
+test("at the lock a map, an extension and a frame on any other origin are sent nothing", () => {
+  const youtube = frame(YOUTUBE);
+  const others = NOT_YOUTUBE.map(frame);
+  lock();
+  expect(youtube.posts).toHaveBeenCalledTimes(1);
+  for (const other of others) expect(other.posts, other.element.src).not.toHaveBeenCalled();
+});
+
+test("nothing is sent to an embed when the lock lifts", () => {
+  const youtube = frame(YOUTUBE);
+  lock();
+  expect(youtube.posts).toHaveBeenCalledTimes(1);
+  unlock();
+  expect(youtube.posts).toHaveBeenCalledTimes(1);
 });
