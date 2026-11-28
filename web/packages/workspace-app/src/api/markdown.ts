@@ -53,8 +53,8 @@ interface WikiSpan {
 /// the document structure; for the inline renderer the source is read
 /// as one paragraph (a `| ` prefix the offsets account for), so a cell
 /// that opens with a block-level tag still yields its links beside the
-/// tags. The walk visits spans in order. Every caller sends one line,
-/// so the paragraph reading holds.
+/// tags. The walk visits spans in order. The inline renderer's one
+/// caller sends one line, so the paragraph reading holds there.
 function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): WikiSpan[] {
   if (!input.includes("[[")) return [];
   const source = inline ? `| ${input}` : input;
@@ -206,6 +206,11 @@ export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: bool
 /// the same `DOMPurify.sanitize` chokepoint as the block renderers.
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
 /// labels; a call without the option keeps the authored syntax.
+/// The labels assume one line, as a table cell is: the label pass reads
+/// the input as one paragraph, so in input holding a blank line a link on
+/// a later line that Markdown reads as an indented code block or an HTML
+/// block keeps its brackets, though this renderer shows that line as
+/// inline text.
 export function renderMarkdownInline(input: string, opts: { wikilinks?: boolean } = {}): string {
   const source = input ?? "";
   const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source, true, false) : source, { async: false }) as string;
