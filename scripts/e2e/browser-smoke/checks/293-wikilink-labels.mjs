@@ -363,6 +363,9 @@ export default {
       writeFileSync(join(ctx.outDir, "wikilink-labels.json"),
         JSON.stringify(evidence, null, 2) + "\n");
       rmSync(directory, { recursive: true, force: true });
+      // The seed has no root note, and a later check in the same run would
+      // resolve `[[note]]` to this one.
+      rmSync(join(ctx.workspaceDir, NOTE), { force: true });
     }
   },
 };
