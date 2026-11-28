@@ -2127,6 +2127,54 @@ describe('widget search', () => {
     expect(activeText(term)).toBe('needle');
   });
 
+  // With more than one match left, the landing shows the press's
+  // direction: newer from no active match waits for the oldest.
+  test('a newer press waiting on the active match when pruning removes it lands on the oldest of two matches left', async () => {
+    const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(898) + 'needle\r\nfiller\r\nneedle', 80, 5, 1000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), 'on the oldest match').toEqual([range(0, 0)]);
+    term.write('\r\n' + 'filler\r\n'.repeat(600));
+    expect(active(term), 'the write prunes the active match').toBeUndefined();
+    settle(search);
+    expect(search.state, 'the waiting newer press lands on the oldest of the two left').toEqual({
+      index: 2, total: 2, partial: false,
+    });
+    expect(activeText(term)).toBe('needle');
+  });
+
+  // The write between the presses feeds the second one's slice too, so
+  // neither places the list and both are still waiting at the pruning.
+  test('two newer presses waiting on the active match when pruning removes it both apply, in order', async () => {
+    const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(896) + 'needle\r\nfiller\r\nneedle\r\nfiller\r\nneedle', 80, 5, 1000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the presses wait for placement').toBeNull();
+    expect(active(term), 'on the oldest match').toEqual([range(0, 0)]);
+    term.write('\r\n' + 'filler\r\n'.repeat(600));
+    expect(active(term), 'the write prunes the active match').toBeUndefined();
+    settle(search);
+    expect(search.state, 'newer lands on the oldest of the three left, newer again on the middle one').toEqual({
+      index: 2, total: 3, partial: false,
+    });
+    expect(activeText(term)).toBe('needle');
+  });
+
   // The write that leaves the pair ending before its start also switches to
   // the alternate screen, which sets the primary's active match aside in
   // its cells unread; the switch back reads them.
