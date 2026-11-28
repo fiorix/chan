@@ -2196,6 +2196,89 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(3, 3)]);
   });
 
+  // A narrowing resize rewraps each history line in two rows, past the line
+  // limit, so pruning takes the oldest rows and the active match with them.
+  test('a press waiting on the active match when a resize prunes it applies from no active match', async () => {
+    const { term } = await create('needle ' + 'x'.repeat(60) + '\r\n' + ('y'.repeat(60) + '\r\n').repeat(700) +
+      'needle y\r\nneedle z', 80, 5, 1000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term), 'newer from the newest wraps to the oldest').toEqual([range(0, 0)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), 'on the oldest match').toEqual([range(0, 0)]);
+    const oldest = term.core!.trackCell(0, 0)!;
+    term.resize(40, 5);
+    const pruned = oldest.point();
+    oldest.free();
+    expect(pruned, 'not exercised: the core no longer prunes the oldest row at this resize; ' +
+      'after a core update, find a resize that does, or this case guards nothing').toBeNull();
+    expect(active(term), 'the resize prunes the active match').toBeUndefined();
+    settle(search);
+    expect(search.state, 'the waiting newer press lands on the oldest left, as from no active match').toEqual({
+      index: 2, total: 2, partial: false,
+    });
+    expect(activeLine(term)).toBe('needle y');
+  });
+
+  // The switch sets the primary screen's active match aside, so the
+  // alternate screen shows none.
+  test('a press waiting on the active match at the switch to the alternate screen applies there from no active match', async () => {
+    const { term } = await create('x needle\r\nyy needle');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(0, 2)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), 'on the oldest match').toEqual([range(0, 2)]);
+    term.write('\x1b[?1049h\x1b[Hneedle a\r\nneedle b');
+    expect(active(term), 'the alternate screen shows no primary match').toBeUndefined();
+    settle(search);
+    expect(search.state, 'the waiting newer press lands on the oldest, as from no active match').toEqual({
+      index: 2, total: 2, partial: false,
+    });
+    expect(active(term)).toEqual([range(0, 0)]);
+    term.write('\x1b[?1049l');
+    expect(active(term), 'the primary match returns with its screen').toEqual([range(0, 2)]);
+    settle(search);
+    expect(search.state).toEqual({ index: 2, total: 2, partial: false });
+  });
+
+  // The switch back drops the alternate screen's active match and returns
+  // the primary's, which a press made at that moment steps from.
+  test("a press waiting at the switch back from the alternate screen steps from the primary screen's returned match", async () => {
+    const { term } = await create('x needle\r\nyy needle');
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(0, 2)]);
+    term.write('\x1b[?1049h\x1b[Hneedle a\r\nneedle b');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term), 'older from no active match lands on the newest').toEqual([range(1, 0)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), "on the alternate screen's newest").toEqual([range(1, 0)]);
+    term.write('\x1b[?1049l');
+    expect(active(term), 'the primary match returns with its screen').toEqual([range(0, 2)]);
+    settle(search);
+    expect(search.state, 'the waiting newer press steps on from the returned oldest match').toEqual({
+      index: 1, total: 2, partial: false,
+    });
+    expect(active(term)).toEqual([range(1, 3)]);
+  });
+
   test('a predicted expensive feed restarts the scan and preserves the kept match', async () => {
     const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(20_000), 200, 5, 60_000);
     const search = searchOf(term);
