@@ -436,9 +436,9 @@ function describe(href) {
 /// (`atMs`), both on the request log's clock, and whether its request was
 /// made after the tab was asked for (`afterOpen`), by the request log's own
 /// rule. A request made before the menu command whose response comes after
-/// it reads as before the open, as it does in the request log; a request
-/// the page never reported reads `null` for both. No other part of the query
-/// is kept, so no token is.
+/// it reads as before the open, as it does in the request log; a response
+/// whose request the reader had not seen when the response came reads
+/// `null` for both. No other part of the query is kept, so no token is.
 function watchFailedResponses(page, windowUrl, requests) {
   const base = new URL(".", windowUrl);
   const entries = [];
