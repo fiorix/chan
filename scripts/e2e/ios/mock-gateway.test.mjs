@@ -255,6 +255,11 @@ test("F4/F7 happy + negative: entry exchange, cookies, window ops, labels, and t
         400,
     );
     // Percent-encoded tmux connection segment ("term/one" -> "term%2Fone").
+    const tmuxList = invoke(server, "GET", "/api/library/tmux", null, { cookie: cookieHeader });
+    assert.equal(tmuxList.status, 200);
+    const tmuxConns = JSON.parse(tmuxList.body);
+    assert.equal(tmuxConns.length, 1);
+    assert.deepEqual(tmuxConns[0].origin, { program: "tmux", command: "tmux -CC", local: true });
     assert.equal(
         invoke(
             server,
@@ -265,6 +270,13 @@ test("F4/F7 happy + negative: entry exchange, cookies, window ops, labels, and t
         ).status,
         204,
     );
+    const windowsAfterTmux = JSON.parse(
+        invoke(server, "GET", "/api/library/windows", null, { cookie: cookieHeader }).body,
+    );
+    const mintedTmuxWin = windowsAfterTmux.find((w) => w.window_id.startsWith("w-tmux-"));
+    assert.ok(mintedTmuxWin, "new-window tmux request must mint a w-tmux-* window");
+    assert.equal(mintedTmuxWin.kind, "terminal");
+    assert.deepEqual(mintedTmuxWin.tmux, { connection: "term/one", control: false });
     assert.equal(
         invoke(
             server,

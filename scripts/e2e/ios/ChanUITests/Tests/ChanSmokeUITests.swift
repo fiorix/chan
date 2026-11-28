@@ -99,9 +99,10 @@ final class ChanSmokeUITests: XCTestCase {
         if showComputersBtn.exists && showComputersBtn.isHittable {
             showComputersBtn.tap()
         }
-        for _ in 0..<5 {
-            if webview.staticTexts["e2e-box"].exists ||
-                webview.buttons.matching(NSPredicate(format: "label CONTAINS 'e2e-box'")).firstMatch.exists {
+        for _ in 0..<6 {
+            if (webview.staticTexts["e2e-box"].exists && webview.staticTexts["e2e-box"].isHittable) ||
+                (webview.buttons["Connect e2e-box"].exists && webview.buttons["Connect e2e-box"].isHittable) ||
+                (webview.buttons["New terminal on e2e-box"].exists && webview.buttons["New terminal on e2e-box"].isHittable) {
                 break
             }
             let nextCardBtn = webview.buttons["Next card"]
@@ -109,6 +110,50 @@ final class ChanSmokeUITests: XCTestCase {
                 nextCardBtn.tap()
                 RunLoop.current.run(until: Date().addingTimeInterval(0.6))
             }
+        }
+    }
+
+    private func ensureTmuxCardFront(app: XCUIApplication, webview: XCUIElement) {
+        let showComputersBtn = app.buttons["Show computers"]
+        if showComputersBtn.exists && showComputersBtn.isHittable {
+            showComputersBtn.tap()
+        }
+        for _ in 0..<6 {
+            let newTmuxBtn = webview.buttons["New tmux window in tmux -CC on e2e-box"]
+            if newTmuxBtn.exists && newTmuxBtn.isHittable {
+                break
+            }
+            let nextCardBtn = webview.buttons["Next card"]
+            if nextCardBtn.exists && nextCardBtn.isHittable {
+                nextCardBtn.tap()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+            }
+        }
+    }
+
+    private func setClientSessionName(chanHome: String, value: String) -> Bool {
+        guard !chanHome.isEmpty else { return false }
+        let desktopDir = URL(fileURLWithPath: chanHome).appendingPathComponent("desktop", isDirectory: true)
+        let configUrl = desktopDir.appendingPathComponent("config.json")
+        do {
+            try FileManager.default.createDirectory(at: desktopDir, withIntermediateDirectories: true)
+            var obj: [String: Any] = [:]
+            if let data = try? Data(contentsOf: configUrl),
+               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                obj = existing
+            }
+            obj["client_session_name"] = value
+            let encoded = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+            let tmpUrl = desktopDir.appendingPathComponent("config.json.tmp.\(UUID().uuidString)")
+            try encoded.write(to: tmpUrl, options: .atomic)
+            if FileManager.default.fileExists(atPath: configUrl.path) {
+                _ = try FileManager.default.replaceItemAt(configUrl, withItemAt: tmpUrl)
+            } else {
+                try FileManager.default.moveItem(at: tmpUrl, to: configUrl)
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -391,19 +436,23 @@ final class ChanSmokeUITests: XCTestCase {
             }
 
             var reconnectOk = false
-            let beforeLedger = fetchLedger()
-            let entryBefore = (beforeLedger?["entryCalls"] as? [[String: Any]])?.count ?? 0
-            let navBefore = (beforeLedger?["navigations"] as? [[String: Any]])?.count ?? 0
             let reconnectBtn = webview.buttons["Reconnect devserver for window"]
-            if reconnectBtn.exists {
+            if let beforeLedger = fetchLedger(),
+               let preEntries = beforeLedger["entryCalls"] as? [[String: Any]],
+               let preNavs = beforeLedger["navigations"] as? [[String: Any]],
+               reconnectBtn.exists {
+                let entryBefore = preEntries.count
+                let navBefore = preNavs.count
                 reconnectBtn.tap()
                 reconnectOk = waitUntil(timeout: 12) {
-                    let afterLedger = self.fetchLedger()
-                    let entryAfter = (afterLedger?["entryCalls"] as? [[String: Any]])?.count ?? 0
-                    let navAfter = (afterLedger?["navigations"] as? [[String: Any]])?.count ?? 0
+                    guard let afterLedger = self.fetchLedger(),
+                          let afterEntries = afterLedger["entryCalls"] as? [[String: Any]],
+                          let afterNavs = afterLedger["navigations"] as? [[String: Any]] else {
+                        return false
+                    }
                     let allComputersBtn = webview.buttons["All computers..."]
-                    return entryAfter > entryBefore &&
-                        navAfter > navBefore &&
+                    return afterEntries.count > entryBefore &&
+                        afterNavs.count > navBefore &&
                         allComputersBtn.exists &&
                         allComputersBtn.isHittable
                 }
@@ -538,19 +587,91 @@ final class ChanSmokeUITests: XCTestCase {
             }
         }
 
-        if abandonNeeded {
-            ensureE2eBoxCardFront(app: app, webview: webview)
-            let focusForAbandon = webview.buttons.matching(NSPredicate(format: "label == 'Focus window'")).firstMatch
-            if focusForAbandon.waitForExistence(timeout: 5) {
-                focusForAbandon.tap()
-                let abandonBtn = webview.buttons["Abandon devserver for window"]
-                if abandonBtn.waitForExistence(timeout: 6) {
-                    abandonBtn.tap()
-                    abandonOk = showGatewaysBtn.waitForExistence(timeout: 6) &&
-                        webview.buttons["Connect e2e-box"].waitForExistence(timeout: 6)
+        // 8. TmuxRequest (new-window) + immediate DevserverFeed refresh + seed=0 + client_name=iPhone-E2E.
+        var tmuxOk = false
+        var tmuxNavOk = false
+        ensureTmuxCardFront(app: app, webview: webview)
+        let newTmuxBtn = webview.buttons["New tmux window in tmux -CC on e2e-box"]
+        if let beforeTmuxLedger = fetchLedger(),
+           let preTmux = beforeTmuxLedger["tmuxRequests"] as? [[String: Any]],
+           newTmuxBtn.waitForExistence(timeout: 5),
+           newTmuxBtn.isHittable {
+            let tmuxBefore = preTmux.count
+            newTmuxBtn.tap()
+            tmuxOk = waitUntil(timeout: 2.5) {
+                guard let afterLedger = self.fetchLedger(),
+                      let tmuxReqs = afterLedger["tmuxRequests"] as? [[String: Any]],
+                      tmuxReqs.count > tmuxBefore else {
+                    return false
+                }
+                let hasReq = tmuxReqs[tmuxBefore...].contains { entry in
+                    guard (entry["connection"] as? String) == "term/one",
+                          let req = entry["request"] as? [String: Any],
+                          (req["request"] as? String) == "new-window" else {
+                        return false
+                    }
+                    return true
+                }
+                return hasReq && webview.buttons["Terminal Window 4"].exists
+            }
+        }
+
+        if tmuxOk && setClientSessionName(chanHome: chanHome, value: "iPhone-E2E") {
+            let focusPred = NSPredicate(format: "label == 'Focus window'")
+            var focusTmuxBtn: XCUIElement?
+            _ = waitUntil(timeout: 4) {
+                focusTmuxBtn = webview.buttons.matching(focusPred).allElementsBoundByIndex.first { $0.isHittable }
+                return focusTmuxBtn != nil
+            }
+            if let btn = focusTmuxBtn {
+                btn.tap()
+                tmuxNavOk = waitUntil(timeout: 12) {
+                    guard let ledger = self.fetchLedger(),
+                          let navs = ledger["navigations"] as? [[String: Any]] else {
+                        return false
+                    }
+                    return navs.contains { nav in
+                        guard let params = nav["params"] as? [String: Any] else { return false }
+                        let w = (params["w"] as? String) ?? ""
+                        let kind = (params["kind"] as? String) ?? ""
+                        let seed = (params["seed"] as? String) ?? ""
+                        let clientName = (params["client_name"] as? String) ?? ""
+                        let lib = (params["lib"] as? String) ?? ""
+                        let pane = (params["pane"] as? String) ?? ""
+                        let h = (params["h"] as? String) ?? ""
+                        return w == "w-tmux-4" &&
+                            kind == "terminal" &&
+                            seed == "0" &&
+                            clientName == "iPhone-E2E" &&
+                            lib == "lib-e2e001" &&
+                            pane == "#3b82f6" &&
+                            h.count == 32
+                    }
                 }
             }
         }
+        recordVerdict(
+            caseName: "sim-tmux-request",
+            passed: tmuxOk && tmuxNavOk,
+            detail: "tmux_request_immediate_refresh=\(tmuxOk) w_tmux_4_seed0_client_name=\(tmuxNavOk)"
+        )
+
+        if abandonNeeded {
+            let abandonBtn = webview.buttons["Abandon devserver for window"]
+            if !abandonBtn.waitForExistence(timeout: 3) {
+                ensureE2eBoxCardFront(app: app, webview: webview)
+                let focusForAbandon = webview.buttons.matching(NSPredicate(format: "label == 'Focus window'")).firstMatch
+                if focusForAbandon.waitForExistence(timeout: 5) {
+                    focusForAbandon.tap()
+                }
+            }
+            if abandonBtn.waitForExistence(timeout: 6) {
+                abandonBtn.tap()
+                abandonOk = showGatewaysBtn.waitForExistence(timeout: 6) &&
+                    webview.buttons["Connect e2e-box"].waitForExistence(timeout: 6)
+            }
+        }
+        _ = setClientSessionName(chanHome: chanHome, value: "")
 
         let allCommandsOk = commandsOk && abandonOk
         recordVerdict(

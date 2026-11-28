@@ -113,7 +113,7 @@ function defaultSeedState() {
             {
                 connection: "term/one",
                 library_id: DEFAULT_LIBRARY_ID,
-                origin: { kind: "terminal", window_id: "w-ctrl" },
+                origin: { program: "tmux", command: "tmux -CC", local: true },
                 version: "3.4",
                 session: { name: "main", id: "$0" },
                 windows: [],
@@ -911,6 +911,28 @@ export function createMockGatewayServer(options = {}) {
                     }
                     const found = state.tmuxConnections.some((c) => c.connection === connId);
                     if (!found) return json(res, 404, { error: "tmux connection not found" });
+                    if (reqBody.request === "new-window") {
+                        const ordinal = state.nextWindowOrdinal++;
+                        state.windows.push({
+                            window_id: `w-tmux-${ordinal}`,
+                            library_id: DEFAULT_LIBRARY_ID,
+                            kind: "terminal",
+                            title: `Terminal Window ${ordinal}`,
+                            ordinal,
+                            label: "",
+                            prefix: "/terminal",
+                            token: "",
+                            persisted: false,
+                            connected: false,
+                            holders: [],
+                            active_transfer: false,
+                            control: false,
+                            tmux: { connection: connId, control: false },
+                            hidden: false,
+                            origin: "native",
+                            start_terminal: false,
+                        });
+                    }
                     state.ledger.tmuxRequests.push({
                         rawSegment,
                         connection: connId,

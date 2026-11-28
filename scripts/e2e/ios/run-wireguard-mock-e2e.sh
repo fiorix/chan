@@ -14,11 +14,13 @@ REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 PROBE_RED=0
+MODE="matrix"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --probe-red) PROBE_RED=1; shift ;;
+        --s5) MODE="s5"; shift ;;
         -h|--help)
-            echo "usage: run-wireguard-mock-e2e.sh [--probe-red]" >&2
+            echo "usage: run-wireguard-mock-e2e.sh [--s5] [--probe-red]" >&2
             exit 0
             ;;
         *)
@@ -28,9 +30,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+VERDICT_TIER="tier2"
+DOMAIN="wg-e2e.invalid"
+if [ "$MODE" = "s5" ]; then
+    VERDICT_TIER="tier4"
+    DOMAIN="localtest.me"
+fi
+
 for cmd in cargo node; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "verdict tier2 wg-prereq 2 PREREQ missing required command: $cmd"
+        echo "verdict $VERDICT_TIER wg-prereq 2 PREREQ missing required command: $cmd"
         exit 2
     fi
 done
@@ -95,7 +104,7 @@ CLIENT_PUB="$(node -e "const d = JSON.parse(process.argv[1]); console.log(d.pub)
 CLIENT_PRIV="$(node -e "const d = JSON.parse(process.argv[1]); console.log(d.priv);" "$KEY_JSON")"
 
 # Seed placeholder peer file before mock-gateway starts; updated after wg-peer binds.
-node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" wg-e2e.invalid <(
+node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" "$DOMAIN" <(
     printf 'peer: ready url=http://10.7.0.2:8080 udp=127.0.0.1:9 public_key=%s\n' \
         "$(node -e 'console.log(Buffer.alloc(32, 1).toString("base64"))')"
 ) <(
@@ -103,17 +112,26 @@ node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" wg-e2e.in
         "$(node -e 'console.log(Buffer.alloc(32, 2).toString("base64"))')"
 ) 2>/dev/null || {
     # Fallback explicit seed when process substitution isn't desired
-    printf '{"endpoint":"127.0.0.1:9","server_public_key":"%s","addresses":["10.7.0.1/32"],"allowed_ips":["10.7.0.2/32"],"persistent_keepalive":5,"hosts":[],"ingresses":[{"id":"p1","endpoint":"127.0.0.1:9","server_public_key":"%s","hosts":[{"name":"p1.wg-e2e.invalid","addresses":["10.7.0.2"]}]},{"id":"p2","endpoint":"127.0.0.1:10","server_public_key":"%s","hosts":[{"name":"p2.wg-e2e.invalid","addresses":["10.7.0.2"]}]}]}\n' \
+    printf '{"endpoint":"127.0.0.1:9","server_public_key":"%s","addresses":["10.7.0.1/32"],"allowed_ips":["10.7.0.2/32"],"persistent_keepalive":5,"hosts":[],"ingresses":[{"id":"p1","endpoint":"127.0.0.1:9","server_public_key":"%s","hosts":[{"name":"p1.%s","addresses":["10.7.0.2"]}]},{"id":"p2","endpoint":"127.0.0.1:10","server_public_key":"%s","hosts":[{"name":"p2.%s","addresses":["10.7.0.2"]}]}]}\n' \
         "$(node -e 'console.log(Buffer.alloc(32, 1).toString("base64"))')" \
         "$(node -e 'console.log(Buffer.alloc(32, 1).toString("base64"))')" \
-        "$(node -e 'console.log(Buffer.alloc(32, 2).toString("base64"))')" >"$WORK/peers.json"
+        "$DOMAIN" \
+        "$(node -e 'console.log(Buffer.alloc(32, 2).toString("base64"))')" \
+        "$DOMAIN" >"$WORK/peers.json"
 }
 
+MOCK_ARGS=(
+    --auto-confirm
+    --no-session-auth
+    --peer-file "$WORK/peers.json"
+    --ledger "$WORK/ledger.json"
+)
+if [ "$MODE" = "s5" ]; then
+    MOCK_ARGS+=(--proxy-apex "http://localtest.me:8080")
+fi
+
 node "$SCRIPT_DIR/mock-gateway.mjs" \
-    --auto-confirm \
-    --no-session-auth \
-    --peer-file "$WORK/peers.json" \
-    --ledger "$WORK/ledger.json" \
+    "${MOCK_ARGS[@]}" \
     >"$WORK/mock-gateway.log" 2>&1 &
 MOCK_PID="$!"
 
@@ -145,57 +163,103 @@ if ! wait_for_line 10 "$WORK/peer-p2.log" '^peer: ready '; then
     exit 2
 fi
 
-node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" wg-e2e.invalid \
+node "$SCRIPT_DIR/ios-wireguard-oracle.mjs" fixture "$WORK/peers.json" "$DOMAIN" \
     "$WORK/peer-p1.log" "$WORK/peer-p2.log"
 
 HARNESS_RC=0
-(
-    cd "$REPO"
-    CHAN_IOS_E2E_MOCK_ORIGIN="$MOCK_ORIGIN" \
-    CHAN_IOS_E2E_CLIENT_PRIV="$CLIENT_PRIV" \
-    CHAN_IOS_E2E_PROBE_RED="$PROBE_RED" \
-        cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness \
-        -- --ignored live_wg_peer_matrix --nocapture
-) >"$WORK/harness.log" 2>&1 || HARNESS_RC="$?"
+if [ "$MODE" = "s5" ]; then
+    (
+        cd "$REPO"
+        CHAN_IOS_E2E_MOCK_ORIGIN="$MOCK_ORIGIN" \
+        CHAN_IOS_E2E_CLIENT_PRIV="$CLIENT_PRIV" \
+        CHAN_IOS_E2E_PROBE_RED="$PROBE_RED" \
+            cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --lib \
+            -- --ignored wireguard::tests::live_wg_peer_s5_stopped_recovery --nocapture
+    ) >"$WORK/harness.log" 2>&1 || HARNESS_RC="$?"
+else
+    (
+        cd "$REPO"
+        CHAN_IOS_E2E_MOCK_ORIGIN="$MOCK_ORIGIN" \
+        CHAN_IOS_E2E_CLIENT_PRIV="$CLIENT_PRIV" \
+        CHAN_IOS_E2E_PROBE_RED="$PROBE_RED" \
+            cargo test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness \
+            -- --ignored live_wg_peer_matrix --nocapture
+    ) >"$WORK/harness.log" 2>&1 || HARNESS_RC="$?"
+fi
 
 if [ "$PROBE_RED" = 1 ]; then
     if [ "$HARNESS_RC" -ne 0 ]; then
-        echo "verdict tier2 wg-live-probe-red 1 FAIL red probe correctly detected PKCE mismatch failure ($SHA)"
+        echo "verdict $VERDICT_TIER wg-live-probe-red 1 FAIL red probe correctly detected injected failure ($SHA)"
         cleanup
         trap - EXIT
         rm -rf "${WORK:?}"
         exit 1
     fi
-    echo "verdict tier2 wg-live-probe-red 0 PASS unexpected pass in --probe-red mode ($SHA)" >&2
+    echo "verdict $VERDICT_TIER wg-live-probe-red 0 PASS unexpected pass in --probe-red mode ($SHA)" >&2
     exit 0
 fi
 
 if [ "$HARNESS_RC" -ne 0 ]; then
-    echo "verdict tier2 wg-live-matrix 1 FAIL live_wg_peer_matrix failed (work kept at $WORK)" >&2
+    echo "verdict $VERDICT_TIER wg-live-$MODE 1 FAIL live WireGuard test ($MODE) failed (work kept at $WORK)" >&2
     cat "$WORK/harness.log" >&2
     exit 1
 fi
 
-# Verify ledger received proxied requests for p1, p2, and sibling survival, and NOT retired p1.
 LEDGER_RC=0
-node -e '
-const fs = require("node:fs");
-const assert = require("node:assert/strict");
-const ledger = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+node --input-type=module -e '
+import fs from "node:fs";
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const [mode, ledgerPath, p1LogPath, p2LogPath, oraclePath] = process.argv.slice(1);
+const { parsePeerRequests, verifyPeerRouting } = await import(pathToFileURL(oraclePath).href);
+const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
 const queries = ledger.requests.map((r) => `${r.path}${r.query}`);
-assert.ok(queries.includes("/api/library/windows?via=p1"), "missing p1 proxied request");
-assert.ok(queries.includes("/api/library/windows?via=p2"), "missing p2 proxied request");
-assert.ok(queries.includes("/api/library/windows?via=p2-sibling"), "missing p2 sibling request after p1 retirement");
-assert.ok(!queries.includes("/api/library/windows?via=p1-retired"), "retired p1 leaked a request");
-' "$WORK/ledger.json" >"$WORK/ledger-check.log" 2>&1 || LEDGER_RC="$?"
+const p1Reqs = parsePeerRequests(fs.readFileSync(p1LogPath, "utf8"));
+const p2Reqs = parsePeerRequests(fs.readFileSync(p2LogPath, "utf8"));
+const emptyBefore = { p1: [], p2: [] };
+const after = { p1: p1Reqs, p2: p2Reqs };
+
+if (mode === "s5") {
+    assert.ok(queries.includes("/api/library/windows?via=s5-p1-initial"), "missing s5-p1-initial request");
+    assert.ok(queries.includes("/api/library/windows?via=s5-p2-initial"), "missing s5-p2-initial request");
+    assert.ok(queries.includes("/api/library/windows?via=s5-p2-sibling"), "missing s5-p2-sibling request");
+    assert.ok(!queries.includes("/api/library/windows?via=s5-p1-stopped"), "stopped p1 leaked a request");
+    assert.ok(queries.includes("/api/library/windows?via=s5-p1-recovered"), "missing s5-p1-recovered request");
+    assert.ok(queries.includes("/api/library/windows?via=s5-p2-recovered"), "missing s5-p2-recovered request");
+    verifyPeerRouting(emptyBefore, after, "p1", "/api/library/windows?via=s5-p1-initial");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=s5-p2-initial");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=s5-p2-sibling");
+    verifyPeerRouting(emptyBefore, after, "none", "/api/library/windows?via=s5-p1-stopped");
+    verifyPeerRouting(emptyBefore, after, "p1", "/api/library/windows?via=s5-p1-recovered");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=s5-p2-recovered");
+} else {
+    assert.ok(queries.includes("/api/library/windows?via=p1"), "missing p1 proxied request");
+    assert.ok(queries.includes("/api/library/windows?via=p2"), "missing p2 proxied request");
+    assert.ok(queries.includes("/api/library/windows?via=p2-sibling"), "missing p2 sibling request after p1 retirement");
+    assert.ok(!queries.includes("/api/library/windows?via=p1-retired"), "retired p1 leaked a request");
+    assert.ok(queries.includes("/api/library/windows?via=p1-recovered"), "missing p1-recovered request");
+    assert.ok(queries.includes("/api/library/windows?via=p2-recovered"), "missing p2-recovered request");
+    verifyPeerRouting(emptyBefore, after, "p1", "/api/library/windows?via=p1");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=p2");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=p2-sibling");
+    verifyPeerRouting(emptyBefore, after, "none", "/api/library/windows?via=p1-retired");
+    verifyPeerRouting(emptyBefore, after, "p1", "/api/library/windows?via=p1-recovered");
+    verifyPeerRouting(emptyBefore, after, "p2", "/api/library/windows?via=p2-recovered");
+}
+' "$MODE" "$WORK/ledger.json" "$WORK/peer-p1.log" "$WORK/peer-p2.log" "$SCRIPT_DIR/ios-wireguard-oracle.mjs" >"$WORK/ledger-check.log" 2>&1 || LEDGER_RC="$?"
 
 if [ "$LEDGER_RC" -ne 0 ]; then
-    echo "verdict tier2 wg-live-ledger 1 FAIL ledger verification failed (work kept at $WORK)" >&2
+    echo "verdict $VERDICT_TIER wg-live-ledger 1 FAIL ledger verification failed (work kept at $WORK)" >&2
     cat "$WORK/ledger-check.log" >&2
     exit 1
 fi
 
-echo "verdict tier2 wg-live-matrix 0 PASS real wg-peer handshake, ConnectProxy forwarding, and sibling survival verified at $SHA"
+if [ "$MODE" = "s5" ]; then
+    echo "verdict tier4 wg-live-s5 0 PASS real wg-peer stopped-tunnel detection, sibling survival, and foreground recovery verified at $SHA"
+else
+    echo "verdict tier2 wg-live-matrix 0 PASS real wg-peer handshake, ConnectProxy forwarding, sibling survival, and p1 restart verified at $SHA"
+fi
 cleanup
 trap - EXIT
 rm -rf "${WORK:?}"

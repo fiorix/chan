@@ -16,14 +16,28 @@ SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 SKIP_BUILD=0
 PROBE_RED=0
 SIM_NAME="${IOS_SIM:-iPhone 17}"
+CHECK_VERDICTS_MODE=0
+CHECK_VERDICT_FILE=""
+CHECK_LEDGER_FILE=""
+CHECK_XCODE_RC=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --skip-build) SKIP_BUILD=1; shift ;;
         --probe-red) PROBE_RED=1; shift ;;
         --sim) SIM_NAME="${2:?--sim requires a simulator name or UDID}"; shift 2 ;;
+        --check-verdicts)
+            CHECK_VERDICTS_MODE=1
+            CHECK_VERDICT_FILE="${2:?--check-verdicts requires VERDICT_FILE and LEDGER_FILE}"
+            CHECK_LEDGER_FILE="${3:?--check-verdicts requires VERDICT_FILE and LEDGER_FILE}"
+            shift 3
+            ;;
+        --xcode-rc)
+            CHECK_XCODE_RC="${2:?--xcode-rc requires an integer status}"
+            shift 2
+            ;;
         -h|--help)
-            echo "usage: run-simulator-smoke.sh [--skip-build] [--probe-red] [--sim NAME]" >&2
+            echo "usage: run-simulator-smoke.sh [--skip-build] [--probe-red] [--sim NAME] | --check-verdicts VERDICT_FILE LEDGER_FILE [--xcode-rc N]" >&2
             exit 0
             ;;
         *)
@@ -32,6 +46,64 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+evaluate_sim_gate() {
+    local verdict_file="$1"
+    local ledger_file="$2"
+    local xcode_rc="$3"
+    local plist_rc="$4"
+    local crash_rc="$5"
+    local xcode_log="$6"
+    local work_hint="$7"
+
+    if [ ! -f "$verdict_file" ]; then
+        echo "verdict tier4 sim-xcuitest 1 FAIL XCUITest did not produce verdict output (xcodebuild rc=$xcode_rc)"
+        if [ -n "$xcode_log" ] && [ -s "$xcode_log" ]; then
+            cat "$xcode_log" >&2
+        fi
+        return 1
+    fi
+
+    cat "$verdict_file"
+
+    local nav_oracle_rc=0
+    local nav_oracle_out=""
+    if [ ! -f "$ledger_file" ]; then
+        echo "verdict tier4 sim-nav-oracle 1 FAIL ledger.json missing at $ledger_file"
+        nav_oracle_rc=1
+    else
+        nav_oracle_out="$(node "$SCRIPT_DIR/sim-smoke-oracle.mjs" check-ledger "$ledger_file" 2>&1)" || nav_oracle_rc="$?"
+        if [ "$nav_oracle_rc" -eq 0 ]; then
+            echo "verdict tier4 sim-nav-oracle 0 PASS $nav_oracle_out"
+        else
+            echo "verdict tier4 sim-nav-oracle 1 FAIL $nav_oracle_out"
+        fi
+    fi
+
+    local verdict_gate_rc=0
+    local verdict_gate_out=""
+    verdict_gate_out="$(node "$SCRIPT_DIR/sim-smoke-oracle.mjs" check-verdicts "$verdict_file" "$xcode_rc" 2>&1)" || verdict_gate_rc="$?"
+    if [ "$verdict_gate_rc" -ne 0 ]; then
+        echo "verdict tier4 sim-verdict-gate 1 FAIL $verdict_gate_out"
+    fi
+
+    if [ "$plist_rc" -ne 0 ] || [ "$crash_rc" -ne 0 ] || [ "$nav_oracle_rc" -ne 0 ] || [ "$verdict_gate_rc" -ne 0 ] || [ "$xcode_rc" -ne 0 ]; then
+        echo "Simulator smoke finished with failures (plist_rc=$plist_rc crash_rc=$crash_rc nav_oracle_rc=$nav_oracle_rc verdict_gate_rc=$verdict_gate_rc xcode_rc=$xcode_rc${work_hint:+; logs at $work_hint})"
+        return 1
+    fi
+    return 0
+}
+
+if [ "$CHECK_VERDICTS_MODE" = 1 ]; then
+    if ! command -v node >/dev/null 2>&1; then
+        echo "verdict tier4 sim-prereq 2 PREREQ missing required tool: node"
+        exit 2
+    fi
+    if ! evaluate_sim_gate "$CHECK_VERDICT_FILE" "$CHECK_LEDGER_FILE" "$CHECK_XCODE_RC" 0 0 "" ""; then
+        exit 1
+    fi
+    exit 0
+fi
 
 for cmd in xcodebuild xcodegen xcrun node plutil python3 openssl perl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -253,48 +325,6 @@ xcodebuild test \
     -derivedDataPath "$WORK/DerivedData" \
     >"$WORK/xcodebuild-test.log" 2>&1 || XCODE_RC="$?"
 
-if [ ! -f "$WORK/sim-verdicts.txt" ]; then
-    echo "verdict tier4 sim-xcuitest 2 PREREQ XCUITest did not produce verdict output (xcodebuild rc=$XCODE_RC)"
-    cat "$WORK/xcodebuild-test.log" >&2
-    exit 2
-fi
-
-cat "$WORK/sim-verdicts.txt"
-
-NAV_ORACLE_RC=0
-if [ -f "$WORK/ledger.json" ]; then
-    node --input-type=module -e '
-import fs from "node:fs";
-import { pathToFileURL } from "node:url";
-const { verifyWindowNavigationParams } = await import(pathToFileURL(process.argv[2]).href);
-const ledger = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-const navs = Array.isArray(ledger.navigations) ? ledger.navigations : [];
-for (const nav of navs) {
-    const w = nav.params?.w;
-    let spec;
-    if (w === "w-hidden-ws") {
-        spec = { windowId: w, kind: "workspace", startTerminal: true, libraryId: "lib-e2e001", pane: "#3b82f6" };
-    } else if (w === "w-ctrl") {
-        spec = { windowId: w, kind: "control", libraryId: "lib-e2e001" };
-    } else if (typeof w === "string" && w.length > 0) {
-        spec = { windowId: w, kind: "terminal", libraryId: "lib-e2e001" };
-    } else {
-        throw new Error(`unexpected recorded navigation without w param: ${nav.url}`);
-    }
-    verifyWindowNavigationParams(nav.url, spec);
-}
-if (navs.length > 0) {
-    console.log(`verdict tier4 sim-nav-oracle 0 PASS validated ${navs.length} recorded navigation URL(s)`);
-}
-' "$WORK/ledger.json" "$SCRIPT_DIR/ios-wireguard-oracle.mjs" >"$WORK/nav-oracle.log" 2>&1 || NAV_ORACLE_RC="$?"
-    if [ "$NAV_ORACLE_RC" -ne 0 ]; then
-        echo "verdict tier4 sim-nav-oracle 1 FAIL recorded navigation URL failed oracle check (see $WORK/nav-oracle.log)"
-        cat "$WORK/nav-oracle.log" >&2
-    elif [ -s "$WORK/nav-oracle.log" ]; then
-        cat "$WORK/nav-oracle.log"
-    fi
-fi
-
 CRASH_AFTER="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'Chan-*.ips' 2>/dev/null | wc -l | tr -d ' ')"
 LOG_RC=0
 perl -e 'alarm 15; exec @ARGV' xcrun simctl spawn "$UDID" log show --last 2m --predicate 'process == "Chan"' --style compact >"$WORK/sim-chan.log" 2>"$WORK/sim-log.err" || LOG_RC="$?"
@@ -318,9 +348,7 @@ else
     fi
 fi
 
-FAIL_COUNT="$(grep -Ec '^verdict [^ ]+ [^ ]+ 1 FAIL ' "$WORK/sim-verdicts.txt" || true)"
-if [ "$PLIST_RC" -ne 0 ] || [ "$CRASH_RC" -ne 0 ] || [ "$NAV_ORACLE_RC" -ne 0 ] || [ "$FAIL_COUNT" -gt 0 ] || [ "$XCODE_RC" -ne 0 ]; then
-    echo "Simulator smoke finished with failures (plist_rc=$PLIST_RC crash_rc=$CRASH_RC nav_oracle_rc=$NAV_ORACLE_RC ui_failures=$FAIL_COUNT xcode_rc=$XCODE_RC; logs at $WORK)"
+if ! evaluate_sim_gate "$WORK/sim-verdicts.txt" "$WORK/ledger.json" "$XCODE_RC" "$PLIST_RC" "$CRASH_RC" "$WORK/xcodebuild-test.log" "$WORK"; then
     exit 1
 fi
 

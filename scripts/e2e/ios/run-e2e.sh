@@ -228,6 +228,68 @@ run_make_verdict() {
     run_cmd_verdict "$tier" "$name" make -C "$REPO" "$@"
 }
 
+write_sim_gate_fixture() {
+    local out_dir="$1"
+    local mode="$2"
+    mkdir -p "$out_dir"
+    node --input-type=module -e '
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const [outDir, mode, oraclePath] = process.argv.slice(1);
+const { REQUIRED_SIM_VERDICTS } = await import(pathToFileURL(oraclePath).href);
+const H = "0123456789abcdef0123456789abcdef";
+const allPass = REQUIRED_SIM_VERDICTS.map((n) => `verdict tier4 ${n} 0 PASS ok`).join("\n") + "\n";
+const validLedger = {
+    navigations: [
+        { url: `https://alice--0123456789ab.p1.localtest.me:45556/api/notes-1a2b3c/index.html?w=w-hidden-ws&h=${H}&start=terminal&lib=lib-e2e001&pane=%233b82f6`, params: { w: "w-hidden-ws" } },
+        { url: `https://alice--0123456789ab.p1.localtest.me:45556/terminal/index.html?w=w-ctrl&h=${H}&kind=control&lib=lib-e2e001&pane=%233b82f6`, params: { w: "w-ctrl" } },
+        { url: `https://alice--0123456789ab.p1.localtest.me:45556/terminal/index.html?w=w-2&h=${H}&kind=terminal&lib=lib-e2e001&pane=%233b82f6`, params: { w: "w-2" } },
+        { url: `https://alice--0123456789ab.p1.localtest.me:45556/terminal/index.html?w=w-3&h=${H}&kind=terminal&lib=lib-e2e001&pane=%233b82f6`, params: { w: "w-3" } },
+        { url: `https://alice--0123456789ab.p1.localtest.me:45556/terminal/index.html?w=w-tmux-4&h=${H}&kind=terminal&seed=0&client_name=iPhone-E2E&lib=lib-e2e001&pane=%233b82f6`, params: { w: "w-tmux-4" } },
+    ],
+    tmuxRequests: [
+        { rawSegment: "term%2Fone", connection: "term/one", request: { request: "new-window" } },
+    ],
+};
+
+const verdictPath = path.join(outDir, "sim-verdicts.txt");
+const ledgerPath = path.join(outDir, "ledger.json");
+
+if (mode === "pass") {
+    fs.writeFileSync(verdictPath, allPass);
+    fs.writeFileSync(ledgerPath, JSON.stringify(validLedger));
+} else if (mode === "empty-verdicts") {
+    fs.writeFileSync(verdictPath, "");
+    fs.writeFileSync(ledgerPath, JSON.stringify(validLedger));
+} else if (mode === "partial-verdicts") {
+    fs.writeFileSync(verdictPath, "verdict tier4 sim-boot-render 0 PASS ok\n");
+    fs.writeFileSync(ledgerPath, JSON.stringify(validLedger));
+} else if (mode === "no-verdicts") {
+    fs.writeFileSync(ledgerPath, JSON.stringify(validLedger));
+} else if (mode === "missing-ledger") {
+    fs.writeFileSync(verdictPath, allPass);
+} else if (mode === "empty-navigations") {
+    fs.writeFileSync(verdictPath, allPass);
+    fs.writeFileSync(ledgerPath, JSON.stringify({ navigations: [], tmuxRequests: [] }));
+} else if (mode === "leaked-client-name") {
+    const leaked = structuredClone(validLedger);
+    leaked.navigations[0].url += "&client_name=attacker";
+    fs.writeFileSync(verdictPath, allPass);
+    fs.writeFileSync(ledgerPath, JSON.stringify(leaked));
+} else if (mode === "missing-tmux-nav") {
+    const noTmux = structuredClone(validLedger);
+    noTmux.navigations = noTmux.navigations.filter((n) => n.params.w !== "w-tmux-4");
+    noTmux.tmuxRequests = [];
+    fs.writeFileSync(verdictPath, allPass);
+    fs.writeFileSync(ledgerPath, JSON.stringify(noTmux));
+} else {
+    throw new Error(`unknown fixture mode: ${mode}`);
+}
+' "$out_dir" "$mode" "$SCRIPT_DIR/sim-smoke-oracle.mjs"
+}
+
 run_self_test() {
     echo "=== E2E Self-Test Mode ($SHA) ==="
     run_make_verdict self-test e2e-check e2e-check
@@ -237,7 +299,11 @@ run_self_test() {
     run_cargo_verdict self-test ios-e2e-harness test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
     run_make_verdict self-test ios-unit-tests ios-test
     run_cmd_verdict self-test node-unit-tests node --test "$SCRIPT_DIR"/*.test.mjs
+    local gate_dir="$RUN_DIR/sim-gate-pass"
+    write_sim_gate_fixture "$gate_dir" pass
+    run_cmd_verdict self-test sim-verdict-gate-pass "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$gate_dir/sim-verdicts.txt" "$gate_dir/ledger.json" --xcode-rc 0
     run_stream_verdicts "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
+    run_stream_verdicts "$SCRIPT_DIR/run-wireguard-mock-e2e.sh" --s5
 }
 
 expect_red() {
@@ -279,6 +345,7 @@ expect_prereq() {
 run_probe_red() {
     echo "=== E2E Probe-Red Mode ($SHA) ==="
     expect_red probe-wireguard-live "$SCRIPT_DIR/run-wireguard-mock-e2e.sh" --probe-red
+    expect_red probe-wireguard-s5 "$SCRIPT_DIR/run-wireguard-mock-e2e.sh" --s5 --probe-red
     expect_red probe-contract-matrix node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 1 --probe-red
     expect_red probe-contract-matrix-tier2 node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 2 --probe-red
     expect_red probe-contract-matrix-tier3 node "$SCRIPT_DIR/ios-contract-matrix.mjs" --tier 3 --probe-red
@@ -298,6 +365,34 @@ run_probe_red() {
             verifyStoppedTunnelView({ wireguard_status: 'connecting' }, 'p1');
         });
     "
+    local p_empty="$RUN_DIR/probe-sim-empty-verdicts"
+    write_sim_gate_fixture "$p_empty" empty-verdicts
+    expect_red probe-sim-empty-verdicts "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_empty/sim-verdicts.txt" "$p_empty/ledger.json" --xcode-rc 0
+
+    local p_partial="$RUN_DIR/probe-sim-partial-verdicts"
+    write_sim_gate_fixture "$p_partial" partial-verdicts
+    expect_red probe-sim-partial-verdicts "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_partial/sim-verdicts.txt" "$p_partial/ledger.json" --xcode-rc 0
+
+    local p_crash="$RUN_DIR/probe-sim-xcode-crash-no-verdicts"
+    write_sim_gate_fixture "$p_crash" no-verdicts
+    expect_red probe-sim-xcode-crash-no-verdicts "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_crash/sim-verdicts.txt" "$p_crash/ledger.json" --xcode-rc 65
+
+    local p_no_ledger="$RUN_DIR/probe-sim-missing-ledger"
+    write_sim_gate_fixture "$p_no_ledger" missing-ledger
+    expect_red probe-sim-missing-ledger "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_no_ledger/sim-verdicts.txt" "$p_no_ledger/ledger.json" --xcode-rc 0
+
+    local p_empty_nav="$RUN_DIR/probe-sim-empty-navigations"
+    write_sim_gate_fixture "$p_empty_nav" empty-navigations
+    expect_red probe-sim-empty-navigations "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_empty_nav/sim-verdicts.txt" "$p_empty_nav/ledger.json" --xcode-rc 0
+
+    local p_leaked="$RUN_DIR/probe-sim-leaked-client-name"
+    write_sim_gate_fixture "$p_leaked" leaked-client-name
+    expect_red probe-sim-leaked-client-name "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_leaked/sim-verdicts.txt" "$p_leaked/ledger.json" --xcode-rc 0
+
+    local p_no_tmux="$RUN_DIR/probe-sim-missing-tmux-nav"
+    write_sim_gate_fixture "$p_no_tmux" missing-tmux-nav
+    expect_red probe-sim-missing-tmux-nav "$SCRIPT_DIR/run-simulator-smoke.sh" --check-verdicts "$p_no_tmux/sim-verdicts.txt" "$p_no_tmux/ledger.json" --xcode-rc 0
+
     expect_prereq probe-vitest-missing-prereq env CHAN_E2E_VITEST_BIN=/nonexistent/vitest "$SCRIPT_DIR/run-e2e.sh" --tier 1
 }
 
@@ -338,6 +433,7 @@ run_tier4() {
     fi
     run_stream_verdicts "$SCRIPT_DIR/run-simulator-smoke.sh" "${sim_args[@]}"
     run_cmd_verdict tier4 scenario-s2-wireguard-enroll-and-proxy "$SCRIPT_DIR/run-wireguard-mock-e2e.sh"
+    run_cmd_verdict tier4 scenario-s5-stopped-tunnel-recovery "$SCRIPT_DIR/run-wireguard-mock-e2e.sh" --s5
     run_cargo_verdict tier4 scenario-s6-adversarial-boundaries test --manifest-path "$REPO/Cargo.toml" -p chan-ios --test ios_e2e_harness
 }
 
