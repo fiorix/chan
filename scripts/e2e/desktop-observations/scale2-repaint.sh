@@ -79,4 +79,6 @@ obs_verdict
 node "$HERE/scale2-repaint.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output"
 verdict=$?
 import -window "$xid" "$output/window-after.png" || obs_log "the screenshot after the driver failed"
-obs_judge "$verdict" "scale-2 repaint differs base to tip in the wrong direction"
+# Reached only on the driver's fault status: the tree under test kept the
+# half-scale paint, the driver's FAULT line above says on which read.
+obs_judge "$verdict" "this tree kept the half-scale paint after the refocus"
