@@ -982,99 +982,80 @@ mod tests {
     }
 
     #[test]
-    fn retired_engine_key_set_warns_and_writes_nothing() {
+    fn retired_engine_key_is_unknown_to_cli_get_and_set() {
         let env = test_env::ChanTestEnv::new();
-        let path = env.home().join("server.toml");
-        for (key, value) in [
-            ("server.terminal.ghostty", Some("true")),
-            ("terminal.ghostty", Some("false")),
-            ("terminal.ghostty=true", None),
-        ] {
-            config_quietly(ConfigAction::Set {
-                key: key.into(),
-                value: value.map(Into::into),
-            })
-            .unwrap_or_else(|error| panic!("{key} {value:?}: {error:#}"));
-        }
-        assert!(
-            !path.exists(),
-            "a set of the retired key created server.toml"
-        );
+        let server = env.home().join("server.toml");
+        let editor = env.home().join("preferences.toml");
+        // Each spelling a script may have kept, with each value set took.
+        let actions = || {
+            let mut actions = Vec::new();
+            for key in ["server.terminal.ghostty", "terminal.ghostty"] {
+                for json in [false, true] {
+                    actions.push(ConfigAction::Get {
+                        key: Some(key.into()),
+                        json,
+                    });
+                }
+            }
+            for (key, value) in [
+                ("server.terminal.ghostty", Some("true")),
+                ("terminal.ghostty", Some("false")),
+                ("terminal.ghostty", Some("maybe")),
+                ("terminal.ghostty=true", None),
+            ] {
+                actions.push(ConfigAction::Set {
+                    key: key.into(),
+                    value: value.map(Into::into),
+                });
+            }
+            actions
+        };
 
-        // A file that holds the key keeps every byte, and so does one that
-        // does not load: the set reads no file.
-        for body in [
-            "[terminal]\nghostty = false\nfont_size = 12\n",
-            "terminal = = =\n",
+        // No files, a server.toml that holds the key, and two files that do
+        // not load: each is left as it was, and the refusal reads neither,
+        // since a file that does not load would fail the command first.
+        for files in [
+            None,
+            Some((
+                "[terminal]\nghostty = false\nfont_size = 12\n",
+                "theme = \"dark\"\n",
+            )),
+            Some(("terminal = = =\n", "theme = = =\n")),
         ] {
-            std::fs::write(&path, body).unwrap();
-            for value in ["true", "false"] {
-                config_quietly(ConfigAction::Set {
-                    key: "terminal.ghostty".into(),
-                    value: Some(value.into()),
-                })
-                .unwrap();
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            if let Some((server_body, editor_body)) = files {
+                std::fs::write(&server, server_body).unwrap();
+                std::fs::write(&editor, editor_body).unwrap();
+            }
+            for action in actions() {
+                let label = format!("{action:?} over {files:?}");
+                let (mut out, mut err) = (Vec::new(), Vec::new());
+                let error = config_command(action, &mut out, &mut err)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                assert!(
+                    error.as_deref().is_some_and(
+                        |error| error.contains("unknown key `server.terminal.ghostty`")
+                    ),
+                    "{label}: {error:?}"
+                );
+                assert!(out.is_empty(), "{label}: {out:?}");
+                assert!(err.is_empty(), "{label}: {err:?}");
+                assert_eq!(
+                    std::fs::read_to_string(&server).ok().as_deref(),
+                    files.map(|(body, _)| body),
+                    "{label}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&editor).ok().as_deref(),
+                    files.map(|(_, body)| body),
+                    "{label}"
+                );
             }
         }
-
-        let mut err = Vec::new();
-        set_retired_engine_key("false", &mut err).unwrap();
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            format!("{RETIRED_ENGINE_WARNING}\n")
-        );
-        for word in ["deprecated", "no effect", "Remove it", "will reject"] {
-            assert!(RETIRED_ENGINE_WARNING.contains(word), "{word}");
-        }
     }
 
     #[test]
-    fn retired_engine_key_set_refuses_a_non_boolean() {
-        let env = test_env::ChanTestEnv::new();
-        let error = config_quietly(ConfigAction::Set {
-            key: "terminal.ghostty".into(),
-            value: Some("maybe".into()),
-        })
-        .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("expected true|false"),
-            "{error:#}"
-        );
-        assert!(!env.home().join("server.toml").exists());
-        let mut err = Vec::new();
-        assert!(set_retired_engine_key("maybe", &mut err).is_err());
-        assert!(err.is_empty(), "a refused value also warned");
-    }
-
-    #[test]
-    fn retired_engine_key_get_reads_true_with_the_warning() {
-        let env = test_env::ChanTestEnv::new();
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        get_retired_engine_key(&mut out, &mut err).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "true\n");
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            format!("{RETIRED_ENGINE_WARNING}\n")
-        );
-
-        // Answered before any config file is read: a file that does not load
-        // is no error.
-        std::fs::write(env.home().join("server.toml"), "terminal = = =\n").unwrap();
-        for (key, json) in [
-            ("server.terminal.ghostty", false),
-            ("terminal.ghostty", true),
-        ] {
-            config_quietly(ConfigAction::Get {
-                key: Some(key.into()),
-                json,
-            })
-            .unwrap_or_else(|error| panic!("{key}: {error:#}"));
-        }
-    }
-
-    #[test]
-    fn retired_engine_key_warns_on_stderr_and_answers_on_stdout() {
+    fn config_answers_on_stdout_alone() {
         let _env = test_env::ChanTestEnv::new();
         let run = |action| {
             let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -1084,21 +1065,7 @@ mod tests {
                 String::from_utf8(err).unwrap(),
             )
         };
-        let warning = format!("{RETIRED_ENGINE_WARNING}\n");
-        for json in [false, true] {
-            let get = ConfigAction::Get {
-                key: Some("terminal.ghostty".into()),
-                json,
-            };
-            assert_eq!(run(get), ("true\n".into(), warning.clone()), "{json}");
-        }
-        let set = ConfigAction::Set {
-            key: "terminal.ghostty".into(),
-            value: Some("false".into()),
-        };
-        assert_eq!(run(set), (String::new(), warning));
-
-        // An ordinary key keeps its whole answer on stdout.
+        // A key's whole answer goes to stdout.
         let set = ConfigAction::Set {
             key: "terminal.font_size".into(),
             value: Some("13".into()),
@@ -1165,10 +1132,6 @@ mod tests {
                 value: Some("13".into()),
             },
             ConfigAction::Get {
-                key: Some("terminal.ghostty".into()),
-                json: false,
-            },
-            ConfigAction::Get {
                 key: None,
                 json: false,
             },
@@ -1188,13 +1151,6 @@ mod tests {
                 "{label}: {error:#}"
             );
         }
-
-        // The retired key's set answers on stderr alone.
-        let set = ConfigAction::Set {
-            key: "terminal.ghostty".into(),
-            value: Some("false".into()),
-        };
-        config_command(set, &mut RefusingWriter, &mut std::io::sink()).unwrap();
     }
 
     #[test]
@@ -1214,7 +1170,7 @@ mod tests {
         );
         assert_eq!(dump["server"]["terminal"]["font_size"], 12);
 
-        assert!(config_key_spec(RETIRED_ENGINE_KEY).is_err());
+        assert!(config_key_spec("server.terminal.ghostty").is_err());
         let Err(listing) = config_key_spec("server.nope") else {
             panic!("an unknown key resolved");
         };

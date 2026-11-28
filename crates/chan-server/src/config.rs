@@ -480,6 +480,36 @@ mod tests {
     }
 
     #[test]
+    fn a_file_holding_terminal_ghostty_loads_with_its_other_settings() {
+        // A file that fails to load leaves the server on every default, so
+        // the retired key must cost a file none of its other settings.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        let file = |ghostty: Option<&str>| {
+            let ghostty = ghostty.map_or(String::new(), |value| format!("ghostty = {value}\n"));
+            format!(
+                "[search]\naggression = \"aggressive\"\n\
+                 [terminal]\n{ghostty}font_size = 15\nscrollback_mb = 30\nmcp_env = true\n\
+                 [transfer]\nstall_timeout_secs = 42\n\
+                 [tunnel]\nmax_live = 7\n"
+            )
+        };
+        std::fs::write(&path, file(None)).unwrap();
+        let without = ServerConfig::load_warning_once(&path, &AtomicBool::new(false)).unwrap();
+        assert_ne!(without, ServerConfig::default());
+        assert_eq!(without.search.aggression, SearchAggression::Aggressive);
+        assert_eq!(without.terminal.font_size, 15);
+        assert_eq!(without.transfer.stall_timeout_secs, 42);
+        assert_eq!(without.tunnel.max_live, 7);
+
+        for value in ["true", "false"] {
+            std::fs::write(&path, file(Some(value))).unwrap();
+            let (_, with) = load_warnings(&path, &AtomicBool::new(false));
+            assert_eq!(with, without, "ghostty = {value}");
+        }
+    }
+
+    #[test]
     fn populated_round_trips() {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("server.toml");

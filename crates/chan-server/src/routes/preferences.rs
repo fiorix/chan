@@ -815,41 +815,6 @@ mod tests {
             .contains("unknown field `attachments_dir`"));
     }
 
-    /// The number of WARN events `f` gives on this thread.
-    fn count_warnings<T>(f: impl FnOnce() -> T) -> (usize, T) {
-        struct Count(Arc<AtomicUsize>);
-        impl tracing::Subscriber for Count {
-            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                if *event.metadata().level() == tracing::Level::WARN {
-                    self.0.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            fn enter(&self, _: &tracing::span::Id) {}
-            fn exit(&self, _: &tracing::span::Id) {}
-        }
-        let count = Arc::new(AtomicUsize::new(0));
-        let out = tracing::subscriber::with_default(Count(Arc::clone(&count)), f);
-        (count.load(Ordering::Relaxed), out)
-    }
-
-    #[test]
-    fn count_warnings_counts_the_warnings_given_inside_its_closure() {
-        tracing::warn!("given before the count");
-        let (warnings, ()) = count_warnings(|| {
-            tracing::info!("not a warning");
-            tracing::warn!("given inside the count");
-        });
-        assert_eq!(warnings, 1);
-    }
-
     #[test]
     fn the_preferences_view_omits_a_stored_terminal_ghostty() {
         let tmp = TempDir::new().unwrap();
@@ -868,57 +833,81 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_terminal_write_carrying_terminal_ghostty_is_applied_without_it() {
-        // A page loaded before the retirement echoes the terminal object it
-        // read, `ghostty` included, with one setting changed.
-        for ghostty in [true, false] {
-            let tmp = TempDir::new().unwrap();
-            let path = tmp.path().join("server.toml");
-            let state = make_test_state(false);
-            let revision = state.config_revision.load(Ordering::Relaxed);
-            let mut older = terminal_as_read(&state);
-            older["ghostty"] = json!(ghostty);
+    /// The preferences write of a page loaded before `terminal.ghostty` was
+    /// retired: it echoes the terminal object it read, `ghostty` included,
+    /// with one setting changed. `ghostty` takes the two values such a page
+    /// sends and three it never did.
+    fn writes_naming_terminal_ghostty(state: &AppState) -> Vec<serde_json::Value> {
+        [
+            json!(true),
+            json!(false),
+            json!("yes"),
+            json!(1),
+            json!(null),
+        ]
+        .into_iter()
+        .map(|ghostty| {
+            let mut older = terminal_as_read(state);
+            older["ghostty"] = ghostty;
             older["mcp_env"] = json!(true);
-
-            // The body is decoded inside the count: the key is dropped there.
-            let (warnings, written) = count_warnings(|| {
-                let body = serde_json::from_value::<PatchConfigBody>(json!({
-                    "expected_revision": revision,
-                    "preferences": { "terminal": older },
-                }))
-                .expect("a boolean terminal.ghostty is accepted");
-                patch_config_with_saves(&state, body, noop_save_editor, |config| {
-                    config.save_to(&path)
-                })
-            });
-            let answer = to_json(&written.expect("the write is applied"));
-
-            assert_eq!(warnings, 0, "ghostty = {ghostty}");
-            assert_eq!(state.config_revision.load(Ordering::Relaxed), revision + 1);
-            assert_eq!(answer["preferences"]["terminal"]["mcp_env"], json!(true));
-            assert!(
-                answer["preferences"]["terminal"].get("ghostty").is_none(),
-                "{answer}"
-            );
-            assert!(terminal_as_read(&state).get("ghostty").is_none());
-            let file = std::fs::read_to_string(&path).unwrap();
-            assert!(file.contains("mcp_env = true"), "{file}");
-            assert!(!file.contains("ghostty"), "{file}");
-        }
+            json!({
+                "expected_revision": state.config_revision.load(Ordering::Relaxed),
+                "preferences": { "terminal": older },
+            })
+        })
+        .collect()
     }
 
     #[test]
-    fn a_terminal_write_refuses_a_non_boolean_terminal_ghostty() {
-        for value in [json!("yes"), json!(1), json!(null)] {
-            let error = serde_json::from_value::<PatchConfigBody>(json!({
-                "expected_revision": 1,
-                "preferences": { "terminal": { "ghostty": value.clone() } },
-            }))
-            .expect_err("a non-boolean terminal.ghostty is refused")
-            .to_string();
-            assert!(error.contains("terminal.ghostty"), "{value}: {error}");
-            assert!(error.contains("expected a boolean"), "{value}: {error}");
+    fn a_terminal_write_carrying_terminal_ghostty_is_refused_as_unknown() {
+        let state = make_test_state(false);
+        for body in writes_naming_terminal_ghostty(&state) {
+            let ghostty = &body["preferences"]["terminal"]["ghostty"];
+            let error = serde_json::from_value::<PatchConfigBody>(body.clone())
+                .err()
+                .map(|error| error.to_string());
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("unknown field `terminal.ghostty`")),
+                "ghostty = {ghostty}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_patch_carrying_terminal_ghostty_is_refused_before_its_handler() {
+        // The route's own extractor. The handler takes the decoded body, so
+        // a body refused here writes nothing and leaves the revision as it is.
+        use axum::extract::FromRequest;
+
+        let state = make_test_state(false);
+        for body in writes_naming_terminal_ghostty(&state) {
+            let ghostty = body["preferences"]["terminal"]["ghostty"].clone();
+            let request = axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/api/config")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("a PATCH request");
+            let Err(rejection) = Json::<PatchConfigBody>::from_request(request, &()).await else {
+                panic!("ghostty = {ghostty}: the body was decoded");
+            };
+            let response = rejection.into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ghostty = {ghostty}"
+            );
+            let answer = to_bytes(response.into_body(), 8192)
+                .await
+                .expect("read the refusal");
+            let answer: serde_json::Value = serde_json::from_slice(&answer).expect("refusal JSON");
+            assert_eq!(
+                answer["error"],
+                json!("the request body does not match what this route accepts"),
+                "ghostty = {ghostty}"
+            );
         }
     }
 
