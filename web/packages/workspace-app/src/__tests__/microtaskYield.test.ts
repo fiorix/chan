@@ -18,8 +18,9 @@ afterEach(() => {
 test("a loop of microtasks lets a timer fire once it passes the limit, and is counted", async () => {
   // A loop the yield does not break stops itself here, so the case fails
   // rather than hangs.
+  const LIMIT = 1_000;
   const SPINS = 200_000;
-  installed = yieldRunawayMicrotasks(1_000);
+  installed = yieldRunawayMicrotasks(LIMIT);
   let fired = false;
   let runs = 0;
   await new Promise<void>((done) => {
@@ -32,7 +33,10 @@ test("a loop of microtasks lets a timer fire once it passes the limit, and is co
     queueMicrotask(spin);
   });
   expect(fired, "the timer fired while the loop ran").toBe(true);
-  expect(runs).toBeLessThan(SPINS);
+  // The first LIMIT queues run as microtasks; the next is queued as a timer
+  // behind the one armed before the loop, so its run sees the timer fired.
+  // A yield before the limit reads fewer runs, one after it more.
+  expect(runs, "the loop yielded exactly at its limit").toBe(LIMIT + 1);
   expect(installed.yielded).toBeGreaterThan(0);
 });
 
