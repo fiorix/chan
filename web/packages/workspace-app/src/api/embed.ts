@@ -12,6 +12,11 @@
 // the Tauri WebView CSP `frame-src` lists the same hosts. Keep the list
 // minimal -- every entry is an origin the app will frame. Local extensions
 // stay on Chan's own origin and do not widen this media allowlist.
+//
+// A YouTube embed's src enables YouTube's player API, so the page can post
+// the player a command across origins; the screen lock pauses an embed that
+// way (state/lockMedia.svelte.ts). The player reads a posted command under
+// the sandbox below, with no token added for it.
 
 export type EmbedKind = "youtube" | "maps";
 
@@ -69,6 +74,28 @@ export function isAllowedEmbedSrc(src: string | null | undefined): boolean {
     u.protocol === "https:" &&
     EMBED_IFRAME_HOSTS.includes(u.hostname.toLowerCase())
   );
+}
+
+/// The origin every YouTube embed frame loads from.
+export const YOUTUBE_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
+
+/// True when `src` loads on the YouTube embed origin.
+export function isYouTubeEmbedSrc(src: string | null | undefined): boolean {
+  if (!src) return false;
+  try {
+    return new URL(src).origin === YOUTUBE_EMBED_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
+/// `src` with YouTube's player API enabled when it is a YouTube embed, its
+/// other parameters kept; any other src as it is.
+export function withYouTubePlayerApi(src: string): string {
+  if (!isYouTubeEmbedSrc(src)) return src;
+  const u = new URL(src);
+  u.searchParams.set("enablejsapi", "1");
+  return u.toString();
 }
 
 const YT_HOSTS = new Set([
@@ -136,7 +163,7 @@ export function detectEmbed(rawUrl: string): EmbedInfo | null {
     return id
       ? {
           kind: "youtube",
-          src: `https://www.youtube-nocookie.com/embed/${id}`,
+          src: withYouTubePlayerApi(`${YOUTUBE_EMBED_ORIGIN}/embed/${id}`),
           title: "YouTube video",
         }
       : null;
