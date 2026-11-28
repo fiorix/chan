@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filePath, filesReady } from "./files.mjs";
+import { filePath, filesReady, rowWentAway } from "./files.mjs";
 
 test("workspace paths retain literal names and normalize directory separators", () => {
   assert.equal(filePath(""), "");
@@ -20,5 +20,18 @@ test("an empty directory proves absence only with a visible, unfiltered, success
   assert.equal(filesReady({ ...empty, rows: [{ name: "cached.md" }], retry: true }), false);
   for (const status of ["Loading files...", "Workspace root unavailable missing", "File listing failed denied"]) {
     assert.equal(filesReady({ ...empty, status: [status] }), false);
+  }
+});
+
+test("a row click that a re-rendered listing took the row from is retried, and other errors are not", () => {
+  for (const message of [
+    "Node is detached from document",
+    'row "notes/a.md" went before it could be clicked',
+    "Node is either not clickable or not an Element",
+  ]) {
+    assert.equal(rowWentAway(new Error(message)), true, message);
+  }
+  for (const message of ["the Files tab has no Details toggle", "Waiting failed: 10000ms exceeded"]) {
+    assert.equal(rowWentAway(new Error(message)), false, message);
   }
 });

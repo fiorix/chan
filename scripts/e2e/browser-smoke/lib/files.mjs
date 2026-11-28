@@ -189,13 +189,20 @@ export async function openFile(page, path, scope = "") {
   await row.click({ count: 2 });
 }
 
+/// Whether a click on a Files row failed because the listing re-rendered
+/// under it: the row was detached, was gone when it was looked up, or had
+/// no box left for the pointer to reach.
+export function rowWentAway(error) {
+  return /detached|went before it could be clicked|Node is either not clickable or not an Element/i.test(error?.message ?? "");
+}
+
 /// Open `path` from the Files listing and wait until its tab is the active
 /// one, answering how many tries it took. The listing can re-render between
 /// finding a row and the pointer reaching it (a watch event or a session
-/// change refetches the directory): the row is then detached, or the two
-/// clicks land on two different rows, or the row is gone when it is looked
-/// up, and no tab opens. Each try finds the row again; a file that opens no
-/// tab in any of them is a failure.
+/// change refetches the directory): the row is then detached or left with
+/// no box to click, or the two clicks land on two different rows, or the
+/// row is gone when it is looked up, and no tab opens. Each try finds the
+/// row again; a file that opens no tab in any of them is a failure.
 export async function openFileTab(page, path, scope = "", tries = 3) {
   const title = filePath(path);
   const pane = await paneScope(page, scope);
@@ -204,7 +211,7 @@ export async function openFileTab(page, path, scope = "", tries = 3) {
     try {
       await openFile(page, path, scope);
     } catch (error) {
-      if (!/detached|went before it could be clicked/i.test(error.message)) throw error;
+      if (!rowWentAway(error)) throw error;
       last = error.message;
       continue;
     }

@@ -2080,6 +2080,122 @@ describe('widget search', () => {
     expect(active(term)).toEqual([range(3, 0)]);
   });
 
+  // A press made after output, whose neighbour was on the screen, waits on
+  // the kept match; the feed outruns the press's placement slice, so it is
+  // still waiting when the next write arrives.
+  test('a press waiting on the active match when output leaves it ending before its start applies from no active match', async () => {
+    const { term } = await create(`needle 0\r\nr1\r\n${'x'.repeat(37)}needle\r\nneedle 4\r\nr5`);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(2, 37, 3, 2)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'older');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), 'on the wrapped match').toEqual([range(2, 37, 3, 2)]);
+    term.write('\x1b[4;6r\x1b[6;1H\n');
+    expect(active(term), 'the write loses the active match').toBeUndefined();
+    frame();
+    expect(active(term), 'the waiting older press lands on the newest, as from no active match').toEqual([range(3, 0)]);
+    expect(activeText(term)).toBe('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 2, partial: false });
+    expect(active(term)).toEqual([range(3, 0)]);
+  });
+
+  test('a press waiting on the active match when pruning removes it applies from no active match', async () => {
+    const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(900) + 'needle', 80, 5, 1000);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'newer');
+    expect(active(term)).toEqual([range(0, 0)]);
+    slowFeed();
+    term.write('\x1b[m');
+    search.step('needle', 'newer');
+    expect(search.state.index, 'the press waits for placement').toBeNull();
+    expect(active(term), 'on the oldest match').toEqual([range(0, 0)]);
+    term.write('\r\n' + 'filler\r\n'.repeat(600));
+    expect(active(term), 'the write prunes the active match').toBeUndefined();
+    settle(search);
+    expect(search.state, 'the waiting newer press lands on the oldest, as from no active match').toEqual({
+      index: 1, total: 1, partial: false,
+    });
+    expect(active(term)?.[0].start.absoluteRow).toBeLessThan(901);
+    expect(activeText(term)).toBe('needle');
+  });
+
+  // The write that leaves the pair ending before its start also switches to
+  // the alternate screen, which sets the primary's active match aside in
+  // its cells unread; the switch back reads them.
+  test('a set-aside active match left ending before its start is lost at the switch back', async () => {
+    const { term } = await create(`needle 0\r\nr1\r\n${'x'.repeat(37)}needle\r\nneedle 4\r\nr5`);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(2, 37, 3, 2)]);
+    const start = term.core!.trackCell(2, 37)!;
+    const end = term.core!.trackCell(3, 2)!;
+    term.write('\x1b[4;6r\x1b[6;1H\n\x1b[?1049h');
+    expect(active(term), 'the alternate screen shows no primary match').toBeUndefined();
+    settle(search);
+    term.write('\x1b[?1049l');
+    const moved = { start: start.point(), end: end.point() };
+    start.free();
+    end.free();
+    expect(moved, 'not exercised: the core no longer moves one cell of the pair above the other here; ' +
+      'after a core update, find a write that does, or this case guards nothing').toEqual({
+      start: { row: 2, col: 37 }, end: { row: 2, col: 2 },
+    });
+    expect(active(term), 'find shows no active match at the switch back').toBeUndefined();
+    expect(activeText(term), 'Copy reads nothing of it').toBeUndefined();
+    expect(search.state.index, 'no match is kept: the index reads zero of none counted yet').toBe(0);
+    search.step('needle', 'older');
+    expect(active(term), 'older from no active match lands on the newest').toEqual([range(3, 0)]);
+    expect(activeText(term)).toBe('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 2, partial: false });
+    expect(active(term)).toEqual([range(3, 0)]);
+  });
+
+  // A narrowing resize while the alternate screen shows reflows the primary
+  // screen: the set-aside pair's start, the last cells of a row still
+  // marked wrapped, moves to the next row, and its end stays on the row
+  // above.
+  test('a set-aside active match that a resize leaves ending on a row above its start is lost at the switch back', async () => {
+    const { term } = await create(`needle 0\r\nr1\r\n${'x'.repeat(37)}needle\r\nneedle 4\r\nr5`);
+    const search = searchOf(term);
+    search.find('needle');
+    settle(search);
+    search.step('needle', 'older');
+    expect(active(term)).toEqual([range(2, 37, 3, 2)]);
+    const start = term.core!.trackCell(2, 37)!;
+    const end = term.core!.trackCell(3, 2)!;
+    term.write('\x1b[4;6r\x1b[6;1H\n\x1b[?1049h');
+    settle(search);
+    term.resize(37, 6);
+    settle(search);
+    term.write('\x1b[?1049l');
+    const moved = { start: start.point(), end: end.point() };
+    start.free();
+    end.free();
+    expect(moved, 'not exercised: the core no longer reflows the pair to end on a row above its start here; ' +
+      'after a core update, find a resize that does, or this case guards nothing').toEqual({
+      start: { row: 3, col: 0 }, end: { row: 2, col: 2 },
+    });
+    expect(active(term), 'find shows no active match at the switch back').toBeUndefined();
+    expect(activeText(term), 'Copy reads nothing of it').toBeUndefined();
+    search.step('needle', 'older');
+    expect(active(term), 'older from no active match lands on the newest').toEqual([range(3, 3)]);
+    expect(activeText(term)).toBe('needle');
+    settle(search);
+    expect(search.state).toEqual({ index: 1, total: 2, partial: false });
+    expect(active(term)).toEqual([range(3, 3)]);
+  });
+
   test('a predicted expensive feed restarts the scan and preserves the kept match', async () => {
     const { term } = await create('needle\r\n' + 'filler\r\n'.repeat(20_000), 200, 5, 60_000);
     const search = searchOf(term);
@@ -2769,7 +2885,7 @@ describe('a listed match whose end precedes its start', () => {
     { name: 'as the newest match', row: 478, entry: 221, read: 'at' as const },
     { name: 'as the first active-area entry', row: 230, entry: 0, read: 'at' as const },
     { name: 'as the last active-area entry', row: 462, entry: 229, read: 'at' as const },
-    { name: 'in the middle of a batch, ending on its own row', row: 130, entry: 50, read: 'batch' as const, sameRow: true },
+    { name: 'in a batch, ending on its own row', row: 130, entry: 50, read: 'batch' as const, sameRow: true },
   ])('find neither counts, highlights, steps to nor copies it, listed $name', async ({ row, entry, read, sameRow }) => {
     const { term } = await create(threePaged, 200, 20, 10_000_000);
     expect(coreRows(term, 'needle', 230)[entry], `the core lists row ${row} as entry ${entry}`).toBe(row);
