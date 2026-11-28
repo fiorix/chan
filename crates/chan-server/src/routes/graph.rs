@@ -4534,56 +4534,59 @@ mod tests {
         }
     }
 
-    // A backlinks call walks no tree, in either form of the route, under the
-    // listing cap or over it: neither the workspace's whole-tree walk,
-    // counted where the workspace takes it, nor either walk a graph load
-    // counts. A graph load moves the workspace's count by one, under the cap
-    // and over it, so the count sees a walk the route takes.
+    // A backlinks call builds no walk of the workspace's files, of the whole
+    // tree or below a folder, in either form of the route, under the listing
+    // cap or over it. The count is taken where the workspace crate builds
+    // each walker of a workspace's files (`walks_built` names them), so a
+    // walk by any route counts: the listing and the directories-only walk a
+    // graph load takes, the editor's tree, a prefix listing, the index's
+    // walks, the spine's walk and the report's scan. A graph load builds a
+    // walk of the whole tree under the cap and over it, so the count sees a
+    // walk the route takes.
     #[tokio::test]
     async fn a_backlinks_call_walks_no_tree() {
-        use super::tree_walks::{taken, Walk};
-        use chan_workspace::workspace::listing_limit_test_hooks::tree_walks_taken;
+        use chan_workspace::workspace::listing_limit_test_hooks::walks_built;
+        type Walks = std::collections::BTreeMap<String, usize>;
 
         let app = backlinks_route_app();
         let workspace = backlinks_fixture_read(&app).await;
-        let root = workspace.root().to_path_buf();
-        let walks = || {
-            [
-                tree_walks_taken(&workspace),
-                taken(&root, Walk::Listing),
-                taken(&root, Walk::Directories),
-            ]
+        // The walks built since `before` was taken, per folder each starts
+        // from.
+        let since = |before: &Walks| -> Walks {
+            walks_built(&workspace)
+                .into_iter()
+                .map(|(start, n)| {
+                    let earlier = before.get(&start).copied().unwrap_or(0);
+                    (start, n - earlier)
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect()
         };
         let mut graph_loads = std::collections::BTreeMap::new();
         let mut calls = std::collections::BTreeMap::new();
         for (when, over_cap) in [("under the cap", false), ("over the cap", true)] {
             let limit = over_cap.then(|| over_the_listing_cap(&workspace));
-            let before = tree_walks_taken(&workspace);
+            let before = walks_built(&workspace);
             graph_route_body(&app, "/api/graph").await;
-            graph_loads.insert(when, tree_walks_taken(&workspace) - before);
+            graph_loads.insert(when, since(&before).contains_key(""));
             for uri in ["/api/backlinks/LICENSE", "/api/backlinks/LICENSE?stream=1"] {
-                let before = walks();
+                let before = walks_built(&workspace);
                 graph_route_body(&app, uri).await;
-                let after = walks();
-                calls.insert((when, uri), [0, 1, 2].map(|k| after[k] - before[k]));
+                calls.insert((when, uri), since(&before));
             }
             drop(limit);
         }
         assert_eq!(
             graph_loads,
-            [("over the cap", 1), ("under the cap", 1)].into(),
-            "fixture: the workspace's whole-tree walks of one graph load"
+            [("over the cap", true), ("under the cap", true)].into(),
+            "fixture: a graph load builds a walk of the whole tree"
         );
-        let walked = |k: usize| -> std::collections::BTreeMap<_, _> {
-            calls
-                .iter()
-                .map(|(call, taken)| (*call, taken[k]))
-                .collect()
-        };
-        let none: std::collections::BTreeMap<_, _> = calls.keys().map(|call| (*call, 0)).collect();
-        assert_eq!(walked(1), none, "a graph load's whole-tree listings");
-        assert_eq!(walked(2), none, "a graph load's directories-only walks");
-        assert_eq!(walked(0), none, "the workspace's whole-tree walks");
+        let none: std::collections::BTreeMap<_, _> =
+            calls.keys().map(|call| (*call, Walks::new())).collect();
+        assert_eq!(
+            calls, none,
+            "the walks a backlinks call builds, by the folder each starts from"
+        );
     }
 
     // A backlinks call reads from the disk only the spellings that decide

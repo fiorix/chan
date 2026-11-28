@@ -836,6 +836,8 @@ pub fn walk_workspace_scoped<'a>(
     root: &'a Path,
     policy: &'a IndexScopePolicy,
 ) -> impl Iterator<Item = DirEntry> + 'a {
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::workspace::listing_limit_test_hooks::record_walk_built(root);
     WalkDir::new(root)
         .min_depth(1)
         .follow_links(false)
@@ -916,6 +918,8 @@ fn walk_workspace_with<'a>(
     root: &Path,
     filter: Option<&'a WalkFilter>,
 ) -> impl Iterator<Item = DirEntry> + 'a {
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::workspace::listing_limit_test_hooks::record_walk_built(root);
     WalkDir::new(root)
         .min_depth(1)
         .follow_links(false)
@@ -2001,6 +2005,8 @@ fn list_tree_scoped_inner(
     let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
         Box::new(walk_workspace_scoped(root, policy))
     } else {
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::workspace::listing_limit_test_hooks::record_walk_built(walk_from);
         let walker = WalkDir::new(walk_from)
             .min_depth(min_depth)
             .follow_links(false)
@@ -2099,6 +2105,8 @@ fn list_tree_inner(
         // `WalkFilter` is supplied it also prunes the blocklisted dir
         // basenames at any depth, matching `walk_workspace_filtered`.
         let filter = filter.cloned();
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::workspace::listing_limit_test_hooks::record_walk_built(walk_from);
         let walker = WalkDir::new(walk_from)
             .min_depth(min_depth)
             .follow_links(false)

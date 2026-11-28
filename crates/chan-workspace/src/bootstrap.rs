@@ -187,6 +187,8 @@ pub(crate) fn bootstrap_dir_scoped(
     // Mirror `walk_workspace_filtered`'s filter chain: skip `.git` /
     // `.chan` and any excluded dir basename at any depth; drop
     // symlinks / specials; never follow links; stay on one fs.
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::workspace::listing_limit_test_hooks::record_walk_built(&base);
     let walker = WalkDir::new(&base)
         .min_depth(1)
         .follow_links(false)

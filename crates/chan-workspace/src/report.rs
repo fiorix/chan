@@ -75,7 +75,11 @@ impl ReportState {
         };
         let index = match loaded {
             Some(idx) => idx,
-            None => Index::scan_cancelable(&opts, cancel).map_err(scan_error)?,
+            None => {
+                #[cfg(any(test, feature = "test-hooks"))]
+                crate::workspace::listing_limit_test_hooks::record_walk_built(&opts.root);
+                Index::scan_cancelable(&opts, cancel).map_err(scan_error)?
+            }
         };
 
         if index.skipped_entries() != 0 {
@@ -215,6 +219,8 @@ impl ReportState {
         cancel: Option<&AtomicBool>,
     ) -> Result<()> {
         let opts = report_options(workspace_root, policy);
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::workspace::listing_limit_test_hooks::record_walk_built(&opts.root);
         let replacement = Index::scan_cancelable(&opts, cancel).map_err(scan_error)?;
         if replacement.skipped_entries() != 0 {
             tracing::warn!(
