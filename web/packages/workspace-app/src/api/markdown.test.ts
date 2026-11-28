@@ -168,6 +168,48 @@ describe("markdown iframe embeds", () => {
   });
 });
 
+describe("the player API on a YouTube embed frame", () => {
+  // The screen lock pauses a YouTube embed by posting its player a command,
+  // which the player reads only when the frame's src carries enablejsapi=1.
+  const EMBED = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
+  const DEFAULT_SANDBOX = "allow-scripts allow-same-origin allow-presentation allow-popups";
+
+  function frame(source: string): HTMLIFrameElement | null {
+    const template = document.createElement("template");
+    template.innerHTML = renderMarkdown(source);
+    return template.content.querySelector("iframe");
+  }
+
+  test.each([
+    ["with the default sandbox", "", DEFAULT_SANDBOX],
+    ["with a sandbox of its own", ' sandbox="allow-scripts allow-same-origin"', "allow-scripts allow-same-origin"],
+  ])("a raw YouTube frame %s gains the parameter, keeping the rest as written", (_, sandboxAttr, sandbox) => {
+    const query = "autoplay=1&mute=1&loop=1&playlist=dQw4w9WgXcQ,M7lc1UVf-VE";
+    const el = frame(`<iframe src="${EMBED}?${query}#t=30" allow="autoplay; encrypted-media"${sandboxAttr}></iframe>`);
+    expect(el?.getAttribute("src")).toBe(`${EMBED}?${query}&enablejsapi=1#t=30`);
+    expect(el?.getAttribute("allow")).toBe("autoplay; encrypted-media");
+    expect(el?.getAttribute("sandbox")).toBe(sandbox);
+  });
+
+  test.each(["enablejsapi=1", "enablejsapi=0"])("a raw YouTube frame whose src sets %s is left as written", (param) => {
+    const src = `${EMBED}?${param}&autoplay=1`;
+    expect(frame(`<iframe src="${src}"></iframe>`)?.getAttribute("src")).toBe(src);
+  });
+
+  test("the image syntax's YouTube frame carries the parameter once", () => {
+    expect(frame("![](https://youtu.be/dQw4w9WgXcQ)")?.getAttribute("src")).toBe(`${EMBED}?enablejsapi=1`);
+  });
+
+  test("a map frame's src is left as written", () => {
+    const src = "https://www.google.com/maps/embed?pb=!1m18!1m12";
+    expect(frame(`<iframe src="${src}"></iframe>`)?.getAttribute("src")).toBe(src);
+  });
+
+  test("a YouTube frame whose src does not parse is still dropped", () => {
+    expect(frame('<iframe src="https://www.youtube-nocookie.com:99999/embed/dQw4w9WgXcQ"></iframe>')).toBeNull();
+  });
+});
+
 describe("style elements", () => {
   // The renderers' HTML enters the app's own document, where a `<style>`
   // element's rules reach every element, so none of them keeps one unless
