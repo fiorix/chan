@@ -50,7 +50,7 @@ async function setDock(page, side, wanted, authToken) {
 }
 
 function treeRow(root, path) {
-  return `${DOCK} [role="treeitem"][title=${join(root, path)}]`;
+  return `${DOCK} [role="treeitem"][title=${JSON.stringify(join(root, path))}]`;
 }
 
 async function expand(page, root, path) {
