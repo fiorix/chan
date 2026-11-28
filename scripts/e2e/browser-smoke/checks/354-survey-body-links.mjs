@@ -191,7 +191,7 @@ async function dropDowns(page, anchorQuery) {
         copyStyle: copyStyle ? { borderTopWidth: copyStyle.borderTopWidth, borderRadius: copyStyle.borderTopLeftRadius } : null,
       };
     });
-  }, linkQuery);
+  }, anchorQuery);
 }
 
 /// Where the page is: its origin and path (the app keeps its layout in the
