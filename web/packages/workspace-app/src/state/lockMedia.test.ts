@@ -66,6 +66,11 @@ function frame(html: string) {
   return { element, posts: vi.spyOn(element.contentWindow!, "postMessage") };
 }
 
+/// A frame's document finished loading; the event does not bubble.
+function load(element: HTMLIFrameElement): void {
+  element.dispatchEvent(new Event("load"));
+}
+
 function video(fields: Record<string, unknown>): HTMLVideoElement {
   const element = document.body.appendChild(document.createElement("video"));
   return Object.assign(element, fields);
@@ -135,4 +140,44 @@ test("nothing is sent to an embed when the lock lifts", () => {
   expect(youtube.posts).toHaveBeenCalledTimes(1);
   unlock();
   expect(youtube.posts).toHaveBeenCalledTimes(1);
+});
+
+test("a YouTube embed that arrives while the lock is up is sent the pause as it loads", () => {
+  lock();
+  const rendered = frame(YOUTUBE);
+  const raw = frame(YOUTUBE_RAW);
+  expect(rendered.posts).not.toHaveBeenCalled();
+  load(rendered.element);
+  load(raw.element);
+  expect(rendered.posts.mock.calls).toEqual([[PAUSE, EMBED_ORIGIN]]);
+  expect(raw.posts.mock.calls).toEqual([[PAUSE, EMBED_ORIGIN]]);
+});
+
+test("a YouTube embed that reloads under the lock is sent the pause again", () => {
+  const youtube = frame(YOUTUBE);
+  lock();
+  load(youtube.element);
+  expect(youtube.posts.mock.calls).toEqual([
+    [PAUSE, EMBED_ORIGIN],
+    [PAUSE, EMBED_ORIGIN],
+  ]);
+});
+
+test("a YouTube embed that loads with no lock up is sent nothing, before a lock or after one", () => {
+  const youtube = frame(YOUTUBE);
+  load(youtube.element);
+  expect(youtube.posts).not.toHaveBeenCalled();
+  lock();
+  unlock();
+  load(youtube.element);
+  expect(youtube.posts).toHaveBeenCalledTimes(1);
+});
+
+test("under the lock a map, an extension and a frame on any other origin are sent nothing as they load", () => {
+  lock();
+  const youtube = frame(YOUTUBE);
+  const others = NOT_YOUTUBE.map(frame);
+  for (const each of [youtube, ...others]) load(each.element);
+  expect(youtube.posts).toHaveBeenCalledTimes(1);
+  for (const other of others) expect(other.posts, other.element.src).not.toHaveBeenCalled();
 });
