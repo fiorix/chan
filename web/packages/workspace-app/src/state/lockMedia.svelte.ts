@@ -8,7 +8,10 @@
 // lock posts each such frame the player's pause, which keeps the position,
 // addressed to the embed origin so that a frame showing any other document
 // receives nothing. A map's frame, an extension's and a frame on any other
-// origin are sent nothing; the page knows no command of theirs.
+// origin are sent nothing; the page knows no command of theirs. A player's
+// start cannot be heard across origins, so a YouTube embed that loads while
+// the lock is up, new or reloading, is sent the pause as it loads, which holds
+// off a player that would start by itself. Nothing the frame posts is read.
 //
 // Element fullscreen is viewerLayer's. A video can also present outside the
 // page, in picture-in-picture or in WebKit's own video fullscreen, where the
@@ -48,14 +51,19 @@ function stopAllMedia(): void {
   if (document.pictureInPictureElement) void document.exitPictureInPicture().catch(() => {});
 }
 
-/// Stop every player as the lock comes up, and any that starts while it is
-/// up (`play` does not bubble, so it is caught on its way down). Returns the
+/// Stop every player as the lock comes up, any that starts while it is up,
+/// and any YouTube embed that loads while it is up (neither `play` nor a
+/// frame's `load` bubbles, so both are caught on their way down). Returns the
 /// teardown.
 export function installLockMediaPause(): () => void {
   const onPlay = (event: Event): void => {
     if (screensaver.locked && event.target instanceof HTMLMediaElement) stopMedia(event.target);
   };
+  const onLoad = (event: Event): void => {
+    if (screensaver.locked && event.target instanceof HTMLIFrameElement) pauseYouTubeEmbed(event.target);
+  };
   document.addEventListener("play", onPlay, true);
+  document.addEventListener("load", onLoad, true);
   const stopEffect = $effect.root(() => {
     $effect(() => {
       if (screensaver.locked) stopAllMedia();
@@ -63,6 +71,7 @@ export function installLockMediaPause(): () => void {
   });
   return () => {
     document.removeEventListener("play", onPlay, true);
+    document.removeEventListener("load", onLoad, true);
     stopEffect();
   };
 }
