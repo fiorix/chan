@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openFileTab, selectFile } from "../lib/files.mjs";
+import { waitIndexPillClear } from "../lib/index-pill.mjs";
 import { colourBox, pdfPageRasters, pixelAt } from "../lib/pdf.mjs";
 
 const BODY = "# Wikilinks\n\n[[note]]\n\n[[note|alias]]\n\nEnd.\n";
@@ -20,7 +21,7 @@ async function focusedPane(page) {
 }
 
 async function openEditor(page, path, pane) {
-  await openFileTab(page, path, pane);
+  await openFileTab(page, path, pane, undefined, { waitIndexPill: true });
   const active = `${pane} .editor-tab.active`;
   await page.waitForSelector(`${active} .cm-editor`, { visible: true, timeout: 30_000 });
   if (await page.$(`${active} .md-source`)) {
@@ -38,9 +39,10 @@ async function exportPdf(ctx, path, pane, outputName) {
   const filename = path.split("/").at(-1).replace(/\.md$/, ".pdf");
   const target = join(ctx.downloadDir, filename);
   rmSync(target, { force: true });
-  await selectFile(ctx.page, path, { details: true, scope: pane });
+  await selectFile(ctx.page, path, { details: true, scope: pane, waitIndexPill: true });
   const details = `${pane} aside[aria-label="Details"]`;
   await ctx.page.waitForSelector(`${details} .pill-caret`, { visible: true });
+  await waitIndexPillClear(ctx.page, `${details} .pill-caret`);
   await ctx.page.click(`${details} .pill-caret`);
   await ctx.page.waitForSelector(`${details} .action-menu-item`, { visible: true });
   const clicked = await ctx.page.evaluate((scope) => {
@@ -204,6 +206,7 @@ async function inspectFixtures(ctx, directory, evidence, faults) {
           await ctx.assertPdf(rendered.bytes, { pages: kind === "document" ? 10 : 6,
             orientation: kind === "document" ? "portrait" : "landscape" });
         } catch (error) {
+          if (error?.smokeEnvironment) throw error;
           record.error = error.message;
           faults.push(`${theme} ${kind}: ${error.message}`);
         }
@@ -319,6 +322,7 @@ export default {
               orientation: kind === "deck" ? "landscape" : "portrait",
             });
           } catch (error) {
+            if (error?.smokeEnvironment) throw error;
             faults.push(`${kind} ${label}: ${error.message}`);
           }
         }

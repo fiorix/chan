@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { waitIndexPillClear } from "../lib/index-pill.mjs";
 
 const fixture = "floating-outline-smoke.md";
 const deck = `---\nchan:\n  kind: slides\n  slides:\n    aspect_ratio: "16:9"\n---\n\n` + Array.from({ length: 10 }, (_, i) => i === 4
@@ -95,6 +96,7 @@ export default {
       await clearDocumentMargins();
       await command('app.editor.outline');
       await page.waitForSelector('aside.inspector.left');
+      await waitIndexPillClear(page, '[aria-label="Close Details"]');
       await page.click('[aria-label="Close Details"]');
       assert.equal(await width('.editor-host'), editorWidth);
 
@@ -143,6 +145,7 @@ export default {
       await command('app.editor.details');
       await page.waitForSelector('aside.inspector.right');
       await clearDocumentMargins();
+      await waitIndexPillClear(page, '[aria-label="Close Details"]');
       await page.click('[aria-label="Close Details"]');
       await select(1);
       await page.focus('.cm-content');

@@ -1,5 +1,7 @@
 // Files tab navigation and readings use the directory view's accessible controls.
 
+import { waitIndexPillClear } from "./index-pill.mjs";
+
 export const FILE_LIST = '[role="listbox"][aria-label="Directory contents"]';
 export const FILE_ROW = `${FILE_LIST} [role="option"]`;
 const TABS = '[role="tablist"] .tab > [role="tab"]';
@@ -160,28 +162,37 @@ async function pathRow(page, path, scope) {
   return waitFileRow(page, name, true, { scope });
 }
 
-export async function selectFile(page, path, { details = false, scope = "" } = {}) {
+/// Select `path`'s row and, with `details`, show its Details. With
+/// `waitIndexPill`, a click on the Details toggle first waits until the
+/// status pill's index section no longer covers it (`index-pill.mjs`).
+export async function selectFile(page, path, { details = false, scope = "", waitIndexPill = false } = {}) {
   const row = await pathRow(page, path, scope);
   await row.click();
   if (details) {
     scope = await paneScope(page, scope);
     // The toolbar's toggle is the Details button that carries a pressed state.
-    const toggle = await page.$(within(scope, 'button[aria-label="Details"][aria-pressed]'));
+    const selector = within(scope, 'button[aria-label="Details"][aria-pressed]');
+    const toggle = await page.$(selector);
     if (!toggle) throw new Error("the Files tab has no Details toggle");
-    if (await toggle.evaluate((el) => el.getAttribute("aria-pressed") !== "true")) await toggle.click();
+    if (await toggle.evaluate((el) => el.getAttribute("aria-pressed") !== "true")) {
+      if (waitIndexPill) await waitIndexPillClear(page, selector);
+      await toggle.click();
+    }
     await page.waitForFunction(({ selector, path }) => document.querySelector(`${selector} aside[aria-label="Details"] h3[title]`)?.getAttribute("title") === path, { timeout: 15_000 }, { selector: scope, path: filePath(path) });
   }
   return row;
 }
 
-export async function openFile(page, path, scope = "") {
+export async function openFile(page, path, scope = "", { waitIndexPill = false } = {}) {
   const row = await pathRow(page, path, scope);
   // A listing that re-renders between the wait and the lookup has no row to hand back.
   if (!row) throw new Error(`row ${JSON.stringify(path)} went before it could be clicked`);
   scope = await paneScope(page, scope);
   // Details can cover the listing in a narrow pane; expose the row before the pointer opens it.
-  const closeDetails = await page.$(within(scope, 'aside[aria-label="Details"] button[aria-label="Close Details"]'));
+  const closeSelector = within(scope, 'aside[aria-label="Details"] button[aria-label="Close Details"]');
+  const closeDetails = await page.$(closeSelector);
   if (closeDetails) {
+    if (waitIndexPill) await waitIndexPillClear(page, closeSelector);
     await closeDetails.click();
     await page.waitForSelector(within(scope, 'aside[aria-label="Details"]'), { hidden: true, timeout: 10_000 });
     await closeDetails.dispose();
@@ -202,14 +213,16 @@ export function rowWentAway(error) {
 /// change refetches the directory): the row is then detached or left with
 /// no box to click, or the two clicks land on two different rows, or the
 /// row is gone when it is looked up, and no tab opens. Each try finds the
-/// row again; a file that opens no tab in any of them is a failure.
-export async function openFileTab(page, path, scope = "", tries = 3) {
+/// row again; a file that opens no tab in any of them is a failure. With
+/// `waitIndexPill`, a click on the Files Details' close waits as
+/// `selectFile`'s does.
+export async function openFileTab(page, path, scope = "", tries = 3, { waitIndexPill = false } = {}) {
   const title = filePath(path);
   const pane = await paneScope(page, scope);
   let last = "";
   for (let attempt = 1; attempt <= tries; attempt++) {
     try {
-      await openFile(page, path, scope);
+      await openFile(page, path, scope, { waitIndexPill });
     } catch (error) {
       if (!rowWentAway(error)) throw error;
       last = error.message;
