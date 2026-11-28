@@ -1,4 +1,9 @@
-// The warning-period contract at the real CLI, HTTP and file boundaries.
+// The retired terminal.ghostty key at the real CLI, HTTP and file boundaries.
+// chan config set and get refuse it as an unknown key, in either spelling and
+// whatever the value, and a preferences PATCH naming it is refused whatever
+// its value, while the same PATCH without it is accepted; no refusal writes
+// a byte. A server.toml that stores it still loads, with one warning per
+// process for a stored false.
 // Each arm records its own result so a base run exposes every difference.
 // A fresh server owns the once-per-process warning; earlier checks can have
 // spent the shared server's warning already.
@@ -38,6 +43,15 @@ function assertWarning(stderr) {
     assert.match(stderr, pattern, "stderr carries the complete deprecation warning");
   }
 }
+// The CLI resolves both spellings to one key and refuses it by that name.
+const KEY_SPELLINGS = ["terminal.ghostty", "server.terminal.ghostty"];
+function assertRefused(row) {
+  assert.notEqual(row.code, 0, "the CLI refuses the retired key");
+  assert.equal(row.stdout, "");
+  assert.match(row.stderr, /unknown key `server\.terminal\.ghostty`/);
+  assert.deepEqual(row.after, row.before, "a refused command writes no config bytes");
+}
+const REFUSED_BODY = { error: "the request body does not match what this route accepts" };
 async function api(serverUrl, path, options = {}) {
   const url = new URL(serverUrl);
   const token = url.searchParams.get("t");
@@ -78,8 +92,9 @@ export default {
     const configPath = join(ctx.chanHome, "server.toml");
     const original = readOptional(configPath);
     async function cli(row, args) {
-      // A stored false makes get's effective true distinct from the old
-      // selectable engine. Restore this seed before every independent arm.
+      // Each command runs over a file that still stores the key, so a refusal
+      // is read where the key is present. Restore this seed before every
+      // independent arm.
       replaceFile(configPath, seed(true));
       row.invocation = { binary: ctx.chanBin, args: ["config", ...args], CHAN_HOME: ctx.chanHome };
       row.before = configHashes(ctx.chanHome);
@@ -99,18 +114,18 @@ export default {
     }
     try {
       await arm("a-set-false", async (row) => {
-        await cli(row, ["set", "terminal.ghostty", "false"]);
-        assert.equal(row.code, 0);
-        assert.equal(row.stdout, "");
-        assertWarning(row.stderr);
-        assert.deepEqual(row.after, row.before, "deprecated set writes no config bytes");
+        for (const key of KEY_SPELLINGS) {
+          const leg = row[key] = {};
+          await cli(leg, ["set", key, "false"]);
+          assertRefused(leg);
+        }
       });
       await arm("b-get", async (row) => {
-        await cli(row, ["get", "terminal.ghostty"]);
-        assert.equal(row.code, 0);
-        assert.equal(row.stdout, "true\n");
-        assertWarning(row.stderr);
-        assert.deepEqual(row.after, row.before, "deprecated get writes no config bytes");
+        for (const key of KEY_SPELLINGS) {
+          const leg = row[key] = {};
+          await cli(leg, ["get", key]);
+          assertRefused(leg);
+        }
       });
       await arm("c-list", async (row) => {
         await cli(row, ["get"]);
@@ -121,16 +136,13 @@ export default {
       });
       await arm("d-set-invalid", async (row) => {
         await cli(row, ["set", "terminal.ghostty", "maybe"]);
-        assert.notEqual(row.code, 0);
-        assert.equal(row.stdout, "");
-        assert.match(row.stderr, /terminal\.ghostty/);
-        assert.deepEqual(row.after, row.before, "invalid set writes no config bytes");
+        assertRefused(row);
       });
     } finally {
       replaceFile(configPath, original);
     }
 
-    await arm("e-patch-invalid", async (row) => {
+    await arm("e-patch-refused", async (row) => {
       const workspaceDir = seedWorkspace();
       const server = launchServer(ctx.chanBin, workspaceDir, undefined, {
         env: { RUST_LOG: "warn,chan_server::extract=debug" },
@@ -142,27 +154,32 @@ export default {
       try {
         const serverUrl = await server.url;
         const config = await readConfig(serverUrl);
-        const patch = (ghostty) => api(serverUrl, "/api/config", {
+        const patch = (terminal) => api(serverUrl, "/api/config", {
           method: "PATCH",
-          body: JSON.stringify({ expected_revision: config.revision,
-            preferences: { terminal: { ...config.preferences.terminal, ghostty } } }),
+          body: JSON.stringify({ expected_revision: config.revision, preferences: { terminal } }),
         });
         row.before = configHashes(server.chanHome);
-        const response = await patch("yes");
-        row.httpStatus = response.status;
-        row.body = await response.text();
+        row.refusals = [];
+        // The booleans first: the warning period accepted them.
+        for (const ghostty of [true, false, "yes"]) {
+          const logIndex = rejections().length;
+          const response = await patch({ ...config.preferences.terminal, ghostty });
+          const refusal = { ghostty, httpStatus: response.status, body: await response.text() };
+          row.refusals.push(refusal);
+          assert.equal(refusal.httpStatus, 422, `a terminal.ghostty = ${JSON.stringify(ghostty)} PATCH is refused`);
+          assert.deepEqual(JSON.parse(refusal.body), REFUSED_BODY);
+          refusal.rejections = await waitForLog(() => rejections().slice(logIndex), "extractor rejection");
+          assert.equal(refusal.rejections.length, 1, "exactly one logged rejection names terminal.ghostty");
+          assert.match(refusal.rejections[0], /unknown field `terminal\.ghostty`/, "the rejection names the key as unknown");
+        }
         row.after = configHashes(server.chanHome);
-        assert.equal(row.httpStatus, 422, "a non-boolean terminal.ghostty PATCH is rejected as an invalid body");
-        assert.deepEqual(JSON.parse(row.body), { error: "the request body does not match what this route accepts" });
-        assert.deepEqual(row.after, row.before, "invalid PATCH writes no config bytes");
-        row.rejections = await waitForLog(rejections, "extractor rejection");
-        assert.equal(row.rejections.length, 1, "exactly one logged rejection names terminal.ghostty");
-        const control = await patch(true);
+        assert.deepEqual(row.after, row.before, "refused PATCHes write no config bytes");
+        row.revisionAfter = (await readConfig(serverUrl)).revision;
+        assert.equal(row.revisionAfter, config.revision, "refused PATCHes do not move the revision");
+        const control = await patch(config.preferences.terminal);
         row.controlStatus = control.status;
-        assert.equal(row.controlStatus, 200, "the same PATCH accepts a boolean terminal.ghostty");
-        row.controlReadback = (await readConfig(serverUrl)).preferences.terminal;
-        assert.equal(Object.hasOwn(row.controlReadback, "ghostty"), false, "the accepted retired key is absent on readback");
-        assert.equal(rejections().length, 1, "the boolean control adds no rejection");
+        assert.equal(row.controlStatus, 200, "the same PATCH without terminal.ghostty is accepted");
+        assert.equal(rejections().length, row.refusals.length, "the control adds no rejection");
       } finally {
         row.stderrLines = server.stderrLines.map(maskTokens);
         await teardownServer(ctx.chanBin, server.child, workspaceDir, server.chanHome);

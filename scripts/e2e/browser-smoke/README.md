@@ -129,7 +129,7 @@ Check 339 supplies pen and touch input through CDP. A complete trusted primary s
 
 Check 340 locates the scrollbar thumb from painted pixels and checks drag/release, immediate reversal after overshooting, release outside the page viewport, and selection in the last column after the scrollbar fades. Release outside an operating-system window still needs a native desktop check.
 
-Check 341 exercises the retired `terminal.ghostty` key at CLI, HTTP and persisted-file boundaries: set/get/list behavior, invalid CLI and PATCH values, unchanged files after rejection, and a once-per-process warning for a stored false value. A fresh server isolates warning multiplicity from earlier checks.
+Check 341 exercises the retired `terminal.ghostty` key at CLI, HTTP and persisted-file boundaries: `chan config` set and get refuse it as an unknown key in either spelling and with any value, a preferences PATCH naming it is refused whatever its value while the same PATCH without it is accepted, no refusal writes the config files, the listing omits it, and a stored false still loads with a once-per-process warning. A fresh server isolates warning multiplicity from earlier checks.
 
 Check 342 drives two Chrome reparent probes through CDP: completion of a reported mouse gesture when capture loss is delivered after reattachment, and recovery by a second pointer after a pen releases while detached without notifying the canvas. The second leg requires no copy before the second press. Each records the native event trace and reports an unavailable trigger as a skip, making a selected suite incomplete. Checks 337-340 and 342 use the shared pointer harness for per-leg status, resource cleanup and saved partial evidence.
 
