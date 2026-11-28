@@ -518,18 +518,36 @@ async function openRecorder(name, file, pane) {
   return { tab: attached.value.row.tab, pane: attached.value.row.pane };
 }
 
-/// A press on a terminal's host gives it the keyboard and its pane focus.
-async function focusTerminal(tab) {
+/// A press on a terminal's host gives it the keyboard and, beside another
+/// pane, its pane the focus. A lone pane never carries the focus class (the
+/// app draws that highlight only when a split leaves a pane to tell it
+/// from), so a press made before the split reads the keyboard `alone`.
+async function focusTerminal(tab, { alone = false } = {}) {
   const point = await page.evaluate(hostPoint, tab);
   if (!point) throw new Error(`terminal ${tab} has no host`);
   await clickClient(point);
-  const held = await waitFor(() => page.evaluate((tab) => {
+  const held = await waitFor(() => page.evaluate((tab, alone) => {
     const terminal = document.querySelector(`.terminal-tab[data-terminal-tab-id="${tab}"]`);
     const pane = terminal?.closest(".pane");
-    return Boolean(pane?.classList.contains("focused") && terminal.querySelector(".terminal-host")?.contains(document.activeElement));
-  }, tab), Boolean, 10_000);
+    return Boolean((alone || pane?.classList.contains("focused")) && terminal?.querySelector(".terminal-host")?.contains(document.activeElement));
+  }, tab, alone), Boolean, 10_000);
   return held.ok;
 }
+
+/// Where the keyboard is and how many panes show and carry the focus class,
+/// for a setup press that did not take.
+function keyboardAt() {
+  const active = document.activeElement;
+  return {
+    keyboard: `${active?.tagName ?? "none"}.${active?.className?.toString?.() ?? ""}`,
+    panes: document.querySelectorAll(".pane[data-pane-id]").length,
+    focusedPanes: document.querySelectorAll(".pane.focused").length,
+  };
+}
+
+// The keyboard's place for a setup error; a read that fails is named in
+// it, so the setup still reads as not run.
+const keyboardNow = () => page.evaluate(keyboardAt).then((at) => JSON.stringify(at), (error) => `unread: ${describe(error)}`);
 
 async function setup() {
   page = await WebKitPage.open(values.inspector);
@@ -540,7 +558,11 @@ async function setup() {
   verdict.probe = await page.evaluate(plantProbe);
   verdict.startAt = (await page.evaluate(pageWhere)).at;
   target = await openRecorder(NAMES.target, FILES.target, null);
-  if (!(await focusTerminal(target.tab))) throw new SetupError("a press on A's terminal did not give it the keyboard");
+  // B is not open yet and the window has one pane, so this press is read
+  // against A's terminal alone.
+  if (!(await focusTerminal(target.tab, { alone: true }))) {
+    throw new SetupError(`a press on A's terminal did not give it the keyboard: ${await keyboardNow()}`);
+  }
   await typeText("t");
   verdict.targetControl = await recordedSince("A's control", FILES.target, 0, "74").catch((error) => {
     throw new SetupError(describe(error));
@@ -551,7 +573,9 @@ async function setup() {
   (panes) => panes.length === 2 && panes.some((pane) => pane.terminals === 0), 10_000);
   if (!split.ok) throw new SetupError(`the split left no empty second pane: ${JSON.stringify(split.value)}`);
   away = await openRecorder(NAMES.away, FILES.away, split.value.find((pane) => pane.terminals === 0).id);
-  if (!(await focusTerminal(away.tab))) throw new SetupError("a press on B's terminal did not give it the keyboard");
+  if (!(await focusTerminal(away.tab))) {
+    throw new SetupError(`a press on B's terminal did not give it the keyboard: ${await keyboardNow()}`);
+  }
   await typeText("a");
   verdict.awayControl = await recordedSince("B's control", FILES.away, 0, "61").catch((error) => {
     throw new SetupError(describe(error));
