@@ -5,6 +5,7 @@ import {
   embedFromSrc,
   embedIframeHtml,
   isAllowedEmbedSrc,
+  withYouTubePlayerApi,
 } from "./embed";
 
 describe("detectEmbed: YouTube", () => {
@@ -12,21 +13,21 @@ describe("detectEmbed: YouTube", () => {
     const e = detectEmbed("https://youtu.be/dQw4w9WgXcQ");
     expect(e).toEqual({
       kind: "youtube",
-      src: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+      src: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1",
       title: "YouTube video",
     });
   });
 
   test("watch?v= link", () => {
     const e = detectEmbed("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42");
-    expect(e?.src).toBe("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ");
+    expect(e?.src).toBe("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1");
   });
 
   test("/embed/, /shorts/, /live/ paths", () => {
     for (const path of ["embed", "shorts", "live"]) {
       const e = detectEmbed(`https://www.youtube.com/${path}/dQw4w9WgXcQ`);
       expect(e?.src).toBe(
-        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1",
       );
     }
   });
@@ -103,6 +104,36 @@ describe("isAllowedEmbedSrc", () => {
   });
 });
 
+// The screen lock pauses a YouTube embed by posting a player command to its
+// frame, which the player answers only when its src enables the API.
+describe("withYouTubePlayerApi", () => {
+  test("a YouTube embed src gains the player API and keeps its own parameters", () => {
+    expect(
+      withYouTubePlayerApi("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30&autoplay=1#t"),
+    ).toBe("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=30&autoplay=1&enablejsapi=1#t");
+  });
+
+  test("a src that names the parameter carries it once, enabled", () => {
+    for (const query of ["?enablejsapi=1", "?enablejsapi=0"]) {
+      expect(withYouTubePlayerApi(`https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ${query}`), query).toBe(
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1",
+      );
+    }
+  });
+
+  test("a map src, a src on another origin and a malformed src are left as they are", () => {
+    for (const src of [
+      "https://www.google.com/maps/embed?pb=!1m18!1m12!1m3",
+      "https://www.youtube.com/embed/dQw4w9WgXcQ",
+      "http://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+      "/ext/echo/index.html",
+      "not a url",
+    ]) {
+      expect(withYouTubePlayerApi(src)).toBe(src);
+    }
+  });
+});
+
 describe("embedDimensions / width hint", () => {
   test("youtube keeps 16:9", () => {
     expect(embedDimensions("youtube", 320)).toEqual({ width: 320, height: 180 });
@@ -122,7 +153,7 @@ describe("embedIframeHtml", () => {
     const html = embedIframeHtml("https://youtu.be/dQw4w9WgXcQ");
     expect(html).toContain("<iframe");
     expect(html).toContain(
-      'src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"',
+      'src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1"',
     );
     expect(html).toContain("sandbox=");
     expect(html).toContain("allowfullscreen");

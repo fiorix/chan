@@ -142,7 +142,7 @@ describe("markdown iframe embeds", () => {
     const html = renderMarkdown("![](https://youtu.be/dQw4w9WgXcQ)");
     expect(html).toContain("<iframe");
     expect(html).toContain(
-      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+      'src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?enablejsapi=1"',
     );
     expect(html).toContain("sandbox");
   });
