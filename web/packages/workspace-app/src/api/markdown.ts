@@ -7,7 +7,11 @@
 import DOMPurify, { type Config } from "dompurify";
 import { marked } from "marked";
 import { GFM, parser } from "@lezer/markdown";
-import { embedIframeHtml, isAllowedEmbedSrc } from "./embed";
+import {
+  embedIframeHtml,
+  isAllowedEmbedSrc,
+  YOUTUBE_EMBED_ORIGIN,
+} from "./embed";
 import { parseWikiBody } from "../editor/links";
 import { Frontmatter } from "../editor/markdown/frontmatter";
 import { RefAwareLink } from "../editor/markdown/refAwareLink";
@@ -58,8 +62,6 @@ function renderWikiLabels(input: string): string {
   return output + input.slice(end);
 }
 
-const YOUTUBE_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
-
 // The screen lock pauses a YouTube embed by posting its player a command,
 // which the player reads only when the frame's src carries enablejsapi=1.
 // An author's raw frame keeps its src as written, so the parameter is
@@ -67,6 +69,8 @@ const YOUTUBE_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
 // re-encode the other parameters (a playlist's commas among them). A src
 // that sets the parameter itself, to any value, is left as the author wrote
 // it, and so is the image syntax's frame once its builder has set it.
+// embed.ts's `withYouTubePlayerApi` serves that builder's own src and sets
+// the parameter over any value it finds, which an author's src must not get.
 function withPlayerApi(src: string): string {
   let u: URL;
   try {
