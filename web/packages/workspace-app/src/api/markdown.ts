@@ -58,20 +58,45 @@ function renderWikiLabels(input: string): string {
   return output + input.slice(end);
 }
 
+const YOUTUBE_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
+
+// The screen lock pauses a YouTube embed by posting its player a command,
+// which the player reads only when the frame's src carries enablejsapi=1.
+// An author's raw frame keeps its src as written, so the parameter is
+// appended to its query rather than set through `searchParams`, which would
+// re-encode the other parameters (a playlist's commas among them). A src
+// that sets the parameter itself, to any value, is left as the author wrote
+// it, and so is the image syntax's frame once its builder has set it.
+function withPlayerApi(src: string): string {
+  let u: URL;
+  try {
+    u = new URL(src);
+  } catch {
+    return src;
+  }
+  if (u.origin !== YOUTUBE_EMBED_ORIGIN || u.searchParams.has("enablejsapi")) return src;
+  u.search = u.search ? `${u.search}&enablejsapi=1` : "?enablejsapi=1";
+  return u.href;
+}
+
 // Allow the embed iframes through DOMPurify, but ONLY for the host
 // allowlist (embed.ts). The hook is the backstop: it drops any iframe
 // -- including a raw `<iframe>` in user markdown -- whose src is not an
 // allowlisted embed origin, and forces the protective attributes on the
-// ones that survive. `ADD_TAGS`/`ADD_ATTR` are passed per call
+// ones that survive; a YouTube frame also gets the player API's parameter
+// (`withPlayerApi`). `ADD_TAGS`/`ADD_ATTR` are passed per call
 // (EMBED_OPTS, which SANITIZE_OPTS extends) so other DOMPurify callers
 // keep stripping iframes.
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.nodeName !== "IFRAME") return;
   const el = node as Element;
-  if (!isAllowedEmbedSrc(el.getAttribute("src"))) {
+  const src = el.getAttribute("src") ?? "";
+  if (!isAllowedEmbedSrc(src)) {
     el.remove();
     return;
   }
+  const playable = withPlayerApi(src);
+  if (playable !== src) el.setAttribute("src", playable);
   if (!el.getAttribute("sandbox")) {
     el.setAttribute(
       "sandbox",
