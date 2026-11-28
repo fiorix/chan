@@ -86,6 +86,54 @@ describe("the image-syntax embed", () => {
   });
 });
 
+// A YouTube frame's src carries the player API's parameter, which the
+// screen lock needs and a reader does not, so the printed address is the
+// embed's own: the stand-in leaves that parameter out and keeps the rest.
+describe("a YouTube embed's printed address", () => {
+  const ADDRESS = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
+
+  function printedInDocument(markdown: string): Element | null {
+    const dom = buildDocDom({
+      markdown: `before\n\n${markdown}\n\nafter`,
+      path: "notes/doc.md",
+      theme: "light",
+      contentWidthPx: 800,
+    });
+    return attach(dom.root).querySelector("a");
+  }
+
+  test("the document prints the image syntax's embed at its address", () => {
+    const link = printedInDocument(IMAGE_EMBED);
+    expect(link?.textContent).toBe(`YouTube video: ${ADDRESS}`);
+    expect(link?.getAttribute("href")).toBe(ADDRESS);
+  });
+
+  test("the deck prints it at its address", () => {
+    const page = buildSlidePageDom({
+      markdown: `# Slide\n\n${IMAGE_EMBED}`,
+      fromPath: "decks/d.md",
+      spec: { aspectRatio: "16:9", zoomFactor: 2 },
+      theme: "light",
+    });
+    const link = attach(page.root).querySelector("a");
+    expect(link?.textContent).toBe(`YouTube video: ${ADDRESS}`);
+    expect(link?.getAttribute("href")).toBe(ADDRESS);
+  });
+
+  test("a pasted frame keeps the parameters its author wrote", () => {
+    const src = `${ADDRESS}?list=PLa,PLb&start=30#t`;
+    const link = printedInDocument(`<iframe src="${src}" title="Talk"></iframe>`);
+    expect(link?.textContent).toBe(`Talk: ${src}`);
+    expect(link?.getAttribute("href")).toBe(src);
+  });
+
+  test("a map frame's address is printed as written", () => {
+    const src = `${MAP_SRC}&enablejsapi=1`;
+    const link = printedInDocument(`<iframe src="${src}" title="Office"></iframe>`);
+    expect(link?.textContent).toBe(`Office: ${src}`);
+  });
+});
+
 describe("the live preview", () => {
   test("keeps the embed it can play", async () => {
     const root = document.createElement("div");
