@@ -199,7 +199,16 @@ describe("survey overlay", () => {
   test.each([
     "Should I replace [[ -f a/b.txt ]] with [ -f a/b.txt ]?",
     'if [[ "$a" == "$b" || -z "$c" ]]; then',
+    "Use [[ $x =~ ^[[:digit:]]+$ ]] here",
+    "nested [[ $x == [[note]] ]] end",
   ])("a survey body shows a shell test as typed: %s", async (source) => {
+    expect((await surveyBody(source)).textContent?.trim()).toBe(source);
+  });
+
+  test.each([
+    "Strip it with sed 's/[[:space:]]*$//' first?",
+    "grep -E '^[[:space:]]*#' conf",
+  ])("a survey body shows a POSIX class as typed: %s", async (source) => {
     expect((await surveyBody(source)).textContent?.trim()).toBe(source);
   });
 

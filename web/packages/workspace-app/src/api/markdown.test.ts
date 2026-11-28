@@ -180,6 +180,31 @@ describe("strict wikilink labels", () => {
     expect(strict(source).textContent?.trim()).toBe(source);
   });
 
+  test.each([
+    "Strip it with sed 's/[[:space:]]*$//' first?",
+    "grep -E '^[[:space:]]*#' conf",
+    "Match [[:alpha:]] here",
+  ])("leaves a POSIX class as typed: %s", (source) => {
+    expect(strict(source).textContent?.trim()).toBe(source);
+  });
+
+  test.each([
+    "Use [[ $x =~ ^[[:digit:]]+$ ]] here",
+    "nested [[ $x == [[note]] ]] end",
+    "if [[ $a == [[x]] && $b == [[y]] ]]; then",
+  ])("leaves a link inside a shell test as typed: %s", (source) => {
+    expect(strict(source).textContent?.trim()).toBe(source);
+  });
+
+  test.each([
+    ["if [[ -f a ]]; then open [[note]]", "if [[ -f a ]]; then open note"],
+    ["Open [[note]] or run [[ -f a ]]", "Open note or run [[ -f a ]]"],
+    ["Padded [[ my note]] and [[note]] here", "Padded [[ my note]] and note here"],
+    ["Open [[Re: note]] now", "Open Re: note now"],
+  ])("labels a plain link beside a shell test or with a colon: %s", (source, label) => {
+    expect(strict(source).textContent?.trim()).toBe(label);
+  });
+
   test("labels a plain link beside bracket text it leaves as typed", () => {
     expect(strict("Run [[ -f a.txt ]] and [[1], [2]], then open [[note|alias]]").textContent?.trim())
       .toBe("Run [[ -f a.txt ]] and [[1], [2]], then open alias");
