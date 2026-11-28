@@ -154,6 +154,15 @@ describe("Cut", () => {
     expect(view.state.doc.toString()).toBe("");
   });
 
+  test("a selection below the document start asks for no frontmatter rule", async () => {
+    const view = editor(`xx\n${WITH_IMAGE}`, 3, 3 + WITH_IMAGE.length);
+
+    await cutSelection(view, CTX);
+
+    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX, false);
+    expect(view.state.doc.toString()).toBe("xx\n");
+  });
+
   test("falls back to plain text when the rich write fails, then deletes", async () => {
     rich.write.mockRejectedValue(new Error("image fetch failed"));
     const view = editor(WITH_IMAGE, 0, WITH_IMAGE.length);

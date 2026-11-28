@@ -78,6 +78,31 @@ test("a copy from the document start keeps frontmatter as typed and labels the b
   view.destroy();
 });
 
+test("the upgrade of a copy from the document start keeps frontmatter as typed", async () => {
+  const md = '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]] ![](./x.png)';
+  const view = viewWith(md, 0, md.length);
+  expect(handleClipboardCopy(view, copyEvent(), ctx, false)).toBe(true);
+  await vi.waitFor(() => expect(writeClipboardHtml).toHaveBeenCalledTimes(1));
+  const text = docText(writeClipboardHtml.mock.calls[0]![0]);
+  expect(text).toContain('up: "[[Projects/Parent]]"');
+  expect(text).toContain("See a");
+  view.destroy();
+});
+
+test("a copy below the start that begins at a rule labels links on both sides of it", async () => {
+  const md = "# Deck\n\n---\n# Slide 2\n[[b]] ![](./x.png)\n---\n# Slide 3\n[[c]]";
+  const view = viewWith(md, md.indexOf("---"), md.length);
+  const ev = copyEvent();
+  expect(handleClipboardCopy(view, ev, ctx, false)).toBe(true);
+  await vi.waitFor(() => expect(writeClipboardHtml).toHaveBeenCalledTimes(1));
+  for (const [flavour, html] of [["the event's HTML", ev.store["text/html"]!], ["the upgrade's HTML", writeClipboardHtml.mock.calls[0]![0]]]) {
+    const text = docText(html);
+    expect(text, flavour).toContain("Slide 3");
+    expect(text, flavour).not.toContain("[[");
+  }
+  view.destroy();
+});
+
 test("copy body leaves inline code and fenced code as typed", () => {
   const root = document.createElement("div");
   root.innerHTML = buildBaselineHtml("`[[note]]`\n\n```text\n[[note]]\n```\n", "notes/doc.md", "/ws");
@@ -98,6 +123,11 @@ const ctx: ChanClipboardContext = {
   getUploadDir: () => "notes",
   getWorkspaceRoot: () => "/ws",
 };
+
+/// The text of a copied payload's chan-doc wrapper.
+function docText(html: string): string {
+  return new DOMParser().parseFromString(html, "text/html").querySelector("[data-chan-doc]")?.textContent ?? "";
+}
 
 /// A view over `doc` with `[from,to)` selected. Read-only builds set the
 /// editable facet off so the cut guard can be exercised.
@@ -378,5 +408,13 @@ describe("writeDocSelectionToClipboard (desktop path)", () => {
     const [html, plain] = writeClipboardHtml.mock.calls[0]!;
     expect(plain).toBe("![](./a.png#w=1)");
     expect(html).toContain("data-chan-markdown");
+  });
+
+  test("keeps frontmatter as typed in the HTML it hands the native write when asked", async () => {
+    await writeDocSelectionToClipboard('---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]] ![](./x.png)', ctx, true);
+    expect(writeClipboardHtml).toHaveBeenCalledTimes(1);
+    const text = docText(writeClipboardHtml.mock.calls[0]![0]);
+    expect(text).toContain('up: "[[Projects/Parent]]"');
+    expect(text).toContain("See a");
   });
 });
