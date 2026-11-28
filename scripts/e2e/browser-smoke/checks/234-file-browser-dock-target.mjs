@@ -1,10 +1,11 @@
 // The dock hands its file commands to the focused pane's tab on close.
 // A left dock holds a selected row beside a Files tab with a selected
 // file; the dock's own menu row closes it; the launcher's Copy path copies
-// the tab's selection (proved by pasting it into a third folder on disk).
+// the tab's selection, which the clipboard read proves by holding the tab's
+// file, and leaves the keyboard inside the tab's tree.
 // Closing by the menu row: the Hybrid Nav chord remounts the focused tab
 // on its own, so it cannot go red here.
-import { mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { navigateFiles, waitFileRow } from "../lib/files.mjs";
 import { token } from "../lib/drafts.mjs";
@@ -99,7 +100,6 @@ export default {
     const fixture = join(ctx.workspaceDir, prefix);
     mkdirSync(join(fixture, "docs"), { recursive: true });
     mkdirSync(join(fixture, "notes"), { recursive: true });
-    mkdirSync(join(fixture, "target"), { recursive: true });
     writeFileSync(join(fixture, "docs", "a.md"), "dock file\n");
     writeFileSync(join(fixture, "notes", "b.md"), "tab file\n");
     const authToken = token(ctx);
@@ -141,22 +141,6 @@ export default {
         return active ? !!active.closest(".browser:not(.dock)") : false;
       });
       if (!tree) throw new Error("the keyboard is not inside the tab's tree");
-
-      const targetRow = await waitFileRow(page, "target", true, { timeout: 15_000 });
-      if (!targetRow) throw new Error("folder row target not found in the Files tab");
-      await targetRow.click({ button: "right" });
-      const pasteButton = await page.evaluateHandle(() => [...document.querySelectorAll(".ctx button")].find(
-        (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "Paste") ?? null);
-      const pasteElement = pasteButton.asElement();
-      if (!pasteElement) throw new Error("menu row Paste not found");
-      await pasteElement.click();
-
-      const landed = join(fixture, "target", "b.md");
-      await ctx.pollFile(landed, 15_000);
-      if (readFileSync(landed, "utf8") !== "tab file\n") throw new Error("pasted content is not the tab's file");
-      await page.waitForFunction((wanted) => [...document.querySelectorAll('[role="option"],[role="treeitem"]')].some(
-        (row) => (row.getAttribute("title") ?? "").endsWith(wanted) && row.getAttribute("aria-selected") === "true",
-      ), { timeout: 15_000 }, `${prefix}/target/b.md`);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
       await setDock(page, "left", originalDocks.left === true, authToken);
